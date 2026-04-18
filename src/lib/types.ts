@@ -1,0 +1,268 @@
+export type LocationSource = "os" | "ip" | "manual";
+
+export type OrchestrationState =
+  | "Idle"
+  | "Onboarding"
+  | "SelectingServer"
+  | "ServerSelected"
+  | "GeneratingSshKey"
+  | "UploadingSshKeyToVast"
+  | "CreatingInstance"
+  | "WaitingForInstance"
+  | "VerifyingReservation"
+  | "ConnectingSsh"
+  | "ConfiguringRemote"
+  | "ConfiguringWireGuard"
+  | "ConfiguringSunshine"
+  | "ConfiguringNvidiaHeadless"
+  | "ConfiguringMoonlight"
+  | "AwaitingPairPin"
+  | "Pairing"
+  | "Ready"
+  | "Error";
+
+export interface CredentialsState {
+  appUsername: string;
+  appPassword: string;
+  vastApiKey: string;
+}
+
+export interface SshState {
+  keyName: string;
+  privateKeyPath: string;
+  publicKeyPath: string;
+  uploadedToVast: boolean;
+  sshUsername: string;
+  sshPassword: string;
+}
+
+export interface LocationState {
+  source: LocationSource;
+  city: string;
+  region: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+}
+
+export interface ServerPreferences {
+  minReliability: number;
+  storageGb: number;
+  templateHash: string;
+  maxHourlyPrice: number;
+  minHourlyPrice: number;
+  requireVerified: boolean;
+  requireDatacenter: boolean;
+  includeOnDemand: boolean;
+  includeInterruptible: boolean;
+  includeReserved: boolean;
+  requireStaticIp: boolean;
+  requireAvx: boolean;
+  minGpuCount: number;
+  minGpuRamGb: number;
+  minCpuCores: number;
+  minInetDownMbps: number;
+  minInetUpMbps: number;
+  geolocationCountryCode: string;
+}
+
+export interface OfferCandidate {
+  id: number;
+  hostId: number | null;
+  hostLabel: string;
+  locationLabel: string;
+  city: string;
+  region: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+  reliability: number;
+  gpuName: string;
+  gpuRamMb: number;
+  gpuCount: number;
+  cpuName: string;
+  cpuCores: number;
+  internetDownMbps: number;
+  internetUpMbps: number;
+  hourlyPrice: number;
+  availableStorageGb: number;
+  estimatedDistanceKm: number;
+  score: number;
+  timeRemainingHours: number;
+  isVerified: boolean;
+  isDatacenter: boolean;
+  offerType: string;
+  hasStaticIp: boolean;
+  hasAvx: boolean;
+}
+
+export interface InstanceState {
+  instanceId: number | null;
+  offerId: number | null;
+  status: string;
+  sshHost: string;
+  sshPort: number;
+  sshUser: string;
+  sshCommand: string;
+}
+
+export interface WireGuardState {
+  serverIp: string;
+  clientIp: string;
+  serverPublicKey: string;
+  clientPublicKey: string;
+  configPath: string;
+}
+
+export interface SunshineState {
+  configured: boolean;
+}
+
+export interface MoonlightState {
+  configured: boolean;
+  hostAddress: string;
+}
+
+export interface ProvisionedServerSteps {
+  sshKeyReady: boolean;
+  sshKeyUploadedToVast: boolean;
+  instanceCreated: boolean;
+  instanceReady: boolean;
+  sshConnected: boolean;
+  nvidiaHeadlessConfigured: boolean;
+  sunshineConfigured: boolean;
+  lowLatencyAudioConfigured: boolean;
+  wireguardConfigured: boolean;
+  moonlightConfigured: boolean;
+  awaitingPairPin: boolean;
+  pairingCompleted: boolean;
+}
+
+export interface ProvisionedServerState {
+  instanceId: number;
+  offerId: number | null;
+  sshHost: string;
+  sshPort: number;
+  status: string;
+  sshCommand: string;
+  wireguardServerIp: string;
+  wireguardClientIp: string;
+  wireguardServerPublicKey: string;
+  wireguardClientPublicKey: string;
+  wireguardConfigPath: string;
+  moonlightHostAddress: string;
+  lastState: OrchestrationState;
+  lastError: string | null;
+  steps: ProvisionedServerSteps;
+}
+
+export interface MoonlightPreferences {
+  bitrate: number;
+  fps: number;
+  width: number;
+  height: number;
+  hostaudio: number;
+  showperfoverlay: number;
+  keepawake: number;
+  framepacing: number;
+  vsync: number;
+  hdr: number;
+  videocfg: number;
+  videodec: number;
+  yuv444: number;
+  gameopts: number;
+  gamepadmouse: number;
+  detectnetblocking: number;
+}
+
+export interface RentedInstanceSummary {
+  instanceId: number;
+  label: string;
+  status: string;
+  gpuName: string;
+  sshHost: string;
+  sshPort: number;
+  publicIp: string;
+}
+
+export interface ServerPreferencesUpdate {
+  minReliability: number;
+  storageGb: number;
+  templateHash: string;
+  maxHourlyPrice: number;
+  minHourlyPrice: number;
+  requireVerified: boolean;
+  requireDatacenter: boolean;
+  includeOnDemand: boolean;
+  includeInterruptible: boolean;
+  includeReserved: boolean;
+  requireStaticIp: boolean;
+  requireAvx: boolean;
+  minGpuCount: number;
+  minGpuRamGb: number;
+  minCpuCores: number;
+  minInetDownMbps: number;
+  minInetUpMbps: number;
+  geolocationCountryCode: string;
+}
+
+export interface SshCredentialsUpdate {
+  sshUsername: string;
+  sshPassword: string;
+}
+
+export interface PlatformCredentialsUpdate {
+  appUsername: string;
+  appPassword: string;
+}
+
+export interface PersistedAppState {
+  version: number;
+  onboardingCompleted: boolean;
+  credentials: CredentialsState;
+  ssh: SshState;
+  location: LocationState;
+  serverPreferences: ServerPreferences;
+  selectedOffer: OfferCandidate | null;
+  instance: InstanceState;
+  wireguard: WireGuardState;
+  sunshine: SunshineState;
+  moonlight: MoonlightState;
+  moonlightPreferences: MoonlightPreferences;
+  provisionedServers: ProvisionedServerState[];
+  orchestrationState: OrchestrationState;
+  lastError: string | null;
+}
+
+export interface OnboardingPayload {
+  appUsername: string;
+  appPassword: string;
+  vastApiKey: string;
+}
+
+export interface ManualLocationInput {
+  city: string;
+  region: string;
+  country: string;
+  latitude: number;
+  longitude: number;
+}
+
+export interface SearchOffersRequest {
+  limit: number;
+}
+
+export interface ProvisioningEvent {
+  state: OrchestrationState;
+  message: string;
+  details?: string;
+  timestamp: string;
+  isError: boolean;
+}
+
+export interface FrontendError {
+  code: string;
+  message: string;
+  details?: string;
+  retryable: boolean;
+}

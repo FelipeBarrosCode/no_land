@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "onboardingCompleted": false,
+  "credentials": {
+    "appUsername": "",
+    "appPassword": "",
+    "vastApiKey": ""
+  },
+  "ssh": {
+    "keyName": "nolandConnectSSH",
+    "privateKeyPath": "",
+    "publicKeyPath": "",
+    "uploadedToVast": false
+  },
+  "location": {
+    "source": "ip",
+    "city": "",
+    "region": "",
+    "country": "",
+    "latitude": 0,
+    "longitude": 0
+  },
+  "serverPreferences": {
+    "minReliability": 0.85,
+    "storageGb": 100,
+    "templateHash": "2a62a7d5089a50a5ad89a9480f540d25"
+  },
+  "selectedOffer": null,
+  "instance": {
+    "instanceId": null,
+    "offerId": null,
+    "status": "idle",
+    "sshHost": "",
+    "sshPort": 22,
+    "sshUser": "root"
+  },
+  "wireguard": {
+    "serverIp": "",
+    "clientIp": "",
+    "serverPublicKey": "",
+    "clientPublicKey": "",
+    "configPath": ""
+  },
+  "sunshine": {
+    "configured": false
+  },
+  "moonlight": {
+    "configured": false,
+    "hostAddress": ""
+  },
+  "moonlightPreferences": {
+    "bitrate": 80000,
+    "fps": 60,
+    "width": 2560,
+    "height": 1440,
+    "hostaudio": 1,
+    "showperfoverlay": 1,
+    "keepawake": 1,
+    "framepacing": 1,
+    "vsync": 1,
+    "hdr": 0,
+    "videocfg": 2,
+    "videodec": 1,
+    "yuv444": 0,
+    "gameopts": 1,
+    "gamepadmouse": 1,
+    "detectnetblocking": 1
+  },
+  "provisionedServers": [],
+  "orchestrationState": "Idle",
+  "lastError": null
+}
