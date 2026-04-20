@@ -1024,11 +1024,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
-    let endpoint_host = if !instance.public_ip.is_empty() {
-        instance.public_ip.clone()
-    } else {
-        instance.ssh_host.clone()
-    };
+    let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_port == 0 {
         return Err(AppError::Provisioning(format!(
@@ -1878,11 +1874,7 @@ async fn run_existing_instance_orchestration(
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
-    let endpoint_host = if !instance.public_ip.is_empty() {
-        instance.public_ip.clone()
-    } else {
-        instance.ssh_host.clone()
-    };
+    let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_port == 0 {
         return Err(AppError::Provisioning(format!(

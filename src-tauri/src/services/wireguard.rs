@@ -38,7 +38,7 @@ impl WireGuardService {
         remote: &RemoteExec,
         local_app_data_dir: &Path,
         endpoint_host: &str,
-        _endpoint_port: u16,
+        endpoint_port: u16,
     ) -> AppResult<WireGuardProvisionResult> {
         ensure_local_wireguard_tools()?;
 
@@ -54,7 +54,7 @@ impl WireGuardService {
             &client_private,
             &server_public,
             endpoint_host,
-            self.defaults.listen_port,
+            endpoint_port,
             &format!("{server_tunnel_host}/32"),
         );
 

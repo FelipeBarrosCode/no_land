@@ -195,6 +195,8 @@ pub struct VastInstance {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub wireguard_port: u16,
+    #[serde(default)]
+    pub wireguard_host_ip: String,
     pub ssh_command: String,
     pub public_ip: String,
     pub gpu_name: String,
@@ -235,6 +237,7 @@ impl VastInstance {
             .filter(|port| *port > 0)
             .unwrap_or_else(|| extract_ssh_port_from_ports(value));
         let wireguard_port = extract_wireguard_port_from_ports(value);
+        let wireguard_host_ip = extract_wireguard_host_ip_from_ports(value);
 
         let ssh_command = field_as_str(
             value,
@@ -276,6 +279,7 @@ impl VastInstance {
             ssh_host,
             ssh_port,
             wireguard_port,
+            wireguard_host_ip,
             ssh_command,
             public_ip,
             gpu_name: value
@@ -315,6 +319,18 @@ impl VastInstance {
     pub fn is_vm_runtime(&self) -> bool {
         let runtime = self.image_runtype.trim().to_ascii_lowercase();
         runtime == "vm" || runtime == "kvm" || runtime == "qemu"
+    }
+
+    pub fn wireguard_endpoint_host(&self) -> String {
+        if let Some(host) = normalize_host_ip(&self.wireguard_host_ip) {
+            return host;
+        }
+
+        if let Some(host) = normalize_host_ip(&self.public_ip) {
+            return host;
+        }
+
+        self.ssh_host.trim().to_string()
     }
 }
 
@@ -379,10 +395,24 @@ fn extract_wireguard_port_from_ports(value: &Value) -> u16 {
     extract_port_from_ports(value, "51820/udp", 0)
 }
 
+fn extract_wireguard_host_ip_from_ports(value: &Value) -> String {
+    extract_host_ip_from_ports(value, "51820/udp").unwrap_or_default()
+}
+
 fn extract_port_from_ports(value: &Value, key: &str, default: u16) -> u16 {
     if let Some(ports) = value.get("ports") {
         if let Some(ports_map) = ports.as_object() {
             if let Some(entry) = ports_map.get(key) {
+                if let Some(port) = extract_host_port_from_entry(entry) {
+                    return port;
+                }
+            }
+
+            for (entry_key, entry) in ports_map {
+                if !port_mapping_key_matches(entry_key, key) {
+                    continue;
+                }
+
                 if let Some(port) = extract_host_port_from_entry(entry) {
                     return port;
                 }
@@ -446,6 +476,84 @@ fn extract_port_from_ports(value: &Value, key: &str, default: u16) -> u16 {
     default
 }
 
+fn extract_host_ip_from_ports(value: &Value, key: &str) -> Option<String> {
+    if let Some(ports) = value.get("ports") {
+        if let Some(ports_map) = ports.as_object() {
+            if let Some(entry) = ports_map.get(key) {
+                if let Some(ip) = extract_host_ip_from_entry(entry) {
+                    return Some(ip);
+                }
+            }
+
+            for (entry_key, entry) in ports_map {
+                if !port_mapping_key_matches(entry_key, key) {
+                    continue;
+                }
+
+                if let Some(ip) = extract_host_ip_from_entry(entry) {
+                    return Some(ip);
+                }
+            }
+        }
+
+        if let Some(ports_array) = ports.as_array() {
+            let (target_port, target_proto) = parse_port_key(key);
+
+            for entry in ports_array {
+                let Some(object) = entry.as_object() else {
+                    continue;
+                };
+
+                let container_port = object
+                    .get("Port")
+                    .or_else(|| object.get("port"))
+                    .or_else(|| object.get("container_port"))
+                    .or_else(|| object.get("private_port"));
+
+                let Some(container_port) = container_port else {
+                    continue;
+                };
+
+                let Some(container_port) = parse_port_number(container_port) else {
+                    continue;
+                };
+
+                let proto = object
+                    .get("Protocol")
+                    .or_else(|| object.get("protocol"))
+                    .or_else(|| object.get("Proto"))
+                    .or_else(|| object.get("proto"))
+                    .and_then(Value::as_str)
+                    .map(|raw| raw.trim().to_ascii_lowercase());
+
+                if container_port != target_port {
+                    continue;
+                }
+
+                if let Some(expected) = target_proto.as_deref() {
+                    if let Some(actual) = proto.as_deref() {
+                        if actual != expected {
+                            continue;
+                        }
+                    }
+                }
+
+                if let Some(ip) = object
+                    .get("HostIp")
+                    .or_else(|| object.get("host_ip"))
+                    .or_else(|| object.get("public_ip"))
+                    .and_then(Value::as_str)
+                    .and_then(normalize_host_ip)
+                {
+                    return Some(ip);
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn extract_host_port_from_entry(entry: &Value) -> Option<u16> {
     if let Some(array) = entry.as_array() {
         for item in array {
@@ -470,6 +578,50 @@ fn extract_host_port_from_entry(entry: &Value) -> Option<u16> {
     parse_port_number(entry)
 }
 
+fn extract_host_ip_from_entry(entry: &Value) -> Option<String> {
+    if let Some(array) = entry.as_array() {
+        for item in array {
+            if let Some(ip) = item
+                .get("HostIp")
+                .or_else(|| item.get("host_ip"))
+                .or_else(|| item.get("public_ip"))
+                .and_then(Value::as_str)
+                .and_then(normalize_host_ip)
+            {
+                return Some(ip);
+            }
+        }
+    }
+
+    if let Some(object) = entry.as_object() {
+        if let Some(ip) = object
+            .get("HostIp")
+            .or_else(|| object.get("host_ip"))
+            .or_else(|| object.get("public_ip"))
+            .and_then(Value::as_str)
+            .and_then(normalize_host_ip)
+        {
+            return Some(ip);
+        }
+    }
+
+    entry.as_str().and_then(normalize_host_ip)
+}
+
+fn port_mapping_key_matches(actual: &str, expected: &str) -> bool {
+    let (actual_port, actual_proto) = parse_port_key(actual);
+    let (expected_port, expected_proto) = parse_port_key(expected);
+
+    if actual_port == 0 || expected_port == 0 || actual_port != expected_port {
+        return false;
+    }
+
+    match (actual_proto.as_deref(), expected_proto.as_deref()) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
 fn parse_port_key(key: &str) -> (u16, Option<String>) {
     let mut parts = key.split('/');
     let port = parts
@@ -478,6 +630,20 @@ fn parse_port_key(key: &str) -> (u16, Option<String>) {
         .unwrap_or_default();
     let proto = parts.next().map(|raw| raw.trim().to_ascii_lowercase());
     (port, proto)
+}
+
+fn normalize_host_ip(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let normalized = value.to_ascii_lowercase();
+    if normalized == "0.0.0.0" || normalized == "::" || normalized == "[::]" {
+        return None;
+    }
+
+    Some(value.to_string())
 }
 
 fn parse_port_number(raw: &Value) -> Option<u16> {

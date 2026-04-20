@@ -442,11 +442,7 @@ async fn sync_wireguard_endpoint_from_vast(
     );
 
     let instance = vast.get_instance(instance_id).await?;
-    let endpoint_host = if !instance.public_ip.is_empty() {
-        instance.public_ip
-    } else {
-        instance.ssh_host
-    };
+    let endpoint_host = instance.wireguard_endpoint_host();
 
     if endpoint_host.trim().is_empty() {
         return Ok(());
