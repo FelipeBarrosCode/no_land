@@ -222,7 +222,7 @@ pub async fn search_offers(
                 _ => state_snapshot.server_preferences.include_on_demand,
             };
 
-            let static_ip_ok = offer.has_static_ip;
+            let static_ip_ok = !state_snapshot.server_preferences.require_static_ip || offer.has_static_ip;
             let avx_ok = !state_snapshot.server_preferences.require_avx || offer.has_avx;
             let gpu_count_ok = offer.gpu_count == 1;
             let gpu_ram_ok =
@@ -842,7 +842,7 @@ pub async fn update_server_preferences(
     let include_on_demand = payload.include_on_demand;
     let include_interruptible = payload.include_interruptible;
     let include_reserved = payload.include_reserved;
-    let require_static_ip = true;
+    let require_static_ip = payload.require_static_ip;
     let require_avx = payload.require_avx;
     let min_gpu_count = 1;
     let min_gpu_ram_gb = payload.min_gpu_ram_gb;

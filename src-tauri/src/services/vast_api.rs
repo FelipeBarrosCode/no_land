@@ -97,9 +97,7 @@ impl VastApiClient {
             "reliability": { "gte": min_reliability.max(0.8) },
             "gpu_arch": { "eq": "nvidia" },
             "vms_enabled": { "eq": true },
-            "static_ip": { "eq": true },
             "num_gpus": { "eq": 1 },
-            "direct_port_count": { "gte": 1 },
             "order": [["dph_total", "asc"]]
         });
 

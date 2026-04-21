@@ -55,6 +55,7 @@ impl SunshineService {
         let values = BTreeMap::from([
             ("address_family".to_string(), "both".to_string()),
             ("port".to_string(), self.defaults.port.to_string()),
+            ("address".to_string(), "0.0.0.0".to_string()),
             ("origin_web_ui_allowed".to_string(), "all".to_string()),
             ("origin_pin_allowed".to_string(), "all".to_string()),
             ("upnp".to_string(), "off".to_string()),
@@ -236,7 +237,7 @@ exit 0"#,
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "pgrep -x Xorg >/dev/null 2>&1 && (command -v timeout >/dev/null 2>&1 && timeout 8s bash -lc 'DISPLAY=:0 xrandr --listmonitors' || DISPLAY=:0 xrandr --listmonitors) || (echo 'Xorg process not found' && exit 1)",
+                    "pgrep -x Xorg >/dev/null 2>&1 && (command -v timeout >/dev/null 2>&1 && timeout 8s bash -lc 'DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors' || DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors) || (echo 'Xorg process not found' && exit 1)",
                     Duration::from_secs(30),
                 )
             })
@@ -256,12 +257,36 @@ exit 0"#,
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??
             };
+            let systemd_status = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "systemctl status noland-xorg --no-pager 2>/dev/null || echo 'systemd status unavailable'",
+                        Duration::from_secs(15),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            let journalctl_tail = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || echo 'journalctl unavailable'",
+                        Duration::from_secs(15),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
 
             return Err(AppError::Provisioning(format!(
-                "Xorg is not running after virtual display setup. Cannot continue. Output: {} | Error: {} | Xorg log tail: {}",
+                "Xorg is not running after virtual display setup. Cannot continue. Output: {} | Error: {} | Xorg log tail: {} | systemd status: {} | journalctl: {}",
                 xorg_check.stdout.trim(),
                 xorg_check.stderr.trim(),
-                xorg_log_tail.stdout.trim()
+                xorg_log_tail.stdout.trim(),
+                systemd_status.stdout.trim(),
+                journalctl_tail.stdout.trim()
             )));
         }
 
@@ -281,8 +306,9 @@ exit 0"#,
         let escaped = shell_single_quote_escape(&config);
 
         let write_config_command = format!(
-            "mkdir -p {home}/.config/sunshine && bash -lc 'cat > {home}/.config/sunshine/sunshine.conf <<\"EOF\"\n{config}\nEOF'",
+            "mkdir -p {home}/.config/sunshine && sudo -u {user} bash -lc 'cat > {home}/.config/sunshine/sunshine.conf <<\"EOF\"\n{config}\nEOF'",
             home = target_home,
+            user = target_user,
             config = escaped
         );
 
@@ -312,6 +338,26 @@ exit 0"#,
         )
         .await?;
 
+        // Kill any root-level Sunshine processes to prevent conflicts
+        let cleanup_root_sunshine = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo pkill -9 -u root sunshine 2>/dev/null || true; sudo systemctl stop sunshine.service 2>/dev/null || true; sudo systemctl disable sunshine.service 2>/dev/null || true; sleep 1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if cleanup_root_sunshine.status_code != 0 {
+            warn!(
+                "Root Sunshine cleanup had issues (continuing): stdout: {} | stderr: {}",
+                cleanup_root_sunshine.stdout.trim(),
+                cleanup_root_sunshine.stderr.trim()
+            );
+        }
+
         let enable = {
             let remote = remote.clone();
             let target_user = target_user.to_string();
@@ -319,7 +365,7 @@ exit 0"#,
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
                     &format!(
-                        "sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user daemon-reload && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user enable sunshine && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user restart sunshine && sleep 3 && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user status sunshine --no-pager -n 30"
+                        "sudo ufw allow 47990/tcp 2>/dev/null || true && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user daemon-reload && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user enable sunshine && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user restart sunshine && sleep 3 && sudo -u {target_user} XDG_RUNTIME_DIR=/run/user/{target_uid} systemctl --user status sunshine --no-pager -n 30"
                     ),
                     Duration::from_secs(120),
                 )
@@ -428,7 +474,7 @@ exit 0"#,
             let remote = remote.clone();
             let probe = tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    r#"nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || { echo 0; exit 0; }; if command -v timeout >/dev/null 2>&1; then timeout 8s bash -lc "DISPLAY=:0 xrandr 2>/dev/null | grep -c '+'" || echo 0; else DISPLAY=:0 xrandr 2>/dev/null | grep -c '+' || echo 0; fi"#,
+                    r#"nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || { echo 0; exit 0; }; if command -v timeout >/dev/null 2>&1; then timeout 8s bash -lc "DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr 2>/dev/null | grep -c '+'" || echo 0; else DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr 2>/dev/null | grep -c '+' || echo 0; fi"#,
                     Duration::from_secs(15),
                 )
             })
@@ -506,11 +552,13 @@ Section "Device"
    Driver "nvidia"
    VendorName "NVIDIA Corporation"
    Option "MetaModes" "{w}x{h}"
-   Option "UseDisplayDevice" "DFP"
-   Option "ConnectedMonitor" "DFP"
+   Option "UseDisplayDevice" "DFP-0"
+   Option "ConnectedMonitor" "DFP-0"
    Option "CustomEDID" "DFP-0:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "DFP-0"
    Option "ModeDebug" "True"
    Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
+   Option "AllowEmptyInitialConfiguration" "True"
 EndSection
 
 Section "Screen"
@@ -518,9 +566,8 @@ Section "Screen"
    Device "Card0"
    Monitor "Monitor0"
    DefaultDepth 24
-   Option "AllowEmptyInitialConfiguration" "True"
    SubSection "Display"
-       Modes "{w}x{h}"
+       Depth 24
    EndSubSection
 EndSection
 "#,
@@ -544,10 +591,12 @@ Section "Device"
    Driver "nvidia"
    VendorName "NVIDIA Corporation"
    Option "MetaModes" "{w}x{h}"
-   Option "UseDisplayDevice" "DFP"
+   Option "UseDisplayDevice" "DFP-0"
    Option "CustomEDID" "DFP-0:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "DFP-0"
    Option "ModeDebug" "True"
    Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
+   Option "AllowEmptyInitialConfiguration" "True"
 EndSection
 
 Section "Screen"
@@ -555,9 +604,8 @@ Section "Screen"
    Device "Card0"
    Monitor "Monitor0"
    DefaultDepth 24
-   Option "AllowEmptyInitialConfiguration" "True"
    SubSection "Display"
-       Modes "{w}x{h}"
+       Depth 24
    EndSubSection
 EndSection
 "#,
@@ -574,6 +622,7 @@ GPU_OUTPUT="{output}"
 TARGET_USER="{target_user}"
 TARGET_UID="{uid}"
 TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+SHARED_XAUTH="/tmp/.Xauthority-shared"
 
 echo "=== Noland TwinView Virtual Display Setup ==="
 echo "Resolution: ${{VIRT_W}}x${{VIRT_H}}"
@@ -613,27 +662,105 @@ sudo systemctl mask sddm 2>/dev/null || true
 sudo systemctl mask lightdm 2>/dev/null || true
 sleep 2
 
-# 4. Kill existing Xorg
-echo "Killing existing Xorg..."
+# 4. Stop any existing Xorg service and clean up stale Xauthority
+echo "Stopping existing Xorg..."
+sudo systemctl stop noland-xorg 2>/dev/null || true
 sudo pkill -9 Xorg 2>/dev/null || true
+rm -f /root/.Xauthority $SHARED_XAUTH 2>/dev/null || true
 sleep 2
 
-# 5. Start Xorg with virtual display config
-echo "Starting Xorg with virtual display config..."
-sudo /usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/30-nvidia-virtual.conf -auth /root/.Xauthority -logfile /var/log/Xorg.0.log &
-sleep 8
+# 5. Create shared Xauthority file accessible by both root and user
+echo "Creating shared Xauthority..."
+touch $SHARED_XAUTH
+chmod 666 $SHARED_XAUTH
+xauth -f $SHARED_XAUTH add :0 . $(openssl rand -hex 16)
 
-# Check if Xorg is running
-if ! pgrep -x Xorg > /dev/null; then
+# 6. Install systemd service for Xorg (survives SSH disconnect)
+echo "Installing noland-xorg systemd service..."
+sudo tee /etc/systemd/system/noland-xorg.service > /dev/null <<'SYSTEMDEOF'
+[Unit]
+Description=Noland Virtual Xorg Display
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/tmp/.Xauthority-shared"
+ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/30-nvidia-virtual.conf -auth /tmp/.Xauthority-shared -logfile /var/log/Xorg.0.log -novtswitch -logverbose 7
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMDEOF
+sudo systemctl daemon-reload
+
+# 6a. Start Xorg via systemd
+echo "Starting Xorg with virtual display config..."
+sudo systemctl start noland-xorg
+
+# Retry check for up to 20 seconds (some VMs are slow to initialize the NVIDIA driver)
+XORG_READY=false
+for i in $(seq 1 20); do
+    sleep 1
+    if sudo systemctl is-active noland-xorg >/dev/null 2>&1; then
+        echo "Xorg service active after $i seconds"
+        XORG_READY=true
+        break
+    fi
+done
+
+if [ "$XORG_READY" != "true" ]; then
     echo "Xorg failed to start with ConnectedMonitor=${{GPU_OUTPUT}}. Checking log..."
+    echo "--- systemd status ---"
+    sudo systemctl status noland-xorg --no-pager 2>/dev/null || true
+    echo "--- journalctl ---"
+    sudo journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || true
+    echo "--- Xorg log ---"
     tail -80 /var/log/Xorg.0.log 2>/dev/null || true
     echo "Retrying Xorg without ConnectedMonitor..."
+    sudo systemctl stop noland-xorg 2>/dev/null || true
     sudo pkill -9 Xorg 2>/dev/null || true
     sleep 2
-    sudo /usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/31-nvidia-virtual-fallback.conf -auth /root/.Xauthority -logfile /var/log/Xorg.0.log &
-    sleep 8
-    if ! pgrep -x Xorg > /dev/null; then
+
+    # Update service to use fallback config
+    sudo tee /etc/systemd/system/noland-xorg.service > /dev/null <<'SYSTEMDEOF'
+[Unit]
+Description=Noland Virtual Xorg Display
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/tmp/.Xauthority-shared"
+ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/31-nvidia-virtual-fallback.conf -auth /tmp/.Xauthority-shared -logfile /var/log/Xorg.0.log -novtswitch -logverbose 7
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMDEOF
+    sudo systemctl daemon-reload
+    sudo systemctl start noland-xorg
+
+    FALLBACK_READY=false
+    for i in $(seq 1 20); do
+        sleep 1
+        if sudo systemctl is-active noland-xorg >/dev/null 2>&1; then
+            echo "Xorg fallback service active after $i seconds"
+            FALLBACK_READY=true
+            break
+        fi
+    done
+    if [ "$FALLBACK_READY" != "true" ]; then
         echo "Xorg fallback start also failed. Checking log..."
+        echo "--- systemd status ---"
+        sudo systemctl status noland-xorg --no-pager 2>/dev/null || true
+        echo "--- journalctl ---"
+        sudo journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || true
+        echo "--- Xorg log ---"
         tail -100 /var/log/Xorg.0.log 2>/dev/null || true
         exit 1
     fi
@@ -646,10 +773,10 @@ sudo systemctl unmask gdm 2>/dev/null || true
 sudo systemctl unmask sddm 2>/dev/null || true
 sudo systemctl unmask lightdm 2>/dev/null || true
 
-# 6. Wait for display to be ready
+# 7. Wait for display to be ready
 echo "Waiting for display..."
 for i in $(seq 1 30); do
-    if DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then
+    if DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
         echo "Display ready after $i seconds"
         break
     fi
@@ -659,41 +786,40 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-# 6.1 Force target mode for Sunshine/Moonlight consistency
+# 7.1 Force target mode for Sunshine/Moonlight consistency
 echo "Enforcing target display mode ${{VIRT_W}}x${{VIRT_H}} @ {vhz}Hz..."
-ACTIVE_OUTPUT=$(DISPLAY=:0 xrandr --query | awk '/ connected/{{print $1; exit}}' || true)
+ACTIVE_OUTPUT=$(DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | awk '/ connected/{{print $1; exit}}' || true)
 if [ -n "$ACTIVE_OUTPUT" ]; then
-    if ! DISPLAY=:0 xrandr --query | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+    if ! DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
         MODELINE=$(cvt -r "$VIRT_W" "$VIRT_H" {vhz} 2>/dev/null | sed -n '2p' || true)
         MODE_NAME=$(echo "$MODELINE" | awk '{{print $2}}' || true)
         if [ -n "$MODELINE" ] && [ -n "$MODE_NAME" ]; then
-            DISPLAY=:0 xrandr --newmode ${{MODELINE#Modeline }} 2>/dev/null || true
-            DISPLAY=:0 xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
-            DISPLAY=:0 xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --newmode ${{MODELINE#Modeline }} 2>/dev/null || true
+            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
+            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
         fi
     else
-        DISPLAY=:0 xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
     fi
 fi
 
-# 7. Set up Xauthority for user
+# 8. Set up Xauthority for user (symlink to shared file)
 echo "Setting up Xauthority for user $TARGET_USER..."
 sudo mkdir -p /run/user/$TARGET_UID
-xauth generate :0 . trusted 2>/dev/null || true
-sudo cp /root/.Xauthority /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
-sudo cp /root/.Xauthority /home/$TARGET_USER/.Xauthority 2>/dev/null || true
-sudo chmod 600 /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
-sudo chmod 600 /home/$TARGET_USER/.Xauthority 2>/dev/null || true
+sudo cp $SHARED_XAUTH /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
+sudo cp $SHARED_XAUTH /home/$TARGET_USER/.Xauthority 2>/dev/null || true
+sudo chmod 666 /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
+sudo chmod 666 /home/$TARGET_USER/.Xauthority 2>/dev/null || true
 sudo chown $TARGET_USER:$TARGET_GROUP /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
 sudo chown $TARGET_USER:$TARGET_GROUP /home/$TARGET_USER/.Xauthority 2>/dev/null || true
 
-# 8. Verify
+# 9. Verify
 echo "=== Verification ==="
 echo "Xorg: $(pgrep -a Xorg | head -1 || echo 'NOT RUNNING')"
 echo "Xrandr monitors:"
-DISPLAY=:0 xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
 echo "Xrandr full output:"
-DISPLAY=:0 xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
+DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
 echo "=== Setup Complete ==="
 "#,
             w = width,
@@ -715,7 +841,7 @@ echo "=== Setup Complete ==="
 
         let output = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&install_cmd, Duration::from_secs(180)))
+            tokio::task::spawn_blocking(move || remote.ssh(&install_cmd, Duration::from_secs(300)))
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
@@ -881,14 +1007,19 @@ echo "=== Setup Complete ==="
 TARGET_USER="{target_user}"
 TARGET_HOME="{target_home}"
 TARGET_UID="{target_uid}"
+SHARED_XAUTH="/tmp/.Xauthority-shared"
 
 mkdir -p "$TARGET_HOME/.config/systemd/user/sunshine.service.d"
-touch "$TARGET_HOME/.Xauthority"
-sudo chown {target_uid}:{target_gid} "$TARGET_HOME/.Xauthority"
-sudo chmod 600 "$TARGET_HOME/.Xauthority"
 
-if [ -f /root/.Xauthority ]; then
-  sudo xauth -f /root/.Xauthority extract - :0 | sudo -u "$TARGET_USER" xauth -f "$TARGET_HOME/.Xauthority" merge - || true
+# Use shared Xauthority if it exists (created by headless display setup)
+if [ -f "$SHARED_XAUTH" ]; then
+  cp "$SHARED_XAUTH" "$TARGET_HOME/.Xauthority"
+  sudo chown {target_uid}:{target_gid} "$TARGET_HOME/.Xauthority"
+  sudo chmod 666 "$TARGET_HOME/.Xauthority"
+else
+  touch "$TARGET_HOME/.Xauthority"
+  sudo chown {target_uid}:{target_gid} "$TARGET_HOME/.Xauthority"
+  sudo chmod 600 "$TARGET_HOME/.Xauthority"
 fi
 
 cat > "$TARGET_HOME/.config/systemd/user/sunshine.service.d/10-display.conf" <<EOF
@@ -1105,9 +1236,10 @@ Type=simple
 WorkingDirectory={home}
 Environment=DISPLAY=:0
 Environment=XAUTHORITY={home}/.Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/{uid}
 Restart=always
 RestartSec=10
-ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do if DISPLAY=:0 xdpyinfo >/dev/null 2>&1; then echo "Xorg ready"; exit 0; fi; sleep 1; done; echo "WARNING: Xorg not ready"'
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 60); do if DISPLAY=:0 XAUTHORITY={home}/.Xauthority xdpyinfo >/dev/null 2>&1; then echo "Xorg ready"; exit 0; fi; sleep 1; done; echo "WARNING: Xorg not ready"'
 ExecStart={bin}
 StandardOutput=journal
 StandardError=journal
@@ -1121,8 +1253,9 @@ WantedBy=default.target
 
         let content_b64 = BASE64.encode(systemd_service.as_bytes());
         let command = format!(
-            "mkdir -p {home}/.config/systemd/user && bash -lc 'base64 -d <<< \"{b64}\" > {home}/.config/systemd/user/sunshine.service && chmod 644 {home}/.config/systemd/user/sunshine.service'",
+            "mkdir -p {home}/.config/systemd/user && sudo -u {user} bash -lc 'base64 -d <<< \"{b64}\" > {home}/.config/systemd/user/sunshine.service && chmod 644 {home}/.config/systemd/user/sunshine.service'",
             home = target_home,
+            user = target_user,
             b64 = content_b64
         );
 
@@ -1173,7 +1306,7 @@ WantedBy=default.target
         let xorg_check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("pgrep -x Xorg >/dev/null 2>&1 && DISPLAY=:0 xrandr --listmonitors 2>/dev/null && echo yes || echo no", Duration::from_secs(30))
+                remote.ssh("pgrep -x Xorg >/dev/null 2>&1 && DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors 2>/dev/null && echo yes || echo no", Duration::from_secs(30))
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -1248,7 +1381,7 @@ WantedBy=default.target
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "DISPLAY=:0 xrandr --listmonitors 2>/dev/null | head -5 || echo ''",
+                    "DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors 2>/dev/null | head -5 || echo ''",
                     Duration::from_secs(30),
                 )
             })
@@ -1263,7 +1396,7 @@ WantedBy=default.target
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    r#"DISPLAY=:0 xrandr --listmonitors 2>/dev/null | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "0""#,
+                    r#"DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors 2>/dev/null | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "0""#,
                     Duration::from_secs(15),
                 )
             })
@@ -1284,7 +1417,7 @@ WantedBy=default.target
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    r#"DISPLAY=:0 xrandr 2>/dev/null | grep -E '^\s+[0-9]+x[0-9]+' | head -1 | awk '{print $1}' | grep -oE '[a-zA-Z]+[0-9]+' || echo "0""#,
+                    r#"DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr 2>/dev/null | grep -E '^\s+[0-9]+x[0-9]+' | head -1 | awk '{print $1}' | grep -oE '[a-zA-Z]+[0-9]+' || echo "0""#,
                     Duration::from_secs(30),
                 )
             })
@@ -1305,7 +1438,7 @@ WantedBy=default.target
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    r#"DISPLAY=:0 nvidia-settings -q Xinerama -t 2>/dev/null | head -1 || DISPLAY=:0 xrandr 2>/dev/null | grep -iE 'dfp|hdmi|dp|virtual' | head -1 | awk '{print $1}' || echo "0""#,
+                    r#"DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared nvidia-settings -q Xinerama -t 2>/dev/null | head -1 || DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr 2>/dev/null | grep -iE 'dfp|hdmi|dp|virtual' | head -1 | awk '{print $1}' || echo "0""#,
                     Duration::from_secs(30),
                 )
             })
@@ -1396,7 +1529,7 @@ WantedBy=default.target
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "echo DISPLAY=$DISPLAY; xrandr --listmonitors",
+                    "echo DISPLAY=$DISPLAY; DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --listmonitors",
                     Duration::from_secs(40),
                 )
             })
@@ -1419,7 +1552,7 @@ WantedBy=default.target
             let expected = format!("{}x{}", display.width, display.height);
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    &format!("DISPLAY=:0 xrandr --query | grep -q \"{expected}\" && echo ok || (DISPLAY=:0 xrandr --query && exit 1)"),
+                    &format!("DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --query | grep -q \"{expected}\" && echo ok || (DISPLAY=:0 XAUTHORITY=/tmp/.Xauthority-shared xrandr --query && exit 1)"),
                     Duration::from_secs(40),
                 )
             })

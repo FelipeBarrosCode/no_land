@@ -161,7 +161,7 @@ export function ServerPickerModal({
       minInetDownMbps: Number.parseFloat(minDown) || 0,
       minInetUpMbps: Number.parseFloat(minUp) || 0,
       geolocationCountryCode,
-      requireStaticIp: true
+      requireStaticIp: false
     });
 
     await onSearchOffers(1);

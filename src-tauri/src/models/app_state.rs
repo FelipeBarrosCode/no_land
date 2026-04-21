@@ -153,7 +153,7 @@ impl Default for ServerPreferences {
             include_on_demand: true,
             include_interruptible: true,
             include_reserved: true,
-            require_static_ip: true,
+            require_static_ip: false,
             require_avx: false,
             min_gpu_count: 1,
             min_gpu_ram_gb: 0,

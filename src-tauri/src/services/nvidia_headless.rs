@@ -119,7 +119,7 @@ impl NvidiaHeadlessService {
 APT_COMMON_OPTS="-o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
 
 echo "[nvidia-headless] Starting apt --fix-broken install"
-sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_COMMON_OPTS -y --fix-broken install &
+sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_COMMON_OPTS -y --fix-broken install > /dev/null 2>&1 &
 FIX_PID=$!
 while kill -0 "$FIX_PID" 2>/dev/null; do
   echo "[nvidia-headless] fix-broken still running... $(date -u +%H:%M:%S)"
@@ -134,7 +134,7 @@ echo "[nvidia-headless] Installing headless packages: {packages}"
 INSTALLED=0
 for attempt in 1 2 3; do
   echo "[nvidia-headless] install attempt $attempt/3"
-  sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_COMMON_OPTS install -y --fix-missing {packages} &
+  sudo DEBIAN_FRONTEND=noninteractive apt-get $APT_COMMON_OPTS install -y --fix-missing {packages} > /dev/null 2>&1 &
   INSTALL_PID=$!
   while kill -0 "$INSTALL_PID" 2>/dev/null; do
     echo "[nvidia-headless] package install still running... $(date -u +%H:%M:%S)"

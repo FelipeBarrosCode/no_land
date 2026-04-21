@@ -249,7 +249,7 @@ export function SettingsScreen({
               includeOnDemand: appState.serverPreferences.includeOnDemand,
               includeInterruptible: appState.serverPreferences.includeInterruptible,
               includeReserved: appState.serverPreferences.includeReserved,
-              requireStaticIp: true,
+              requireStaticIp: false,
               requireAvx: appState.serverPreferences.requireAvx,
               minGpuCount: 1,
               minGpuRamGb: appState.serverPreferences.minGpuRamGb,
