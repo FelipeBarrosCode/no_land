@@ -1011,26 +1011,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         )
         .await;
 
-        let sunshine_restart_after_audio = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart sunshine && sleep 2 && XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active sunshine",
-                    Duration::from_secs(45),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if sunshine_restart_after_audio.status_code != 0 {
-            warn!(
-                "Sunshine restart after audio setup failed (continuing): stdout: {} | stderr: {}",
-                sunshine_restart_after_audio.stdout.trim(),
-                sunshine_restart_after_audio.stderr.trim()
-            );
-        }
-
     }
     ensure_not_cancelled(&context)?;
 
@@ -1862,25 +1842,6 @@ async fn run_existing_instance_orchestration(
         )
         .await;
 
-        let sunshine_restart_after_audio = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart sunshine && sleep 2 && XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active sunshine",
-                    Duration::from_secs(45),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if sunshine_restart_after_audio.status_code != 0 {
-            warn!(
-                "Sunshine restart after audio setup failed (continuing): stdout: {} | stderr: {}",
-                sunshine_restart_after_audio.stdout.trim(),
-                sunshine_restart_after_audio.stderr.trim()
-            );
-        }
     }
     ensure_not_cancelled(&context)?;
 

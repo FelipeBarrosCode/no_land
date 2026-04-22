@@ -224,6 +224,28 @@ exit 0"#,
                 "Successfully installed {} Sunshine packages",
                 packages_needed.len()
             );
+
+            // Immediately mask/disable any auto-started sunshine service to prevent
+            // port occupation before our provisioning reaches the cleanup step.
+            let mask = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "sudo systemctl stop sunshine 2>/dev/null || true; sudo systemctl disable sunshine 2>/dev/null || true; sudo systemctl mask sunshine 2>/dev/null || true; sudo pkill -9 -f sunshine 2>/dev/null || true",
+                        Duration::from_secs(30),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+
+            if mask.status_code != 0 {
+                warn!(
+                    "Post-install sunshine mask had issues (continuing): stdout: {} | stderr: {}",
+                    mask.stdout.trim(),
+                    mask.stderr.trim()
+                );
+            }
         }
 
         self.setup_headless_display(remote, target_user, display).await?;
@@ -423,7 +445,7 @@ exit 0"#,
 
         // Call 2: verify process is alive and web UI responds
         let verify_cmd = format!(
-            "pgrep -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (cat /tmp/sunshine-start-{user}.log 2>/dev/null; echo 'SUNSHINE_FAILED')",
+            "pgrep -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47991/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (cat /tmp/sunshine-start-{user}.log 2>/dev/null; echo 'SUNSHINE_FAILED')",
             user = target_user,
         );
 
@@ -451,7 +473,7 @@ exit 0"#,
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
+                    "curl -k -s --connect-timeout 10 https://localhost:47991/pin >/dev/null 2>&1 && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
                     Duration::from_secs(30),
                 )
             })
@@ -468,7 +490,7 @@ exit 0"#,
         }
 
         info!(
-            "Sunshine Web UI available at https://<wireguard-ip>:47990 (use HTTPS, accept self-signed cert)"
+            "Sunshine Web UI available at https://<wireguard-ip>:47991 (use HTTPS, accept self-signed cert)"
         );
 
         // 7. Bootstrap credentials
@@ -1439,7 +1461,7 @@ context.properties = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
+                    "curl -k -s --connect-timeout 5 https://localhost:47991/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
                     Duration::from_secs(15),
                 )
             })
@@ -1449,7 +1471,7 @@ context.properties = {
 
         if web_check.status_code != 0 || !web_check.stdout.contains("WEB_OK") {
             return Err(AppError::Provisioning(format!(
-                "Sunshine web UI validation failed (not responding on https://localhost:47990/pin). stdout: {} | stderr: {}",
+                "Sunshine web UI validation failed (not responding on https://localhost:47991/pin). stdout: {} | stderr: {}",
                 web_check.stdout.trim(),
                 web_check.stderr.trim()
             )));
