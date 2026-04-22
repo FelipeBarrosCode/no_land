@@ -25,6 +25,8 @@ pub enum AppError {
     Provisioning(String),
     #[error("State error: {0}")]
     State(String),
+    #[error("NVIDIA driver mismatch: {0}")]
+    DriverMismatch(String),
     #[error("Operation cancelled")]
     Cancelled,
 }
@@ -93,6 +95,12 @@ impl From<AppError> for FrontendError {
             AppError::Provisioning(message) => Self {
                 code: "provisioning_failed".to_string(),
                 message: "Provisioning failed. Check diagnostics and retry.".to_string(),
+                details: Some(message),
+                retryable: true,
+            },
+            AppError::DriverMismatch(message) => Self {
+                code: "driver_mismatch".to_string(),
+                message: "NVIDIA driver mismatch detected. Rebooting to fix...".to_string(),
                 details: Some(message),
                 retryable: true,
             },

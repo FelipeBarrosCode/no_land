@@ -197,6 +197,17 @@ echo "[nvidia-headless] Headless package install complete"'"#,
         };
 
         if nvidia_check.status_code != 0 || !nvidia_check.stdout.contains("NVIDIA-SMI") {
+            let stderr_lower = nvidia_check.stderr.to_lowercase();
+            let stdout_lower = nvidia_check.stdout.to_lowercase();
+            if stderr_lower.contains("driver/library version mismatch")
+                || stdout_lower.contains("driver/library version mismatch")
+                || stderr_lower.contains("failed to initialize nvml")
+                || stdout_lower.contains("failed to initialize nvml")
+            {
+                return Err(AppError::DriverMismatch(
+                    "NVIDIA kernel driver and userspace library version mismatch. Reboot required.".to_string(),
+                ));
+            }
             return Err(AppError::Provisioning(
                 "CUDA device not detected. Please pick a compatible NVIDIA host.".to_string(),
             ));

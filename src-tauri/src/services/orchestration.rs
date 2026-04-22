@@ -830,21 +830,52 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         )
         .await;
 
-        if let Err(error) = nvidia.setup_and_validate(&remote).await {
-            let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
-            let diag_summary = diagnostics
-                .map(|diag| {
-                    diag.commands
-                        .into_iter()
-                        .map(|(command, output)| format!("{command} -> {}", output.status_code))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                })
-                .unwrap_or_else(|| "no diagnostics collected".to_string());
-
-            return Err(AppError::Provisioning(format!(
-                "{error}. Diagnostics: {diag_summary}"
-            )));
+        match nvidia.setup_and_validate(&remote).await {
+            Ok(()) => {}
+            Err(AppError::DriverMismatch(_)) => {
+                warn!("NVIDIA driver mismatch detected — triggering reboot and retry");
+                ensure_post_nvidia_reboot(
+                    &app,
+                    &context,
+                    &vast,
+                    &mut instance,
+                    &mut remote,
+                    Some(offer.id),
+                )
+                .await?;
+                ensure_not_cancelled(&context)?;
+                // Retry NVIDIA setup after reboot
+                if let Err(error) = nvidia.setup_and_validate(&remote).await {
+                    let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
+                    let diag_summary = diagnostics
+                        .map(|diag| {
+                            diag.commands
+                                .into_iter()
+                                .map(|(command, output)| format!("{command} -> {}", output.status_code))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        })
+                        .unwrap_or_else(|| "no diagnostics collected".to_string());
+                    return Err(AppError::Provisioning(format!(
+                        "{error}. Diagnostics: {diag_summary}"
+                    )));
+                }
+            }
+            Err(error) => {
+                let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
+                let diag_summary = diagnostics
+                    .map(|diag| {
+                        diag.commands
+                            .into_iter()
+                            .map(|(command, output)| format!("{command} -> {}", output.status_code))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_else(|| "no diagnostics collected".to_string());
+                return Err(AppError::Provisioning(format!(
+                    "{error}. Diagnostics: {diag_summary}"
+                )));
+            }
         }
 
         mark_server_step_completed(
