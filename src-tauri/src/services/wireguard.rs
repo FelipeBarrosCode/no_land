@@ -33,6 +33,50 @@ const APT_UPDATE_TIMEOUT_SECS: u64 = 900;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 1200;
 
 impl WireGuardService {
+    async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
+        let lock_script = format!(
+            r#"#!/bin/bash
+max_wait={}
+check_count=0
+echo "Waiting for package manager lock to be released..."
+while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+    check_count=$((check_count + 1))
+    if [ $((check_count % 30)) -eq 0 ]; then
+        elapsed=$((check_count))
+        echo "Still waiting for package manager lock..." $elapsed "seconds elapsed"
+    fi
+    sleep 1
+    max_wait=$((max_wait - 1))
+    if [ $max_wait -le 0 ]; then
+        echo "TIMEOUT: Package manager lock not released after {max_wait_secs} seconds"
+        exit 1
+    fi
+done
+echo "Package manager lock released after" $check_count "seconds"
+exit 0"#,
+            max_wait_secs
+        );
+
+        let remote = remote.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            remote.ssh(&lock_script, Duration::from_secs(max_wait_secs + 60))
+        })
+        .await
+        .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
+
+        if result.status_code != 0 {
+            info!(
+                "dpkg lock wait returned {}: {}",
+                result.status_code,
+                result.stderr.trim()
+            );
+            return Ok(false);
+        }
+
+        info!("dpkg lock released successfully");
+        Ok(true)
+    }
+
     pub async fn configure(
         &self,
         remote: &RemoteExec,
@@ -193,6 +237,16 @@ impl WireGuardService {
         remote: &RemoteExec,
         packages_needed: &[String],
     ) -> AppResult<()> {
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
+        if !lock_acquired {
+            return Err(AppError::Provisioning(
+                "Package manager is locked by another process (likely unattended-upgrades). \
+                Waiting timed out after 10 minutes. Please try again in a few minutes when \
+                system updates have finished. Alternatively, you can SSH into the instance and \
+                run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a".to_string(),
+            ));
+        }
+
         let update = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
