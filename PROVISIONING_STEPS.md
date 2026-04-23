@@ -241,7 +241,7 @@ Write to `/etc/sunshine/sunshine.conf`:
 
 ```
 address_family = both
-port = 47990
+port = 47989
 origin_pin_allowed = all
 origin_web_ui_allowed = all
 upnp = off
@@ -252,13 +252,14 @@ nvenc_preset = p4
 ping_timeout = 10000
 ```
 
-### Step 7.3: Set Web UI Credentials
+### Step 7.3: Create Web UI Credentials
 
 **IMPORTANT:** Credentials are required for pairing to work.
 
-```bash
-sudo sunshine --creds <username> <password>
-```
+1. Open `https://<wireguard-ip>:47990` in your browser
+2. Accept the self-signed certificate
+3. Create your login credentials on the signup page
+4. Then proceed to pairing
 
 ### Step 7.4: Create Systemd Service
 
@@ -613,7 +614,7 @@ Key recovery rules:
 - Wait for `ssh_ready` or `running` status
 
 ### Sunshine Pairing Fails
-1. Ensure Web UI credentials are set: `sudo sunshine --creds <user> <pass>`
+1. Ensure Web UI credentials are created via the web UI at `https://<wireguard-ip>:47990`
 2. Check `origin_pin_allowed = all` in config
 3. Enter PIN within 60 seconds
 4. Verify Moonlight can reach Sunshine: `curl -k https://10.77.0.1:47990`

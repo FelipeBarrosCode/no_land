@@ -53,7 +53,9 @@ impl SunshineService {
     pub fn render_config(&self, detected_capture: &str, detected_output: &str) -> String {
         let values = BTreeMap::from([
             ("port".to_string(), self.defaults.port.to_string()),
+            ("address".to_string(), self.defaults.address.clone()),
             ("origin_web_ui_allowed".to_string(), "all".to_string()),
+            ("origin_pin_allowed".to_string(), "all".to_string()),
             ("upnp".to_string(), "off".to_string()),
             ("encoder".to_string(), self.defaults.encoder.clone()),
             ("av1_mode".to_string(), self.defaults.av1_mode.to_string()),
@@ -445,7 +447,7 @@ exit 0"#,
 
         // Call 2: verify process is alive and web UI responds
         let verify_cmd = format!(
-            "pgrep -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47991/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (cat /tmp/sunshine-start-{user}.log 2>/dev/null; echo 'SUNSHINE_FAILED')",
+            "pgrep -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (cat /tmp/sunshine-start-{user}.log 2>/dev/null; echo 'SUNSHINE_FAILED')",
             user = target_user,
         );
 
@@ -468,12 +470,12 @@ exit 0"#,
             )));
         }
 
-        // 6. Health check: verify web UI responds
+        // 6. Health check: verify web UI and protocol ports respond
         let health_check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 10 https://localhost:47991/pin >/dev/null 2>&1 && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
+                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && nc -z localhost 47989 2>/dev/null && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
                     Duration::from_secs(30),
                 )
             })
@@ -490,33 +492,11 @@ exit 0"#,
         }
 
         info!(
-            "Sunshine Web UI available at https://<wireguard-ip>:47991 (use HTTPS, accept self-signed cert)"
+            "Sunshine Web UI available at https://<wireguard-ip>:47990 (use HTTPS, accept self-signed cert)"
         );
-
-        // 7. Bootstrap credentials
-        let creds_command = if target_user == "root" {
-            "sunshine --creds sunshine password".to_string()
-        } else {
-            format!("sudo -u {} sunshine --creds sunshine password", target_user)
-        };
-
-        let bootstrap_creds = {
-            let remote = remote.clone();
-            let creds_command = creds_command.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&creds_command, Duration::from_secs(45))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if bootstrap_creds.status_code != 0 {
-            warn!(
-                "Sunshine credentials bootstrap failed (continuing): stdout: {} | stderr: {}",
-                bootstrap_creds.stdout.trim(),
-                bootstrap_creds.stderr.trim()
-            );
-        }
+        info!(
+            "IMPORTANT: Visit the Web UI above to create your login credentials before pairing."
+        );
 
         let apply_affinity = {
             let remote = remote.clone();
@@ -1461,7 +1441,7 @@ context.properties = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 5 https://localhost:47991/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
+                    "curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
                     Duration::from_secs(15),
                 )
             })
@@ -1471,7 +1451,7 @@ context.properties = {
 
         if web_check.status_code != 0 || !web_check.stdout.contains("WEB_OK") {
             return Err(AppError::Provisioning(format!(
-                "Sunshine web UI validation failed (not responding on https://localhost:47991/pin). stdout: {} | stderr: {}",
+                "Sunshine web UI validation failed (not responding on https://localhost:47990/pin). stdout: {} | stderr: {}",
                 web_check.stdout.trim(),
                 web_check.stderr.trim()
             )));

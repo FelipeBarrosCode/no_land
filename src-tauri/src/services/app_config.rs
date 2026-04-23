@@ -132,7 +132,7 @@ impl Default for AppConfig {
                 nvenc_preset: 4,
                 output_name: 0,
                 ping_timeout: 30000,
-                port: 47990,
+                port: 47989,
                 address: "0.0.0.0".to_string(),
                 display: ":0".to_string(),
                 cpu_affinity: "2-5".to_string(),

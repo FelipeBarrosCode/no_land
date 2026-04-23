@@ -7,7 +7,7 @@ use std::{
 
 use serde::Serialize;
 use tokio::fs;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
@@ -29,8 +29,8 @@ pub struct WireGuardService {
 }
 
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
-const APT_UPDATE_TIMEOUT_SECS: u64 = 900;
-const APT_INSTALL_TIMEOUT_SECS: u64 = 1200;
+const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
+const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 
 impl WireGuardService {
     async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
@@ -103,7 +103,6 @@ exit 0"#,
         );
 
         self.setup_queue_management_persistent(remote).await?;
-        self.setup_firewall_rules(remote, &primary_interface).await?;
         self.setup_network_tuning_persistent(remote).await?;
 
         let packages_needed = self.check_wireguard_packages_needed(remote).await?;
@@ -140,6 +139,9 @@ exit 0"#,
             );
             self.install_wireguard_packages(remote, &packages_needed).await?;
         }
+
+        // Set up firewall rules only after ufw is guaranteed to be installed
+        self.setup_firewall_rules(remote, &primary_interface).await?;
 
         let bring_up = {
             let remote = remote.clone();
@@ -237,11 +239,27 @@ exit 0"#,
         remote: &RemoteExec,
         packages_needed: &[String],
     ) -> AppResult<()> {
-        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
+        // 1. Preemptively kill any competing apt processes and fix broken dpkg state
+        let cleanup = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo pkill -f unattended-upgrades 2>/dev/null || true; sudo pkill -f apt.systemd.daily 2>/dev/null || true; sudo dpkg --configure -a 2>/dev/null || true",
+                    Duration::from_secs(60),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if cleanup.status_code != 0 {
+            warn!("Pre-install apt cleanup returned non-zero (continuing): {}", cleanup.stderr.trim());
+        }
+
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 60).await?;
         if !lock_acquired {
             return Err(AppError::Provisioning(
                 "Package manager is locked by another process (likely unattended-upgrades). \
-                Waiting timed out after 10 minutes. Please try again in a few minutes when \
+                Waiting timed out after 60 seconds. Please try again in a few minutes when \
                 system updates have finished. Alternatively, you can SSH into the instance and \
                 run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a".to_string(),
             ));
@@ -251,7 +269,7 @@ exit 0"#,
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "sudo apt-get -o DPkg::Lock::Timeout=600 update",
+                    "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 update",
                     Duration::from_secs(APT_UPDATE_TIMEOUT_SECS),
                 )
             })
@@ -269,7 +287,7 @@ exit 0"#,
         }
 
         let install_command = format!(
-            "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y {}",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y {}",
             packages_needed.join(" ")
         );
 
@@ -339,7 +357,7 @@ WantedBy=multi-user.target
         let enable = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("sudo systemctl enable set-cpu-governor && sudo systemctl start set-cpu-governor", Duration::from_secs(30))
+                remote.ssh("sudo systemctl daemon-reload && sudo systemctl enable set-cpu-governor && sudo systemctl start set-cpu-governor", Duration::from_secs(30))
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -594,12 +612,12 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
 
     async fn setup_queue_management_persistent(&self, remote: &RemoteExec) -> AppResult<()> {
         let script = r#"#!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 EGRESS_IF="$(ip route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
 [ -n "$EGRESS_IF" ] || { echo "No egress interface detected"; exit 1; }
 
-tc qdisc replace dev "$EGRESS_IF" root fq_codel
+tc qdisc replace dev "$EGRESS_IF" root fq_codel || true
 tc -s qdisc show dev "$EGRESS_IF"
 "#;
 

@@ -16,7 +16,7 @@ const SUNSHINE_PORTS = [47984, 47989, 47990];
 
 function buildSunshineUrls(serverIp: string) {
   return SUNSHINE_PORTS.map((port) => ({
-    url: `http://${serverIp}:${port}`,
+    url: `https://${serverIp}:${port}`,
     port,
   }));
 }
