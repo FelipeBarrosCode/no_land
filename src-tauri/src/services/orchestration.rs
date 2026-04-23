@@ -213,16 +213,17 @@ impl OrchestrationService {
             .load_key_into_agent(Path::new(&private_key_path), &passphrase)
             .await?;
 
-        let target_user = sanitize_ssh_user(&{
+        let sunshine_user = sanitize_ssh_user(&context.config.audio_target_user);
+        let ssh_username = {
             let state = context.state.read().await;
             if state.ssh.ssh_username.is_empty() {
-                context.config.audio_target_user.clone()
+                context.config.ssh_user.clone()
             } else {
                 state.ssh.ssh_username.clone()
             }
-        });
+        };
         let remote = RemoteExec {
-            ssh_user: target_user,
+            ssh_user: sanitize_ssh_user(&ssh_username),
             ssh_host: pairing_context.host.clone(),
             ssh_port: pairing_context.port,
             private_key_path,
@@ -231,7 +232,7 @@ impl OrchestrationService {
         let pairing_mode = detect_sunshine_pairing_mode(&remote).await?;
         match pairing_mode {
             SunshinePairingMode::SunshineCli => {
-                let command = format!("printf '%s\\n' '{pin}' | sunshine-cli pair");
+                let command = format!("sudo -u {sunshine_user} bash -lc 'printf \"%s\\n\" \"{pin}\" | sunshine-cli pair'");
                 let pair_result =
                     tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(45)))
                         .await
@@ -249,7 +250,7 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::SunshinePairPin => {
-                let command = format!("sunshine --pair-pin '{pin}'");
+                let command = format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
                 let pair_result =
                     tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(45)))
                         .await
@@ -267,7 +268,7 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::ManualWebUi => {
-                let pairing_verified = verify_manual_sunshine_pairing(&remote).await?;
+                let pairing_verified = verify_manual_sunshine_pairing(&remote, &sunshine_user).await?;
                 if !pairing_verified {
                     emit_transition(
                         app,
@@ -742,17 +743,19 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     ensure_instance_is_vm_runtime(&instance)?;
     ensure_not_cancelled(&context)?;
 
-    // Get target user from settings (fallback to config default if not set)
-    let target_user = sanitize_ssh_user(&{
+    // ssh_user: who we authenticate as over SSH (typically root on cloud VMs)
+    // target_user: who Sunshine/Xorg run as (unprivileged user)
+    let ssh_user = sanitize_ssh_user(&{
         let state = context.state.read().await;
         if state.ssh.ssh_username.is_empty() {
-            context.config.audio_target_user.clone()
+            context.config.ssh_user.clone()
         } else {
             state.ssh.ssh_username.clone()
         }
     });
+    let target_user = sanitize_ssh_user(&context.config.audio_target_user);
     let mut remote = RemoteExec {
-        ssh_user: target_user.clone(),
+        ssh_user,
         ssh_host: instance.public_ip.clone(),
         ssh_port: instance.ssh_port,
         private_key_path: key_paths.private_key_path.display().to_string(),
@@ -1615,17 +1618,19 @@ async fn run_existing_instance_orchestration(
     ensure_instance_is_vm_runtime(&instance)?;
     ensure_not_cancelled(&context)?;
 
-    // Get target user (the user we'll SSH as directly)
-    let target_user = sanitize_ssh_user(&{
+    // ssh_user: who we authenticate as over SSH (typically root on cloud VMs)
+    // target_user: who Sunshine/Xorg run as (unprivileged user)
+    let ssh_user = sanitize_ssh_user(&{
         let state = context.state.read().await;
         if state.ssh.ssh_username.is_empty() {
-            context.config.audio_target_user.clone()
+            context.config.ssh_user.clone()
         } else {
             state.ssh.ssh_username.clone()
         }
     });
+    let target_user = sanitize_ssh_user(&context.config.audio_target_user);
     let mut remote = RemoteExec {
-        ssh_user: target_user.clone(),
+        ssh_user,
         ssh_host: instance.public_ip.clone(),
         ssh_port: instance.ssh_port,
         private_key_path: key_paths.private_key_path.display().to_string(),
@@ -2917,8 +2922,8 @@ async fn detect_sunshine_pairing_mode(remote: &RemoteExec) -> AppResult<Sunshine
     })
 }
 
-async fn verify_manual_sunshine_pairing(remote: &RemoteExec) -> AppResult<bool> {
-    let target_user = remote.ssh_user.replace('"', "");
+async fn verify_manual_sunshine_pairing(remote: &RemoteExec, sunshine_user: &str) -> AppResult<bool> {
+    let target_user = sunshine_user.replace('"', "");
     let check_command = format!(
         r#"python3 - <<'PY'
 import json, os, pwd, sys
@@ -2930,11 +2935,7 @@ try:
     candidates.append(pwd.getpwnam(target_user).pw_dir + "/.config/sunshine/sunshine_state.json")
 except Exception:
     pass
-candidates.extend([
-    f"/home/{{target_user}}/.config/sunshine/sunshine_state.json",
-    "/root/.config/sunshine/sunshine_state.json",
-    "/var/lib/sunshine/sunshine_state.json",
-])
+candidates.append(f"/home/{target_user}/.config/sunshine/sunshine_state.json")
 
 KEYS = {{"paired_clients", "pairedClients", "clients", "devices", "trusted_devices", "paired_devices"}}
 

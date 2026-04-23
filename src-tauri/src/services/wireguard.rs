@@ -34,47 +34,107 @@ const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 
 impl WireGuardService {
     async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
-        let lock_script = format!(
+        // Option C: Surgical approach
+        // 1. Quick check first
+        // 2. If locked, aggressive kill
+        // 3. Check again
+        // 4. Only then wait with timeout
+        let surgical_script = format!(
             r#"#!/bin/bash
-max_wait={}
+set -uo pipefail
+
+LOCK_FILES="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock"
+MAX_WAIT={max_wait_secs}
+
+check_lock() {{
+    for lock in $LOCK_FILES; do
+        if sudo fuser "$lock" >/dev/null 2>&1; then
+            return 1
+        fi
+    done
+    return 0
+}}
+
+# Phase 1: Quick check (0-3 seconds)
+if check_lock; then
+    echo "LOCK_FREE"
+    exit 0
+fi
+
+# Phase 2: Aggressive kill (unattended-upgrades often auto-restarts)
+echo "LOCK_HELD: killing competing apt processes..."
+sudo systemctl stop unattended-upgrades 2>/dev/null || true
+sudo systemctl mask unattended-upgrades 2>/dev/null || true
+sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
+sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
+sudo pkill -9 -f "apt-get" 2>/dev/null || true
+sudo pkill -9 -f "dpkg" 2>/dev/null || true
+sleep 2
+
+# Phase 3: Fix broken dpkg state and remove stale locks
+echo "Fixing dpkg state..."
+sudo dpkg --configure -a 2>/dev/null || true
+for lock in $LOCK_FILES; do
+    if [ -f "$lock" ]; then
+        sudo rm -f "$lock" 2>/dev/null || true
+    fi
+done
+
+# Phase 4: Check again after cleanup
+sleep 1
+if check_lock; then
+    echo "LOCK_FREE_AFTER_KILL"
+    exit 0
+fi
+
+# Phase 5: Patient wait with timeout
+echo "Still locked after cleanup, waiting up to ${{MAX_WAIT}}s..."
 check_count=0
-echo "Waiting for package manager lock to be released..."
-while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+while ! check_lock; do
     check_count=$((check_count + 1))
-    if [ $((check_count % 30)) -eq 0 ]; then
-        elapsed=$((check_count))
-        echo "Still waiting for package manager lock..." $elapsed "seconds elapsed"
+    if [ $((check_count % 15)) -eq 0 ]; then
+        echo "Still waiting for package manager lock... ${{check_count}}s elapsed"
     fi
     sleep 1
-    max_wait=$((max_wait - 1))
-    if [ $max_wait -le 0 ]; then
-        echo "TIMEOUT: Package manager lock not released after {max_wait_secs} seconds"
+    if [ $check_count -ge $MAX_WAIT ]; then
+        echo "TIMEOUT: Package manager lock not released after ${{MAX_WAIT}} seconds"
+        # Unmask so future boots are not broken
+        sudo systemctl unmask unattended-upgrades 2>/dev/null || true
         exit 1
     fi
 done
-echo "Package manager lock released after" $check_count "seconds"
-exit 0"#,
-            max_wait_secs
+
+# Unmask so future boots are not broken
+sudo systemctl unmask unattended-upgrades 2>/dev/null || true
+echo "LOCK_RELEASED_AFTER_WAIT ${{check_count}}"
+exit 0"#
         );
 
         let remote = remote.clone();
         let result = tokio::task::spawn_blocking(move || {
-            remote.ssh(&lock_script, Duration::from_secs(max_wait_secs + 60))
+            remote.ssh(&surgical_script, Duration::from_secs(max_wait_secs + 30))
         })
         .await
         .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
 
         if result.status_code != 0 {
             info!(
-                "dpkg lock wait returned {}: {}",
+                "dpkg lock wait returned {}: stdout={} stderr={}",
                 result.status_code,
+                result.stdout.trim(),
                 result.stderr.trim()
             );
             return Ok(false);
         }
 
-        info!("dpkg lock released successfully");
-        Ok(true)
+        let stdout = result.stdout.trim();
+        if stdout.contains("LOCK_FREE") || stdout.contains("LOCK_RELEASED") {
+            info!("dpkg lock acquired: {}", stdout);
+            Ok(true)
+        } else {
+            info!("dpkg lock check returned unexpected output: {}", stdout);
+            Ok(false)
+        }
     }
 
     pub async fn configure(
@@ -239,23 +299,8 @@ exit 0"#,
         remote: &RemoteExec,
         packages_needed: &[String],
     ) -> AppResult<()> {
-        // 1. Preemptively kill any competing apt processes and fix broken dpkg state
-        let cleanup = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "sudo pkill -f unattended-upgrades 2>/dev/null || true; sudo pkill -f apt.systemd.daily 2>/dev/null || true; sudo dpkg --configure -a 2>/dev/null || true",
-                    Duration::from_secs(60),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if cleanup.status_code != 0 {
-            warn!("Pre-install apt cleanup returned non-zero (continuing): {}", cleanup.stderr.trim());
-        }
-
-        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 60).await?;
+        // wait_for_dpkg_lock_with_message handles all cleanup internally (Option C)
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 120).await?;
         if !lock_acquired {
             return Err(AppError::Provisioning(
                 "Package manager is locked by another process (likely unattended-upgrades). \

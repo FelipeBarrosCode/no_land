@@ -84,47 +84,107 @@ impl SunshineService {
     }
 
     async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
-        let lock_script = format!(
+        // Option C: Surgical approach
+        // 1. Quick check first
+        // 2. If locked, aggressive kill
+        // 3. Check again
+        // 4. Only then wait with timeout
+        let surgical_script = format!(
             r#"#!/bin/bash
-max_wait={}
+set -uo pipefail
+
+LOCK_FILES="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock"
+MAX_WAIT={max_wait_secs}
+
+check_lock() {{
+    for lock in $LOCK_FILES; do
+        if sudo fuser "$lock" >/dev/null 2>&1; then
+            return 1
+        fi
+    done
+    return 0
+}}
+
+# Phase 1: Quick check (0-3 seconds)
+if check_lock; then
+    echo "LOCK_FREE"
+    exit 0
+fi
+
+# Phase 2: Aggressive kill (unattended-upgrades often auto-restarts)
+echo "LOCK_HELD: killing competing apt processes..."
+sudo systemctl stop unattended-upgrades 2>/dev/null || true
+sudo systemctl mask unattended-upgrades 2>/dev/null || true
+sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
+sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
+sudo pkill -9 -f "apt-get" 2>/dev/null || true
+sudo pkill -9 -f "dpkg" 2>/dev/null || true
+sleep 2
+
+# Phase 3: Fix broken dpkg state and remove stale locks
+echo "Fixing dpkg state..."
+sudo dpkg --configure -a 2>/dev/null || true
+for lock in $LOCK_FILES; do
+    if [ -f "$lock" ]; then
+        sudo rm -f "$lock" 2>/dev/null || true
+    fi
+done
+
+# Phase 4: Check again after cleanup
+sleep 1
+if check_lock; then
+    echo "LOCK_FREE_AFTER_KILL"
+    exit 0
+fi
+
+# Phase 5: Patient wait with timeout
+echo "Still locked after cleanup, waiting up to ${{MAX_WAIT}}s..."
 check_count=0
-echo "Waiting for package manager lock to be released..."
-while sudo fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+while ! check_lock; do
     check_count=$((check_count + 1))
-    if [ $((check_count % 30)) -eq 0 ]; then
-        elapsed=$((check_count))
-        echo "Still waiting for package manager lock..." $elapsed "seconds elapsed"
+    if [ $((check_count % 15)) -eq 0 ]; then
+        echo "Still waiting for package manager lock... ${{check_count}}s elapsed"
     fi
     sleep 1
-    max_wait=$((max_wait - 1))
-    if [ $max_wait -le 0 ]; then
-        echo "TIMEOUT: Package manager lock not released after {max_wait_secs} seconds"
+    if [ $check_count -ge $MAX_WAIT ]; then
+        echo "TIMEOUT: Package manager lock not released after ${{MAX_WAIT}} seconds"
+        # Unmask so future boots are not broken
+        sudo systemctl unmask unattended-upgrades 2>/dev/null || true
         exit 1
     fi
 done
-echo "Package manager lock released after" $check_count "seconds"
-exit 0"#,
-            max_wait_secs
+
+# Unmask so future boots are not broken
+sudo systemctl unmask unattended-upgrades 2>/dev/null || true
+echo "LOCK_RELEASED_AFTER_WAIT ${{check_count}}"
+exit 0"#
         );
 
         let remote = remote.clone();
         let result = tokio::task::spawn_blocking(move || {
-            remote.ssh(&lock_script, Duration::from_secs(max_wait_secs + 60))
+            remote.ssh(&surgical_script, Duration::from_secs(max_wait_secs + 30))
         })
         .await
         .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
 
         if result.status_code != 0 {
             info!(
-                "dpkg lock wait returned {}: {}",
+                "dpkg lock wait returned {}: stdout={} stderr={}",
                 result.status_code,
+                result.stdout.trim(),
                 result.stderr.trim()
             );
             return Ok(false);
         }
 
-        info!("dpkg lock released successfully");
-        Ok(true)
+        let stdout = result.stdout.trim();
+        if stdout.contains("LOCK_FREE") || stdout.contains("LOCK_RELEASED") {
+            info!("dpkg lock acquired: {}", stdout);
+            Ok(true)
+        } else {
+            info!("dpkg lock check returned unexpected output: {}", stdout);
+            Ok(false)
+        }
     }
 
     async fn check_sunshine_packages_needed(&self, remote: &RemoteExec) -> AppResult<Vec<String>> {
@@ -322,19 +382,20 @@ exit 0"#,
         let detected_output = self.detect_output_name(remote).await?;
         info!("Detected output name: {}", detected_output);
 
-        // 1. Aggressive cleanup FIRST: kill ALL sunshine processes and free ALL ports
+        // 1. Aggressive cleanup FIRST: kill ALL sunshine processes (root + user) and free ALL ports
         let cleanup = {
             let remote = remote.clone();
+            let _target_user = target_user.to_string();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "sudo systemctl stop sunshine 2>/dev/null || true; sudo systemctl disable sunshine 2>/dev/null || true; sudo systemctl mask sunshine 2>/dev/null || true; sudo rm -f /etc/systemd/system/sunshine.service 2>/dev/null || true; sudo systemctl daemon-reload 2>/dev/null || true; sudo pkill -9 -f sunshine 2>/dev/null || true; rm -f /tmp/sunshine-start-*.log 2>/dev/null || true; for port in 47984 47989 47990 47991 48010; do sudo fuser -k ${{port}}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do sudo fuser -k ${{port}}/udp 2>/dev/null || true; done; sleep 3",
+                    &format!("sudo systemctl --user stop sunshine 2>/dev/null || true; sudo systemctl stop sunshine 2>/dev/null || true; sudo systemctl disable sunshine 2>/dev/null || true; sudo systemctl mask sunshine 2>/dev/null || true; sudo rm -f /etc/systemd/system/sunshine.service 2>/dev/null || true; sudo systemctl daemon-reload 2>/dev/null || true; sudo pkill -9 -x sunshine 2>/dev/null || true; sudo pkill -9 -f sunshine 2>/dev/null || true; rm -f /tmp/sunshine-start-*.log 2>/dev/null || true; rm -rf /root/.config/sunshine 2>/dev/null || true; for port in 47984 47989 47990 47991 48010; do sudo fuser -k ${{port}}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do sudo fuser -k ${{port}}/udp 2>/dev/null || true; done; sleep 2; pgrep -x sunshine >/dev/null 2>&1 && echo 'CLEANUP_FAIL' || echo 'CLEANUP_OK'"),
                     Duration::from_secs(30),
                 )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-        if cleanup.status_code != 0 {
+        if cleanup.status_code != 0 || !cleanup.stdout.contains("CLEANUP_OK") {
             warn!(
                 "Sunshine cleanup had issues (continuing): stdout: {} | stderr: {}",
                 cleanup.stdout.trim(),
@@ -347,7 +408,7 @@ exit 0"#,
         let config_lines: Vec<String> = config.lines().map(|l| l.to_string()).collect();
         let printf_args = config_lines.join("' '");
         let write_config_command = format!(
-            "mkdir -p {home}/.config/sunshine && printf '%s\n' '{printf_args}' > {home}/.config/sunshine/sunshine.conf && chown {user}:$(id -gn {user}) {home}/.config/sunshine/sunshine.conf && chmod 644 {home}/.config/sunshine/sunshine.conf && grep -q 'port =' {home}/.config/sunshine/sunshine.conf && echo 'CONFIG_OK' || (echo 'CONFIG_WRITE_FAILED' && exit 1)",
+            "sudo -u {user} mkdir -p {home}/.config/sunshine && printf '%s\n' '{printf_args}' | sudo -u {user} tee {home}/.config/sunshine/sunshine.conf > /dev/null && grep -q 'port =' {home}/.config/sunshine/sunshine.conf && echo 'CONFIG_OK' || (echo 'CONFIG_WRITE_FAILED' && exit 1)",
             home = target_home,
             user = target_user,
             printf_args = printf_args
@@ -416,44 +477,66 @@ exit 0"#,
             );
         }
 
-        // 5. Start Sunshine — split into TWO SSH calls to avoid session hang
-        // Call 1: setsid detaches sunshine into a new session so SSH returns immediately
-        let start_cmd = format!(
-            "setsid sudo -u {target_user} bash -lc 'cd {target_home} && nohup env DISPLAY=:0 XAUTHORITY={target_home}/.Xauthority sunshine > /tmp/sunshine-start-{target_user}.log 2>&1 < /dev/null &' > /dev/null 2>&1",
+        // 5. Install and start Sunshine as a systemd system service running as {target_user}
+        let service_content = format!(
+            r#"[Unit]
+Description=Sunshine Game Stream Host
+After=graphical-session.target network.target
+
+[Service]
+Type=simple
+User={target_user}
+Group={target_group}
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY={target_home}/.Xauthority"
+Environment="HOME={target_home}"
+WorkingDirectory={target_home}
+ExecStart=/usr/bin/sunshine
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target"#,
             target_user = target_user,
+            target_group = self.resolve_user_group(remote, target_user).await?,
             target_home = target_home,
+        );
+
+        let install_service_cmd = format!(
+            "sudo bash -lc 'cat > /etc/systemd/system/sunshine.service <<\"EOF\"\n{}\nEOF\nchmod 644 /etc/systemd/system/sunshine.service && systemctl daemon-reload && systemctl unmask sunshine 2>/dev/null || true && systemctl enable sunshine && systemctl restart sunshine'",
+            shell_single_quote_escape(&service_content),
         );
 
         let start_sunshine = {
             let remote = remote.clone();
-            let start_cmd = start_cmd.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh(&start_cmd, Duration::from_secs(15))
+                remote.ssh(&install_service_cmd, Duration::from_secs(60))
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
         if start_sunshine.status_code != 0 {
-            warn!(
-                "Sunshine start command returned non-zero (continuing): stdout: {} | stderr: {}",
+            return Err(AppError::Provisioning(format!(
+                "Failed to install/start Sunshine systemd service: stdout: {} | stderr: {}",
                 start_sunshine.stdout.trim(),
                 start_sunshine.stderr.trim()
-            );
+            )));
         }
 
         // Give Sunshine time to initialize before checking
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        // Call 2: verify process is alive and web UI responds
+        // Call 2: verify process is alive, running as correct user, and web UI responds
         let verify_cmd = format!(
-            "pgrep -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (cat /tmp/sunshine-start-{user}.log 2>/dev/null; echo 'SUNSHINE_FAILED')",
+            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (journalctl -u sunshine --no-pager -n 20 2>/dev/null; echo 'SUNSHINE_FAILED')",
             user = target_user,
         );
 
         let verify = {
             let remote = remote.clone();
-            let verify_cmd = verify_cmd.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(&verify_cmd, Duration::from_secs(30))
             })
@@ -463,10 +546,10 @@ exit 0"#,
 
         if verify.status_code != 0 || !verify.stdout.contains("SUNSHINE_STARTED") {
             return Err(AppError::Provisioning(format!(
-                "Failed to start Sunshine. Log: {} | stdout: {} | stderr: {}",
-                verify.stdout.trim(),
-                verify.stdout.trim(),
-                verify.stderr.trim()
+                "Failed to start Sunshine as user {user}. stdout: {stdout} | stderr: {stderr}",
+                user = target_user,
+                stdout = verify.stdout.trim(),
+                stderr = verify.stderr.trim()
             )));
         }
 
@@ -566,8 +649,9 @@ exit 0"#,
         if !is_headless {
             info!("Real display detected. Skipping virtual display setup, using existing Xorg.");
             let create_user_dirs = format!(
-                "mkdir -p {}/.config/pipewire/pipewire.conf.d {}/.config/wireplumber {}/.config/systemd/user",
-                target_home, target_home, target_home
+                "sudo -u {target_user} mkdir -p {home}/.config/pipewire/pipewire.conf.d {home}/.config/wireplumber {home}/.config/systemd/user",
+                target_user = target_user,
+                home = target_home
             );
             let output = {
                 let remote = remote.clone();
@@ -698,10 +782,13 @@ echo "Resolution: ${{VIRT_W}}x${{VIRT_H}}"
 echo "GPU Output: ${{GPU_OUTPUT}}"
 echo "Target User: ${{TARGET_USER}}"
 
-# 1. Set DRM permissions for NVIDIA capture
+# 1. Set DRM permissions for NVIDIA capture and add user to required groups
 echo "Setting DRM permissions..."
 sudo chmod 666 /dev/dri/card0 2>/dev/null || true
 sudo chmod 666 /dev/dri/renderD128 2>/dev/null || true
+sudo usermod -aG video "$TARGET_USER" 2>/dev/null || true
+sudo usermod -aG audio "$TARGET_USER" 2>/dev/null || true
+sudo usermod -aG render "$TARGET_USER" 2>/dev/null || true
 
 # 2. Install NVIDIA xorg config (TwinView approach - no EDID needed!)
 echo "Installing NVIDIA Xorg virtual display config + synthetic EDID..."
@@ -853,8 +940,7 @@ if [ -f /root/.Xauthority ]; then
         fi
     done
 fi
-# Also allow local connections without authentication (fallback)
-DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xhost +local: 2>/dev/null || true
+# Do NOT use xhost +local: - it is a security hole. Rely on Xauthority instead.
 
 # Unmask display managers to avoid permanent host changes
 sudo systemctl unmask gdm 2>/dev/null || true
@@ -901,13 +987,19 @@ sudo chmod 666 /home/$TARGET_USER/.Xauthority 2>/dev/null || true
 sudo chown $TARGET_USER:$TARGET_GROUP /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
 sudo chown $TARGET_USER:$TARGET_GROUP /home/$TARGET_USER/.Xauthority 2>/dev/null || true
 
-# 9. Verify
+# 9. Verify Xorg is running and user can access the display
 echo "=== Verification ==="
 echo "Xorg: $(pgrep -a Xorg | head -1 || echo 'NOT RUNNING')"
 echo "Xrandr monitors:"
 DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
 echo "Xrandr full output:"
 DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
+echo "Testing user display access..."
+if sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
+    echo "USER_DISPLAY_ACCESS=OK"
+else
+    echo "USER_DISPLAY_ACCESS=FAIL"
+fi
 echo "=== Setup Complete ==="
 "#,
             w = width,
@@ -946,8 +1038,9 @@ echo "=== Setup Complete ==="
         info!("NVIDIA TwinView virtual display setup output: {}", output.stdout.trim());
 
         let create_user_dirs = format!(
-            "mkdir -p {}/.config/pipewire/pipewire.conf.d {}/.config/wireplumber {}/.config/systemd/user",
-            target_home, target_home, target_home
+            "sudo -u {target_user} mkdir -p {home}/.config/pipewire/pipewire.conf.d {home}/.config/wireplumber {home}/.config/systemd/user",
+            target_user = target_user,
+            home = target_home
         );
         let output = {
             let remote = remote.clone();
@@ -1067,6 +1160,25 @@ echo "=== Setup Complete ==="
             .map_err(|error| AppError::Provisioning(format!("Failed to resolve GID for {target_user}: {error}")))
     }
 
+    async fn resolve_user_group(&self, remote: &RemoteExec, target_user: &str) -> AppResult<String> {
+        let group_command = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&format!("id -gn {target_user}"), Duration::from_secs(10))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        let group = group_command.stdout.trim();
+        if group.is_empty() {
+            Ok(target_user.to_string())
+        } else {
+            Ok(group.to_string())
+        }
+    }
+
     async fn setup_realtime_permissions(&self, remote: &RemoteExec) -> AppResult<()> {
         let limits_config = r#"# Realtime audio permissions for low-latency streaming
 # Generated by Noland Connect
@@ -1157,18 +1269,17 @@ context.properties = {
 }
 "#;
 
-        let escaped = shell_single_quote_escape(pipewire_lowlatency);
         let command = if target_user == "root" {
             format!(
-                "mkdir -p {home}/.config/pipewire/pipewire.conf.d && bash -lc 'cat > {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf <<\"EOF\"\n{config}\nEOF'",
+                "mkdir -p {home}/.config/pipewire/pipewire.conf.d && tee {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf > /dev/null <<'EOF'\n{config}\nEOF",
                 home = target_home,
-                config = escaped
+                config = pipewire_lowlatency
             )
         } else {
             format!(
-                "sudo -u {user} mkdir -p {home}/.config/pipewire/pipewire.conf.d && sudo -u {user} bash -lc 'cat > {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf <<\"EOF\"\n{config}\nEOF'",
+                "sudo -u {user} mkdir -p {home}/.config/pipewire/pipewire.conf.d && sudo -u {user} tee {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf > /dev/null <<'EOF'\n{config}\nEOF",
                 home = target_home,
-                config = escaped,
+                config = pipewire_lowlatency,
                 user = target_user
             )
         };
@@ -1337,12 +1448,13 @@ context.properties = {
     ) -> AppResult<()> {
         let target_home = self.resolve_user_home(remote, target_user).await?;
 
-        // Check Sunshine is running (pgrep, not systemd)
+        // Check Sunshine is running as the correct user
         let process_check = {
             let remote = remote.clone();
+            let target_user = target_user.to_string();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "pgrep -x sunshine >/dev/null 2>&1 && echo 'RUNNING' || echo 'NOT_RUNNING'",
+                    &format!("pgrep -u {target_user} -x sunshine >/dev/null 2>&1 && echo 'RUNNING_AS_USER' || (pgrep -x sunshine >/dev/null 2>&1 && echo 'RUNNING_AS_ROOT' || echo 'NOT_RUNNING')"),
                     Duration::from_secs(10),
                 )
             })
@@ -1350,7 +1462,7 @@ context.properties = {
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
-        if process_check.status_code != 0 || !process_check.stdout.contains("RUNNING") {
+        if process_check.status_code != 0 || process_check.stdout.contains("NOT_RUNNING") {
             let ps_output = {
                 let remote = remote.clone();
                 tokio::task::spawn_blocking(move || {
@@ -1365,6 +1477,12 @@ context.properties = {
                 process_check.stderr.trim(),
                 ps_output.stdout.trim()
             )));
+        }
+
+        if process_check.stdout.contains("RUNNING_AS_ROOT") {
+            return Err(AppError::Provisioning(
+                "Sunshine is running as root instead of the target user. This is a security risk and will break display/audio capture. Please re-provision.".to_string(),
+            ));
         }
 
         // Check config file exists
