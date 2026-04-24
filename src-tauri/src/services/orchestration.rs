@@ -2417,6 +2417,45 @@ async fn ensure_post_nvidia_reboot(
                 };
 
                 if probe.status_code == 0 {
+                    // Wait for systemd to finish booting before continuing
+                    // Prevents race conditions where Xorg service start fails because systemd is mid-boot
+                    const SYSTEM_STATE_ATTEMPTS: usize = 30;
+                    const SYSTEM_STATE_INTERVAL: Duration = Duration::from_secs(2);
+                    let mut system_ready = false;
+                    for sys_attempt in 1..=SYSTEM_STATE_ATTEMPTS {
+                        let system_state = {
+                            let remote = remote.clone();
+                            tokio::task::spawn_blocking(move || {
+                                remote.ssh("systemctl is-system-running 2>/dev/null", Duration::from_secs(10))
+                            })
+                            .await
+                            .map_err(|error| AppError::Command(format!("system-state probe join failure: {error}")))??
+                        };
+                        let state = system_state.stdout.trim();
+                        if state == "running" || state == "degraded" {
+                            system_ready = true;
+                            break;
+                        }
+                        emit_transition(
+                            app,
+                            context,
+                            OrchestrationState::ConnectingSsh,
+                            "Waiting for system to finish booting",
+                            Some(format!(
+                                "system state: {} (attempt {}/{})",
+                                state,
+                                sys_attempt,
+                                SYSTEM_STATE_ATTEMPTS
+                            )),
+                            false,
+                        )
+                        .await;
+                        sleep(SYSTEM_STATE_INTERVAL).await;
+                    }
+                    if !system_ready {
+                        warn!("System did not reach 'running' state after reboot, continuing anyway");
+                    }
+
                     mark_server_step_completed(
                         context,
                         instance.id,

@@ -117,8 +117,8 @@ sudo systemctl stop unattended-upgrades 2>/dev/null || true
 sudo systemctl mask unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
-sudo pkill -9 -f "apt-get" 2>/dev/null || true
-sudo pkill -9 -f "dpkg" 2>/dev/null || true
+sudo pkill -9 -f "[a]pt-get" 2>/dev/null || true
+sudo pkill -9 -f "[d]pkg" 2>/dev/null || true
 sleep 2
 
 # Phase 3: Fix broken dpkg state and remove stale locks
@@ -248,6 +248,28 @@ exit 0"#
                 "Missing Sunshine packages: {} (need to install)",
                 packages_needed.join(", ")
             );
+
+            // Permanently neuter unattended-upgrades so it can't re-acquire the lock
+            let disable_auto_upgrades = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                        Duration::from_secs(30),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            if disable_auto_upgrades.status_code != 0 {
+                warn!(
+                    "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
+                    disable_auto_upgrades.stdout.trim(),
+                    disable_auto_upgrades.stderr.trim()
+                );
+            } else {
+                info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+            }
 
             let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
             if !lock_acquired {
@@ -431,6 +453,36 @@ exit 0"#
             )));
         }
 
+        // 2b. Patch apps.json to use the correct output name (Vast.ai images often have stale HDMI-1 refs)
+        let patch_apps_json = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            let target_home = target_home.to_string();
+            let detected_output = detected_output.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "if [ -f {home}/.config/sunshine/apps.json ]; then sudo -u {user} sed -i 's/HDMI-[0-9]*/{output}/g' {home}/.config/sunshine/apps.json && echo 'APPS_JSON_PATCHED'; else echo 'APPS_JSON_NOT_FOUND'; fi",
+                        home = target_home,
+                        user = target_user,
+                        output = detected_output
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if patch_apps_json.status_code != 0 {
+            warn!(
+                "apps.json patch failed (continuing): stdout: {} | stderr: {}",
+                patch_apps_json.stdout.trim(),
+                patch_apps_json.stderr.trim()
+            );
+        } else {
+            info!("apps.json patch result: {}", patch_apps_json.stdout.trim());
+        }
+
         // 3. Setup display access: copy Xauthority to user home with correct group
         let display_access = {
             let remote = remote.clone();
@@ -455,6 +507,46 @@ exit 0"#
                 display_access.stderr.trim()
             )));
         }
+
+        // 3b. Start desktop session if none is running (Vast.ai images often have no active session)
+        let start_desktop = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            let target_home = target_home.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "if pgrep -x plasmashell >/dev/null 2>&1 || pgrep -x gnome-shell >/dev/null 2>&1; then echo 'DESKTOP_ALREADY_RUNNING'; else sudo bash -lc 'export DISPLAY=:0; export XAUTHORITY={home}/.Xauthority; export XDG_RUNTIME_DIR=/run/user/$(id -u {user}); mkdir -p $XDG_RUNTIME_DIR; chown {user}:$(id -gn {user}) $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR; if [ -f /usr/share/xsessions/plasma.desktop ]; then sudo -u {user} env DISPLAY=:0 XAUTHORITY={home}/.Xauthority XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR dbus-launch --exit-with-session startplasma-x11 &>/dev/null & elif [ -f /usr/share/xsessions/gnome.desktop ]; then sudo -u {user} env DISPLAY=:0 XAUTHORITY={home}/.Xauthority XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR dbus-launch --exit-with-session gnome-session &>/dev/null & fi; sleep 5'; echo 'DESKTOP_STARTED'; fi",
+                        user = target_user,
+                        home = target_home
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        info!("Desktop session result: {}", start_desktop.stdout.trim());
+
+        // 3c. Disable screen locker for cloud VMs (KDE screen locker breaks on headless/cloud setups)
+        let disable_screen_lock = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            let target_home = target_home.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "sudo -u {user} bash -lc 'mkdir -p {home}/.config; export XDG_RUNTIME_DIR=/run/user/$(id -u {user}); kwriteconfig5 --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true; kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true; kwriteconfig5 --file kwinrc --group Compositing --key Enabled false 2>/dev/null || true' && echo 'SCREEN_LOCK_DISABLED' || echo 'SCREEN_LOCK_CONFIG_FAILED'",
+                        user = target_user,
+                        home = target_home
+                    ),
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        info!("Screen lock disable result: {}", disable_screen_lock.stdout.trim());
 
         // 4. Open ALL Moonlight ports (TCP + UDP)
         let firewall = {
@@ -489,6 +581,7 @@ User={target_user}
 Group={target_group}
 Environment="DISPLAY=:0"
 Environment="XAUTHORITY={target_home}/.Xauthority"
+Environment="XDG_RUNTIME_DIR=/run/user/{target_uid}"
 Environment="HOME={target_home}"
 WorkingDirectory={target_home}
 ExecStart=/usr/bin/sunshine
@@ -502,6 +595,7 @@ WantedBy=multi-user.target"#,
             target_user = target_user,
             target_group = self.resolve_user_group(remote, target_user).await?,
             target_home = target_home,
+            target_uid = self.resolve_user_uid(remote, target_user).await?,
         );
 
         let install_service_cmd = format!(

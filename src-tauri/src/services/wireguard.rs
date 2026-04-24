@@ -67,8 +67,8 @@ sudo systemctl stop unattended-upgrades 2>/dev/null || true
 sudo systemctl mask unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
-sudo pkill -9 -f "apt-get" 2>/dev/null || true
-sudo pkill -9 -f "dpkg" 2>/dev/null || true
+sudo pkill -9 -f "[a]pt-get" 2>/dev/null || true
+sudo pkill -9 -f "[d]pkg" 2>/dev/null || true
 sleep 2
 
 # Phase 3: Fix broken dpkg state and remove stale locks
@@ -299,6 +299,28 @@ exit 0"#
         remote: &RemoteExec,
         packages_needed: &[String],
     ) -> AppResult<()> {
+        // Permanently neuter unattended-upgrades so it can't re-acquire the lock
+        let disable_auto_upgrades = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if disable_auto_upgrades.status_code != 0 {
+            warn!(
+                "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
+                disable_auto_upgrades.stdout.trim(),
+                disable_auto_upgrades.stderr.trim()
+            );
+        } else {
+            info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+        }
+
         // wait_for_dpkg_lock_with_message handles all cleanup internally (Option C)
         let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 120).await?;
         if !lock_acquired {
@@ -443,6 +465,12 @@ ufw status | grep -q "{}/udp (out)" || ufw allow out {}/udp comment 'WireGuard o
 ufw route allow in on {} out on {} comment 'WG ingress forward' >/dev/null 2>&1 || true
 ufw route allow in on {} out on {} comment 'WG egress forward' >/dev/null 2>&1 || true
 
+# Allow ICMP (ping) via iptables directly — UFW ICMP syntax is inconsistent across versions
+iptables -C INPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
+iptables -C INPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-reply -j ACCEPT
+iptables -C OUTPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT
+iptables -C OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
+
 # Sunshine ports via WireGuard only
 ufw status | grep -q "on {}" || ufw allow in on {} to any port 47984,47989,48010 comment 'Sunshine streaming'
 "#,
@@ -541,8 +569,10 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
     ) -> AppResult<()> {
         let iface = self.defaults.server_interface_name.clone();
         let nic = primary_interface.to_string();
+        // Note: FORWARD rules are handled by ufw route allow in setup_firewall_rules.
+        // Only NAT/MASQUERADE remains here because UFW cannot configure it.
         let command = format!(
-            "sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo iptables -C FORWARD -i {iface} -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i {iface} -j ACCEPT; sudo iptables -C FORWARD -o {iface} -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -o {iface} -j ACCEPT; sudo iptables -C FORWARD -i {iface} -o {nic} -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i {iface} -o {nic} -j ACCEPT; sudo iptables -C FORWARD -i {nic} -o {iface} -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || sudo iptables -A FORWARD -i {nic} -o {iface} -m state --state RELATED,ESTABLISHED -j ACCEPT; sudo iptables -t nat -C POSTROUTING -o {nic} -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o {nic} -j MASQUERADE"
+            "sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo iptables -t nat -C POSTROUTING -o {nic} -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o {nic} -j MASQUERADE"
         );
 
         let output = {

@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, time::Duration};
 
 use serde::Serialize;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
@@ -35,6 +35,28 @@ impl NvidiaHeadlessService {
                 "Missing headless packages: {} (need to install)",
                 packages_needed.join(", ")
             );
+
+            // Permanently neuter unattended-upgrades so it can't re-acquire the lock
+            let disable_auto_upgrades = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                        Duration::from_secs(30),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            if disable_auto_upgrades.status_code != 0 {
+                warn!(
+                    "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
+                    disable_auto_upgrades.stdout.trim(),
+                    disable_auto_upgrades.stderr.trim()
+                );
+            } else {
+                info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+            }
 
             let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
             if !lock_acquired {
@@ -299,8 +321,8 @@ sudo systemctl stop unattended-upgrades 2>/dev/null || true
 sudo systemctl mask unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
 sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
-sudo pkill -9 -f "apt-get" 2>/dev/null || true
-sudo pkill -9 -f "dpkg" 2>/dev/null || true
+sudo pkill -9 -f "[a]pt-get" 2>/dev/null || true
+sudo pkill -9 -f "[d]pkg" 2>/dev/null || true
 sleep 2
 
 # Phase 3: Fix broken dpkg state and remove stale locks
