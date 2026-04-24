@@ -237,7 +237,7 @@ exit 0"#
         display: DisplayProfile,
     ) -> AppResult<()> {
         let target_home = self.resolve_user_home(remote, target_user).await?;
-        let _target_uid = self.resolve_user_uid(remote, target_user).await?;
+        let target_uid = self.resolve_user_uid(remote, target_user).await?;
         let _target_gid = self.resolve_user_gid(remote, target_user).await?;
         let packages_needed = self.check_sunshine_packages_needed(remote).await?;
 
@@ -309,27 +309,10 @@ exit 0"#
                 packages_needed.len()
             );
 
-            // Immediately mask/disable any auto-started sunshine service to prevent
-            // port occupation before our provisioning reaches the cleanup step.
-            let mask = {
-                let remote = remote.clone();
-                tokio::task::spawn_blocking(move || {
-                    remote.ssh(
-                        "sudo systemctl stop sunshine 2>/dev/null || true; sudo systemctl disable sunshine 2>/dev/null || true; sudo systemctl mask sunshine 2>/dev/null || true; sudo pkill -9 -f sunshine 2>/dev/null || true",
-                        Duration::from_secs(30),
-                    )
-                })
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-            };
-
-            if mask.status_code != 0 {
-                warn!(
-                    "Post-install sunshine mask had issues (continuing): stdout: {} | stderr: {}",
-                    mask.stdout.trim(),
-                    mask.stderr.trim()
-                );
-            }
+            self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
+                .await?;
+            self.assert_rtsp_port_available(remote, target_user, &target_home)
+                .await?;
         }
 
         self.setup_headless_display(remote, target_user, display).await?;
@@ -404,26 +387,8 @@ exit 0"#
         let detected_output = self.detect_output_name(remote).await?;
         info!("Detected output name: {}", detected_output);
 
-        // 1. Aggressive cleanup FIRST: kill ALL sunshine processes (root + user) and free ALL ports
-        let cleanup = {
-            let remote = remote.clone();
-            let _target_user = target_user.to_string();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    &format!("sudo systemctl --user stop sunshine 2>/dev/null || true; sudo systemctl stop sunshine 2>/dev/null || true; sudo systemctl disable sunshine 2>/dev/null || true; sudo systemctl mask sunshine 2>/dev/null || true; sudo rm -f /etc/systemd/system/sunshine.service 2>/dev/null || true; sudo systemctl daemon-reload 2>/dev/null || true; sudo pkill -9 -x sunshine 2>/dev/null || true; sudo pkill -9 -f sunshine 2>/dev/null || true; rm -f /tmp/sunshine-start-*.log 2>/dev/null || true; rm -rf /root/.config/sunshine 2>/dev/null || true; for port in 47984 47989 47990 47991 48010; do sudo fuser -k ${{port}}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do sudo fuser -k ${{port}}/udp 2>/dev/null || true; done; sleep 2; pgrep -x sunshine >/dev/null 2>&1 && echo 'CLEANUP_FAIL' || echo 'CLEANUP_OK'"),
-                    Duration::from_secs(30),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if cleanup.status_code != 0 || !cleanup.stdout.contains("CLEANUP_OK") {
-            warn!(
-                "Sunshine cleanup had issues (continuing): stdout: {} | stderr: {}",
-                cleanup.stdout.trim(),
-                cleanup.stderr.trim()
-            );
-        }
+        self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
+            .await?;
 
         // 2. Write config using printf (reliable) and verify
         let config = self.render_config(&detected_capture, &detected_output);
@@ -569,6 +534,9 @@ exit 0"#
             );
         }
 
+        self.assert_rtsp_port_available(remote, target_user, &target_home)
+            .await?;
+
         // 5. Install and start Sunshine as a systemd system service running as {target_user}
         let service_content = format!(
             r#"[Unit]
@@ -595,28 +563,110 @@ WantedBy=multi-user.target"#,
             target_user = target_user,
             target_group = self.resolve_user_group(remote, target_user).await?,
             target_home = target_home,
-            target_uid = self.resolve_user_uid(remote, target_user).await?,
+            target_uid = target_uid,
         );
 
-        let install_service_cmd = format!(
-            "sudo bash -lc 'cat > /etc/systemd/system/sunshine.service <<\"EOF\"\n{}\nEOF\nchmod 644 /etc/systemd/system/sunshine.service && systemctl daemon-reload && systemctl unmask sunshine 2>/dev/null || true && systemctl enable sunshine && systemctl restart sunshine'",
+        let prepare_service_cmd =
+            "sudo bash -lc 'systemctl stop sunshine 2>/dev/null || true; systemctl disable sunshine 2>/dev/null || true; systemctl unmask sunshine 2>/dev/null || true; rm -f /etc/systemd/system/sunshine.service; echo SERVICE_PREPARED'";
+        let write_service_cmd = format!(
+            "sudo bash -lc 'cat > /etc/systemd/system/sunshine.service <<\"EOF\"\n{}\nEOF\nchmod 644 /etc/systemd/system/sunshine.service; test -f /etc/systemd/system/sunshine.service && echo SERVICE_WRITTEN'",
             shell_single_quote_escape(&service_content),
         );
+        let daemon_reload_cmd =
+            "sudo bash -lc 'systemctl daemon-reload && echo DAEMON_RELOADED'";
+        let enable_service_cmd =
+            "sudo bash -lc 'systemctl enable sunshine && echo SERVICE_ENABLED'";
+        let clear_ports_cmd =
+            "sudo bash -lc 'for port in 47984 47989 47990 47991 48010; do fuser -k ${port}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do fuser -k ${port}/udp 2>/dev/null || true; done; echo PORTS_CLEARED'";
+        let restart_service_cmd =
+            "sudo bash -lc 'systemctl restart sunshine && echo SERVICE_RESTARTED'";
 
-        let start_sunshine = {
+        let prepare_service = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&install_service_cmd, Duration::from_secs(60))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            let command = prepare_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-
-        if start_sunshine.status_code != 0 {
+        if prepare_service.status_code != 0 || !prepare_service.stdout.contains("SERVICE_PREPARED") {
             return Err(AppError::Provisioning(format!(
-                "Failed to install/start Sunshine systemd service: stdout: {} | stderr: {}",
-                start_sunshine.stdout.trim(),
-                start_sunshine.stderr.trim()
+                "Failed to prepare Sunshine systemd service path. stdout: {} | stderr: {}",
+                prepare_service.stdout.trim(),
+                prepare_service.stderr.trim()
+            )));
+        }
+
+        let write_service = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&write_service_cmd, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if write_service.status_code != 0 || !write_service.stdout.contains("SERVICE_WRITTEN") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to write Sunshine systemd service. stdout: {} | stderr: {}",
+                write_service.stdout.trim(),
+                write_service.stderr.trim()
+            )));
+        }
+
+        let daemon_reload = {
+            let remote = remote.clone();
+            let command = daemon_reload_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if daemon_reload.status_code != 0 || !daemon_reload.stdout.contains("DAEMON_RELOADED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to reload systemd after writing Sunshine service. stdout: {} | stderr: {}",
+                daemon_reload.stdout.trim(),
+                daemon_reload.stderr.trim()
+            )));
+        }
+
+        let enable_service = {
+            let remote = remote.clone();
+            let command = enable_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if enable_service.status_code != 0 || !enable_service.stdout.contains("SERVICE_ENABLED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to enable Sunshine systemd service. stdout: {} | stderr: {}",
+                enable_service.stdout.trim(),
+                enable_service.stderr.trim()
+            )));
+        }
+
+        let clear_ports = {
+            let remote = remote.clone();
+            let command = clear_ports_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if clear_ports.status_code != 0 || !clear_ports.stdout.contains("PORTS_CLEARED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to clear Sunshine ports before restart. stdout: {} | stderr: {}",
+                clear_ports.stdout.trim(),
+                clear_ports.stderr.trim()
+            )));
+        }
+
+        let restart_service = {
+            let remote = remote.clone();
+            let command = restart_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if restart_service.status_code != 0 || !restart_service.stdout.contains("SERVICE_RESTARTED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to restart Sunshine systemd service. stdout: {} | stderr: {}",
+                restart_service.stdout.trim(),
+                restart_service.stderr.trim()
             )));
         }
 
@@ -625,7 +675,7 @@ WantedBy=multi-user.target"#,
 
         // Call 2: verify process is alive, running as correct user, and web UI responds
         let verify_cmd = format!(
-            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'SUNSHINE_STARTED' || (journalctl -u sunshine --no-pager -n 20 2>/dev/null; echo 'SUNSHINE_FAILED')",
+            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 ' && echo 'SUNSHINE_STARTED' || (journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED')",
             user = target_user,
         );
 
@@ -652,7 +702,7 @@ WantedBy=multi-user.target"#,
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && nc -z localhost 47989 2>/dev/null && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
+                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && nc -z localhost 47989 2>/dev/null && ss -ltnp | grep -q ':48010 ' && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
                     Duration::from_secs(30),
                 )
             })
@@ -1271,6 +1321,103 @@ echo "=== Setup Complete ==="
         } else {
             Ok(group.to_string())
         }
+    }
+
+    async fn cleanup_packaged_sunshine_launchers(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        target_home: &str,
+        target_uid: u32,
+    ) -> AppResult<()> {
+        let system_cleanup_command = "sudo bash -lc 'systemctl stop sunshine 2>/dev/null || true; systemctl disable sunshine 2>/dev/null || true; systemctl mask sunshine 2>/dev/null || true; pkill -9 -x sunshine 2>/dev/null || true; rm -f /etc/xdg/autostart/*Sunshine*.desktop /etc/xdg/autostart/*sunshine*.desktop 2>/dev/null || true; rm -f /tmp/sunshine-start-*.log 2>/dev/null || true; rm -rf /root/.config/sunshine 2>/dev/null || true; for port in 47984 47989 47990 47991 48010; do fuser -k ${port}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do fuser -k ${port}/udp 2>/dev/null || true; done; echo CLEANUP_SYSTEM_OK'";
+        let user_cleanup_command = format!(
+            "sudo -u {user} bash -lc 'rm -f {home}/.config/autostart/*Sunshine*.desktop {home}/.config/autostart/*sunshine*.desktop; rm -f {home}/.config/systemd/user/sunshine.service {home}/.config/systemd/user/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/default.target.wants/sunshine.service {home}/.config/systemd/user/default.target.wants/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/graphical-session.target.wants/sunshine.service {home}/.config/systemd/user/graphical-session.target.wants/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/sunshine.service {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/app-org.lizardbyte.sunshine@autostart.service; echo CLEANUP_USER_OK'",
+            user = target_user,
+            home = target_home,
+        );
+        let reload_and_verify_command = format!(
+            "sudo -u {user} env XDG_RUNTIME_DIR=/run/user/{uid} systemctl --user daemon-reload 2>/dev/null || true; sleep 2; if pgrep -x sunshine >/dev/null 2>&1; then echo CLEANUP_VERIFY_FAIL; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; exit 1; fi; if [ -e {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/sunshine.service ]; then echo CLEANUP_VERIFY_FAIL; echo '--- user symlink still present ---'; ls -la {home}/.config/systemd/user/xdg-desktop-autostart.target.wants 2>/dev/null || true; exit 1; fi; echo CLEANUP_VERIFY_OK",
+            user = target_user,
+            uid = target_uid,
+            home = target_home,
+        );
+
+        let system_cleanup = {
+            let remote = remote.clone();
+            let command = system_cleanup_command.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if system_cleanup.status_code != 0 || !system_cleanup.stdout.contains("CLEANUP_SYSTEM_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed system Sunshine cleanup. stdout: {} | stderr: {}",
+                system_cleanup.stdout.trim(),
+                system_cleanup.stderr.trim()
+            )));
+        }
+
+        let user_cleanup = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&user_cleanup_command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if user_cleanup.status_code != 0 || !user_cleanup.stdout.contains("CLEANUP_USER_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed user Sunshine cleanup. stdout: {} | stderr: {}",
+                user_cleanup.stdout.trim(),
+                user_cleanup.stderr.trim()
+            )));
+        }
+
+        let reload_and_verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&reload_and_verify_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if reload_and_verify.status_code != 0 || !reload_and_verify.stdout.contains("CLEANUP_VERIFY_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed Sunshine cleanup verification. stdout: {} | stderr: {}",
+                reload_and_verify.stdout.trim(),
+                reload_and_verify.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn assert_rtsp_port_available(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        target_home: &str,
+    ) -> AppResult<()> {
+        let port_check_command = format!(
+            "if ss -ltnp | grep -q ':48010 '; then echo 'PORT_BUSY'; echo '--- ss ---'; ss -ltnp | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- user symlinks ---'; ls -la {home}/.config/systemd/user/xdg-desktop-autostart.target.wants 2>/dev/null || true; else echo 'PORT_FREE'; fi",
+            home = target_home,
+        );
+
+        let port_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&port_check_command, Duration::from_secs(20)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if port_check.status_code != 0 || !port_check.stdout.contains("PORT_FREE") {
+            return Err(AppError::Provisioning(format!(
+                "RTSP port 48010 is still occupied before starting Sunshine for user {}. {}",
+                target_user,
+                port_check.stdout.trim()
+            )));
+        }
+
+        Ok(())
     }
 
     async fn setup_realtime_permissions(&self, remote: &RemoteExec) -> AppResult<()> {
