@@ -54,6 +54,7 @@ impl SunshineService {
         let values = BTreeMap::from([
             ("port".to_string(), self.defaults.port.to_string()),
             ("origin_web_ui_allowed".to_string(), "all".to_string()),
+            ("system_tray".to_string(), "disabled".to_string()),
             ("upnp".to_string(), "off".to_string()),
             ("encoder".to_string(), self.defaults.encoder.clone()),
             ("av1_mode".to_string(), self.defaults.av1_mode.to_string()),
