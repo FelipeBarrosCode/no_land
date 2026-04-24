@@ -53,9 +53,7 @@ impl SunshineService {
     pub fn render_config(&self, detected_capture: &str, detected_output: &str) -> String {
         let values = BTreeMap::from([
             ("port".to_string(), self.defaults.port.to_string()),
-            ("address".to_string(), self.defaults.address.clone()),
             ("origin_web_ui_allowed".to_string(), "all".to_string()),
-            ("origin_pin_allowed".to_string(), "all".to_string()),
             ("upnp".to_string(), "off".to_string()),
             ("encoder".to_string(), self.defaults.encoder.clone()),
             ("av1_mode".to_string(), self.defaults.av1_mode.to_string()),

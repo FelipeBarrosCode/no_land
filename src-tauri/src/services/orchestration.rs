@@ -268,24 +268,9 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::ManualWebUi => {
-                let pairing_verified = verify_manual_sunshine_pairing(&remote, &sunshine_user).await?;
-                if !pairing_verified {
-                    emit_transition(
-                        app,
-                        context,
-                        OrchestrationState::AwaitingPairPin,
-                        "Manual Sunshine pairing required",
-                        Some(
-                            "This Sunshine build has no CLI pairing support. Enter the Moonlight PIN in Sunshine Web UI, then submit PIN again to verify pairing state.".to_string(),
-                        ),
-                        false,
-                    )
-                    .await;
-
-                    return Err(AppError::Provisioning(
-                        "Sunshine CLI pairing not supported on this server build. Complete pairing in Sunshine Web UI, then submit PIN again for verification.".to_string(),
-                    ));
-                }
+                info!(
+                    "Sunshine build requires manual Web UI pairing; skipping version-specific pairing state verification"
+                );
             }
         }
 
@@ -2959,93 +2944,6 @@ async fn detect_sunshine_pairing_mode(remote: &RemoteExec) -> AppResult<Sunshine
         "PAIR_PIN" => SunshinePairingMode::SunshinePairPin,
         _ => SunshinePairingMode::ManualWebUi,
     })
-}
-
-async fn verify_manual_sunshine_pairing(remote: &RemoteExec, sunshine_user: &str) -> AppResult<bool> {
-    let target_user = sunshine_user.replace('"', "");
-    let check_command = format!(
-        r#"python3 - <<'PY'
-import json, os, pwd, sys
-import time
-
-target_user = "{target_user}"
-candidates = []
-try:
-    candidates.append(pwd.getpwnam(target_user).pw_dir + "/.config/sunshine/sunshine_state.json")
-except Exception:
-    pass
-candidates.append(f"/home/{target_user}/.config/sunshine/sunshine_state.json")
-
-KEYS = {{"paired_clients", "pairedClients", "clients", "devices", "trusted_devices", "paired_devices"}}
-
-def count_pairings(node):
-    total = 0
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key in KEYS:
-                if isinstance(value, list):
-                    total += len(value)
-                elif isinstance(value, dict):
-                    total += len(value)
-            total += count_pairings(value)
-    elif isinstance(node, list):
-        for item in node:
-            total += count_pairings(item)
-    return total
-
-for path in candidates:
-    if not path or not os.path.exists(path):
-        continue
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except Exception:
-        continue
-    count = count_pairings(payload)
-    age_seconds = int(time.time() - os.path.getmtime(path))
-    print(f"STATE_FILE={{path}}")
-    print(f"PAIRED_COUNT={{count}}")
-    print(f"STATE_AGE_SECONDS={{age_seconds}}")
-    sys.exit(0)
-
-print("STATE_FILE=")
-print("PAIRED_COUNT=0")
-print("STATE_AGE_SECONDS=999999")
-PY"#
-    );
-
-    let output = {
-        let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh(&check_command, Duration::from_secs(30)))
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-    };
-
-    if output.status_code != 0 {
-        return Err(AppError::Provisioning(format!(
-            "Failed verifying Sunshine pairing state: stdout: {} | stderr: {}",
-            output.stdout.trim(),
-            output.stderr.trim()
-        )));
-    }
-
-    let paired_count = output
-        .stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("PAIRED_COUNT="))
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-
-    let state_age_seconds = output
-        .stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("STATE_AGE_SECONDS="))
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(u64::MAX);
-
-    let recently_updated = state_age_seconds <= 900;
-
-    Ok(paired_count > 0 && recently_updated)
 }
 
 #[derive(Clone, Copy)]
