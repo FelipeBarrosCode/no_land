@@ -15,6 +15,7 @@ pub struct PersistedAppState {
     pub sunshine: SunshineState,
     pub moonlight: MoonlightState,
     pub moonlight_preferences: MoonlightPreferences,
+    pub shared_storage: SharedStorageState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     pub orchestration_state: OrchestrationState,
     pub last_error: Option<String>,
@@ -35,6 +36,7 @@ impl Default for PersistedAppState {
             sunshine: SunshineState::default(),
             moonlight: MoonlightState::default(),
             moonlight_preferences: MoonlightPreferences::default(),
+            shared_storage: SharedStorageState::default(),
             provisioned_servers: Vec::new(),
             orchestration_state: OrchestrationState::Idle,
             last_error: None,
@@ -470,4 +472,201 @@ pub struct PairingContext {
     pub host: String,
     pub port: u16,
     pub user: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageState {
+    pub settings: SharedStorageSettings,
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+    pub last_backup_trigger: String,
+}
+
+impl Default for SharedStorageState {
+    fn default() -> Self {
+        Self {
+            settings: SharedStorageSettings::default(),
+            last_backup_started_at: None,
+            last_backup_finished_at: None,
+            last_backup_status: "never_run".to_string(),
+            last_backup_error: None,
+            last_backup_trigger: "none".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettings {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    #[serde(default)]
+    pub backblaze_application_key: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+}
+
+impl Default for SharedStorageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backblaze_key_id: String::new(),
+            backblaze_application_key: String::new(),
+            bucket_name: "noland".to_string(),
+            remote_name: "b2".to_string(),
+            destination_prefix: "vm-backup".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettingsUpdate {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    pub backblaze_application_key: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettingsResponse {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStatusResponse {
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+    pub last_backup_trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageInstanceStatus {
+    pub instance_id: u64,
+    pub backup_running: bool,
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+}
+
+// ============================================================
+// Bundle Index + Restore types
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleIndex {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub instance_id: u64,
+    pub snapshot_id: String,
+    pub host: BundleHost,
+    pub bundles: Vec<AppBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleHost {
+    pub username: String,
+    pub home: String,
+    pub os: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBundle {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub bundle_type: String,
+    pub confidence: f64,
+    pub signals: Vec<String>,
+    pub folder_bundles: Vec<FolderBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderBundle {
+    pub id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub default_selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunRequest {
+    pub bundle_id: String,
+    pub folder_bundle_ids: Vec<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreRequest {
+    pub bundle_id: String,
+    pub folder_bundle_ids: Vec<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunResult {
+    pub would_restore: Vec<RestoreDryRunItem>,
+    pub total_files_estimate: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunItem {
+    pub folder_bundle_id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreJob {
+    pub job_id: String,
+    pub instance_id: u64,
+    pub bundle_id: String,
+    pub mode: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub items: Vec<RestoreJobItem>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreJobItem {
+    pub folder_bundle_id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub status: String,
+    pub error: Option<String>,
 }

@@ -8,8 +8,11 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences } from "../../lib/types";
+import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SunshineSettingsResponse, BundleIndex, RestoreDryRunResult, RestoreJob } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
+import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
+import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
+import { RestoreBundlesPanel } from "../restore/RestoreBundlesPanel";
 
 interface Props {
   appState: PersistedAppState;
@@ -19,6 +22,8 @@ interface Props {
   offersPage: number;
   offersHasNextPage: boolean;
   busy: boolean;
+  instanceActionRunning: boolean;
+  sunshineSettings: SunshineSettingsResponse | null;
   onSearchOffers: (page?: number) => Promise<void>;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
@@ -34,6 +39,18 @@ interface Props {
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
+  onLoadSunshineSettings: (instanceId: number) => Promise<void>;
+  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
+  onReconnectWireguard: (instanceId: number) => Promise<string | null>;
+  onPauseInstance: (instanceId: number) => Promise<void>;
+  onDestroyInstance: (instanceId: number) => Promise<void>;
+  bundleIndex: BundleIndex | null;
+  restoreJob: RestoreJob | null;
+  onGenerateBundleIndex: () => Promise<void>;
+  onLoadRestoreBundles: (instanceId: number) => Promise<void>;
+  onDryRunRestore: (instanceId: number, bundleId: string, folderIds: string[], mode: string) => Promise<RestoreDryRunResult | null>;
+  onRestoreBundle: (instanceId: number, bundleId: string, folderIds: string[], mode: string) => Promise<RestoreJob | null>;
+  onPollRestoreJob: (jobId: string) => Promise<void>;
 }
 
 const placeholders = [
@@ -52,6 +69,8 @@ export function DashboardScreen({
   offersPage,
   offersHasNextPage,
   busy,
+  instanceActionRunning,
+  sunshineSettings,
   onSearchOffers,
   onNextOffersPage,
   onPreviousOffersPage,
@@ -60,9 +79,23 @@ export function DashboardScreen({
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
-  onSaveServerPreferences
+  onSaveServerPreferences,
+  onLoadSunshineSettings,
+  onSaveSunshineSettings,
+  onReconnectWireguard,
+  onPauseInstance,
+  onDestroyInstance,
+  bundleIndex,
+  restoreJob,
+  onGenerateBundleIndex,
+  onLoadRestoreBundles,
+  onDryRunRestore,
+  onRestoreBundle,
+  onPollRestoreJob
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
+  const [restoreInstanceId, setRestoreInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
 
   async function handleMoonlightDownload() {
@@ -82,6 +115,43 @@ export function DashboardScreen({
   async function handlePlayExisting(instanceId: number) {
     await onStartPlayExisting(instanceId);
     navigate("/provisioning");
+  }
+
+  async function handleOpenSettings(instanceId: number) {
+    setSettingsInstanceId(instanceId);
+    await onLoadSunshineSettings(instanceId);
+  }
+
+  async function handleSaveSunshineSettings(settings: Record<string, unknown>) {
+    if (settingsInstanceId !== null) {
+      await onSaveSunshineSettings(settingsInstanceId, settings);
+    }
+  }
+
+  function handleCloseSunshineSettings() {
+    setSettingsInstanceId(null);
+  }
+
+  async function handleReconnect(instanceId: number) {
+    await onReconnectWireguard(instanceId);
+  }
+
+  async function handlePause(instanceId: number) {
+    await onPauseInstance(instanceId);
+    await onLoadRentedInstances();
+  }
+
+  async function handleDestroy(instanceId: number) {
+    await onDestroyInstance(instanceId);
+    await onLoadRentedInstances();
+  }
+
+  function handleOpenRestore(instanceId: number) {
+    setRestoreInstanceId(instanceId);
+  }
+
+  function handleCloseRestore() {
+    setRestoreInstanceId(null);
   }
 
   return (
@@ -174,13 +244,19 @@ export function DashboardScreen({
                       <p>GPU: {instance.gpuName}</p>
                       <p>SSH: {instance.sshHost || "pending"}</p>
                     </div>
-                    <Button
-                      className="mt-3 w-full"
-                      disabled={busy}
-                      onClick={() => handlePlayExisting(instance.instanceId)}
-                    >
-                      Play This Server
-                    </Button>
+                    <div className="mt-3">
+                      <InstanceCardActions
+                        instance={instance}
+                        busy={busy}
+                        instanceActionRunning={instanceActionRunning}
+                        onPlay={handlePlayExisting}
+                        onSettings={handleOpenSettings}
+                        onRestore={handleOpenRestore}
+                        onReconnect={handleReconnect}
+                        onPause={handlePause}
+                        onDestroy={handleDestroy}
+                      />
+                    </div>
                   </Card>
                 ))}
               </div>
@@ -281,6 +357,31 @@ export function DashboardScreen({
           </Card>
         </section>
       </div>
+
+      {settingsInstanceId !== null && (
+        <SunshineSettingsPanel
+          settings={sunshineSettings}
+          busy={instanceActionRunning}
+          onSave={handleSaveSunshineSettings}
+          onClose={handleCloseSunshineSettings}
+        />
+      )}
+
+      {restoreInstanceId !== null && (
+        <RestoreBundlesPanel
+          bundleIndex={bundleIndex}
+          restoreJob={restoreJob}
+          instanceId={restoreInstanceId}
+          busy={busy}
+          instanceActionRunning={instanceActionRunning}
+          onLoadBundles={onLoadRestoreBundles}
+          onGenerateIndex={onGenerateBundleIndex}
+          onDryRun={onDryRunRestore}
+          onRestore={onRestoreBundle}
+          onPollJob={onPollRestoreJob}
+          onClose={handleCloseRestore}
+        />
+      )}
 
       <ServerPickerModal
         open={pickerOpen}

@@ -1,0 +1,76 @@
+# Keep user files from home directories
++ /home/*/Desktop/**
++ /home/*/Documents/**
++ /home/*/Downloads/**
++ /home/*/Pictures/**
++ /home/*/Music/**
++ /home/*/Videos/**
++ /home/*/Projects/**
++ /home/*/Workspace/**
++ /home/*/Code/**
+
+# Keep user-created app launchers
++ /home/*/.local/share/applications/*.desktop
++ /home/*/.local/share/icons/**
++ /home/*/.local/share/mime/**
+
+# Keep common user config that belongs with downloaded apps
++ /home/*/.config/**/*.desktop
++ /home/*/.config/**/settings*
++ /home/*/.config/**/config*
++ /home/*/.config/**/preferences*
+
+# Keep AppImages and manually downloaded app bundles
++ /home/*/**/*.AppImage
++ /home/*/**/*.deb
++ /home/*/**/*.tar.gz
++ /home/*/**/*.zip
++ /home/*/**/*.7z
++ /home/*/**/*.rar
+
+# Exclude system and virtual filesystems
+- /bin/**
+- /boot/**
+- /dev/**
+- /etc/**
+- /lib/**
+- /lib32/**
+- /lib64/**
+- /libx32/**
+- /proc/**
+- /run/**
+- /sbin/**
+- /sys/**
+- /usr/**
+- /var/**
+- /snap/**
+- /opt/**
+- /tmp/**
+
+# Exclude VM/runtime/build/cache junk
+- **/.cache/**
+- **/Cache/**
+- **/cache/**
+- **/__pycache__/**
+- **/.npm/**
+- **/.gradle/**
+- **/.m2/repository/**
+- **/node_modules/**
+- **/.venv/**
+- **/venv/**
+- **/target/**
+- **/build/**
+- **/dist/**
+
+# Exclude core dumps, logs, temp files
+- **/core
+- **/core.*
+- **/*.core
+- **/*.log
+- **/*.tmp
+- **/*.swp
+- **/*~
+- **/.Trash/**
+
+# Exclude everything else
+- *

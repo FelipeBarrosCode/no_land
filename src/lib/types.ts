@@ -229,9 +229,19 @@ export interface PersistedAppState {
   sunshine: SunshineState;
   moonlight: MoonlightState;
   moonlightPreferences: MoonlightPreferences;
+  sharedStorage: SharedStorageState;
   provisionedServers: ProvisionedServerState[];
   orchestrationState: OrchestrationState;
   lastError: string | null;
+}
+
+export interface SharedStorageState {
+  settings: SharedStorageSettings;
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+  lastBackupTrigger: string;
 }
 
 export interface OnboardingPayload {
@@ -265,4 +275,139 @@ export interface FrontendError {
   message: string;
   details?: string;
   retryable: boolean;
+}
+
+export interface SharedStorageSettings {
+  enabled: boolean;
+  backblazeKeyId: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+}
+
+export interface SharedStorageSettingsResponse {
+  enabled: boolean;
+  backblazeKeyId: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+}
+
+export interface SharedStorageSettingsUpdate {
+  enabled: boolean;
+  backblazeKeyId: string;
+  backblazeApplicationKey: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+}
+
+export interface BackupStatusResponse {
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+  lastBackupTrigger?: string;
+}
+
+export interface SharedStorageInstanceStatus {
+  instanceId: number;
+  backupRunning: boolean;
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+}
+
+export interface SunshineSetting {
+  key: string;
+  value: unknown;
+  label: string;
+  description?: string;
+  valueType: string;
+  requiresRestart: boolean;
+}
+
+export interface SunshineSettingsResponse {
+  settings: SunshineSetting[];
+  raw: Record<string, unknown>;
+}
+
+// ============================================================
+// Bundle Index + Restore types
+// ============================================================
+
+export interface BundleHost {
+  username: string;
+  home: string;
+  os: string;
+}
+
+export interface FolderBundle {
+  id: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  defaultSelected: boolean;
+}
+
+export interface AppBundle {
+  id: string;
+  name: string;
+  type: string;
+  confidence: number;
+  signals: string[];
+  folderBundles: FolderBundle[];
+}
+
+export interface BundleIndex {
+  schemaVersion: number;
+  generatedAt: string;
+  instanceId: number;
+  snapshotId: string;
+  host: BundleHost;
+  bundles: AppBundle[];
+}
+
+export interface RestoreRequest {
+  bundleId: string;
+  folderBundleIds: string[];
+  mode: string;
+}
+
+export interface RestoreDryRunItem {
+  folderBundleId: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  action: string;
+}
+
+export interface RestoreDryRunResult {
+  wouldRestore: RestoreDryRunItem[];
+  totalFilesEstimate: number;
+}
+
+export interface RestoreJobItem {
+  folderBundleId: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  status: string;
+  error: string | null;
+}
+
+export interface RestoreJob {
+  jobId: string;
+  instanceId: number;
+  bundleId: string;
+  mode: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  items: RestoreJobItem[];
+  error: string | null;
 }
