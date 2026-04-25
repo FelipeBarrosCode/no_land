@@ -8,11 +8,12 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SunshineSettingsResponse, BundleIndex, RestoreDryRunResult, RestoreJob } from "../../lib/types";
+import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SunshineSettingsResponse, BundleIndex, RestoreDryRunResult, RestoreJob, InstanceMicConfig, InstanceMicRuntimeStatus, MicSessionResponse, MicSettingsUpdate, MicQualityProfile } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
 import { RestoreBundlesPanel } from "../restore/RestoreBundlesPanel";
+import { MicPassthroughPanel } from "../mic-passthrough/MicPassthroughPanel";
 
 interface Props {
   appState: PersistedAppState;
@@ -51,6 +52,16 @@ interface Props {
   onDryRunRestore: (instanceId: number, bundleId: string, folderIds: string[], mode: string) => Promise<RestoreDryRunResult | null>;
   onRestoreBundle: (instanceId: number, bundleId: string, folderIds: string[], mode: string) => Promise<RestoreJob | null>;
   onPollRestoreJob: (jobId: string) => Promise<void>;
+  micConfig: InstanceMicConfig | null;
+  micStatus: InstanceMicRuntimeStatus | null;
+  micSession: MicSessionResponse | null;
+  onLoadMicConfig: (instanceId: number) => Promise<void>;
+  onLoadMicStatus: (instanceId: number) => Promise<void>;
+  onEnableMic: (instanceId: number, profile?: MicQualityProfile) => Promise<MicSessionResponse | null>;
+  onDisableMic: (instanceId: number) => Promise<void>;
+  onReconnectMic: (instanceId: number) => Promise<MicSessionResponse | null>;
+  onRecreateMicDevice: (instanceId: number) => Promise<void>;
+  onUpdateMicSettings: (instanceId: number, payload: MicSettingsUpdate) => Promise<void>;
 }
 
 const placeholders = [
@@ -91,11 +102,22 @@ export function DashboardScreen({
   onLoadRestoreBundles,
   onDryRunRestore,
   onRestoreBundle,
-  onPollRestoreJob
+  onPollRestoreJob,
+  micConfig,
+  micStatus,
+  micSession,
+  onLoadMicConfig,
+  onLoadMicStatus,
+  onEnableMic,
+  onDisableMic,
+  onReconnectMic,
+  onRecreateMicDevice,
+  onUpdateMicSettings
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const [restoreInstanceId, setRestoreInstanceId] = useState<number | null>(null);
+  const [micInstanceId, setMicInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
 
   async function handleMoonlightDownload() {
@@ -152,6 +174,16 @@ export function DashboardScreen({
 
   function handleCloseRestore() {
     setRestoreInstanceId(null);
+  }
+
+  function handleOpenMic(instanceId: number) {
+    setMicInstanceId(instanceId);
+    void onLoadMicConfig(instanceId);
+    void onLoadMicStatus(instanceId);
+  }
+
+  function handleCloseMic() {
+    setMicInstanceId(null);
   }
 
   return (
@@ -252,6 +284,7 @@ export function DashboardScreen({
                         onPlay={handlePlayExisting}
                         onSettings={handleOpenSettings}
                         onRestore={handleOpenRestore}
+                        onMic={handleOpenMic}
                         onReconnect={handleReconnect}
                         onPause={handlePause}
                         onDestroy={handleDestroy}
@@ -380,6 +413,25 @@ export function DashboardScreen({
           onRestore={onRestoreBundle}
           onPollJob={onPollRestoreJob}
           onClose={handleCloseRestore}
+        />
+      )}
+
+      {micInstanceId !== null && (
+        <MicPassthroughPanel
+          instanceId={micInstanceId}
+          config={micConfig}
+          status={micStatus}
+          session={micSession}
+          busy={busy}
+          instanceActionRunning={instanceActionRunning}
+          onLoadConfig={onLoadMicConfig}
+          onLoadStatus={onLoadMicStatus}
+          onEnable={onEnableMic}
+          onDisable={onDisableMic}
+          onReconnect={onReconnectMic}
+          onRecreateDevice={onRecreateMicDevice}
+          onUpdateSettings={onUpdateMicSettings}
+          onClose={handleCloseMic}
         />
       )}
 

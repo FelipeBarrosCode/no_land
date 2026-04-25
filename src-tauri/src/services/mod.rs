@@ -4,6 +4,7 @@ pub mod audio_latency;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 pub mod location;
+pub mod mic_passthrough;
 pub mod moonlight;
 pub mod nvidia_headless;
 pub mod offer_selector;

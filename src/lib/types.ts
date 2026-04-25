@@ -411,3 +411,76 @@ export interface RestoreJob {
   items: RestoreJobItem[];
   error: string | null;
 }
+
+// ============================================================
+// Microphone Passthrough types
+// ============================================================
+
+export type MicQualityProfile = "standard" | "lowLatency" | "highQuality";
+
+export interface InstanceMicConfig {
+  instanceId: number;
+  enabled: boolean;
+  transport: string;
+  codec: string;
+  sampleRate: number;
+  channels: number;
+  vmWireguardIp: string;
+  rtpPort: number;
+  deviceName: string;
+  qualityProfile: MicQualityProfile;
+  sessionId: string | null;
+  sessionToken: string | null;
+  ssrc: number | null;
+  lastEnabledAt: string | null;
+  lastDisabledAt: string | null;
+}
+
+export type MicState =
+  | "disabled"
+  | "starting"
+  | "connecting"
+  | "streaming"
+  | "no_audio_detected"
+  | "wireguard_disconnected"
+  | "vm_agent_unreachable"
+  | "cloud_mic_missing"
+  | "packet_loss_high"
+  | "pipewire_unavailable"
+  | "error";
+
+export interface InstanceMicRuntimeStatus {
+  enabled: boolean;
+  state: MicState;
+  vmAgentReachable: boolean;
+  deviceReady: boolean;
+  receivingAudio: boolean;
+  transport: string;
+  sampleRate: number;
+  channels: number;
+  bitrateKbps: number;
+  frameMs: number;
+  packetLossPercent: number;
+  jitterMs: number;
+  bufferDepthMs: number;
+  lastPacketMsAgo: number | null;
+  pipewireConnected: boolean;
+  defaultSource: boolean;
+  error: string | null;
+}
+
+export interface MicSessionResponse {
+  sessionId: string;
+  sessionToken: string;
+  ssrc: number;
+  vmWireguardIp: string;
+  rtpPort: number;
+  sampleRate: number;
+  channels: number;
+  frameMs: number;
+  bitrateKbps: number;
+}
+
+export interface MicSettingsUpdate {
+  qualityProfile?: MicQualityProfile;
+}

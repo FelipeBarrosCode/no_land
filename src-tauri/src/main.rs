@@ -114,7 +114,14 @@ fn main() {
             get_instance_restore_bundles,
             dry_run_restore,
             restore_bundle,
-            get_restore_job
+            get_restore_job,
+            get_instance_mic_config,
+            update_instance_mic_settings,
+            enable_instance_mic,
+            disable_instance_mic,
+            reconnect_instance_mic,
+            recreate_instance_mic_device,
+            get_instance_mic_status
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

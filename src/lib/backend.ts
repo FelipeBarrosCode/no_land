@@ -19,7 +19,12 @@ import type {
   BundleIndex,
   RestoreRequest,
   RestoreDryRunResult,
-  RestoreJob
+  RestoreJob,
+  InstanceMicConfig,
+  InstanceMicRuntimeStatus,
+  MicSessionResponse,
+  MicSettingsUpdate,
+  MicQualityProfile
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -201,4 +206,38 @@ export async function restoreBundle(
 
 export async function getRestoreJob(jobId: string): Promise<RestoreJob> {
   return invokeSafe<RestoreJob>("get_restore_job", { jobId });
+}
+
+export async function getInstanceMicConfig(instanceId: number): Promise<InstanceMicConfig> {
+  return invokeSafe<InstanceMicConfig>("get_instance_mic_config", { instanceId });
+}
+
+export async function updateInstanceMicSettings(
+  instanceId: number,
+  payload: MicSettingsUpdate
+): Promise<InstanceMicConfig> {
+  return invokeSafe<InstanceMicConfig>("update_instance_mic_settings", { instanceId, payload });
+}
+
+export async function enableInstanceMic(
+  instanceId: number,
+  qualityProfile?: MicQualityProfile
+): Promise<MicSessionResponse> {
+  return invokeSafe<MicSessionResponse>("enable_instance_mic", { instanceId, qualityProfile });
+}
+
+export async function disableInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("disable_instance_mic", { instanceId });
+}
+
+export async function reconnectInstanceMic(instanceId: number): Promise<MicSessionResponse> {
+  return invokeSafe<MicSessionResponse>("reconnect_instance_mic", { instanceId });
+}
+
+export async function recreateInstanceMicDevice(instanceId: number): Promise<void> {
+  return invokeSafe<void>("recreate_instance_mic_device", { instanceId });
+}
+
+export async function getInstanceMicStatus(instanceId: number): Promise<InstanceMicRuntimeStatus> {
+  return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", { instanceId });
 }

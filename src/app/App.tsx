@@ -49,6 +49,17 @@ function RootRoute() {
     return runRestoreBundle(instanceId, { bundleId, folderBundleIds: folderIds, mode });
   };
 
+  const micConfig = useAppStore((state) => state.micConfig);
+  const micStatus = useAppStore((state) => state.micStatus);
+  const micSession = useAppStore((state) => state.micSession);
+  const loadMicConfig = useAppStore((state) => state.loadMicConfig);
+  const loadMicStatus = useAppStore((state) => state.loadMicStatus);
+  const enableMic = useAppStore((state) => state.enableMic);
+  const disableMic = useAppStore((state) => state.disableMic);
+  const reconnectMic = useAppStore((state) => state.reconnectMic);
+  const recreateMicDevice = useAppStore((state) => state.recreateMicDevice);
+  const updateMicSettings = useAppStore((state) => state.updateMicSettings);
+
   if (!appState) {
     return null;
   }
@@ -89,6 +100,16 @@ function RootRoute() {
       onDryRunRestore={dryRunRestore}
       onRestoreBundle={restoreBundle}
       onPollRestoreJob={pollRestoreJob}
+      micConfig={micConfig}
+      micStatus={micStatus}
+      micSession={micSession}
+      onLoadMicConfig={loadMicConfig}
+      onLoadMicStatus={loadMicStatus}
+      onEnableMic={enableMic}
+      onDisableMic={disableMic}
+      onReconnectMic={reconnectMic}
+      onRecreateMicDevice={recreateMicDevice}
+      onUpdateMicSettings={updateMicSettings}
     />
   );
 }

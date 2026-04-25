@@ -34,7 +34,14 @@ import {
   getInstanceRestoreBundles,
   dryRunRestore,
   restoreBundle,
-  getRestoreJob
+  getRestoreJob,
+  getInstanceMicConfig,
+  updateInstanceMicSettings,
+  enableInstanceMic,
+  disableInstanceMic,
+  reconnectInstanceMic,
+  recreateInstanceMicDevice,
+  getInstanceMicStatus
 } from "../lib/backend";
 import type {
   ManualLocationInput,
@@ -55,7 +62,12 @@ import type {
   BundleIndex,
   RestoreDryRunResult,
   RestoreJob,
-  RestoreRequest
+  RestoreRequest,
+  InstanceMicConfig,
+  InstanceMicRuntimeStatus,
+  MicSessionResponse,
+  MicSettingsUpdate,
+  MicQualityProfile
 } from "../lib/types";
 
 interface AppStore {
@@ -117,6 +129,16 @@ interface AppStore {
   runDryRunRestore: (instanceId: number, payload: RestoreRequest) => Promise<RestoreDryRunResult | null>;
   runRestoreBundle: (instanceId: number, payload: RestoreRequest) => Promise<RestoreJob | null>;
   pollRestoreJob: (jobId: string) => Promise<void>;
+  micConfig: InstanceMicConfig | null;
+  micStatus: InstanceMicRuntimeStatus | null;
+  micSession: MicSessionResponse | null;
+  loadMicConfig: (instanceId: number) => Promise<void>;
+  updateMicSettings: (instanceId: number, payload: MicSettingsUpdate) => Promise<void>;
+  enableMic: (instanceId: number, qualityProfile?: MicQualityProfile) => Promise<MicSessionResponse | null>;
+  disableMic: (instanceId: number) => Promise<void>;
+  reconnectMic: (instanceId: number) => Promise<MicSessionResponse | null>;
+  recreateMicDevice: (instanceId: number) => Promise<void>;
+  loadMicStatus: (instanceId: number) => Promise<void>;
   clearError: () => void;
 }
 
@@ -161,6 +183,9 @@ export const useAppStore = create<AppStore>((set, get) => ({
   instanceActionRunning: false,
   bundleIndex: null,
   restoreJob: null,
+  micConfig: null,
+  micStatus: null,
+  micSession: null,
 
   initialize: async () => {
     set({ loading: true, error: null });
@@ -611,6 +636,79 @@ export const useAppStore = create<AppStore>((set, get) => ({
     try {
       const job = await getRestoreJob(jobId);
       set({ restoreJob: job });
+    } catch (error) {
+      set({ error: mapError(error) });
+    }
+  },
+
+  loadMicConfig: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const config = await getInstanceMicConfig(instanceId);
+      set({ micConfig: config, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  updateMicSettings: async (instanceId, payload) => {
+    set({ busy: true, error: null });
+    try {
+      const config = await updateInstanceMicSettings(instanceId, payload);
+      set({ micConfig: config, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  enableMic: async (instanceId, qualityProfile) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const session = await enableInstanceMic(instanceId, qualityProfile);
+      set({ micSession: session, instanceActionRunning: false });
+      return session;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  disableMic: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await disableInstanceMic(instanceId);
+      set({ micSession: null, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  reconnectMic: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const session = await reconnectInstanceMic(instanceId);
+      set({ micSession: session, instanceActionRunning: false });
+      return session;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  recreateMicDevice: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await recreateInstanceMicDevice(instanceId);
+      set({ instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  loadMicStatus: async (instanceId) => {
+    try {
+      const status = await getInstanceMicStatus(instanceId);
+      set({ micStatus: status });
     } catch (error) {
       set({ error: mapError(error) });
     }

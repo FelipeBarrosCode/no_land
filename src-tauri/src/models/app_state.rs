@@ -670,3 +670,194 @@ pub struct RestoreJobItem {
     pub status: String,
     pub error: Option<String>,
 }
+
+// ============================================================
+// Microphone Passthrough types
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceMicConfig {
+    pub instance_id: u64,
+    pub enabled: bool,
+    pub transport: String,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub vm_wireguard_ip: String,
+    pub rtp_port: u16,
+    pub device_name: String,
+    pub quality_profile: MicQualityProfile,
+    pub session_id: Option<String>,
+    pub session_token: Option<String>,
+    pub ssrc: Option<u32>,
+    pub last_enabled_at: Option<String>,
+    pub last_disabled_at: Option<String>,
+}
+
+impl Default for InstanceMicConfig {
+    fn default() -> Self {
+        Self {
+            instance_id: 0,
+            enabled: false,
+            transport: "native_rtp_udp".to_string(),
+            codec: "opus".to_string(),
+            sample_rate: 48000,
+            channels: 1,
+            vm_wireguard_ip: String::new(),
+            rtp_port: 34778,
+            device_name: "Cloud Mic".to_string(),
+            quality_profile: MicQualityProfile::Standard,
+            session_id: None,
+            session_token: None,
+            ssrc: None,
+            last_enabled_at: None,
+            last_disabled_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicQualityProfile {
+    Standard,
+    LowLatency,
+    HighQuality,
+}
+
+impl Default for MicQualityProfile {
+    fn default() -> Self {
+        MicQualityProfile::Standard
+    }
+}
+
+impl MicQualityProfile {
+    pub fn bitrate_kbps(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 32,
+            MicQualityProfile::LowLatency => 48,
+            MicQualityProfile::HighQuality => 64,
+        }
+    }
+
+    pub fn frame_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 20,
+            MicQualityProfile::LowLatency => 10,
+            MicQualityProfile::HighQuality => 20,
+        }
+    }
+
+    pub fn jitter_min_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 20,
+            MicQualityProfile::LowLatency => 10,
+            MicQualityProfile::HighQuality => 30,
+        }
+    }
+
+    pub fn jitter_target_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 30,
+            MicQualityProfile::LowLatency => 15,
+            MicQualityProfile::HighQuality => 40,
+        }
+    }
+
+    pub fn jitter_max_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 60,
+            MicQualityProfile::LowLatency => 40,
+            MicQualityProfile::HighQuality => 80,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceMicRuntimeStatus {
+    pub enabled: bool,
+    pub state: MicState,
+    pub vm_agent_reachable: bool,
+    pub device_ready: bool,
+    pub receiving_audio: bool,
+    pub transport: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub bitrate_kbps: u32,
+    pub frame_ms: u32,
+    pub packet_loss_percent: f64,
+    pub jitter_ms: f64,
+    pub buffer_depth_ms: f64,
+    pub last_packet_ms_ago: Option<u64>,
+    pub pipewire_connected: bool,
+    pub default_source: bool,
+    pub error: Option<String>,
+}
+
+impl Default for InstanceMicRuntimeStatus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state: MicState::Disabled,
+            vm_agent_reachable: false,
+            device_ready: false,
+            receiving_audio: false,
+            transport: "native_rtp_udp".to_string(),
+            sample_rate: 48000,
+            channels: 1,
+            bitrate_kbps: 32,
+            frame_ms: 20,
+            packet_loss_percent: 0.0,
+            jitter_ms: 0.0,
+            buffer_depth_ms: 0.0,
+            last_packet_ms_ago: None,
+            pipewire_connected: false,
+            default_source: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicState {
+    Disabled,
+    Starting,
+    Connecting,
+    Streaming,
+    NoAudioDetected,
+    WireguardDisconnected,
+    VmAgentUnreachable,
+    CloudMicMissing,
+    PacketLossHigh,
+    PipewireUnavailable,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSettingsUpdate {
+    pub quality_profile: Option<MicQualityProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSessionResponse {
+    pub session_id: String,
+    pub session_token: String,
+    pub ssrc: u32,
+    pub vm_wireguard_ip: String,
+    pub rtp_port: u16,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub frame_ms: u32,
+    pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicEnableRequest {
+    pub instance_id: u64,
+    pub quality_profile: Option<MicQualityProfile>,
+}

@@ -14,7 +14,8 @@ use crate::{
             OrchestrationState, PersistedAppState, RentedInstanceSummary, ServerPreferencesUpdate,
             SharedStorageSettingsResponse, SharedStorageSettingsUpdate, BackupStatusResponse,
             SharedStorageInstanceStatus, RestoreRequest, RestoreDryRunResult, RestoreJob,
-            BundleIndex
+            BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus, MicSessionResponse,
+            MicSettingsUpdate, MicQualityProfile
         },
         events::ProvisioningEvent,
     },
@@ -25,6 +26,7 @@ use crate::{
         shared_storage::shared_storage_manager::SharedStorageManager,
         shared_storage::bundle_indexer::BundleIndexer,
         shared_storage::bundle_restore::BundleRestoreService,
+        mic_passthrough::MicPassthroughService,
         vast_api::VastApiClient,
         wireguard::setup_local_wireguard_client,
     },
@@ -1186,6 +1188,78 @@ pub async fn get_restore_job(
     job_id: String,
 ) -> Result<RestoreJob, FrontendError> {
     BundleRestoreService::get_job(&job_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_mic_config(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<InstanceMicConfig, FrontendError> {
+    MicPassthroughService::get_config(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_instance_mic_settings(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    payload: MicSettingsUpdate,
+) -> Result<InstanceMicConfig, FrontendError> {
+    MicPassthroughService::update_settings(context.inner(), instance_id, payload.quality_profile)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn enable_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    quality_profile: Option<MicQualityProfile>,
+) -> Result<MicSessionResponse, FrontendError> {
+    MicPassthroughService::enable(context.inner(), instance_id, quality_profile)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn disable_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    MicPassthroughService::disable(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reconnect_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<MicSessionResponse, FrontendError> {
+    MicPassthroughService::reconnect(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn recreate_instance_mic_device(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    MicPassthroughService::recreate_device(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_mic_status(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<InstanceMicRuntimeStatus, FrontendError> {
+    MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
 }
