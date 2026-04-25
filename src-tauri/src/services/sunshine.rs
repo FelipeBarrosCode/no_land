@@ -42,12 +42,7 @@ pub struct SunshineService {
     pub defaults: SunshineDefaults,
 }
 
-const SUNSHINE_PACKAGES: &[&str] = &[
-    "sunshine",
-    "pipewire",
-    "pipewire-pulse",
-    "wireplumber",
-];
+const SUNSHINE_PACKAGES: &[&str] = &["sunshine", "pipewire", "pipewire-pulse", "wireplumber"];
 
 impl SunshineService {
     pub fn render_config(&self, detected_capture: &str, detected_output: &str) -> String {
@@ -82,7 +77,42 @@ impl SunshineService {
             .join("\n")
     }
 
-    async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
+    pub async fn verify_resume_health(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<()> {
+        let health_command = format!(
+            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \t\"); if [ \"$PROC_COUNT\" = \"1\" ] && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- web ---'; curl -k -I -s --connect-timeout 5 https://localhost:47990/pin 2>&1 || true; fi",
+            user = target_user,
+        );
+
+        let health = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&health_command, Duration::from_secs(20))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if health.status_code != 0 || !health.stdout.contains("SUNSHINE_HEALTHY") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine resume preflight failed for user {}. stdout: {} | stderr: {}",
+                target_user,
+                health.stdout.trim(),
+                health.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn wait_for_dpkg_lock_with_message(
+        &self,
+        remote: &RemoteExec,
+        max_wait_secs: u64,
+    ) -> AppResult<bool> {
         // Option C: Surgical approach
         // 1. Quick check first
         // 2. If locked, aggressive kill
@@ -267,7 +297,10 @@ exit 0"#
                     disable_auto_upgrades.stderr.trim()
                 );
             } else {
-                info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+                info!(
+                    "Auto-upgrades disabled: {}",
+                    disable_auto_upgrades.stdout.trim()
+                );
             }
 
             let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
@@ -276,7 +309,8 @@ exit 0"#
                     "Package manager is locked by another process (likely unattended-upgrades). \
                     Waiting timed out after 10 minutes. Please try again in a few minutes when \
                     system updates have finished. Alternatively, you can SSH into the instance and \
-                    run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a".to_string(),
+                    run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
+                        .to_string(),
                 ));
             }
 
@@ -314,7 +348,8 @@ exit 0"#
                 .await?;
         }
 
-        self.setup_headless_display(remote, target_user, display).await?;
+        self.setup_headless_display(remote, target_user, display)
+            .await?;
 
         // Verify Xorg is running before proceeding
         let xorg_check = {
@@ -377,7 +412,8 @@ exit 0"#
         info!("Xorg verified running: {}", xorg_check.stdout.trim());
 
         self.setup_realtime_permissions(remote).await?;
-        self.setup_virtual_input_permissions(remote, target_user).await?;
+        self.setup_virtual_input_permissions(remote, target_user)
+            .await?;
         self.setup_pipewire_config(remote, target_user).await?;
 
         let detected_capture = self.detect_capture_backend(remote).await?;
@@ -510,7 +546,10 @@ exit 0"#
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-        info!("Screen lock disable result: {}", disable_screen_lock.stdout.trim());
+        info!(
+            "Screen lock disable result: {}",
+            disable_screen_lock.stdout.trim()
+        );
 
         // 4. Open ALL Moonlight ports (TCP + UDP)
         let firewall = {
@@ -571,8 +610,7 @@ WantedBy=multi-user.target"#,
             "sudo bash -lc 'cat > /etc/systemd/system/sunshine.service <<\"EOF\"\n{}\nEOF\nchmod 644 /etc/systemd/system/sunshine.service; test -f /etc/systemd/system/sunshine.service && echo SERVICE_WRITTEN'",
             shell_single_quote_escape(&service_content),
         );
-        let daemon_reload_cmd =
-            "sudo bash -lc 'systemctl daemon-reload && echo DAEMON_RELOADED'";
+        let daemon_reload_cmd = "sudo bash -lc 'systemctl daemon-reload && echo DAEMON_RELOADED'";
         let enable_service_cmd =
             "sudo bash -lc 'systemctl enable sunshine && echo SERVICE_ENABLED'";
         let clear_ports_cmd =
@@ -587,7 +625,8 @@ WantedBy=multi-user.target"#,
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-        if prepare_service.status_code != 0 || !prepare_service.stdout.contains("SERVICE_PREPARED") {
+        if prepare_service.status_code != 0 || !prepare_service.stdout.contains("SERVICE_PREPARED")
+        {
             return Err(AppError::Provisioning(format!(
                 "Failed to prepare Sunshine systemd service path. stdout: {} | stderr: {}",
                 prepare_service.stdout.trim(),
@@ -597,9 +636,11 @@ WantedBy=multi-user.target"#,
 
         let write_service = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&write_service_cmd, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_service_cmd, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
         if write_service.status_code != 0 || !write_service.stdout.contains("SERVICE_WRITTEN") {
             return Err(AppError::Provisioning(format!(
@@ -661,7 +702,8 @@ WantedBy=multi-user.target"#,
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-        if restart_service.status_code != 0 || !restart_service.stdout.contains("SERVICE_RESTARTED") {
+        if restart_service.status_code != 0 || !restart_service.stdout.contains("SERVICE_RESTARTED")
+        {
             return Err(AppError::Provisioning(format!(
                 "Failed to restart Sunshine systemd service. stdout: {} | stderr: {}",
                 restart_service.stdout.trim(),
@@ -680,11 +722,9 @@ WantedBy=multi-user.target"#,
 
         let verify = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&verify_cmd, Duration::from_secs(30))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || remote.ssh(&verify_cmd, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
         if verify.status_code != 0 || !verify.stdout.contains("SUNSHINE_STARTED") {
@@ -720,9 +760,7 @@ WantedBy=multi-user.target"#,
         info!(
             "Sunshine Web UI available at https://<wireguard-ip>:47990 (use HTTPS, accept self-signed cert)"
         );
-        info!(
-            "IMPORTANT: Visit the Web UI above to create your login credentials before pairing."
-        );
+        info!("IMPORTANT: Visit the Web UI above to create your login credentials before pairing.");
 
         let apply_affinity = {
             let remote = remote.clone();
@@ -749,7 +787,12 @@ WantedBy=multi-user.target"#,
         self.validate(remote, target_user, display).await
     }
 
-    async fn setup_headless_display(&self, remote: &RemoteExec, target_user: &str, display: DisplayProfile) -> AppResult<()> {
+    async fn setup_headless_display(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        display: DisplayProfile,
+    ) -> AppResult<()> {
         let target_home = self.resolve_user_home(remote, target_user).await?;
         let target_user_owned = target_user.to_string();
         let uid = {
@@ -777,10 +820,7 @@ WantedBy=multi-user.target"#,
             match probe {
                 Ok(output) => output.stdout.trim().parse().unwrap_or(0),
                 Err(AppError::Timeout(error)) => {
-                    warn!(
-                        "Display probe timed out (treating as headless): {}",
-                        error
-                    );
+                    warn!("Display probe timed out (treating as headless): {}", error);
                     0
                 }
                 Err(error) => return Err(error),
@@ -798,9 +838,11 @@ WantedBy=multi-user.target"#,
             );
             let output = {
                 let remote = remote.clone();
-                tokio::task::spawn_blocking(move || remote.ssh(&create_user_dirs, Duration::from_secs(30)))
-                    .await
-                    .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(&create_user_dirs, Duration::from_secs(30))
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
             };
             if output.status_code != 0 {
                 return Err(AppError::Provisioning(format!(
@@ -1157,10 +1199,7 @@ echo "=== Setup Complete ==="
         );
 
         let escaped_shell = shell_single_quote_escape(&shell_script);
-        let install_cmd = format!(
-            "sudo bash -lc '{}'",
-            escaped_shell
-        );
+        let install_cmd = format!("sudo bash -lc '{}'", escaped_shell);
 
         let output = {
             let remote = remote.clone();
@@ -1178,7 +1217,10 @@ echo "=== Setup Complete ==="
             )));
         }
 
-        info!("NVIDIA TwinView virtual display setup output: {}", output.stdout.trim());
+        info!(
+            "NVIDIA TwinView virtual display setup output: {}",
+            output.stdout.trim()
+        );
 
         let create_user_dirs = format!(
             "sudo -u {target_user} mkdir -p {home}/.config/pipewire/pipewire.conf.d {home}/.config/wireplumber {home}/.config/systemd/user",
@@ -1187,9 +1229,11 @@ echo "=== Setup Complete ==="
         );
         let output = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&create_user_dirs, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&create_user_dirs, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
@@ -1216,7 +1260,10 @@ echo "=== Setup Complete ==="
 
         let dfp_output = query_dfp.stdout.trim();
         if query_dfp.status_code == 0 && !dfp_output.is_empty() {
-            info!("Detected NVIDIA DFP connector from nvidia-xconfig: {}", dfp_output);
+            info!(
+                "Detected NVIDIA DFP connector from nvidia-xconfig: {}",
+                dfp_output
+            );
             return Ok(dfp_output.to_string());
         }
 
@@ -1248,9 +1295,11 @@ echo "=== Setup Complete ==="
         let lookup_command = format!("getent passwd {} | cut -d: -f6", target_user);
         let lookup = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&lookup_command, Duration::from_secs(15)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&lookup_command, Duration::from_secs(15))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
         if lookup.status_code == 0 {
@@ -1278,11 +1327,9 @@ echo "=== Setup Complete ==="
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
-        uid_command
-            .stdout
-            .trim()
-            .parse::<u32>()
-            .map_err(|error| AppError::Provisioning(format!("Failed to resolve UID for {target_user}: {error}")))
+        uid_command.stdout.trim().parse::<u32>().map_err(|error| {
+            AppError::Provisioning(format!("Failed to resolve UID for {target_user}: {error}"))
+        })
     }
 
     async fn resolve_user_gid(&self, remote: &RemoteExec, target_user: &str) -> AppResult<u32> {
@@ -1296,14 +1343,16 @@ echo "=== Setup Complete ==="
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
-        gid_command
-            .stdout
-            .trim()
-            .parse::<u32>()
-            .map_err(|error| AppError::Provisioning(format!("Failed to resolve GID for {target_user}: {error}")))
+        gid_command.stdout.trim().parse::<u32>().map_err(|error| {
+            AppError::Provisioning(format!("Failed to resolve GID for {target_user}: {error}"))
+        })
     }
 
-    async fn resolve_user_group(&self, remote: &RemoteExec, target_user: &str) -> AppResult<String> {
+    async fn resolve_user_group(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<String> {
         let group_command = {
             let remote = remote.clone();
             let target_user = target_user.to_string();
@@ -1359,9 +1408,11 @@ echo "=== Setup Complete ==="
 
         let user_cleanup = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&user_cleanup_command, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&user_cleanup_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
         if user_cleanup.status_code != 0 || !user_cleanup.stdout.contains("CLEANUP_USER_OK") {
             return Err(AppError::Provisioning(format!(
@@ -1379,7 +1430,9 @@ echo "=== Setup Complete ==="
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
-        if reload_and_verify.status_code != 0 || !reload_and_verify.stdout.contains("CLEANUP_VERIFY_OK") {
+        if reload_and_verify.status_code != 0
+            || !reload_and_verify.stdout.contains("CLEANUP_VERIFY_OK")
+        {
             return Err(AppError::Provisioning(format!(
                 "Failed Sunshine cleanup verification. stdout: {} | stderr: {}",
                 reload_and_verify.stdout.trim(),
@@ -1403,9 +1456,11 @@ echo "=== Setup Complete ==="
 
         let port_check = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&port_check_command, Duration::from_secs(20)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&port_check_command, Duration::from_secs(20))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
         if port_check.status_code != 0 || !port_check.stdout.contains("PORT_FREE") {
@@ -1558,7 +1613,10 @@ context.properties = {
         let nvidia_check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1", Duration::from_secs(15))
+                remote.ssh(
+                    "nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1",
+                    Duration::from_secs(15),
+                )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -1576,7 +1634,10 @@ context.properties = {
         let kms_check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("ls -la /dev/dri/renderD* 2>/dev/null | head -2 || true", Duration::from_secs(15))
+                remote.ssh(
+                    "ls -la /dev/dri/renderD* 2>/dev/null | head -2 || true",
+                    Duration::from_secs(15),
+                )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -1706,7 +1767,10 @@ context.properties = {
             let ps_output = {
                 let remote = remote.clone();
                 tokio::task::spawn_blocking(move || {
-                    remote.ssh("ps aux | grep -i sunshine | grep -v grep || true", Duration::from_secs(10))
+                    remote.ssh(
+                        "ps aux | grep -i sunshine | grep -v grep || true",
+                        Duration::from_secs(10),
+                    )
                 })
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??

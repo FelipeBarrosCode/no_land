@@ -233,12 +233,13 @@ impl OrchestrationService {
         match pairing_mode {
             SunshinePairingMode::SunshineCli => {
                 let command = format!("sudo -u {sunshine_user} bash -lc 'printf \"%s\\n\" \"{pin}\" | sunshine-cli pair'");
-                let pair_result =
-                    tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(45)))
-                        .await
-                        .map_err(|error| {
-                            AppError::Command(format!("Failed to join pairing task: {error}"))
-                        })??;
+                let pair_result = tokio::task::spawn_blocking(move || {
+                    remote.ssh(&command, Duration::from_secs(45))
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("Failed to join pairing task: {error}"))
+                })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -250,13 +251,15 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::SunshinePairPin => {
-                let command = format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
-                let pair_result =
-                    tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(45)))
-                        .await
-                        .map_err(|error| {
-                            AppError::Command(format!("Failed to join pairing task: {error}"))
-                        })??;
+                let command =
+                    format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
+                let pair_result = tokio::task::spawn_blocking(move || {
+                    remote.ssh(&command, Duration::from_secs(45))
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("Failed to join pairing task: {error}"))
+                })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -361,7 +364,10 @@ impl OrchestrationService {
             context,
             OrchestrationState::Ready,
             "Provisioning complete. Server is ready to stream.",
-            Some("Pairing modal skipped. Complete Moonlight pairing manually if still needed.".to_string()),
+            Some(
+                "Pairing modal skipped. Complete Moonlight pairing manually if still needed."
+                    .to_string(),
+            ),
             false,
         )
         .await;
@@ -839,7 +845,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                         .map(|diag| {
                             diag.commands
                                 .into_iter()
-                                .map(|(command, output)| format!("{command} -> {}", output.status_code))
+                                .map(|(command, output)| {
+                                    format!("{command} -> {}", output.status_code)
+                                })
                                 .collect::<Vec<_>>()
                                 .join("; ")
                         })
@@ -894,22 +902,44 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let sunshine = SunshineService {
         defaults: context.config.sunshine.clone(),
     };
-    if server_step_is_completed(
+    let sunshine_step_completed = server_step_is_completed(
         &context,
         instance.id,
         ProvisionStepMarker::SunshineConfigured,
     )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Skipping Sunshine install/config",
-            instance.id,
-        )
-        .await;
-    } else {
+    .await;
+    let mut should_install_sunshine = !sunshine_step_completed;
+    if sunshine_step_completed {
+        match sunshine.verify_resume_health(&remote, &target_user).await {
+            Ok(()) => {
+                emit_step_skipped(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringSunshine,
+                    "Skipping Sunshine install/config",
+                    instance.id,
+                )
+                .await;
+            }
+            Err(error) => {
+                warn!(
+                    "Saved Sunshine state drifted for instance {}. Forcing full reconfiguration. {}",
+                    instance.id, error
+                );
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringSunshine,
+                    "Saved Sunshine state is stale. Reconfiguring Sunshine.",
+                    Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
+                    false,
+                )
+                .await;
+                should_install_sunshine = true;
+            }
+        }
+    }
+    if should_install_sunshine {
         let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
         let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
             moonlight_preferences.width,
@@ -918,18 +948,28 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         );
         info!(
             "Sunshine display profile: {}x{} @ {}Hz ({} FPS x2)",
-            display_profile.width, display_profile.height, display_profile.virtual_hz(), display_profile.fps
+            display_profile.width,
+            display_profile.height,
+            display_profile.virtual_hz(),
+            display_profile.fps
         );
         emit_transition(
             &app,
             &context,
             OrchestrationState::ConfiguringSunshine,
             "Installing and configuring Sunshine",
-            Some(format!("Display: {}x{} @ {}Hz", display_profile.width, display_profile.height, display_profile.virtual_hz())),
+            Some(format!(
+                "Display: {}x{} @ {}Hz",
+                display_profile.width,
+                display_profile.height,
+                display_profile.virtual_hz()
+            )),
             false,
         )
         .await;
-        sunshine.install_and_configure(&remote, &target_user, display_profile).await?;
+        sunshine
+            .install_and_configure(&remote, &target_user, display_profile)
+            .await?;
         mark_server_step_completed(
             &context,
             instance.id,
@@ -998,7 +1038,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             false,
         )
         .await;
-
     }
     ensure_not_cancelled(&context)?;
 
@@ -1374,13 +1413,17 @@ async fn run_existing_instance_orchestration(
 
     if let Some(steps) = saved_steps {
         let (resume_state, resume_msg) = determine_resume_step(&steps);
-        info!("Resuming instance {} from step: {:?} - {}", instance_id, resume_state, resume_msg);
+        info!(
+            "Resuming instance {} from step: {:?} - {}",
+            instance_id, resume_state, resume_msg
+        );
         emit_transition(
             &app,
             &context,
             resume_state,
             &resume_msg,
-            Some(format!("Progress: SSH={}, NVIDIA={}, Sunshine={}, WireGuard={}, Moonlight={}",
+            Some(format!(
+                "Progress: SSH={}, NVIDIA={}, Sunshine={}, WireGuard={}, Moonlight={}",
                 steps.ssh_connected,
                 steps.nvidia_headless_configured,
                 steps.sunshine_configured,
@@ -1390,7 +1433,6 @@ async fn run_existing_instance_orchestration(
             false,
         )
         .await;
-
     }
 
     let initial_state = context.state.read().await.clone();
@@ -1713,36 +1755,50 @@ async fn run_existing_instance_orchestration(
         .await?;
     }
 
-    ensure_post_nvidia_reboot(
-        &app,
-        &context,
-        &vast,
-        &mut instance,
-        &mut remote,
-        offer_id,
-    )
-    .await?;
+    ensure_post_nvidia_reboot(&app, &context, &vast, &mut instance, &mut remote, offer_id).await?;
     ensure_not_cancelled(&context)?;
 
     let sunshine = SunshineService {
         defaults: context.config.sunshine.clone(),
     };
-    if server_step_is_completed(
+    let sunshine_step_completed = server_step_is_completed(
         &context,
         instance.id,
         ProvisionStepMarker::SunshineConfigured,
     )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Skipping Sunshine install/config",
-            instance.id,
-        )
-        .await;
-    } else {
+    .await;
+    let mut should_install_sunshine = !sunshine_step_completed;
+    if sunshine_step_completed {
+        match sunshine.verify_resume_health(&remote, &target_user).await {
+            Ok(()) => {
+                emit_step_skipped(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringSunshine,
+                    "Skipping Sunshine install/config",
+                    instance.id,
+                )
+                .await;
+            }
+            Err(error) => {
+                warn!(
+                    "Saved Sunshine state drifted for existing instance {}. Forcing full reconfiguration. {}",
+                    instance.id, error
+                );
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringSunshine,
+                    "Saved Sunshine state is stale. Reconfiguring Sunshine.",
+                    Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
+                    false,
+                )
+                .await;
+                should_install_sunshine = true;
+            }
+        }
+    }
+    if should_install_sunshine {
         let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
         let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
             moonlight_preferences.width,
@@ -1751,18 +1807,28 @@ async fn run_existing_instance_orchestration(
         );
         info!(
             "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS x2)",
-            display_profile.width, display_profile.height, display_profile.virtual_hz(), display_profile.fps
+            display_profile.width,
+            display_profile.height,
+            display_profile.virtual_hz(),
+            display_profile.fps
         );
         emit_transition(
             &app,
             &context,
             OrchestrationState::ConfiguringSunshine,
             "Installing and configuring Sunshine",
-            Some(format!("Display: {}x{} @ {}Hz", display_profile.width, display_profile.height, display_profile.virtual_hz())),
+            Some(format!(
+                "Display: {}x{} @ {}Hz",
+                display_profile.width,
+                display_profile.height,
+                display_profile.virtual_hz()
+            )),
             false,
         )
         .await;
-        sunshine.install_and_configure(&remote, &target_user, display_profile).await?;
+        sunshine
+            .install_and_configure(&remote, &target_user, display_profile)
+            .await?;
         mark_server_step_completed(
             &context,
             instance.id,
@@ -1831,7 +1897,6 @@ async fn run_existing_instance_orchestration(
             false,
         )
         .await;
-
     }
     ensure_not_cancelled(&context)?;
 
@@ -2411,10 +2476,17 @@ async fn ensure_post_nvidia_reboot(
                         let system_state = {
                             let remote = remote.clone();
                             tokio::task::spawn_blocking(move || {
-                                remote.ssh("systemctl is-system-running 2>/dev/null", Duration::from_secs(10))
+                                remote.ssh(
+                                    "systemctl is-system-running 2>/dev/null",
+                                    Duration::from_secs(10),
+                                )
                             })
                             .await
-                            .map_err(|error| AppError::Command(format!("system-state probe join failure: {error}")))??
+                            .map_err(|error| {
+                                AppError::Command(format!(
+                                    "system-state probe join failure: {error}"
+                                ))
+                            })??
                         };
                         let state = system_state.stdout.trim();
                         if state == "running" || state == "degraded" {
@@ -2428,9 +2500,7 @@ async fn ensure_post_nvidia_reboot(
                             "Waiting for system to finish booting",
                             Some(format!(
                                 "system state: {} (attempt {}/{})",
-                                state,
-                                sys_attempt,
-                                SYSTEM_STATE_ATTEMPTS
+                                state, sys_attempt, SYSTEM_STATE_ATTEMPTS
                             )),
                             false,
                         )
@@ -2438,7 +2508,9 @@ async fn ensure_post_nvidia_reboot(
                         sleep(SYSTEM_STATE_INTERVAL).await;
                     }
                     if !system_ready {
-                        warn!("System did not reach 'running' state after reboot, continuing anyway");
+                        warn!(
+                            "System did not reach 'running' state after reboot, continuing anyway"
+                        );
                     }
 
                     mark_server_step_completed(
@@ -2460,10 +2532,7 @@ async fn ensure_post_nvidia_reboot(
                         "Instance reboot completed and SSH is back online",
                         Some(format!(
                             "{}:{} (attempt {}/{})",
-                            remote.ssh_host,
-                            remote.ssh_port,
-                            attempt,
-                            REBOOT_RECONNECT_ATTEMPTS
+                            remote.ssh_host, remote.ssh_port, attempt, REBOOT_RECONNECT_ATTEMPTS
                         )),
                         false,
                     )
@@ -3276,7 +3345,7 @@ async fn ensure_server_record(
 ) -> AppResult<()> {
     let ssh_host = ssh_host.to_string();
     let status = status.to_string();
-    
+
     // Get ssh_command from current instance state
     let ssh_command = {
         let snapshot = context.state.read().await;

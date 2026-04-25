@@ -97,9 +97,7 @@ impl SshKeyService {
                 .arg("--apple-use-keychain")
                 .arg(&key_path_str)
                 .output()
-                .map_err(|error| {
-                    AppError::Command(format!("Failed to spawn ssh-add: {error}"))
-                })?;
+                .map_err(|error| AppError::Command(format!("Failed to spawn ssh-add: {error}")))?;
 
             if output.status.success() {
                 return Ok(());
@@ -118,11 +116,9 @@ impl SshKeyService {
 
                 if let Some(ref mut stdin) = child.stdin {
                     let payload = format!("{}\n", passphrase_owned);
-                    stdin
-                        .write_all(payload.as_bytes())
-                        .map_err(|error| {
-                            AppError::Command(format!("Failed to write passphrase: {error}"))
-                        })?;
+                    stdin.write_all(payload.as_bytes()).map_err(|error| {
+                        AppError::Command(format!("Failed to write passphrase: {error}"))
+                    })?;
                 }
 
                 let status = child
@@ -130,9 +126,9 @@ impl SshKeyService {
                     .map_err(|error| AppError::Command(format!("ssh-add wait failed: {error}")))?;
 
                 if !status.success() {
-                    let output = child
-                        .wait_with_output()
-                        .map_err(|error| AppError::Command(format!("Failed to get ssh-add stderr: {error}")))?;
+                    let output = child.wait_with_output().map_err(|error| {
+                        AppError::Command(format!("Failed to get ssh-add stderr: {error}"))
+                    })?;
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     return Err(AppError::Command(format!(
                         "ssh-add failed with {}: {}",
@@ -143,10 +139,7 @@ impl SshKeyService {
                 return Ok(());
             }
 
-            return Err(AppError::Command(format!(
-                "ssh-add failed: {}",
-                stderr
-            )));
+            return Err(AppError::Command(format!("ssh-add failed: {}", stderr)));
         })
         .await
         .map_err(|error| AppError::Command(format!("ssh-add task join failure: {error}")))?
@@ -156,7 +149,9 @@ impl SshKeyService {
         tokio::task::spawn_blocking(|| {
             if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
                 if !sock.is_empty() {
-                    let pid = std::env::var("SSH_AGENT_PID").ok().filter(|p| !p.is_empty());
+                    let pid = std::env::var("SSH_AGENT_PID")
+                        .ok()
+                        .filter(|p| !p.is_empty());
                     return Ok((sock, pid));
                 }
             }

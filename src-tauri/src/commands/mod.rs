@@ -1,8 +1,4 @@
-use std::{
-    path::Path,
-    process::Command,
-    time::Duration,
-};
+use std::{path::Path, process::Command, time::Duration};
 
 use tauri::{AppHandle, State};
 
@@ -18,8 +14,7 @@ use crate::{
     services::{
         app_context::AppContext, location::LocationService, offer_selector::OfferSelector,
         orchestration::OrchestrationService, remote_exec::RemoteExec, ssh_keys::SshKeyService,
-        vast_api::VastApiClient,
-        wireguard::setup_local_wireguard_client,
+        vast_api::VastApiClient, wireguard::setup_local_wireguard_client,
     },
     utils::redact::redact_secret,
 };
@@ -208,10 +203,12 @@ pub async fn search_offers(
             };
 
             // Verification filter
-            let verified_ok = !state_snapshot.server_preferences.require_verified || offer.is_verified;
+            let verified_ok =
+                !state_snapshot.server_preferences.require_verified || offer.is_verified;
 
             // Datacenter filter
-            let datacenter_ok = !state_snapshot.server_preferences.require_datacenter || offer.is_datacenter;
+            let datacenter_ok =
+                !state_snapshot.server_preferences.require_datacenter || offer.is_datacenter;
 
             // Offer type/category filter
             let offer_type = offer.offer_type.to_ascii_lowercase();
@@ -222,14 +219,17 @@ pub async fn search_offers(
                 _ => state_snapshot.server_preferences.include_on_demand,
             };
 
-            let static_ip_ok = !state_snapshot.server_preferences.require_static_ip || offer.has_static_ip;
+            let static_ip_ok =
+                !state_snapshot.server_preferences.require_static_ip || offer.has_static_ip;
             let avx_ok = !state_snapshot.server_preferences.require_avx || offer.has_avx;
             let gpu_count_ok = offer.gpu_count == 1;
-            let gpu_ram_ok =
-                (offer.gpu_ram_mb as f64 / 1024.0) >= state_snapshot.server_preferences.min_gpu_ram_gb as f64;
+            let gpu_ram_ok = (offer.gpu_ram_mb as f64 / 1024.0)
+                >= state_snapshot.server_preferences.min_gpu_ram_gb as f64;
             let cpu_cores_ok = offer.cpu_cores >= state_snapshot.server_preferences.min_cpu_cores;
-            let down_ok = offer.internet_down_mbps >= state_snapshot.server_preferences.min_inet_down_mbps;
-            let up_ok = offer.internet_up_mbps >= state_snapshot.server_preferences.min_inet_up_mbps;
+            let down_ok =
+                offer.internet_down_mbps >= state_snapshot.server_preferences.min_inet_down_mbps;
+            let up_ok =
+                offer.internet_up_mbps >= state_snapshot.server_preferences.min_inet_up_mbps;
 
             price_ok
                 && verified_ok
@@ -425,7 +425,10 @@ async fn sync_wireguard_endpoint_from_vast(
 ) -> Result<(), AppError> {
     let (instance_id, api_key) = {
         let state = context.state.read().await;
-        (state.instance.instance_id, state.credentials.vast_api_key.clone())
+        (
+            state.instance.instance_id,
+            state.credentials.vast_api_key.clone(),
+        )
     };
 
     let Some(instance_id) = instance_id else {
@@ -460,7 +463,10 @@ async fn sync_wireguard_endpoint_from_vast(
     Ok(())
 }
 
-fn rewrite_wireguard_peer_endpoint(config_path: &Path, endpoint_line: &str) -> Result<(), AppError> {
+fn rewrite_wireguard_peer_endpoint(
+    config_path: &Path,
+    endpoint_line: &str,
+) -> Result<(), AppError> {
     let original = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading WireGuard client config {}: {error}",
@@ -579,10 +585,11 @@ fn validate_wireguard_ping(server_ip: &str) -> Result<(), AppError> {
     #[cfg(not(target_os = "windows"))]
     let args = ["-c", "3", "-W", "2", server_ip];
 
-    let ping = Command::new("ping")
-        .args(args)
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run ping for WireGuard validation: {error}")))?;
+    let ping = Command::new("ping").args(args).output().map_err(|error| {
+        AppError::Command(format!(
+            "Failed to run ping for WireGuard validation: {error}"
+        ))
+    })?;
 
     if !ping.status.success() {
         return Err(AppError::Provisioning(format!(
@@ -659,7 +666,8 @@ async fn sync_server_wireguard_keys(context: &AppContext) -> Result<(), AppError
         let _ = context
             .update_state(|state| {
                 if !server_snapshot.interface_public_key.is_empty() {
-                    state.wireguard.server_public_key = server_snapshot.interface_public_key.clone();
+                    state.wireguard.server_public_key =
+                        server_snapshot.interface_public_key.clone();
                 }
                 if !server_snapshot.peer_public_key.is_empty() {
                     state.wireguard.client_public_key = server_snapshot.peer_public_key.clone();
@@ -808,9 +816,10 @@ pub async fn update_server_preferences(
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
     if payload.min_reliability < 0.8 || payload.min_reliability > 1.0 {
-        return Err(
-            AppError::InvalidInput("Min reliability must be between 0.8 and 1".to_string()).into(),
-        );
+        return Err(AppError::InvalidInput(
+            "Min reliability must be between 0.8 and 1".to_string(),
+        )
+        .into());
     }
     if payload.storage_gb < 30 {
         return Err(AppError::InvalidInput("Storage must be at least 30GB".to_string()).into());
@@ -911,7 +920,10 @@ pub async fn update_ssh_credentials(
         return Err(AppError::InvalidInput("SSH username cannot be empty".to_string()).into());
     }
     if payload.ssh_password.len() < 4 {
-        return Err(AppError::InvalidInput("SSH password must have at least 4 characters".to_string()).into());
+        return Err(AppError::InvalidInput(
+            "SSH password must have at least 4 characters".to_string(),
+        )
+        .into());
     }
 
     let ssh_username = sanitize_ssh_username(&payload.ssh_username);

@@ -16,10 +16,7 @@ pub struct NvidiaDiagnostics {
 #[derive(Debug, Clone)]
 pub struct NvidiaHeadlessService;
 
-const HEADLESS_PACKAGES: &[&str] = &[
-    "x11-xserver-utils",
-    "alsa-utils",
-];
+const HEADLESS_PACKAGES: &[&str] = &["x11-xserver-utils", "alsa-utils"];
 
 const APT_UPDATE_TIMEOUT_SECS: u64 = 900;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 1800;
@@ -55,7 +52,10 @@ impl NvidiaHeadlessService {
                     disable_auto_upgrades.stderr.trim()
                 );
             } else {
-                info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+                info!(
+                    "Auto-upgrades disabled: {}",
+                    disable_auto_upgrades.stdout.trim()
+                );
             }
 
             let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
@@ -64,7 +64,8 @@ impl NvidiaHeadlessService {
                     "Package manager is locked by another process (likely unattended-upgrades). \
                     Waiting timed out after 10 minutes. Please try again in a few minutes when \
                     system updates have finished. Alternatively, you can SSH into the instance and \
-                    run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a".to_string(),
+                    run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
+                        .to_string(),
                 ));
             }
 
@@ -109,7 +110,8 @@ impl NvidiaHeadlessService {
                         "apt-get update hit lock contention on attempt {}. Waiting for lock release before retry...",
                         attempt
                     );
-                    let lock_acquired_retry = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
+                    let lock_acquired_retry =
+                        self.wait_for_dpkg_lock_with_message(remote, 600).await?;
                     if !lock_acquired_retry {
                         break;
                     }
@@ -190,7 +192,10 @@ echo "[nvidia-headless] Headless package install complete"'"#,
                 let remote = remote.clone();
                 let install_script = install_script.clone();
                 tokio::task::spawn_blocking(move || {
-                    remote.ssh(&install_script, Duration::from_secs(APT_INSTALL_TIMEOUT_SECS))
+                    remote.ssh(
+                        &install_script,
+                        Duration::from_secs(APT_INSTALL_TIMEOUT_SECS),
+                    )
                 })
                 .await
                 .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -227,7 +232,8 @@ echo "[nvidia-headless] Headless package install complete"'"#,
                 || stdout_lower.contains("failed to initialize nvml")
             {
                 return Err(AppError::DriverMismatch(
-                    "NVIDIA kernel driver and userspace library version mismatch. Reboot required.".to_string(),
+                    "NVIDIA kernel driver and userspace library version mismatch. Reboot required."
+                        .to_string(),
                 ));
             }
             return Err(AppError::Provisioning(
@@ -235,12 +241,18 @@ echo "[nvidia-headless] Headless package install complete"'"#,
             ));
         }
 
-        info!("GPU detected: {}", nvidia_check.stdout.lines().next().unwrap_or("unknown"));
+        info!(
+            "GPU detected: {}",
+            nvidia_check.stdout.lines().next().unwrap_or("unknown")
+        );
 
         let gpu_info = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader", Duration::from_secs(30))
+                remote.ssh(
+                    "nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader",
+                    Duration::from_secs(30),
+                )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -274,7 +286,10 @@ echo "[nvidia-headless] Headless package install complete"'"#,
         let encoder_supported = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh("nvidia-smi --query-gpu=encoder.supported --format=csv,noheader", Duration::from_secs(30))
+                remote.ssh(
+                    "nvidia-smi --query-gpu=encoder.supported --format=csv,noheader",
+                    Duration::from_secs(30),
+                )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -287,7 +302,11 @@ echo "[nvidia-headless] Headless package install complete"'"#,
         Ok(())
     }
 
-    async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
+    async fn wait_for_dpkg_lock_with_message(
+        &self,
+        remote: &RemoteExec,
+        max_wait_secs: u64,
+    ) -> AppResult<bool> {
         // Option C: Surgical approach
         // 1. Quick check first
         // 2. If locked, aggressive kill
@@ -445,7 +464,10 @@ exit 0"#
         };
 
         if output.status_code != 0 {
-            info!("Warning: Could not enable persistence mode: {}", output.stderr);
+            info!(
+                "Warning: Could not enable persistence mode: {}",
+                output.stderr
+            );
         } else {
             info!("NVIDIA persistence mode enabled");
         }

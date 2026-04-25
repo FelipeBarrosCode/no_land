@@ -74,7 +74,10 @@ impl VastApiClient {
             }
         }
 
-        debug!("Vast returned {} offers across all categories", merged.len());
+        debug!(
+            "Vast returned {} offers across all categories",
+            merged.len()
+        );
         Ok(merged)
     }
 
@@ -155,7 +158,8 @@ impl VastApiClient {
 
         debug!(
             "Vast returned {} offers for category {}",
-            offers.len(), category
+            offers.len(),
+            category
         );
         Ok(offers)
     }

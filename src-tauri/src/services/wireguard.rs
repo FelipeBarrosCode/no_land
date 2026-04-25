@@ -33,7 +33,11 @@ const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 
 impl WireGuardService {
-    async fn wait_for_dpkg_lock_with_message(&self, remote: &RemoteExec, max_wait_secs: u64) -> AppResult<bool> {
+    async fn wait_for_dpkg_lock_with_message(
+        &self,
+        remote: &RemoteExec,
+        max_wait_secs: u64,
+    ) -> AppResult<bool> {
         // Option C: Surgical approach
         // 1. Quick check first
         // 2. If locked, aggressive kill
@@ -178,11 +182,9 @@ exit 0"#
 
         let remote_write_config = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&config_script, Duration::from_secs(60))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || remote.ssh(&config_script, Duration::from_secs(60)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
         if remote_write_config.status_code != 0 {
@@ -197,11 +199,13 @@ exit 0"#
                 "Missing WireGuard packages on remote, attempting install: {}",
                 packages_needed.join(", ")
             );
-            self.install_wireguard_packages(remote, &packages_needed).await?;
+            self.install_wireguard_packages(remote, &packages_needed)
+                .await?;
         }
 
         // Set up firewall rules only after ufw is guaranteed to be installed
-        self.setup_firewall_rules(remote, &primary_interface).await?;
+        self.setup_firewall_rules(remote, &primary_interface)
+            .await?;
 
         let bring_up = {
             let remote = remote.clone();
@@ -225,7 +229,8 @@ exit 0"#
             )));
         }
 
-        self.setup_wireguard_routing(remote, &primary_interface).await?;
+        self.setup_wireguard_routing(remote, &primary_interface)
+            .await?;
 
         self.apply_network_tuning(remote, &primary_interface)
             .await?;
@@ -265,12 +270,10 @@ exit 0"#
                 "Package check returned {}, assuming all packages need installation",
                 check.status_code
             );
-            return Ok(
-                REQUIRED_REMOTE_WIREGUARD_PACKAGES
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect(),
-            );
+            return Ok(REQUIRED_REMOTE_WIREGUARD_PACKAGES
+                .iter()
+                .map(|s| s.to_string())
+                .collect());
         }
 
         let installed: std::collections::HashSet<_> = check
@@ -318,7 +321,10 @@ exit 0"#
                 disable_auto_upgrades.stderr.trim()
             );
         } else {
-            info!("Auto-upgrades disabled: {}", disable_auto_upgrades.stdout.trim());
+            info!(
+                "Auto-upgrades disabled: {}",
+                disable_auto_upgrades.stdout.trim()
+            );
         }
 
         // wait_for_dpkg_lock_with_message handles all cleanup internally (Option C)
@@ -328,7 +334,8 @@ exit 0"#
                 "Package manager is locked by another process (likely unattended-upgrades). \
                 Waiting timed out after 60 seconds. Please try again in a few minutes when \
                 system updates have finished. Alternatively, you can SSH into the instance and \
-                run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a".to_string(),
+                run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
+                    .to_string(),
             ));
         }
 
@@ -361,7 +368,10 @@ exit 0"#
         let install = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh(&install_command, Duration::from_secs(APT_INSTALL_TIMEOUT_SECS))
+                remote.ssh(
+                    &install_command,
+                    Duration::from_secs(APT_INSTALL_TIMEOUT_SECS),
+                )
             })
             .await
             .map_err(|error| AppError::Command(format!("join failure: {error}")))??
@@ -645,11 +655,7 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         };
 
         if route_get.status_code == 0 {
-            if let Some(iface) = route_get
-                .stdout
-                .lines()
-                .find_map(parse_default_route_dev)
-            {
+            if let Some(iface) = route_get.stdout.lines().find_map(parse_default_route_dev) {
                 if !iface.is_empty() {
                     return Ok(iface);
                 }
@@ -849,7 +855,9 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         .arg("brew install wireguard-tools")
         .output()
         .map_err(|error| {
-            AppError::Command(format!("Failed to run Homebrew install for wireguard-tools: {error}"))
+            AppError::Command(format!(
+                "Failed to run Homebrew install for wireguard-tools: {error}"
+            ))
         })?;
 
     if !install.status.success() {
@@ -881,7 +889,9 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         .args(["apt-get", "install", "-y", "wireguard", "wireguard-tools"])
         .output()
         .map_err(|error| {
-            AppError::Command(format!("Failed to run apt install for WireGuard tools: {error}"))
+            AppError::Command(format!(
+                "Failed to run apt install for WireGuard tools: {error}"
+            ))
         })?;
 
     if !install.status.success() {
@@ -1045,8 +1055,7 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
 
     if !copy.status.success() {
         return Err(AppError::Command(
-            "Failed to copy WireGuard config with sudo. Approve sudo prompt and retry."
-                .to_string(),
+            "Failed to copy WireGuard config with sudo. Approve sudo prompt and retry.".to_string(),
         ));
     }
 
