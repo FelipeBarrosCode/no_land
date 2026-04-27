@@ -401,6 +401,8 @@ pub struct ProvisionedServerSteps {
     pub moonlight_configured: bool,
     pub awaiting_pair_pin: bool,
     pub pairing_completed: bool,
+    #[serde(default)]
+    pub post_provision_completed: bool,
 }
 
 impl ProvisionedServerState {
@@ -508,6 +510,8 @@ pub struct SharedStorageSettings {
     pub bucket_name: String,
     pub remote_name: String,
     pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password: Option<String>,
 }
 
 impl Default for SharedStorageSettings {
@@ -519,6 +523,7 @@ impl Default for SharedStorageSettings {
             bucket_name: "noland".to_string(),
             remote_name: "b2".to_string(),
             destination_prefix: "vm-backup".to_string(),
+            crypt_password: None,
         }
     }
 }
@@ -532,6 +537,8 @@ pub struct SharedStorageSettingsUpdate {
     pub bucket_name: String,
     pub remote_name: String,
     pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +549,8 @@ pub struct SharedStorageSettingsResponse {
     pub bucket_name: String,
     pub remote_name: String,
     pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password_set: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,6 +9,7 @@ pub mod moonlight;
 pub mod nvidia_headless;
 pub mod offer_selector;
 pub mod orchestration;
+pub mod post_provision;
 pub mod remote_exec;
 pub mod shared_storage;
 pub mod ssh_keys;

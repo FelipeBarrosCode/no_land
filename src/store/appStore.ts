@@ -476,6 +476,21 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ busy: true, error: null });
     try {
       const status = await triggerInstanceBackup();
+
+      // Refresh bundle index immediately so restore UI reflects selectable bundles
+      // from the latest backup without requiring a manual "Generate Index" action.
+      const currentState = get().appState;
+      const activeInstanceId = currentState?.instance.instanceId;
+      if (activeInstanceId) {
+        try {
+          const index = await getInstanceRestoreBundles(activeInstanceId);
+          set({ backupStatus: status, bundleIndex: index, busy: false });
+          return;
+        } catch {
+          // Backup succeeded even if index retrieval fails; keep success status.
+        }
+      }
+
       set({ backupStatus: status, busy: false });
     } catch (error) {
       set({ busy: false, error: mapError(error) });

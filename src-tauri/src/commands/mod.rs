@@ -962,8 +962,8 @@ fn sanitize_ssh_username(value: &str) -> String {
         .to_string()
 }
 
-fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec, AppError> {
-    let state = context.state.blocking_read().clone();
+async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec, AppError> {
+    let state = context.state.read().await.clone();
     let private_key_path = state.ssh.private_key_path.clone();
     if private_key_path.trim().is_empty() {
         return Err(AppError::InvalidInput(
@@ -1010,7 +1010,7 @@ pub async fn save_shared_storage_settings(
 pub async fn test_shared_storage_config(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     SharedStorageManager::test_configuration(context.inner(), &remote, &target_user).await?;
     Ok("Backblaze B2 configuration is valid".to_string())
@@ -1020,7 +1020,7 @@ pub async fn test_shared_storage_config(
 pub async fn trigger_instance_backup(
     context: State<'_, AppContext>,
 ) -> Result<BackupStatusResponse, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
@@ -1051,7 +1051,7 @@ pub async fn get_instance_backup_status(
 pub async fn setup_instance_backup_schedule(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
@@ -1067,7 +1067,7 @@ pub async fn setup_instance_backup_schedule(
 pub async fn remove_instance_backup_schedule(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     SharedStorageManager::remove_scheduled_backup(&remote, &target_user).await?;
     Ok("Backup schedule removed".to_string())
@@ -1132,7 +1132,7 @@ pub async fn destroy_instance(
 pub async fn generate_bundle_index(
     context: State<'_, AppContext>,
 ) -> Result<(), FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
@@ -1150,7 +1150,7 @@ pub async fn get_instance_restore_bundles(
     context: State<'_, AppContext>,
     instance_id: u64,
 ) -> Result<BundleIndex, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     BundleRestoreService::list_bundles(context.inner(), &remote, instance_id, &target_user)
         .await
@@ -1163,7 +1163,7 @@ pub async fn dry_run_restore(
     instance_id: u64,
     payload: RestoreRequest,
 ) -> Result<RestoreDryRunResult, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     BundleRestoreService::dry_run_restore(context.inner(), &remote, instance_id, &target_user, payload)
         .await
@@ -1176,7 +1176,7 @@ pub async fn restore_bundle(
     instance_id: u64,
     payload: RestoreRequest,
 ) -> Result<RestoreJob, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner())?;
+    let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     BundleRestoreService::restore_bundle(context.inner(), &remote, instance_id, &target_user, payload)
         .await

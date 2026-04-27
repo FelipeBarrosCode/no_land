@@ -553,12 +553,12 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
 
     fn render_server_config(&self, server_private: &str, client_public: &str) -> String {
         format!(
-            "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\nPersistentKeepalive = 25\n",
+            "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\n",
             self.defaults.server_tunnel_ip,
             self.defaults.listen_port,
             server_private,
             client_public,
-            self.defaults.client_tunnel_ip
+            self.defaults.client_tunnel_ip,
         )
     }
 
@@ -601,13 +601,13 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         allowed_ips: &str,
     ) -> String {
         format!(
-            "[Interface]\nAddress = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = 25\n",
+            "[Interface]\nAddress = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\n",
             self.defaults.client_tunnel_ip,
             client_private,
             server_public,
             endpoint_host,
             listen_port,
-            allowed_ips
+            allowed_ips,
         )
     }
 
@@ -750,11 +750,10 @@ tc qdisc show dev "$EGRESS_IF"
         primary_interface: &str,
     ) -> AppResult<()> {
         let iface = self.defaults.server_interface_name.clone();
-        let mtu = self.defaults.tunnel_mtu;
         let nic = primary_interface.to_string();
 
         let command = format!(
-            "sudo tc qdisc replace dev {nic} root fq_codel && (sudo ethtool -C {nic} rx-usecs 0 tx-usecs 0 || true) && sudo ip link set dev {iface} mtu {mtu} && sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{nic}.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{iface}.rp_filter=0 >/dev/null && (sudo systemctl stop tailscaled 2>/dev/null || true)"
+            "sudo tc qdisc replace dev {nic} root fq_codel && (sudo ethtool -C {nic} rx-usecs 0 tx-usecs 0 || true) && sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{nic}.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{iface}.rp_filter=0 >/dev/null && (sudo systemctl stop tailscaled 2>/dev/null || true)"
         );
 
         let output = {

@@ -1,0 +1,14 @@
+[Unit]
+Description=Noland Cloud Mic RTP Sender
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=%h/.config/noland-mic/config.env
+ExecStart=%h/.local/share/noland-mic/scripts/start-sender.sh
+ExecStop=%h/.local/share/noland-mic/scripts/stop-sender.sh
+
+[Install]
+WantedBy=default.target

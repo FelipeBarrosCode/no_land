@@ -1,6 +1,0 @@
-/Users/felipebarros/Documents/CodingProjects/noland/vm-cloud-mic-agent/target/debug/deps/lazy_static-2b0f1272c9be9025.d: /Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/lib.rs /Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/inline_lazy.rs
-
-/Users/felipebarros/Documents/CodingProjects/noland/vm-cloud-mic-agent/target/debug/deps/liblazy_static-2b0f1272c9be9025.rmeta: /Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/lib.rs /Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/inline_lazy.rs
-
-/Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/lib.rs:
-/Users/felipebarros/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lazy_static-1.5.0/src/inline_lazy.rs:

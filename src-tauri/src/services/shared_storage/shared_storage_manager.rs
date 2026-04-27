@@ -10,6 +10,8 @@ use crate::services::{
     remote_exec::RemoteExec,
 };
 
+use super::bundle_indexer::BundleIndexer;
+
 /// In-memory tracking of running backups per instance to prevent overlap.
 static RUNNING_BACKUPS: std::sync::OnceLock<RwLock<HashMap<u64, BackupJobInfo>>> =
     std::sync::OnceLock::new();
@@ -55,6 +57,12 @@ impl SharedStorageManager {
         } else {
             payload.destination_prefix
         };
+        // Only update crypt_password if a new one is provided (non-empty)
+        if let Some(ref pwd) = payload.crypt_password {
+            if !pwd.trim().is_empty() {
+                settings.crypt_password = Some(pwd.clone());
+            }
+        }
 
         context
             .update_state(|state| {
@@ -76,6 +84,7 @@ impl SharedStorageManager {
             bucket_name: s.bucket_name.clone(),
             remote_name: s.remote_name.clone(),
             destination_prefix: s.destination_prefix.clone(),
+            crypt_password_set: s.crypt_password.as_deref().map(|p| !p.is_empty()).unwrap_or(false),
         })
     }
 
@@ -102,10 +111,11 @@ impl SharedStorageManager {
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         // Test with a lightweight list
+        let effective_remote = Self::effective_remote_name(settings);
         let list_cmd = format!(
             "sudo -u {user} rclone ls {remote}:{bucket} --max-depth 1 2>&1 | head -5",
             user = target_user,
-            remote = shell_escape(&settings.remote_name),
+            remote = shell_escape(&effective_remote),
             bucket = shell_escape(&settings.bucket_name),
         );
 
@@ -205,6 +215,23 @@ impl SharedStorageManager {
         let finished_at = chrono::Local::now().to_rfc3339();
         match result {
             Ok(()) => {
+                // Keep restore choices fresh in UI after each successful backup.
+                if let Err(error) = BundleIndexer::generate_and_upload(
+                    context,
+                    remote,
+                    instance_id,
+                    target_user,
+                )
+                .await
+                {
+                    warn!(
+                        instance_id = instance_id,
+                        trigger = trigger,
+                        error = %error,
+                        "Backup succeeded but bundle indexing failed"
+                    );
+                }
+
                 context
                     .update_state(|state| {
                         state.shared_storage.last_backup_finished_at = Some(finished_at);
@@ -256,14 +283,15 @@ impl SharedStorageManager {
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         let filter_path = format!("/home/{}/rules.txt", target_user);
+        let effective_remote = Self::effective_remote_name(settings);
         let dest = format!(
             "{}:{}/{}",
-            settings.remote_name, settings.bucket_name, settings.destination_prefix
+            effective_remote, settings.bucket_name, settings.destination_prefix
         );
 
         let progress_flag = if trigger == "manual" { " --progress" } else { "" };
         let cmd = format!(
-            "sudo -u {user} rclone sync / {dest} --filter-from {filter} --checksum{progress} 2>&1",
+            "sudo -u {user} rclone copy / {dest} --filter-from {filter} --checksum{progress} 2>&1",
             user = target_user,
             dest = shell_escape(&dest),
             filter = shell_escape(&filter_path),
@@ -370,13 +398,14 @@ impl SharedStorageManager {
     }
 
     /// Configure the rclone remote for Backblaze B2.
+    /// Writes config directly to file to avoid exposing secrets in CLI args / process lists.
     async fn configure_rclone_remote(
         remote: &RemoteExec,
         target_user: &str,
         settings: &crate::models::app_state::SharedStorageSettings,
     ) -> AppResult<()> {
         let rclone_conf_dir = format!("/home/{}/.config/rclone", target_user);
-        let _rclone_conf_path = format!("{}/rclone.conf", rclone_conf_dir);
+        let rclone_conf_path = format!("{}/rclone.conf", rclone_conf_dir);
 
         // Ensure config directory exists
         let mkdir_cmd = format!(
@@ -392,18 +421,27 @@ impl SharedStorageManager {
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
-        // Write rclone config using rclone config create
-        let config_cmd = format!(
-            "sudo -u {user} rclone config create {remote_name} b2 account {account} key {key} 2>&1",
+        // Build rclone config file content directly (no secrets in process list)
+        let config_content = format!(
+            "[{name}]\ntype = b2\naccount = {account}\nkey = {key}\n\n[{crypt_name}]\ntype = crypt\nremote = {name}:{bucket}\nfilename_encryption = off\ndirectory_name_encryption = false\npassword = {crypt_pass}\n",
+            name = settings.remote_name,
+            account = settings.backblaze_key_id,
+            key = settings.backblaze_application_key,
+            crypt_name = crypt_remote_name(&settings.remote_name),
+            bucket = settings.bucket_name,
+            crypt_pass = settings.crypt_password.as_deref().unwrap_or(""),
+        );
+
+        let write_cmd = format!(
+            "sudo -u {user} bash -lc 'cat > {path} <<\"RCLONE_EOF\"\n{content}\nRCLONE_EOF\nchmod 600 {path}'",
             user = target_user,
-            remote_name = shell_escape(&settings.remote_name),
-            account = shell_escape(&settings.backblaze_key_id),
-            key = shell_escape(&settings.backblaze_application_key),
+            path = shell_escape(&rclone_conf_path),
+            content = config_content,
         );
 
         let output = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&config_cmd, Duration::from_secs(30)))
+            tokio::task::spawn_blocking(move || remote.ssh(&write_cmd, Duration::from_secs(30)))
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
@@ -411,13 +449,23 @@ impl SharedStorageManager {
         if output.status_code != 0 {
             let redacted = redact_secrets(&output.stdout, settings);
             return Err(AppError::Provisioning(format!(
-                "Failed to configure rclone remote: {}",
+                "Failed to write rclone config: {}",
                 redacted.trim()
             )));
         }
 
-        info!("rclone remote '{}' configured", settings.remote_name);
+        info!("rclone remote '{}' configured (secrets written directly to config file)", settings.remote_name);
         Ok(())
+    }
+
+    /// Determine the effective remote name for backups.
+    /// If crypt password is set, uses the crypt overlay; otherwise uses plain B2.
+    fn effective_remote_name(settings: &crate::models::app_state::SharedStorageSettings) -> String {
+        if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+            crypt_remote_name(&settings.remote_name)
+        } else {
+            settings.remote_name.clone()
+        }
     }
 
     /// Set up the hourly backup schedule via cron.
@@ -442,14 +490,15 @@ impl SharedStorageManager {
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         let filter_path = format!("/home/{}/rules.txt", target_user);
+        let effective_remote = Self::effective_remote_name(settings);
         let dest = format!(
             "{}:{}/{}",
-            settings.remote_name, settings.bucket_name, settings.destination_prefix
+            effective_remote, settings.bucket_name, settings.destination_prefix
         );
 
         // Create cron entry for the user
         let cron_cmd = format!(
-            "0 * * * * rclone sync / {dest} --filter-from {filter} --checksum >> /tmp/noland-backup.log 2>&1",
+            "0 * * * * rclone copy / {dest} --filter-from {filter} --checksum >> /tmp/noland-backup.log 2>&1",
             dest = shell_escape(&dest),
             filter = shell_escape(&filter_path),
         );
@@ -553,6 +602,11 @@ fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
 }
 
+/// Generate the crypt remote overlay name from the base remote name.
+fn crypt_remote_name(base: &str) -> String {
+    format!("{}-crypt", base)
+}
+
 /// Redact secrets from a string before logging.
 fn redact_secrets(input: &str, settings: &crate::models::app_state::SharedStorageSettings) -> String {
     let mut result = input.to_string();
@@ -561,6 +615,11 @@ fn redact_secrets(input: &str, settings: &crate::models::app_state::SharedStorag
     }
     if !settings.backblaze_key_id.is_empty() {
         result = result.replace(&settings.backblaze_key_id, "***REDACTED***");
+    }
+    if let Some(ref pwd) = settings.crypt_password {
+        if !pwd.is_empty() {
+            result = result.replace(pwd, "***REDACTED***");
+        }
     }
     result
 }

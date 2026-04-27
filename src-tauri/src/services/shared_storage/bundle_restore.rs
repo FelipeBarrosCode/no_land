@@ -305,9 +305,14 @@ impl BundleRestoreService {
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
 
+        let effective_remote = if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+            format!("{}-crypt", settings.remote_name)
+        } else {
+            settings.remote_name.clone()
+        };
         let remote_root = format!(
             "{}:{}/{}",
-            settings.remote_name, settings.bucket_name, settings.destination_prefix
+            effective_remote, settings.bucket_name, settings.destination_prefix
         );
 
         let parent_dir = std::path::Path::new(&item.target)
@@ -382,9 +387,14 @@ impl BundleRestoreService {
     ) -> AppResult<u32> {
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
+        let effective_remote = if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+            format!("{}-crypt", settings.remote_name)
+        } else {
+            settings.remote_name.clone()
+        };
         let remote_root = format!(
             "{}:{}/{}",
-            settings.remote_name, settings.bucket_name, settings.destination_prefix
+            effective_remote, settings.bucket_name, settings.destination_prefix
         );
 
         let mut total = 0u32;

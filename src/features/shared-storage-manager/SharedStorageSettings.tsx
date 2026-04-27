@@ -26,6 +26,7 @@ export function SharedStorageSettings({
   const [bucketName, setBucketName] = useState("noland");
   const [remoteName, setRemoteName] = useState("b2");
   const [destinationPrefix, setDestinationPrefix] = useState("vm-backup");
+  const [cryptPassword, setCryptPassword] = useState("");
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testError, setTestError] = useState<string | null>(null);
 
@@ -48,9 +49,11 @@ export function SharedStorageSettings({
       backblazeApplicationKey: appKey.trim(),
       bucketName: bucketName.trim() || "noland",
       remoteName: remoteName.trim() || "b2",
-      destinationPrefix: destinationPrefix.trim() || "vm-backup"
+      destinationPrefix: destinationPrefix.trim() || "vm-backup",
+      cryptPassword: cryptPassword.trim() || undefined
     });
     setAppKey("");
+    setCryptPassword("");
   };
 
   const handleTest = async () => {
@@ -129,6 +132,20 @@ export function SharedStorageSettings({
             placeholder="vm-backup"
             disabled={busy}
           />
+
+          <InputField
+            label="Encryption Password (optional)"
+            value={cryptPassword}
+            onChange={(event) => setCryptPassword(event.target.value)}
+            placeholder="Leave empty for no encryption"
+            type="password"
+            disabled={busy}
+          />
+          {settings?.cryptPasswordSet && !cryptPassword && (
+            <p className="text-xs text-neon-cyan">
+              Encryption is already configured. Enter a new password to change it, or leave empty to keep existing.
+            </p>
+          )}
         </div>
 
         {testResult && (

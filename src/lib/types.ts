@@ -291,6 +291,7 @@ export interface SharedStorageSettingsResponse {
   bucketName: string;
   remoteName: string;
   destinationPrefix: string;
+  cryptPasswordSet: boolean;
 }
 
 export interface SharedStorageSettingsUpdate {
@@ -300,6 +301,7 @@ export interface SharedStorageSettingsUpdate {
   bucketName: string;
   remoteName: string;
   destinationPrefix: string;
+  cryptPassword?: string;
 }
 
 export interface BackupStatusResponse {

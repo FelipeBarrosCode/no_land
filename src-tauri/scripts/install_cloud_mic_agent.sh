@@ -9,13 +9,21 @@ AGENT_VERSION="${2:-0.1.0}"
 INSTALL_DIR="/home/$USER_NAME/.local/bin"
 SERVICE_DIR="/home/$USER_NAME/.config/systemd/user"
 
+uid="$(id -u "$USER_NAME")"
+runtime_dir="/run/user/${uid}"
+bus_path="${runtime_dir}/bus"
+
+run_user_systemctl() {
+    sudo -u "$USER_NAME" env \
+        XDG_RUNTIME_DIR="$runtime_dir" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_path}" \
+        systemctl --user "$@"
+}
+
 # Detect WireGuard IP
 WG_IP=""
-if command -v wg >/dev/null 2>&1; then
-    WG_IP=$(wg show wg0 listen-port 2>/dev/null | head -1 || true)
-    if [ -z "$WG_IP" ]; then
-        WG_IP=$(ip -4 addr show wg0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || true)
-    fi
+if command -v ip >/dev/null 2>&1; then
+    WG_IP=$(ip -4 addr show wg0 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1 || true)
 fi
 
 if [ -z "$WG_IP" ]; then
@@ -29,6 +37,7 @@ echo "WireGuard IP detected: $WG_IP"
 # Ensure directories exist
 mkdir -p "$INSTALL_DIR"
 mkdir -p "$SERVICE_DIR"
+chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.local" "/home/$USER_NAME/.config"
 
 # Copy binary (assumes binary is available at /tmp/cloud-mic-agent)
 if [ -f "/tmp/cloud-mic-agent" ]; then
@@ -64,18 +73,23 @@ EOF
 echo "Systemd user service created"
 
 # Enable and start service for the user
-systemctl --user daemon-reload
-systemctl --user enable cloud-mic-agent.service || true
-systemctl --user start cloud-mic-agent.service || true
+if [[ -d "$runtime_dir" && -S "$bus_path" ]]; then
+    run_user_systemctl daemon-reload
+    run_user_systemctl enable cloud-mic-agent.service || true
+    run_user_systemctl restart cloud-mic-agent.service || true
+else
+    echo "Warning: user systemd session bus unavailable for $USER_NAME"
+    echo "Expected: XDG_RUNTIME_DIR=$runtime_dir and DBUS socket $bus_path"
+fi
 
 # Verify
 sleep 1
-if systemctl --user is-active cloud-mic-agent.service >/dev/null 2>&1; then
+if [[ -d "$runtime_dir" && -S "$bus_path" ]] && run_user_systemctl is-active cloud-mic-agent.service >/dev/null 2>&1; then
     echo "Cloud Mic Agent is running"
     curl -sf "http://${WG_IP}:34779/health" && echo "Health check: OK" || echo "Health check: FAILED"
 else
     echo "Cloud Mic Agent failed to start. Check logs with:"
-    echo "  systemctl --user status cloud-mic-agent.service"
+    echo "  sudo -u $USER_NAME XDG_RUNTIME_DIR=$runtime_dir DBUS_SESSION_BUS_ADDRESS=unix:path=$bus_path systemctl --user status cloud-mic-agent.service"
 fi
 
 echo ""
