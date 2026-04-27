@@ -33,32 +33,6 @@ function RootRoute() {
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
-  const bundleIndex = useAppStore((state) => state.bundleIndex);
-  const restoreJob = useAppStore((state) => state.restoreJob);
-  const generateBundleIndex = useAppStore((state) => state.generateBundleIndex);
-  const loadRestoreBundles = useAppStore((state) => state.loadRestoreBundles);
-  const runDryRunRestore = useAppStore((state) => state.runDryRunRestore);
-  const runRestoreBundle = useAppStore((state) => state.runRestoreBundle);
-  const pollRestoreJob = useAppStore((state) => state.pollRestoreJob);
-
-  const dryRunRestore = async (instanceId: number, bundleId: string, folderIds: string[], mode: string) => {
-    return runDryRunRestore(instanceId, { bundleId, folderBundleIds: folderIds, mode });
-  };
-
-  const restoreBundle = async (instanceId: number, bundleId: string, folderIds: string[], mode: string) => {
-    return runRestoreBundle(instanceId, { bundleId, folderBundleIds: folderIds, mode });
-  };
-
-  const micConfig = useAppStore((state) => state.micConfig);
-  const micStatus = useAppStore((state) => state.micStatus);
-  const micSession = useAppStore((state) => state.micSession);
-  const loadMicConfig = useAppStore((state) => state.loadMicConfig);
-  const loadMicStatus = useAppStore((state) => state.loadMicStatus);
-  const enableMic = useAppStore((state) => state.enableMic);
-  const disableMic = useAppStore((state) => state.disableMic);
-  const reconnectMic = useAppStore((state) => state.reconnectMic);
-  const recreateMicDevice = useAppStore((state) => state.recreateMicDevice);
-  const updateMicSettings = useAppStore((state) => state.updateMicSettings);
 
   if (!appState) {
     return null;
@@ -93,23 +67,6 @@ function RootRoute() {
       onReconnectWireguard={reconnectWireguard}
       onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
-      bundleIndex={bundleIndex}
-      restoreJob={restoreJob}
-      onGenerateBundleIndex={generateBundleIndex}
-      onLoadRestoreBundles={loadRestoreBundles}
-      onDryRunRestore={dryRunRestore}
-      onRestoreBundle={restoreBundle}
-      onPollRestoreJob={pollRestoreJob}
-      micConfig={micConfig}
-      micStatus={micStatus}
-      micSession={micSession}
-      onLoadMicConfig={loadMicConfig}
-      onLoadMicStatus={loadMicStatus}
-      onEnableMic={enableMic}
-      onDisableMic={disableMic}
-      onReconnectMic={reconnectMic}
-      onRecreateMicDevice={recreateMicDevice}
-      onUpdateMicSettings={updateMicSettings}
     />
   );
 }

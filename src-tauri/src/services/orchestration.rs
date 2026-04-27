@@ -26,6 +26,7 @@ use super::{
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
     remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
@@ -456,6 +457,22 @@ async fn run_post_provision_step(
     .await;
 
     let output = PostProvisionService::run(remote, &context.config.audio_target_user).await?;
+
+    if let Err(error) = SharedStorageManager::auto_restore_instance(
+        context,
+        remote,
+        instance_id,
+        &context.config.audio_target_user,
+    )
+    .await
+    {
+        warn!(
+            instance_id = instance_id,
+            error = %error,
+            "Auto-restore after post-provision failed (non-blocking)"
+        );
+    }
+
     let snapshot = context.state.read().await.clone();
     mark_server_step_completed(
         context,

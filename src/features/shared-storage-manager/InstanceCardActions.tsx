@@ -9,8 +9,6 @@ interface Props {
   instanceActionRunning: boolean;
   onPlay: (instanceId: number) => void;
   onSettings: (instanceId: number) => void;
-  onRestore: (instanceId: number) => void;
-  onMic: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
   onPause: (instanceId: number) => void;
   onDestroy: (instanceId: number) => void;
@@ -22,8 +20,6 @@ export function InstanceCardActions({
   instanceActionRunning,
   onPlay,
   onSettings,
-  onRestore,
-  onMic,
   onReconnect,
   onPause,
   onDestroy
@@ -64,24 +60,7 @@ export function InstanceCardActions({
         </Button>
       </div>
 
-      <div className="grid grid-cols-5 gap-2">
-        <Button
-          variant="ghost"
-          className="w-full text-xs"
-          disabled={actionDisabled}
-          onClick={() => onMic(instance.instanceId)}
-        >
-          Mic
-        </Button>
-
-        <Button
-          variant="ghost"
-          className="w-full text-xs"
-          disabled={actionDisabled}
-          onClick={() => onRestore(instance.instanceId)}
-        >
-          Restore
-        </Button>
+      <div className="grid grid-cols-3 gap-2">
 
         <Button
           variant="ghost"

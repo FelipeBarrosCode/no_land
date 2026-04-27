@@ -558,6 +558,183 @@ impl SharedStorageManager {
         Ok(())
     }
 
+    /// Auto-restore backup contents from B2 into the VM after post-provision.
+    ///
+    /// Non-blocking by design from orchestration's perspective: callers can log
+    /// and continue if this returns an error. This method itself is best-effort
+    /// and skips silently when storage is not configured or no remote data exists.
+    pub async fn auto_restore_instance(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+    ) -> AppResult<()> {
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        if !settings.enabled {
+            info!(instance_id = instance_id, "Shared storage disabled; skipping auto-restore");
+            return Ok(());
+        }
+
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
+            info!(
+                instance_id = instance_id,
+                "Backblaze credentials missing; skipping auto-restore"
+            );
+            return Ok(());
+        }
+
+        Self::ensure_rclone_installed(remote).await?;
+        Self::write_filter_rules(remote, target_user).await?;
+        Self::configure_rclone_remote(remote, target_user, settings).await?;
+
+        let effective_remote = Self::effective_remote_name(settings);
+        let source = format!(
+            "{}:{}/{}",
+            effective_remote, settings.bucket_name, settings.destination_prefix
+        );
+        let filter_path = format!("/home/{}/rules.txt", target_user);
+
+        // Check if backup content exists; skip silently when empty.
+        let check_cmd = format!(
+            "sudo -u {user} rclone lsf {src} --max-depth 1 2>&1",
+            user = target_user,
+            src = shell_escape(&source),
+        );
+
+        let check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&check_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        if check.status_code != 0 {
+            warn!(
+                instance_id = instance_id,
+                "Auto-restore source check failed; skipping. stdout={} stderr={}",
+                check.stdout.trim(),
+                check.stderr.trim()
+            );
+            return Ok(());
+        }
+
+        if check.stdout.trim().is_empty() {
+            info!(instance_id = instance_id, "No prior backup contents found; skipping auto-restore");
+            return Ok(());
+        }
+
+        let restore_cmd = format!(
+            "sudo -u {user} rclone copy {src} / --filter-from {filter} --checksum --update 2>&1",
+            user = target_user,
+            src = shell_escape(&source),
+            filter = shell_escape(&filter_path),
+        );
+
+        let restore = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&restore_cmd, Duration::from_secs(3600)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        if restore.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Auto-restore failed: {}",
+                redact_secrets(&restore.stdout, settings).trim()
+            )));
+        }
+
+        info!(instance_id = instance_id, "Auto-restore completed successfully");
+        Ok(())
+    }
+
+    /// Sync current VM state to B2 in destructive mode for teardown.
+    ///
+    /// This is used before destroy so files deleted on VM are deleted in B2.
+    pub async fn sync_cleanup_on_destroy(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+    ) -> AppResult<()> {
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        if !settings.enabled {
+            info!(instance_id = instance_id, "Shared storage disabled; skipping destroy sync cleanup");
+            return Ok(());
+        }
+
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
+            info!(
+                instance_id = instance_id,
+                "Backblaze credentials missing; skipping destroy sync cleanup"
+            );
+            return Ok(());
+        }
+
+        Self::ensure_rclone_installed(remote).await?;
+        Self::write_filter_rules(remote, target_user).await?;
+        Self::configure_rclone_remote(remote, target_user, settings).await?;
+
+        let effective_remote = Self::effective_remote_name(settings);
+        let dest = format!(
+            "{}:{}/{}",
+            effective_remote, settings.bucket_name, settings.destination_prefix
+        );
+        let filter_path = format!("/home/{}/rules.txt", target_user);
+
+        let sync_cmd = format!(
+            "sudo -u {user} rclone sync / {dest} --filter-from {filter} --checksum --delete-excluded 2>&1",
+            user = target_user,
+            dest = shell_escape(&dest),
+            filter = shell_escape(&filter_path),
+        );
+
+        let sync_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&sync_cmd, Duration::from_secs(3600)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        if sync_output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Destroy sync cleanup failed (exit {}): {}",
+                sync_output.status_code,
+                redact_secrets(&sync_output.stdout, settings).trim()
+            )));
+        }
+
+        // Post-check to ensure destination is reachable after sync.
+        let verify_cmd = format!(
+            "sudo -u {user} rclone lsf {dest} --max-depth 1 2>&1",
+            user = target_user,
+            dest = shell_escape(&dest),
+        );
+        let verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&verify_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+        if verify.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Destroy sync cleanup verification failed: {}",
+                redact_secrets(&verify.stdout, settings).trim()
+            )));
+        }
+
+        info!(instance_id = instance_id, "Destroy sync cleanup completed successfully");
+        Ok(())
+    }
+
     /// Get the backup status for the current app state.
     pub async fn get_backup_status(
         context: &AppContext,

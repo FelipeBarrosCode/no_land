@@ -169,6 +169,18 @@ impl InstanceLifecycleService {
                 api_key,
             );
 
+            // Blocking sync cleanup before destruction so deleted files are also
+            // deleted from Backblaze according to current filter rules.
+            let target_user = context.config.audio_target_user.clone();
+            let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+            SharedStorageManager::sync_cleanup_on_destroy(
+                context,
+                &remote,
+                instance_id,
+                &target_user,
+            )
+            .await?;
+
             vast.destroy_instance(instance_id).await?;
 
             // Clean up local state references to the destroyed instance
@@ -197,6 +209,7 @@ impl InstanceLifecycleService {
         let ss_enabled = state.shared_storage.settings.enabled;
         let has_credentials = !state.shared_storage.settings.backblaze_key_id.trim().is_empty()
             && !state.shared_storage.settings.backblaze_application_key.trim().is_empty();
+        let api_key = state.credentials.vast_api_key.clone();
         drop(state);
 
         if !ss_enabled || !has_credentials {
@@ -206,8 +219,19 @@ impl InstanceLifecycleService {
 
         info!(instance_id = instance_id, "Running backup before instance lifecycle action");
 
-        // Build RemoteExec from current state
-        let remote = build_remote_exec_from_context(context).await?;
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing for pre-action backup.".to_string(),
+            ));
+        }
+
+        // Build RemoteExec for the target instance (not global active instance).
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
         SharedStorageManager::trigger_manual_backup(
@@ -330,6 +354,46 @@ impl InstanceLifecycleService {
         let actions = get_lifecycle_actions().read().await;
         actions.contains_key(&instance_id)
     }
+}
+
+async fn build_remote_exec_for_instance(
+    context: &AppContext,
+    vast: &VastApiClient,
+    instance_id: u64,
+) -> AppResult<RemoteExec> {
+    let state = context.state.read().await.clone();
+    let private_key_path = state.ssh.private_key_path.clone();
+    if private_key_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "SSH private key path is empty. Run provisioning first.".to_string(),
+        ));
+    }
+
+    let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+        context.config.ssh_user.clone()
+    } else {
+        state.ssh.ssh_username.clone()
+    };
+
+    let instance = vast.get_instance(instance_id).await?;
+    let ssh_host = if instance.public_ip.trim().is_empty() {
+        instance.ssh_host.clone()
+    } else {
+        instance.public_ip.clone()
+    };
+    if ssh_host.trim().is_empty() || instance.ssh_port == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "Instance {} SSH details are unavailable.",
+            instance_id
+        )));
+    }
+
+    Ok(RemoteExec {
+        ssh_user,
+        ssh_host,
+        ssh_port: instance.ssh_port,
+        private_key_path,
+    })
 }
 
 /// Build a RemoteExec from the current app context state.
