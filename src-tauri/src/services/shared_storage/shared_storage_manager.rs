@@ -95,6 +95,11 @@ impl SharedStorageManager {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<()> {
+        info!(
+            event = "shared_storage_test_start",
+            target_user = target_user,
+            "Shared storage configuration test started"
+        );
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
 
@@ -126,14 +131,36 @@ impl SharedStorageManager {
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
+        let test_stdout = redact_secrets(&output.stdout, settings);
+        let test_stderr = redact_secrets(&output.stderr, settings);
+        info!(
+            event = "shared_storage_test_output",
+            target_user = target_user,
+            status_code = output.status_code,
+            stdout = %test_stdout.trim(),
+            stderr = %test_stderr.trim(),
+            "Shared storage test command output"
+        );
+
         if output.status_code != 0 {
             let stderr = redact_secrets(&output.stdout, settings);
+            warn!(
+                event = "shared_storage_test_failure",
+                target_user = target_user,
+                status_code = output.status_code,
+                "Shared storage configuration test failed"
+            );
             return Err(AppError::Provisioning(format!(
                 "Backblaze B2 connection test failed: {}",
                 stderr.trim()
             )));
         }
 
+        info!(
+            event = "shared_storage_test_success",
+            target_user = target_user,
+            "Shared storage configuration test succeeded"
+        );
         info!("Backblaze B2 configuration test succeeded");
         Ok(())
     }
@@ -156,6 +183,13 @@ impl SharedStorageManager {
         target_user: &str,
         trigger: &str,
     ) -> AppResult<()> {
+        info!(
+            event = "shared_storage_backup_start",
+            instance_id = instance_id,
+            target_user = target_user,
+            trigger = trigger,
+            "Shared storage backup started"
+        );
         // Concurrency guard
         {
             let running = get_running_backups().read().await;
@@ -240,7 +274,9 @@ impl SharedStorageManager {
                     })
                     .await?;
                 info!(
+                    event = "shared_storage_backup_success",
                     instance_id = instance_id,
+                    target_user = target_user,
                     trigger = trigger,
                     "Backup completed successfully"
                 );
@@ -256,7 +292,9 @@ impl SharedStorageManager {
                     })
                     .await?;
                 error!(
+                    event = "shared_storage_backup_failure",
                     instance_id = instance_id,
+                    target_user = target_user,
                     trigger = trigger,
                     error = %err_msg,
                     "Backup failed"
@@ -312,12 +350,32 @@ impl SharedStorageManager {
         };
 
         let stdout = redact_secrets(&output.stdout, settings);
+        let stderr = redact_secrets(&output.stderr, settings);
+
+        if !stdout.trim().is_empty() {
+            info!(
+                trigger = trigger,
+                "shared-storage backup stdout:\n{}",
+                stdout.trim()
+            );
+        }
+        if !stderr.trim().is_empty() {
+            warn!(
+                trigger = trigger,
+                "shared-storage backup stderr:\n{}",
+                stderr.trim()
+            );
+        }
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
                 "rclone sync failed (exit {}): {}",
                 output.status_code,
-                stdout.trim()
+                if !stderr.trim().is_empty() {
+                    stderr.trim()
+                } else {
+                    stdout.trim()
+                }
             )));
         }
 
@@ -384,6 +442,15 @@ impl SharedStorageManager {
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
+
+        info!(
+            event = "shared_storage_write_filter_rules_output",
+            target_user = target_user,
+            status_code = output.status_code,
+            stdout = %output.stdout.trim(),
+            stderr = %output.stderr.trim(),
+            "Shared storage filter-rules write command output"
+        );
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
@@ -475,6 +542,12 @@ impl SharedStorageManager {
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<()> {
+        info!(
+            event = "shared_storage_schedule_setup_start",
+            instance_id = instance_id,
+            target_user = target_user,
+            "Shared storage schedule setup started"
+        );
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
 
@@ -498,7 +571,7 @@ impl SharedStorageManager {
 
         // Create cron entry for the user
         let cron_cmd = format!(
-            "0 * * * * rclone copy / {dest} --filter-from {filter} --checksum >> /tmp/noland-backup.log 2>&1",
+            "0 * * * * rclone copy / {dest} --filter-from {filter} --checksum",
             dest = shell_escape(&dest),
             filter = shell_escape(&filter_path),
         );
@@ -516,7 +589,23 @@ impl SharedStorageManager {
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
+        info!(
+            event = "shared_storage_schedule_setup_output",
+            target_user = target_user,
+            status_code = output.status_code,
+            stdout = %output.stdout.trim(),
+            stderr = %output.stderr.trim(),
+            "Shared storage schedule setup command output"
+        );
+
         if output.status_code != 0 {
+            warn!(
+                event = "shared_storage_schedule_setup_failure",
+                instance_id = instance_id,
+                target_user = target_user,
+                status_code = output.status_code,
+                "Shared storage schedule setup failed"
+            );
             return Err(AppError::Provisioning(format!(
                 "Failed to configure cron schedule: stdout: {} | stderr: {}",
                 output.stdout.trim(),
@@ -524,7 +613,16 @@ impl SharedStorageManager {
             )));
         }
 
-        info!(instance_id = instance_id, "Hourly backup schedule configured");
+        info!(
+            event = "shared_storage_schedule_setup_success",
+            instance_id = instance_id,
+            target_user = target_user,
+            "Shared storage schedule setup succeeded"
+        );
+        info!(
+            instance_id = instance_id,
+            "Hourly backup schedule configured; output now goes to system cron handling"
+        );
         Ok(())
     }
 
@@ -533,6 +631,11 @@ impl SharedStorageManager {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<()> {
+        info!(
+            event = "shared_storage_schedule_remove_start",
+            target_user = target_user,
+            "Shared storage schedule removal started"
+        );
         let cmd = format!(
             "crontab -u {user} -l 2>/dev/null | grep -v 'noland-backup' | crontab -u {user} -",
             user = target_user,
@@ -545,13 +648,30 @@ impl SharedStorageManager {
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
+        info!(
+            event = "shared_storage_schedule_remove_output",
+            target_user = target_user,
+            status_code = output.status_code,
+            stdout = %output.stdout.trim(),
+            stderr = %output.stderr.trim(),
+            "Shared storage schedule removal command output"
+        );
+
         if output.status_code != 0 {
             warn!(
+                event = "shared_storage_schedule_remove_failure",
+                target_user = target_user,
+                status_code = output.status_code,
                 "Failed to remove cron schedule (may not exist): stdout: {} | stderr: {}",
                 output.stdout.trim(),
                 output.stderr.trim()
             );
         } else {
+            info!(
+                event = "shared_storage_schedule_remove_success",
+                target_user = target_user,
+                "Shared storage schedule removed"
+            );
             info!("Hourly backup schedule removed");
         }
 

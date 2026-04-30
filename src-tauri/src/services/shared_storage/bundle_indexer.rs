@@ -40,6 +40,14 @@ impl BundleIndexer {
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
+        info!(
+            event = "shared_storage_bundle_index_mkdir_output",
+            instance_id = instance_id,
+            status_code = mkdir_out.status_code,
+            stdout = %mkdir_out.stdout.trim(),
+            stderr = %mkdir_out.stderr.trim(),
+            "Bundle index mkdir command output"
+        );
         if mkdir_out.status_code != 0 {
             warn!("mkdir /var/lib/noland warn: {}", mkdir_out.stderr.trim());
         }
@@ -58,6 +66,14 @@ impl BundleIndexer {
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
+        info!(
+            event = "shared_storage_bundle_index_write_output",
+            instance_id = instance_id,
+            status_code = write_out.status_code,
+            stdout = %write_out.stdout.trim(),
+            stderr = %write_out.stderr.trim(),
+            "Bundle index script write command output"
+        );
         if write_out.status_code != 0 {
             return Err(AppError::Provisioning(format!(
                 "Failed to write bundle indexer script: {}",
@@ -77,6 +93,14 @@ impl BundleIndexer {
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
+        info!(
+            event = "shared_storage_bundle_index_run_output",
+            instance_id = instance_id,
+            status_code = run_out.status_code,
+            stdout = %run_out.stdout.trim(),
+            stderr = %run_out.stderr.trim(),
+            "Bundle index generation command output"
+        );
         if run_out.status_code != 0 {
             return Err(AppError::Provisioning(format!(
                 "Bundle indexer failed: {}",
@@ -106,6 +130,14 @@ impl BundleIndexer {
                     .await
                     .map_err(|e| AppError::Command(format!("join failure: {e}")))??
             };
+            info!(
+                event = "shared_storage_bundle_index_upload_output",
+                instance_id = instance_id,
+                status_code = upload_out.status_code,
+                stdout = %upload_out.stdout.trim(),
+                stderr = %upload_out.stderr.trim(),
+                "Bundle index upload command output"
+            );
             if upload_out.status_code != 0 {
                 return Err(AppError::Provisioning(format!(
                     "Bundle index upload failed: {}",

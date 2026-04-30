@@ -41,6 +41,7 @@ interface Props {
   onLoadSunshineSettings: (instanceId: number) => Promise<void>;
   onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
   onReconnectWireguard: (instanceId: number) => Promise<string | null>;
+  onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
 }
@@ -75,6 +76,7 @@ export function DashboardScreen({
   onLoadSunshineSettings,
   onSaveSunshineSettings,
   onReconnectWireguard,
+  onRebootInstanceServices,
   onPauseInstance,
   onDestroyInstance
 }: Props) {
@@ -118,6 +120,10 @@ export function DashboardScreen({
 
   async function handleReconnect(instanceId: number) {
     await onReconnectWireguard(instanceId);
+  }
+
+  async function handleReboot(instanceId: number) {
+    await onRebootInstanceServices(instanceId);
   }
 
   async function handlePause(instanceId: number) {
@@ -228,6 +234,7 @@ export function DashboardScreen({
                         onPlay={handlePlayExisting}
                         onSettings={handleOpenSettings}
                         onReconnect={handleReconnect}
+                        onReboot={handleReboot}
                         onPause={handlePause}
                         onDestroy={handleDestroy}
                       />

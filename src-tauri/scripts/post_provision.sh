@@ -15,6 +15,7 @@ BOTTLES_APP_ID="com.usebottles.bottles"
 BOTTLES_GAMES_DIR="/srv/games"
 
 GAME_COMPAT_UPDATED=0
+ENABLE_GITHUB_GAME_COMPAT="${ENABLE_GITHUB_GAME_COMPAT:-0}"
 OS_ID=""
 OS_VERSION=""
 OS_CODENAME=""
@@ -24,7 +25,22 @@ log() {
 }
 
 run_user() {
-  sudo -u "$TARGET_USER" -H bash -lc "$*"
+  runuser -u "$TARGET_USER" -- bash -lc "$*"
+}
+
+run_root() {
+  bash -lc "$*"
+}
+
+ensure_clean_wine_prefix() {
+  run_user "mkdir -p '${WINE_PREFIX}'"
+
+  if grep -q '/root' "${WINE_PREFIX}/user.reg" 2>/dev/null || grep -q '/root' "${WINE_PREFIX}/system.reg" 2>/dev/null; then
+    log "Detected /root references in Wine prefix; rebuilding ${WINE_PREFIX}"
+    run_user "rm -rf '${WINE_PREFIX}' && mkdir -p '${WINE_PREFIX}'"
+  fi
+
+  run_user "HOME='${USER_HOME}' WINEPREFIX='${WINE_PREFIX}' wineboot --init >/dev/null 2>&1 || true"
 }
 
 detect_os() {
@@ -37,7 +53,7 @@ detect_os() {
 
 install_optional_package() {
   local package_name="$1"
-  if apt-get install -y "$package_name"; then
+  if run_root "apt-get install -y '${package_name}'"; then
     return 0
   fi
 
@@ -58,9 +74,8 @@ install_first_available_package() {
 
 ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -y
-  apt-get install -y curl wget ca-certificates gnupg software-properties-common xdg-utils unzip python3 \
-    tar xz-utils cabextract p7zip-full flatpak zstd
+  run_root "DEBIAN_FRONTEND=noninteractive apt-get update -y"
+  run_root "DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget ca-certificates gnupg software-properties-common xdg-utils unzip python3 tar xz-utils cabextract p7zip-full flatpak zstd"
 
   install_first_available_package libfuse2 libfuse2t64 || true
   install_first_available_package fuse3 fuse || true
@@ -68,15 +83,15 @@ ensure_packages() {
 
 install_bottles() {
   log "Installing Bottles via Flatpak"
-  flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-  run_user "flatpak install -y flathub '${BOTTLES_APP_ID}'"
+  run_user "flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo"
+  run_user "flatpak install -y --user flathub '${BOTTLES_APP_ID}'"
 }
 
 configure_bottles_access() {
   log "Configuring Bottles filesystem access"
-  mkdir -p "${BOTTLES_GAMES_DIR}/epic" "${BOTTLES_GAMES_DIR}/ea" "${BOTTLES_GAMES_DIR}/ubisoft" "${BOTTLES_GAMES_DIR}/rockstar" "${BOTTLES_GAMES_DIR}/battlenet" "${BOTTLES_GAMES_DIR}/gog"
-  chown -R "$TARGET_USER:$TARGET_USER" "${BOTTLES_GAMES_DIR}"
-  chmod -R 775 "${BOTTLES_GAMES_DIR}"
+  run_root "mkdir -p '${BOTTLES_GAMES_DIR}/epic' '${BOTTLES_GAMES_DIR}/ea' '${BOTTLES_GAMES_DIR}/ubisoft' '${BOTTLES_GAMES_DIR}/battlenet' '${BOTTLES_GAMES_DIR}/gog'"
+  run_root "chown -R '${TARGET_USER}:${TARGET_USER}' '${BOTTLES_GAMES_DIR}'"
+  run_root "chmod -R 775 '${BOTTLES_GAMES_DIR}'"
   run_user "flatpak override --user '${BOTTLES_APP_ID}' --filesystem='${USER_HOME}/Downloads'"
   run_user "flatpak override --user '${BOTTLES_APP_ID}' --filesystem='${BOTTLES_GAMES_DIR}'"
 }
@@ -89,7 +104,6 @@ download_launcher_installers() {
   run_user "curl -fL 'https://origin-a.akamaihd.net/EA-Desktop-Client-Download/installer-releases/EAappInstaller.exe' -o '${INSTALLER_DIR}/EAappInstaller.exe'"
   run_user "curl -fL 'https://static3.cdn.ubi.com/orbit/launcher_installer/UbisoftConnectInstaller.exe' -o '${INSTALLER_DIR}/UbisoftConnectInstaller.exe'"
   run_user "curl -fL 'https://downloader.battle.net/download/getInstaller?os=win&installer=Battle.net-Setup.exe' -o '${INSTALLER_DIR}/BattleNet-Setup.exe'"
-  run_user "curl -fL 'https://gamedownloads.rockstargames.com/public/installer/Rockstar-Games-Launcher.exe' -o '${INSTALLER_DIR}/Rockstar-Games-Launcher.exe'"
   run_user "curl -fL 'https://webinstallers.gog-statics.com/download/GOG_Galaxy_2.0.exe' -o '${INSTALLER_DIR}/GOG_Galaxy_2.0.exe'"
 }
 
@@ -113,14 +127,13 @@ write_launcher_install_script() {
 #!/usr/bin/env bash
 set -euo pipefail
 
-BCLI='flatpak run --command=bottles-cli com.usebottles.bottles'
+BCLI='flatpak run --user --command=bottles-cli com.usebottles.bottles'
 DIR='\$HOME/Downloads/game-launchers'
 
 \$BCLI run -b epic -e \"\$DIR/EpicGamesLauncherInstaller.msi\"
 \$BCLI run -b ea -e \"\$DIR/EAappInstaller.exe\"
 \$BCLI run -b ubisoft -e \"\$DIR/UbisoftConnectInstaller.exe\"
 \$BCLI run -b battlenet -e \"\$DIR/BattleNet-Setup.exe\"
-\$BCLI run -b rockstar -e \"\$DIR/Rockstar-Games-Launcher.exe\"
 \$BCLI run -b gog -e \"\$DIR/GOG_Galaxy_2.0.exe\"
 EOF
 chmod +x '${USER_HOME}/run-launcher-installers.sh'"
@@ -136,7 +149,6 @@ setup_bottles_launchers() {
   create_bottle_if_missing "ea"
   create_bottle_if_missing "ubisoft"
   create_bottle_if_missing "battlenet"
-  create_bottle_if_missing "rockstar"
   create_bottle_if_missing "gog"
 
   write_launcher_install_script
@@ -147,16 +159,16 @@ install_chrome() {
   log "Installing Google Chrome"
   local deb_path="/tmp/google-chrome-stable_current_amd64.deb"
   wget -q "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -O "$deb_path"
-  dpkg -i "$deb_path" || apt-get install -f -y
+  run_root "dpkg -i '${deb_path}'" || run_root "apt-get install -f -y"
   rm -f "$deb_path"
   run_user "xdg-settings set default-web-browser google-chrome.desktop || true"
 }
 
 install_wine() {
   log "Installing latest Wine stable"
-  dpkg --add-architecture i386
-  mkdir -p /etc/apt/keyrings
-  wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key
+  run_root "dpkg --add-architecture i386"
+  run_root "mkdir -p /etc/apt/keyrings"
+  run_root "wget -qO /etc/apt/keyrings/winehq-archive.key https://dl.winehq.org/wine-builds/winehq.key"
 
   local codename
   codename="${OS_CODENAME:-}"
@@ -164,32 +176,53 @@ install_wine() {
     codename="jammy"
   fi
 
-  if wget -qO "/etc/apt/sources.list.d/winehq-${codename}.sources" "https://dl.winehq.org/wine-builds/ubuntu/dists/${codename}/winehq-${codename}.sources"; then
-    apt-get update -y
-    apt-get install -y --install-recommends winehq-stable || apt-get install -y wine-stable
+  if run_root "wget -qO '/etc/apt/sources.list.d/winehq-${codename}.sources' 'https://dl.winehq.org/wine-builds/ubuntu/dists/${codename}/winehq-${codename}.sources'"; then
+    run_root "apt-get update -y"
+    run_root "apt-get install -y --install-recommends winehq-stable" || run_root "apt-get install -y wine-stable"
   else
     log "WineHQ source unavailable for ${codename}; falling back to distro wine"
-    apt-get update -y
-    apt-get install -y wine-stable || true
+    run_root "apt-get update -y"
+    run_root "apt-get install -y wine-stable" || true
   fi
 
-  apt-get install -y winetricks || true
+  run_root "apt-get install -y winetricks" || true
 }
 
 fetch_latest_asset_url() {
   local repo="$1"
   local regex="$2"
   local api="https://api.github.com/repos/${repo}/releases/latest"
+  local payload
+  payload="$(curl --retry 3 --retry-delay 2 --retry-all-errors -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    -H 'User-Agent: noland-post-provision' \
+    "$api" 2>/tmp/noland-github-api.err || true)"
 
-  curl -fsSL "$api" | python3 -c 'import json,re,sys
-regex=re.compile(sys.argv[1])
-d=json.load(sys.stdin)
-for a in d.get("assets",[]):
-    n=a.get("name","")
-    if regex.search(n):
-        print(a.get("browser_download_url",""))
-        break
-' "$regex"
+  if [[ -z "$payload" ]]; then
+    log "GitHub API request failed for ${repo}"
+    if [[ -s /tmp/noland-github-api.err ]]; then
+      log "GitHub API error: $(tr '\n' ' ' < /tmp/noland-github-api.err)"
+    fi
+    return 1
+  fi
+
+  printf '%s' "$payload" | awk -v pattern="$regex" '
+    /"name"[[:space:]]*:/ {
+      name=$0
+      sub(/^.*"name"[[:space:]]*:[[:space:]]*"/, "", name)
+      sub(/".*/, "", name)
+    }
+    /"browser_download_url"[[:space:]]*:/ {
+      url=$0
+      sub(/^.*"browser_download_url"[[:space:]]*:[[:space:]]*"/, "", url)
+      sub(/".*/, "", url)
+      if (name ~ pattern) {
+        print url
+        exit
+      }
+    }
+  '
 }
 
 extract_name_from_url() {
@@ -316,17 +349,23 @@ install_vkd3d_proton() {
 
 install_winetricks_runtime() {
   log "Installing compatibility runtimes into shared prefix"
-  run_user "mkdir -p '${WINE_PREFIX}'"
+  ensure_clean_wine_prefix
   run_user "WINEPREFIX='${WINE_PREFIX}' wineboot --init >/dev/null 2>&1 || true"
   run_user "WINEPREFIX='${WINE_PREFIX}' winetricks -q vcrun2022 d3dcompiler_47 directx9 >/tmp/noland-winetricks.log 2>&1 || true"
 }
 
 install_game_compat() {
   log "Installing/updating game compatibility layer"
-  install_proton_ge
-  install_wine_ge
-  install_dxvk
-  install_vkd3d_proton
+
+  if [[ "$ENABLE_GITHUB_GAME_COMPAT" == "1" ]]; then
+    install_proton_ge
+    install_wine_ge
+    install_dxvk
+    install_vkd3d_proton
+  else
+    log "Skipping GitHub-based compatibility assets (set ENABLE_GITHUB_GAME_COMPAT=1 to enable)"
+  fi
+
   install_winetricks_runtime
 }
 
@@ -335,11 +374,12 @@ install_heroic_latest() {
   run_user "mkdir -p '${BIN_DIR}' '${APP_DIR}'"
 
   local heroic_url
-  heroic_url="$( (curl -fsSL https://api.github.com/repos/Heroic-Games-Launcher/HeroicGamesLauncher/releases/latest || true) | python3 -c 'import json,sys; d=json.load(sys.stdin); assets=d.get("assets",[]); u="";\nfor a in assets:\n n=a.get("name","")\n if n.endswith(".AppImage") and "arm" not in n.lower():\n  u=a.get("browser_download_url","")\n  break\nprint(u)')"
+  heroic_url="$(fetch_latest_asset_url "Heroic-Games-Launcher/HeroicGamesLauncher" '^(?!.*arm).*\.AppImage$' || true)"
 
   if [[ -z "$heroic_url" ]]; then
     log "Could not detect latest Heroic release URL"
-    return 1
+    log "Skipping Heroic AppImage install (non-fatal)"
+    return 0
   fi
 
   run_user "wget -q '${heroic_url}' -O '${BIN_DIR}/heroic' && chmod +x '${BIN_DIR}/heroic'"
@@ -360,6 +400,7 @@ EOF
 
 setup_shared_wine_prefix() {
   log "Preparing shared Wine prefix"
+  ensure_clean_wine_prefix
   run_user "mkdir -p '${WINE_PREFIX}' '${APP_DIR}' '${USER_HOME}/Desktop'"
   run_user "WINEPREFIX='${WINE_PREFIX}' wineboot --init >/dev/null 2>&1 || true"
 
@@ -400,11 +441,91 @@ EOF
 
 }
 
+configure_desktop_favorites() {
+  log "Configuring desktop favorites for Chrome, Steam, and Bottles"
+
+  run_user "mkdir -p '${USER_HOME}/.local/bin' '${USER_HOME}/.config/autostart'"
+
+  run_user "cat > '${USER_HOME}/.local/bin/noland-pin-favorites.sh' <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+required=(
+  'google-chrome.desktop'
+  'steam.desktop'
+  'com.usebottles.bottles.desktop'
+)
+
+if ! command -v gsettings >/dev/null 2>&1; then
+  exit 0
+fi
+
+updated_raw="['google-chrome.desktop', 'steam.desktop', 'com.usebottles.bottles.desktop']"
+
+gsettings set org.gnome.shell favorite-apps "$updated_raw" || exit 0
+rm -f "$HOME/.config/autostart/noland-pin-favorites.desktop"
+EOF
+chmod +x '${USER_HOME}/.local/bin/noland-pin-favorites.sh'"
+
+  run_user "cat > '${USER_HOME}/.config/autostart/noland-pin-favorites.desktop' <<EOF
+[Desktop Entry]
+Type=Application
+Name=Noland Pin Favorites
+Comment=Pin Chrome, Steam, and Bottles
+Exec=${USER_HOME}/.local/bin/noland-pin-favorites.sh
+Terminal=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+EOF
+"
+}
+
 repair_user_permissions() {
-  chown -R "$TARGET_USER:$TARGET_USER" "${USER_HOME}/.steam" "${USER_HOME}/.local" "${USER_HOME}/Desktop" "${WINE_PREFIX}" 2>/dev/null || true
+  run_root "chown -R '${TARGET_USER}:${TARGET_USER}' '${USER_HOME}/.steam' '${USER_HOME}/.local' '${USER_HOME}/Desktop' '${WINE_PREFIX}'" 2>/dev/null || true
+
+  # Repair common Lutris paths when preinstalled images create root-owned files.
+  run_root "chown -R '${TARGET_USER}:${TARGET_USER}' '${USER_HOME}/.config/lutris' '${USER_HOME}/.local/share/lutris' '${USER_HOME}/.cache/lutris' '${USER_HOME}/Games' '/srv/games/ea'" 2>/dev/null || true
+  run_root "find '${USER_HOME}/.config/lutris' '${USER_HOME}/.local/share/lutris' '${USER_HOME}/.cache/lutris' '${USER_HOME}/Games' '/srv/games/ea' -type d -exec chmod 775 {} +" 2>/dev/null || true
+  run_root "find '${USER_HOME}/.config/lutris' '${USER_HOME}/.local/share/lutris' '${USER_HOME}/.cache/lutris' '${USER_HOME}/Games' '/srv/games/ea' -type f -exec chmod 664 {} +" 2>/dev/null || true
+}
+
+repair_wine_dosdevices_links() {
+  log "Repairing malformed Wine dosdevices links"
+
+  local scan_roots=()
+  [[ -d "${USER_HOME}/Games" ]] && scan_roots+=("${USER_HOME}/Games")
+  [[ -d "${USER_HOME}/.wine" ]] && scan_roots+=("${USER_HOME}/.wine")
+  [[ -d "${WINE_PREFIX}" ]] && scan_roots+=("${WINE_PREFIX}")
+
+  local root
+  for root in "${scan_roots[@]}"; do
+    while IFS= read -r dosdevices; do
+      local prefix_dir
+      prefix_dir="$(dirname "$dosdevices")"
+
+      run_user "find '${dosdevices}' -maxdepth 1 -type l -name '*::*' -delete" || true
+
+      if [[ -L "${dosdevices}/d:" ]]; then
+        local d_target
+        d_target="$(readlink "${dosdevices}/d:" 2>/dev/null || true)"
+        if [[ "${d_target}" == /dev/* ]]; then
+          log "Removing block-device D: mapping in ${dosdevices} -> ${d_target}"
+          run_user "rm -f '${dosdevices}/d:'" || true
+        fi
+      fi
+
+      run_user "if [[ -d '${prefix_dir}/drive_c' ]]; then ln -sfn ../drive_c '${dosdevices}/c:'; fi" || true
+      run_user "ln -sfn / '${dosdevices}/z:'" || true
+    done < <(find "$root" -type d -name dosdevices 2>/dev/null)
+  done
 }
 
 main() {
+  if [[ "${EUID}" -ne 0 ]]; then
+    echo "This script must be run as root" >&2
+    exit 1
+  fi
+
   if ! id "$TARGET_USER" >/dev/null 2>&1; then
     echo "Target user '$TARGET_USER' not found" >&2
     exit 2
@@ -419,11 +540,13 @@ main() {
   install_heroic_latest
   setup_bottles_launchers
   setup_shared_wine_prefix
+  configure_desktop_favorites
   repair_user_permissions
+  repair_wine_dosdevices_links
 
   if [[ "$GAME_COMPAT_UPDATED" -eq 1 ]]; then
     log "Game compatibility layer updated; scheduling reboot in 1 minute"
-    shutdown -r +1 "Noland: reboot after game compatibility updates" || true
+    run_root "shutdown -r +1 'Noland: reboot after game compatibility updates'" || true
   fi
 
   log "Post-provision setup complete"

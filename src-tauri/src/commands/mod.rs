@@ -22,7 +22,8 @@ use crate::{
     services::{
         app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
         location::LocationService, offer_selector::OfferSelector,
-        orchestration::OrchestrationService, remote_exec::RemoteExec, ssh_keys::SshKeyService,
+        orchestration::OrchestrationService, reboot_helper::RebootHelperService,
+        remote_exec::RemoteExec, ssh_keys::SshKeyService,
         shared_storage::shared_storage_manager::SharedStorageManager,
         shared_storage::bundle_indexer::BundleIndexer,
         shared_storage::bundle_restore::BundleRestoreService,
@@ -1124,6 +1125,18 @@ pub async fn destroy_instance(
     instance_id: u64,
 ) -> Result<(), FrontendError> {
     InstanceLifecycleService::destroy_instance(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reboot_instance_services(
+    context: State<'_, AppContext>,
+    _instance_id: u64,
+) -> Result<String, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    RebootHelperService::reboot_and_reinitialize(&remote, &target_user)
         .await
         .map_err(Into::into)
 }

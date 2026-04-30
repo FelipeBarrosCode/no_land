@@ -108,6 +108,7 @@ fn main() {
             get_instance_sunshine_settings,
             update_instance_sunshine_settings,
             reconnect_instance_wireguard,
+            reboot_instance_services,
             pause_instance,
             destroy_instance,
             generate_bundle_index,

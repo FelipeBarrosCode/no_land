@@ -31,6 +31,7 @@ function RootRoute() {
   const loadSunshineSettings = useAppStore((state) => state.loadSunshineSettings);
   const saveSunshineSettings = useAppStore((state) => state.saveSunshineSettings);
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
+  const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
 
@@ -65,6 +66,7 @@ function RootRoute() {
       onLoadSunshineSettings={loadSunshineSettings}
       onSaveSunshineSettings={saveSunshineSettings}
       onReconnectWireguard={reconnectWireguard}
+      onRebootInstanceServices={rebootInstanceServices}
       onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
     />

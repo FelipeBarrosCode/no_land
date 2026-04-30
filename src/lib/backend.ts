@@ -174,6 +174,10 @@ export async function reconnectInstanceWireguard(instanceId: number): Promise<st
   return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
 }
 
+export async function rebootInstanceServices(instanceId: number): Promise<string> {
+  return invokeSafe<string>("reboot_instance_services", { instanceId });
+}
+
 export async function pauseInstance(instanceId: number): Promise<void> {
   return invokeSafe<void>("pause_instance", { instanceId });
 }

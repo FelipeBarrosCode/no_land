@@ -28,6 +28,7 @@ import {
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
   reconnectInstanceWireguard,
+  rebootInstanceServices,
   pauseInstance,
   destroyInstance,
   generateBundleIndex,
@@ -120,6 +121,7 @@ interface AppStore {
   loadSunshineSettings: (instanceId: number) => Promise<void>;
   saveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
   reconnectWireguard: (instanceId: number) => Promise<string | null>;
+  rebootInstanceServices: (instanceId: number) => Promise<string | null>;
   pauseInstance: (instanceId: number) => Promise<void>;
   destroyInstance: (instanceId: number) => Promise<void>;
   bundleIndex: BundleIndex | null;
@@ -574,6 +576,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
     set({ instanceActionRunning: true, error: null });
     try {
       const result = await reconnectInstanceWireguard(instanceId);
+      set({ instanceActionRunning: false });
+      return result;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  rebootInstanceServices: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const result = await rebootInstanceServices(instanceId);
       set({ instanceActionRunning: false });
       return result;
     } catch (error) {
