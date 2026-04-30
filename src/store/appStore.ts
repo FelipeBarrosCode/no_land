@@ -17,7 +17,32 @@ import {
   updateMoonlightPreferences,
   updateServerPreferences,
   updateSshCredentials,
-  updateVastApiKey
+  updateVastApiKey,
+  getSharedStorageSettings,
+  saveSharedStorageSettings,
+  testSharedStorageConfig,
+  triggerInstanceBackup,
+  getInstanceBackupStatus,
+  setupInstanceBackupSchedule,
+  removeInstanceBackupSchedule,
+  getInstanceSunshineSettings,
+  updateInstanceSunshineSettings,
+  reconnectInstanceWireguard,
+  rebootInstanceServices,
+  pauseInstance,
+  destroyInstance,
+  generateBundleIndex,
+  getInstanceRestoreBundles,
+  dryRunRestore,
+  restoreBundle,
+  getRestoreJob,
+  getInstanceMicConfig,
+  updateInstanceMicSettings,
+  enableInstanceMic,
+  disableInstanceMic,
+  reconnectInstanceMic,
+  recreateInstanceMicDevice,
+  getInstanceMicStatus
 } from "../lib/backend";
 import type {
   ManualLocationInput,
@@ -29,7 +54,21 @@ import type {
   ProvisioningEvent,
   RentedInstanceSummary,
   ServerPreferencesUpdate,
-  SshCredentialsUpdate
+  SshCredentialsUpdate,
+  SharedStorageSettingsUpdate,
+  SharedStorageSettingsResponse,
+  BackupStatusResponse,
+  SharedStorageInstanceStatus,
+  SunshineSettingsResponse,
+  BundleIndex,
+  RestoreDryRunResult,
+  RestoreJob,
+  RestoreRequest,
+  InstanceMicConfig,
+  InstanceMicRuntimeStatus,
+  MicSessionResponse,
+  MicSettingsUpdate,
+  MicQualityProfile
 } from "../lib/types";
 
 interface AppStore {
@@ -66,6 +105,42 @@ interface AppStore {
   submitPin: (pin: string) => Promise<void>;
   skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
+  sharedStorageSettings: SharedStorageSettingsResponse | null;
+  backupStatus: BackupStatusResponse | null;
+  instanceBackupStatus: SharedStorageInstanceStatus | null;
+  loadSharedStorageSettings: () => Promise<void>;
+  saveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
+  testSharedStorageConfig: () => Promise<string | null>;
+  triggerBackup: () => Promise<void>;
+  loadBackupStatus: () => Promise<void>;
+  loadInstanceBackupStatus: () => Promise<void>;
+  setupBackupSchedule: () => Promise<string | null>;
+  removeBackupSchedule: () => Promise<string | null>;
+  sunshineSettings: SunshineSettingsResponse | null;
+  instanceActionRunning: boolean;
+  loadSunshineSettings: (instanceId: number) => Promise<void>;
+  saveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
+  reconnectWireguard: (instanceId: number) => Promise<string | null>;
+  rebootInstanceServices: (instanceId: number) => Promise<string | null>;
+  pauseInstance: (instanceId: number) => Promise<void>;
+  destroyInstance: (instanceId: number) => Promise<void>;
+  bundleIndex: BundleIndex | null;
+  restoreJob: RestoreJob | null;
+  generateBundleIndex: () => Promise<void>;
+  loadRestoreBundles: (instanceId: number) => Promise<void>;
+  runDryRunRestore: (instanceId: number, payload: RestoreRequest) => Promise<RestoreDryRunResult | null>;
+  runRestoreBundle: (instanceId: number, payload: RestoreRequest) => Promise<RestoreJob | null>;
+  pollRestoreJob: (jobId: string) => Promise<void>;
+  micConfig: InstanceMicConfig | null;
+  micStatus: InstanceMicRuntimeStatus | null;
+  micSession: MicSessionResponse | null;
+  loadMicConfig: (instanceId: number) => Promise<void>;
+  updateMicSettings: (instanceId: number, payload: MicSettingsUpdate) => Promise<void>;
+  enableMic: (instanceId: number, qualityProfile?: MicQualityProfile) => Promise<MicSessionResponse | null>;
+  disableMic: (instanceId: number) => Promise<void>;
+  reconnectMic: (instanceId: number) => Promise<MicSessionResponse | null>;
+  recreateMicDevice: (instanceId: number) => Promise<void>;
+  loadMicStatus: (instanceId: number) => Promise<void>;
   clearError: () => void;
 }
 
@@ -103,6 +178,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   serverPickerOpen: false,
   error: null,
   _eventsBound: false,
+  sharedStorageSettings: null,
+  backupStatus: null,
+  instanceBackupStatus: null,
+  sunshineSettings: null,
+  instanceActionRunning: false,
+  bundleIndex: null,
+  restoreJob: null,
+  micConfig: null,
+  micStatus: null,
+  micSession: null,
 
   initialize: async () => {
     set({ loading: true, error: null });
@@ -353,6 +438,308 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ busy: false });
     } catch (error) {
       set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  loadSharedStorageSettings: async () => {
+    set({ busy: true, error: null });
+    try {
+      const settings = await getSharedStorageSettings();
+      set({ sharedStorageSettings: settings, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  saveSharedStorageSettings: async (payload) => {
+    set({ busy: true, error: null });
+    try {
+      const appState = await saveSharedStorageSettings(payload);
+      const settings = await getSharedStorageSettings();
+      set({ appState, sharedStorageSettings: settings, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  testSharedStorageConfig: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await testSharedStorageConfig();
+      set({ busy: false });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  triggerBackup: async () => {
+    set({ busy: true, error: null });
+    try {
+      const status = await triggerInstanceBackup();
+
+      // Refresh bundle index immediately so restore UI reflects selectable bundles
+      // from the latest backup without requiring a manual "Generate Index" action.
+      const currentState = get().appState;
+      const activeInstanceId = currentState?.instance.instanceId;
+      if (activeInstanceId) {
+        try {
+          const index = await getInstanceRestoreBundles(activeInstanceId);
+          set({ backupStatus: status, bundleIndex: index, busy: false });
+          return;
+        } catch {
+          // Backup succeeded even if index retrieval fails; keep success status.
+        }
+      }
+
+      set({ backupStatus: status, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  loadBackupStatus: async () => {
+    set({ busy: true, error: null });
+    try {
+      const status = await getInstanceBackupStatus();
+      set({
+        backupStatus: {
+          lastBackupStartedAt: status.lastBackupStartedAt,
+          lastBackupFinishedAt: status.lastBackupFinishedAt,
+          lastBackupStatus: status.lastBackupStatus,
+          lastBackupError: status.lastBackupError
+        },
+        busy: false
+      });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  loadInstanceBackupStatus: async () => {
+    set({ busy: true, error: null });
+    try {
+      const status = await getInstanceBackupStatus();
+      set({ instanceBackupStatus: status, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  setupBackupSchedule: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await setupInstanceBackupSchedule();
+      set({ busy: false });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  removeBackupSchedule: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await removeInstanceBackupSchedule();
+      set({ busy: false });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  loadSunshineSettings: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const settings = await getInstanceSunshineSettings(instanceId);
+      set({ sunshineSettings: settings, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  saveSunshineSettings: async (instanceId, settings) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await updateInstanceSunshineSettings(instanceId, settings);
+      const refreshed = await getInstanceSunshineSettings(instanceId);
+      set({ sunshineSettings: refreshed, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  reconnectWireguard: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const result = await reconnectInstanceWireguard(instanceId);
+      set({ instanceActionRunning: false });
+      return result;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  rebootInstanceServices: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const result = await rebootInstanceServices(instanceId);
+      set({ instanceActionRunning: false });
+      return result;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  pauseInstance: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await pauseInstance(instanceId);
+      set({ instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  destroyInstance: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await destroyInstance(instanceId);
+      const appState = await getAppState();
+      set({ appState, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  generateBundleIndex: async () => {
+    set({ busy: true, error: null });
+    try {
+      await generateBundleIndex();
+      set({ busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  loadRestoreBundles: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const index = await getInstanceRestoreBundles(instanceId);
+      set({ bundleIndex: index, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  runDryRunRestore: async (instanceId, payload) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const result = await dryRunRestore(instanceId, payload);
+      set({ instanceActionRunning: false });
+      return result;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  runRestoreBundle: async (instanceId, payload) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const job = await restoreBundle(instanceId, payload);
+      set({ restoreJob: job, instanceActionRunning: false });
+      return job;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  pollRestoreJob: async (jobId) => {
+    try {
+      const job = await getRestoreJob(jobId);
+      set({ restoreJob: job });
+    } catch (error) {
+      set({ error: mapError(error) });
+    }
+  },
+
+  loadMicConfig: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const config = await getInstanceMicConfig(instanceId);
+      set({ micConfig: config, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  updateMicSettings: async (instanceId, payload) => {
+    set({ busy: true, error: null });
+    try {
+      const config = await updateInstanceMicSettings(instanceId, payload);
+      set({ micConfig: config, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  enableMic: async (instanceId, qualityProfile) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const session = await enableInstanceMic(instanceId, qualityProfile);
+      set({ micSession: session, instanceActionRunning: false });
+      return session;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  disableMic: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await disableInstanceMic(instanceId);
+      set({ micSession: null, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  reconnectMic: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      const session = await reconnectInstanceMic(instanceId);
+      set({ micSession: session, instanceActionRunning: false });
+      return session;
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  recreateMicDevice: async (instanceId) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await recreateInstanceMicDevice(instanceId);
+      set({ instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  loadMicStatus: async (instanceId) => {
+    try {
+      const status = await getInstanceMicStatus(instanceId);
+      set({ micStatus: status });
+    } catch (error) {
+      set({ error: mapError(error) });
     }
   },
 

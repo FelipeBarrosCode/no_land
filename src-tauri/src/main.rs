@@ -97,7 +97,32 @@ fn main() {
             update_platform_credentials,
             update_server_preferences,
             update_moonlight_preferences,
-            update_ssh_credentials
+            update_ssh_credentials,
+            get_shared_storage_settings,
+            save_shared_storage_settings,
+            test_shared_storage_config,
+            trigger_instance_backup,
+            get_instance_backup_status,
+            setup_instance_backup_schedule,
+            remove_instance_backup_schedule,
+            get_instance_sunshine_settings,
+            update_instance_sunshine_settings,
+            reconnect_instance_wireguard,
+            reboot_instance_services,
+            pause_instance,
+            destroy_instance,
+            generate_bundle_index,
+            get_instance_restore_bundles,
+            dry_run_restore,
+            restore_bundle,
+            get_restore_job,
+            get_instance_mic_config,
+            update_instance_mic_settings,
+            enable_instance_mic,
+            disable_instance_mic,
+            reconnect_instance_mic,
+            recreate_instance_mic_device,
+            get_instance_mic_status
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

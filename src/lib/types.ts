@@ -229,9 +229,19 @@ export interface PersistedAppState {
   sunshine: SunshineState;
   moonlight: MoonlightState;
   moonlightPreferences: MoonlightPreferences;
+  sharedStorage: SharedStorageState;
   provisionedServers: ProvisionedServerState[];
   orchestrationState: OrchestrationState;
   lastError: string | null;
+}
+
+export interface SharedStorageState {
+  settings: SharedStorageSettings;
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+  lastBackupTrigger: string;
 }
 
 export interface OnboardingPayload {
@@ -265,4 +275,214 @@ export interface FrontendError {
   message: string;
   details?: string;
   retryable: boolean;
+}
+
+export interface SharedStorageSettings {
+  enabled: boolean;
+  backblazeKeyId: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+}
+
+export interface SharedStorageSettingsResponse {
+  enabled: boolean;
+  backblazeKeyId: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+  cryptPasswordSet: boolean;
+}
+
+export interface SharedStorageSettingsUpdate {
+  enabled: boolean;
+  backblazeKeyId: string;
+  backblazeApplicationKey: string;
+  bucketName: string;
+  remoteName: string;
+  destinationPrefix: string;
+  cryptPassword?: string;
+}
+
+export interface BackupStatusResponse {
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+  lastBackupTrigger?: string;
+}
+
+export interface SharedStorageInstanceStatus {
+  instanceId: number;
+  backupRunning: boolean;
+  lastBackupStartedAt: string | null;
+  lastBackupFinishedAt: string | null;
+  lastBackupStatus: string;
+  lastBackupError: string | null;
+}
+
+export interface SunshineSetting {
+  key: string;
+  value: unknown;
+  label: string;
+  description?: string;
+  valueType: string;
+  requiresRestart: boolean;
+}
+
+export interface SunshineSettingsResponse {
+  settings: SunshineSetting[];
+  raw: Record<string, unknown>;
+}
+
+// ============================================================
+// Bundle Index + Restore types
+// ============================================================
+
+export interface BundleHost {
+  username: string;
+  home: string;
+  os: string;
+}
+
+export interface FolderBundle {
+  id: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  defaultSelected: boolean;
+}
+
+export interface AppBundle {
+  id: string;
+  name: string;
+  type: string;
+  confidence: number;
+  signals: string[];
+  folderBundles: FolderBundle[];
+}
+
+export interface BundleIndex {
+  schemaVersion: number;
+  generatedAt: string;
+  instanceId: number;
+  snapshotId: string;
+  host: BundleHost;
+  bundles: AppBundle[];
+}
+
+export interface RestoreRequest {
+  bundleId: string;
+  folderBundleIds: string[];
+  mode: string;
+}
+
+export interface RestoreDryRunItem {
+  folderBundleId: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  action: string;
+}
+
+export interface RestoreDryRunResult {
+  wouldRestore: RestoreDryRunItem[];
+  totalFilesEstimate: number;
+}
+
+export interface RestoreJobItem {
+  folderBundleId: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  status: string;
+  error: string | null;
+}
+
+export interface RestoreJob {
+  jobId: string;
+  instanceId: number;
+  bundleId: string;
+  mode: string;
+  status: string;
+  startedAt: string;
+  finishedAt: string | null;
+  items: RestoreJobItem[];
+  error: string | null;
+}
+
+// ============================================================
+// Microphone Passthrough types
+// ============================================================
+
+export type MicQualityProfile = "standard" | "lowLatency" | "highQuality";
+
+export interface InstanceMicConfig {
+  instanceId: number;
+  enabled: boolean;
+  transport: string;
+  codec: string;
+  sampleRate: number;
+  channels: number;
+  vmWireguardIp: string;
+  rtpPort: number;
+  deviceName: string;
+  qualityProfile: MicQualityProfile;
+  sessionId: string | null;
+  sessionToken: string | null;
+  ssrc: number | null;
+  lastEnabledAt: string | null;
+  lastDisabledAt: string | null;
+}
+
+export type MicState =
+  | "disabled"
+  | "starting"
+  | "connecting"
+  | "streaming"
+  | "no_audio_detected"
+  | "wireguard_disconnected"
+  | "vm_agent_unreachable"
+  | "cloud_mic_missing"
+  | "packet_loss_high"
+  | "pipewire_unavailable"
+  | "error";
+
+export interface InstanceMicRuntimeStatus {
+  enabled: boolean;
+  state: MicState;
+  vmAgentReachable: boolean;
+  deviceReady: boolean;
+  receivingAudio: boolean;
+  transport: string;
+  sampleRate: number;
+  channels: number;
+  bitrateKbps: number;
+  frameMs: number;
+  packetLossPercent: number;
+  jitterMs: number;
+  bufferDepthMs: number;
+  lastPacketMsAgo: number | null;
+  pipewireConnected: boolean;
+  defaultSource: boolean;
+  error: string | null;
+}
+
+export interface MicSessionResponse {
+  sessionId: string;
+  sessionToken: string;
+  ssrc: number;
+  vmWireguardIp: string;
+  rtpPort: number;
+  sampleRate: number;
+  channels: number;
+  frameMs: number;
+  bitrateKbps: number;
+}
+
+export interface MicSettingsUpdate {
+  qualityProfile?: MicQualityProfile;
 }

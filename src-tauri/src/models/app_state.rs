@@ -15,6 +15,7 @@ pub struct PersistedAppState {
     pub sunshine: SunshineState,
     pub moonlight: MoonlightState,
     pub moonlight_preferences: MoonlightPreferences,
+    pub shared_storage: SharedStorageState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     pub orchestration_state: OrchestrationState,
     pub last_error: Option<String>,
@@ -35,6 +36,7 @@ impl Default for PersistedAppState {
             sunshine: SunshineState::default(),
             moonlight: MoonlightState::default(),
             moonlight_preferences: MoonlightPreferences::default(),
+            shared_storage: SharedStorageState::default(),
             provisioned_servers: Vec::new(),
             orchestration_state: OrchestrationState::Idle,
             last_error: None,
@@ -399,6 +401,8 @@ pub struct ProvisionedServerSteps {
     pub moonlight_configured: bool,
     pub awaiting_pair_pin: bool,
     pub pairing_completed: bool,
+    #[serde(default)]
+    pub post_provision_completed: bool,
 }
 
 impl ProvisionedServerState {
@@ -470,4 +474,399 @@ pub struct PairingContext {
     pub host: String,
     pub port: u16,
     pub user: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageState {
+    pub settings: SharedStorageSettings,
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+    pub last_backup_trigger: String,
+}
+
+impl Default for SharedStorageState {
+    fn default() -> Self {
+        Self {
+            settings: SharedStorageSettings::default(),
+            last_backup_started_at: None,
+            last_backup_finished_at: None,
+            last_backup_status: "never_run".to_string(),
+            last_backup_error: None,
+            last_backup_trigger: "none".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettings {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    #[serde(default)]
+    pub backblaze_application_key: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password: Option<String>,
+}
+
+impl Default for SharedStorageSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backblaze_key_id: String::new(),
+            backblaze_application_key: String::new(),
+            bucket_name: "noland".to_string(),
+            remote_name: "b2".to_string(),
+            destination_prefix: "vm-backup".to_string(),
+            crypt_password: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettingsUpdate {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    pub backblaze_application_key: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSettingsResponse {
+    pub enabled: bool,
+    pub backblaze_key_id: String,
+    pub bucket_name: String,
+    pub remote_name: String,
+    pub destination_prefix: String,
+    #[serde(default)]
+    pub crypt_password_set: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupStatusResponse {
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+    pub last_backup_trigger: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageInstanceStatus {
+    pub instance_id: u64,
+    pub backup_running: bool,
+    pub last_backup_started_at: Option<String>,
+    pub last_backup_finished_at: Option<String>,
+    pub last_backup_status: String,
+    pub last_backup_error: Option<String>,
+}
+
+// ============================================================
+// Bundle Index + Restore types
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleIndex {
+    pub schema_version: u32,
+    pub generated_at: String,
+    pub instance_id: u64,
+    pub snapshot_id: String,
+    pub host: BundleHost,
+    pub bundles: Vec<AppBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleHost {
+    pub username: String,
+    pub home: String,
+    pub os: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppBundle {
+    pub id: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub bundle_type: String,
+    pub confidence: f64,
+    pub signals: Vec<String>,
+    pub folder_bundles: Vec<FolderBundle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderBundle {
+    pub id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub default_selected: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunRequest {
+    pub bundle_id: String,
+    pub folder_bundle_ids: Vec<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreRequest {
+    pub bundle_id: String,
+    pub folder_bundle_ids: Vec<String>,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunResult {
+    pub would_restore: Vec<RestoreDryRunItem>,
+    pub total_files_estimate: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreDryRunItem {
+    pub folder_bundle_id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreJob {
+    pub job_id: String,
+    pub instance_id: u64,
+    pub bundle_id: String,
+    pub mode: String,
+    pub status: String,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+    pub items: Vec<RestoreJobItem>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreJobItem {
+    pub folder_bundle_id: String,
+    pub label: String,
+    pub source: String,
+    pub target: String,
+    pub kind: String,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+// ============================================================
+// Microphone Passthrough types
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceMicConfig {
+    pub instance_id: u64,
+    pub enabled: bool,
+    pub transport: String,
+    pub codec: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub vm_wireguard_ip: String,
+    pub rtp_port: u16,
+    pub device_name: String,
+    pub quality_profile: MicQualityProfile,
+    pub session_id: Option<String>,
+    pub session_token: Option<String>,
+    pub ssrc: Option<u32>,
+    pub last_enabled_at: Option<String>,
+    pub last_disabled_at: Option<String>,
+}
+
+impl Default for InstanceMicConfig {
+    fn default() -> Self {
+        Self {
+            instance_id: 0,
+            enabled: false,
+            transport: "native_rtp_udp".to_string(),
+            codec: "opus".to_string(),
+            sample_rate: 48000,
+            channels: 1,
+            vm_wireguard_ip: String::new(),
+            rtp_port: 34778,
+            device_name: "Cloud Mic".to_string(),
+            quality_profile: MicQualityProfile::Standard,
+            session_id: None,
+            session_token: None,
+            ssrc: None,
+            last_enabled_at: None,
+            last_disabled_at: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MicQualityProfile {
+    Standard,
+    LowLatency,
+    HighQuality,
+}
+
+impl Default for MicQualityProfile {
+    fn default() -> Self {
+        MicQualityProfile::Standard
+    }
+}
+
+impl MicQualityProfile {
+    pub fn bitrate_kbps(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 32,
+            MicQualityProfile::LowLatency => 48,
+            MicQualityProfile::HighQuality => 64,
+        }
+    }
+
+    pub fn frame_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 20,
+            MicQualityProfile::LowLatency => 10,
+            MicQualityProfile::HighQuality => 20,
+        }
+    }
+
+    pub fn jitter_min_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 20,
+            MicQualityProfile::LowLatency => 10,
+            MicQualityProfile::HighQuality => 30,
+        }
+    }
+
+    pub fn jitter_target_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 30,
+            MicQualityProfile::LowLatency => 15,
+            MicQualityProfile::HighQuality => 40,
+        }
+    }
+
+    pub fn jitter_max_ms(&self) -> u32 {
+        match self {
+            MicQualityProfile::Standard => 60,
+            MicQualityProfile::LowLatency => 40,
+            MicQualityProfile::HighQuality => 80,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstanceMicRuntimeStatus {
+    pub enabled: bool,
+    pub state: MicState,
+    pub vm_agent_reachable: bool,
+    pub device_ready: bool,
+    pub receiving_audio: bool,
+    pub transport: String,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub bitrate_kbps: u32,
+    pub frame_ms: u32,
+    pub packet_loss_percent: f64,
+    pub jitter_ms: f64,
+    pub buffer_depth_ms: f64,
+    pub last_packet_ms_ago: Option<u64>,
+    pub pipewire_connected: bool,
+    pub default_source: bool,
+    pub error: Option<String>,
+}
+
+impl Default for InstanceMicRuntimeStatus {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            state: MicState::Disabled,
+            vm_agent_reachable: false,
+            device_ready: false,
+            receiving_audio: false,
+            transport: "native_rtp_udp".to_string(),
+            sample_rate: 48000,
+            channels: 1,
+            bitrate_kbps: 32,
+            frame_ms: 20,
+            packet_loss_percent: 0.0,
+            jitter_ms: 0.0,
+            buffer_depth_ms: 0.0,
+            last_packet_ms_ago: None,
+            pipewire_connected: false,
+            default_source: false,
+            error: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MicState {
+    Disabled,
+    Starting,
+    Connecting,
+    Streaming,
+    NoAudioDetected,
+    WireguardDisconnected,
+    VmAgentUnreachable,
+    CloudMicMissing,
+    PacketLossHigh,
+    PipewireUnavailable,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSettingsUpdate {
+    pub quality_profile: Option<MicQualityProfile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicSessionResponse {
+    pub session_id: String,
+    pub session_token: String,
+    pub ssrc: u32,
+    pub vm_wireguard_ip: String,
+    pub rtp_port: u16,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub frame_ms: u32,
+    pub bitrate_kbps: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MicEnableRequest {
+    pub instance_id: u64,
+    pub quality_profile: Option<MicQualityProfile>,
 }

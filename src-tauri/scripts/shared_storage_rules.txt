@@ -1,0 +1,122 @@
+# Keep user files from home directories
++ /home/*/Desktop/**
++ /home/*/Documents/**
++ /home/*/Downloads/**
++ /home/*/Pictures/**
++ /home/*/Music/**
++ /home/*/Videos/**
++ /home/*/Projects/**
++ /home/*/Workspace/**
++ /home/*/Code/**
+
+# Keep user-created app launchers
++ /home/*/.local/share/applications/*.desktop
++ /home/*/.local/share/icons/**
++ /home/*/.local/share/mime/**
+
+# Keep common user config that belongs with downloaded apps
++ /home/*/.config/**/*.desktop
++ /home/*/.config/**/settings*
++ /home/*/.config/**/config*
++ /home/*/.config/**/preferences*
+
+# Keep AppImages and manually downloaded app bundles
++ /home/*/**/*.AppImage
++ /home/*/**/*.deb
++ /home/*/**/*.tar.gz
++ /home/*/**/*.zip
++ /home/*/**/*.7z
++ /home/*/**/*.rar
+
+# Keep launcher metadata/settings (without game files)
++ /home/*/.local/share/Steam/config/**
++ /home/*/.local/share/Steam/registry.vdf
++ /home/*/.local/share/Steam/ssfn*
++ /home/*/.local/share/Steam/steamapps/libraryfolders.vdf
++ /home/*/.local/share/Steam/steamapps/appmanifest_*.acf
++ /home/*/.local/share/Steam/userdata/*/config/**
++ /home/*/.config/heroic/config.json
++ /home/*/.config/heroic/store_cache/**
++ /home/*/.config/heroic/legendaryConfig/**
++ /home/*/.config/heroic/gog_store/**
++ /home/*/.config/heroic/amazon_store/**
++ /home/*/.config/legendary/config.ini
++ /home/*/.config/legendary/user.json
++ /home/*/.config/legendary/installed.json
++ /home/*/.config/legendary/aliases.json
++ /home/*/.config/nile/config.ini
++ /home/*/.config/nile/user.json
++ /home/*/.config/nile/installed.json
++ /home/*/.config/lutris/lutris.conf
++ /home/*/.config/lutris/system.yml
++ /home/*/.config/lutris/runners/*.yml
++ /home/*/.local/share/lutris/games/*.yml
++ /home/*/.local/share/lutris/pga.db
++ /home/*/.local/share/lutris/banners/**
++ /home/*/.local/share/lutris/coverart/**
+
+# Exclude cloud save caches and launcher/game payload data
+- /home/*/.local/share/Steam/userdata/*/*/remote/**
+- /home/*/.local/share/Steam/userdata/*/*/remotecache.vdf
+- /home/*/.local/share/Steam/steamapps/common/**
+- /home/*/.local/share/Steam/steamapps/downloading/**
+- /home/*/.local/share/Steam/steamapps/temp/**
+- /home/*/.local/share/Steam/steamapps/shadercache/**
+- /home/*/.local/share/Steam/steamapps/workshop/**
+- /home/*/Games/**
+- **/Ubisoft Game Launcher/savegames/**
+- **/Ubisoft Game Launcher/cache/**
+- **/Ubisoft Game Launcher/logs/**
+- **/EA Desktop/Cache/**
+- **/EA Desktop/Logs/**
+- **/Origin/Cache/**
+- **/Origin/Logs/**
+- /home/*/.local/share/lutris/runners/**
+- /home/*/.local/share/lutris/runtime/**
+
+# Exclude system and virtual filesystems
+- /bin/**
+- /boot/**
+- /dev/**
+- /etc/**
+- /lib/**
+- /lib32/**
+- /lib64/**
+- /libx32/**
+- /proc/**
+- /run/**
+- /sbin/**
+- /sys/**
+- /usr/**
+- /var/**
+- /snap/**
+- /opt/**
+- /tmp/**
+
+# Exclude VM/runtime/build/cache junk
+- **/.cache/**
+- **/Cache/**
+- **/cache/**
+- **/__pycache__/**
+- **/.npm/**
+- **/.gradle/**
+- **/.m2/repository/**
+- **/node_modules/**
+- **/.venv/**
+- **/venv/**
+- **/target/**
+- **/build/**
+- **/dist/**
+
+# Exclude core dumps, logs, temp files
+- **/core
+- **/core.*
+- **/*.core
+- **/*.log
+- **/*.tmp
+- **/*.swp
+- **/*~
+- **/.Trash/**
+
+# Exclude everything else
+- *

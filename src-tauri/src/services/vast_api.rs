@@ -370,6 +370,63 @@ impl VastApiClient {
         let _ = parse_response(response, "POST", &url, started).await?;
         Ok(())
     }
+
+    pub async fn pause_instance(&self, instance_id: u64) -> AppResult<VastInstance> {
+        let url = format!(
+            "{}/api/v0/instances/{instance_id}/",
+            self.base_url.trim_end_matches('/')
+        );
+        let payload = json!({ "target_state": "stopped" });
+
+        info!(
+            "Vast request pause_instance instance_id={} endpoint={}",
+            instance_id, url
+        );
+        let started = Instant::now();
+
+        let response = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| map_send_error("PUT", &url, error))?;
+
+        let body = parse_response(response, "PUT", &url, started).await?;
+        info!(
+            "Vast pause_instance instance_id={} response={}",
+            instance_id,
+            abbreviate_text(&body.to_string())
+        );
+
+        self.get_instance(instance_id).await
+    }
+
+    pub async fn destroy_instance(&self, instance_id: u64) -> AppResult<()> {
+        let url = format!(
+            "{}/api/v0/instances/{instance_id}/",
+            self.base_url.trim_end_matches('/')
+        );
+
+        info!(
+            "Vast request destroy_instance instance_id={} endpoint={}",
+            instance_id, url
+        );
+        let started = Instant::now();
+
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| map_send_error("DELETE", &url, error))?;
+
+        let _ = parse_response(response, "DELETE", &url, started).await?;
+        info!("Vast destroy_instance instance_id={} succeeded", instance_id);
+        Ok(())
+    }
 }
 
 fn normalize_offer_category(category: &str) -> String {

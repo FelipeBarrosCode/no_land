@@ -10,6 +10,7 @@ TARGET_USER="user"
 PROFILE="aggressive"
 FORCE_SINK_OVERRIDE=0
 SINK_OVERRIDE=""
+CANONICAL_SINK="sunshine_audio"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -219,35 +220,28 @@ run_user systemctl --user restart pipewire-pulse
 run_user systemctl --user restart wireplumber
 
 sunshine_conf="${user_home}/.config/sunshine/sunshine.conf"
-existing_sink=""
-default_sink=""
+target_sink="${CANONICAL_SINK}"
+target_monitor="${CANONICAL_SINK}.monitor"
 
-if run_user pactl info >/tmp/noland-pactl-info.txt 2>/tmp/noland-pactl-info.err; then
-  default_sink="$(awk -F': ' '/^Default Sink:/ {print $2}' /tmp/noland-pactl-info.txt | head -n1)"
-else
-  log "pactl info failed: $(cat /tmp/noland-pactl-info.err)"
+# Backward-compatible override path, but default is always canonical sink.
+if [[ "$FORCE_SINK_OVERRIDE" -eq 1 && -n "$SINK_OVERRIDE" ]]; then
+  target_sink="$SINK_OVERRIDE"
+  target_monitor="${SINK_OVERRIDE}.monitor"
 fi
+
+log "Ensuring canonical null sink exists: ${target_sink}"
+if ! run_user pactl list short sinks | awk '{print $2}' | grep -qx "$target_sink"; then
+  run_user pactl load-module module-null-sink \
+    sink_name="$target_sink" \
+    sink_properties="device.description=Noland Audio" \
+    rate=48000 channels=2 >/dev/null
+fi
+
+log "Setting default sink/source: sink=${target_sink} source=${target_monitor}"
+run_user pactl set-default-sink "$target_sink" || true
+run_user pactl set-default-source "$target_monitor" || true
 
 if [[ -f "$sunshine_conf" ]]; then
-  existing_sink="$(awk -F'=' '/^[[:space:]]*audio_sink[[:space:]]*=/{v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); print v; exit}' "$sunshine_conf")"
-fi
-
-target_sink="$existing_sink"
-if [[ "$FORCE_SINK_OVERRIDE" -eq 1 ]]; then
-  if [[ -n "$SINK_OVERRIDE" ]]; then
-    target_sink="$SINK_OVERRIDE"
-  else
-    target_sink="$default_sink"
-  fi
-elif [[ -z "$target_sink" ]]; then
-  if [[ -n "$SINK_OVERRIDE" ]]; then
-    target_sink="$SINK_OVERRIDE"
-  else
-    target_sink="$default_sink"
-  fi
-fi
-
-if [[ -f "$sunshine_conf" && -n "$target_sink" ]]; then
   log "Applying Sunshine audio sink: ${target_sink}"
   if grep -Eq '^[[:space:]]*audio_sink[[:space:]]*=' "$sunshine_conf"; then
     run_user sed -i -E "s|^[[:space:]]*audio_sink[[:space:]]*=.*$|audio_sink = ${target_sink}|" "$sunshine_conf"

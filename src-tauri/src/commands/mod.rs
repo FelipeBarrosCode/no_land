@@ -8,13 +8,24 @@ use crate::{
         app_state::{
             LocationSource, ManualLocationInput, MoonlightPreferences, OnboardingPayload,
             OrchestrationState, PersistedAppState, RentedInstanceSummary, ServerPreferencesUpdate,
+            SharedStorageSettingsResponse, SharedStorageSettingsUpdate, BackupStatusResponse,
+            SharedStorageInstanceStatus, RestoreRequest, RestoreDryRunResult, RestoreJob,
+            BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus, MicSessionResponse,
+            MicSettingsUpdate, MicQualityProfile
         },
         events::ProvisioningEvent,
     },
     services::{
-        app_context::AppContext, location::LocationService, offer_selector::OfferSelector,
-        orchestration::OrchestrationService, remote_exec::RemoteExec, ssh_keys::SshKeyService,
-        vast_api::VastApiClient, wireguard::setup_local_wireguard_client,
+        app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
+        location::LocationService, offer_selector::OfferSelector,
+        orchestration::OrchestrationService, reboot_helper::RebootHelperService,
+        remote_exec::RemoteExec, ssh_keys::SshKeyService,
+        shared_storage::shared_storage_manager::SharedStorageManager,
+        shared_storage::bundle_indexer::BundleIndexer,
+        shared_storage::bundle_restore::BundleRestoreService,
+        mic_passthrough::MicPassthroughService,
+        vast_api::VastApiClient,
+        wireguard::setup_local_wireguard_client,
     },
     utils::redact::redact_secret,
 };
@@ -963,4 +974,318 @@ fn sanitize_ssh_username(value: &str) -> String {
         .trim_matches('"')
         .trim_matches('\'')
         .to_string()
+}
+
+async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec, AppError> {
+    let state = context.state.read().await.clone();
+    let private_key_path = state.ssh.private_key_path.clone();
+    if private_key_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "SSH private key path is empty. Run provisioning first.".to_string(),
+        ));
+    }
+    let ssh_host = state.instance.ssh_host.clone();
+    let ssh_port = state.instance.ssh_port;
+    let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+        context.config.audio_target_user.clone()
+    } else {
+        state.ssh.ssh_username.clone()
+    };
+    if ssh_host.trim().is_empty() || ssh_port == 0 {
+        return Err(AppError::InvalidInput(
+            "Instance SSH details are not available. Ensure the instance is running.".to_string(),
+        ));
+    }
+    Ok(RemoteExec {
+        ssh_user,
+        ssh_host,
+        ssh_port,
+        private_key_path,
+    })
+}
+
+#[tauri::command]
+pub async fn get_shared_storage_settings(
+    context: State<'_, AppContext>,
+) -> Result<SharedStorageSettingsResponse, FrontendError> {
+    SharedStorageManager::get_settings(context.inner()).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn save_shared_storage_settings(
+    payload: SharedStorageSettingsUpdate,
+    context: State<'_, AppContext>,
+) -> Result<PersistedAppState, FrontendError> {
+    SharedStorageManager::save_settings(context.inner(), payload).await?;
+    Ok(context.load_state().await)
+}
+
+#[tauri::command]
+pub async fn test_shared_storage_config(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    SharedStorageManager::test_configuration(context.inner(), &remote, &target_user).await?;
+    Ok("Backblaze B2 configuration is valid".to_string())
+}
+
+#[tauri::command]
+pub async fn trigger_instance_backup(
+    context: State<'_, AppContext>,
+) -> Result<BackupStatusResponse, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    let instance_id = {
+        let state = context.state.read().await;
+        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
+            "No active instance. Start provisioning first.".to_string(),
+        ))?
+    };
+    SharedStorageManager::trigger_manual_backup(context.inner(), &remote, instance_id, &target_user).await?;
+    SharedStorageManager::get_backup_status(context.inner()).await.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_backup_status(
+    context: State<'_, AppContext>,
+) -> Result<SharedStorageInstanceStatus, FrontendError> {
+    let instance_id = {
+        let state = context.state.read().await;
+        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
+            "No active instance.".to_string(),
+        ))?
+    };
+    SharedStorageManager::get_instance_backup_status(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn setup_instance_backup_schedule(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    let instance_id = {
+        let state = context.state.read().await;
+        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
+            "No active instance. Start provisioning first.".to_string(),
+        ))?
+    };
+    SharedStorageManager::setup_scheduled_backup(context.inner(), &remote, instance_id, &target_user).await?;
+    Ok("Hourly backup schedule configured".to_string())
+}
+
+#[tauri::command]
+pub async fn remove_instance_backup_schedule(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    SharedStorageManager::remove_scheduled_backup(&remote, &target_user).await?;
+    Ok("Backup schedule removed".to_string())
+}
+
+#[tauri::command]
+pub async fn get_instance_sunshine_settings(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<crate::services::instance_lifecycle::SunshineSettingsResponse, FrontendError> {
+    InstanceLifecycleService::get_sunshine_settings(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_instance_sunshine_settings(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    settings: std::collections::HashMap<String, serde_json::Value>,
+) -> Result<(), FrontendError> {
+    InstanceLifecycleService::update_sunshine_settings(
+        context.inner(),
+        instance_id,
+        crate::services::instance_lifecycle::SunshineSettingsUpdatePayload { settings },
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reconnect_instance_wireguard(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<String, FrontendError> {
+    InstanceLifecycleService::reconnect_wireguard(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn pause_instance(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    InstanceLifecycleService::pause_instance(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn destroy_instance(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    InstanceLifecycleService::destroy_instance(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reboot_instance_services(
+    context: State<'_, AppContext>,
+    _instance_id: u64,
+) -> Result<String, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    RebootHelperService::reboot_and_reinitialize(&remote, &target_user)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn generate_bundle_index(
+    context: State<'_, AppContext>,
+) -> Result<(), FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    let instance_id = {
+        let state = context.state.read().await;
+        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
+            "No active instance. Start provisioning first.".to_string(),
+        ))?
+    };
+    BundleIndexer::generate_and_upload(context.inner(), &remote, instance_id, &target_user)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_restore_bundles(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<BundleIndex, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    BundleRestoreService::list_bundles(context.inner(), &remote, instance_id, &target_user)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn dry_run_restore(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    payload: RestoreRequest,
+) -> Result<RestoreDryRunResult, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    BundleRestoreService::dry_run_restore(context.inner(), &remote, instance_id, &target_user, payload)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn restore_bundle(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    payload: RestoreRequest,
+) -> Result<RestoreJob, FrontendError> {
+    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let target_user = context.config.audio_target_user.clone();
+    BundleRestoreService::restore_bundle(context.inner(), &remote, instance_id, &target_user, payload)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_restore_job(
+    job_id: String,
+) -> Result<RestoreJob, FrontendError> {
+    BundleRestoreService::get_job(&job_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_mic_config(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<InstanceMicConfig, FrontendError> {
+    MicPassthroughService::get_config(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn update_instance_mic_settings(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    payload: MicSettingsUpdate,
+) -> Result<InstanceMicConfig, FrontendError> {
+    MicPassthroughService::update_settings(context.inner(), instance_id, payload.quality_profile)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn enable_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    quality_profile: Option<MicQualityProfile>,
+) -> Result<MicSessionResponse, FrontendError> {
+    MicPassthroughService::enable(context.inner(), instance_id, quality_profile)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn disable_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    MicPassthroughService::disable(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reconnect_instance_mic(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<MicSessionResponse, FrontendError> {
+    MicPassthroughService::reconnect(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn recreate_instance_mic_device(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    MicPassthroughService::recreate_device(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_mic_status(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<InstanceMicRuntimeStatus, FrontendError> {
+    MicPassthroughService::get_status(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
 }

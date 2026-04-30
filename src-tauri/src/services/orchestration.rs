@@ -24,7 +24,9 @@ use super::{
     instance_manager::InstanceManager,
     moonlight::MoonlightService,
     nvidia_headless::NvidiaHeadlessService,
+    post_provision::PostProvisionService,
     remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
@@ -233,13 +235,13 @@ impl OrchestrationService {
         match pairing_mode {
             SunshinePairingMode::SunshineCli => {
                 let command = format!("sudo -u {sunshine_user} bash -lc 'printf \"%s\\n\" \"{pin}\" | sunshine-cli pair'");
-                let pair_result = tokio::task::spawn_blocking(move || {
-                    remote.ssh(&command, Duration::from_secs(45))
-                })
-                .await
-                .map_err(|error| {
-                    AppError::Command(format!("Failed to join pairing task: {error}"))
-                })??;
+                let remote_for_pair = remote.clone();
+                let pair_result =
+                    tokio::task::spawn_blocking(move || remote_for_pair.ssh(&command, Duration::from_secs(45)))
+                        .await
+                        .map_err(|error| {
+                            AppError::Command(format!("Failed to join pairing task: {error}"))
+                        })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -251,15 +253,14 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::SunshinePairPin => {
-                let command =
-                    format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
-                let pair_result = tokio::task::spawn_blocking(move || {
-                    remote.ssh(&command, Duration::from_secs(45))
-                })
-                .await
-                .map_err(|error| {
-                    AppError::Command(format!("Failed to join pairing task: {error}"))
-                })??;
+                let command = format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
+                let remote_for_pair = remote.clone();
+                let pair_result =
+                    tokio::task::spawn_blocking(move || remote_for_pair.ssh(&command, Duration::from_secs(45)))
+                        .await
+                        .map_err(|error| {
+                            AppError::Command(format!("Failed to join pairing task: {error}"))
+                        })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -303,6 +304,18 @@ impl OrchestrationService {
                 snapshot.instance.offer_id,
             )
             .await?;
+
+            if let Err(error) = run_post_provision_step(
+                app,
+                context,
+                &remote,
+                instance_id,
+                snapshot.instance.offer_id,
+            )
+            .await
+            {
+                warn!("Post-provision setup failed (non-fatal): {error}");
+            }
         }
 
         emit_transition(
@@ -319,12 +332,13 @@ impl OrchestrationService {
     }
 
     pub async fn skip_pairing_and_continue(app: &AppHandle, context: &AppContext) -> AppResult<()> {
-        let has_pairing_context = context.pairing_context.read().await.is_some();
-        if !has_pairing_context {
+        let pairing_context = context.pairing_context.read().await.clone();
+        if pairing_context.is_none() {
             return Err(AppError::State(
                 "No active pairing session to skip".to_string(),
             ));
         }
+        let pairing_context = pairing_context.expect("checked above");
 
         emit_transition(
             app,
@@ -357,6 +371,28 @@ impl OrchestrationService {
                 snapshot.instance.offer_id,
             )
             .await?;
+
+            if !snapshot.ssh.private_key_path.trim().is_empty() {
+                let remote = RemoteExec {
+                    ssh_user: sanitize_ssh_user(&pairing_context.user),
+                    ssh_host: pairing_context.host.clone(),
+                    ssh_port: pairing_context.port,
+                    private_key_path: snapshot.ssh.private_key_path.clone(),
+                };
+                if let Err(error) = run_post_provision_step(
+                    app,
+                    context,
+                    &remote,
+                    instance_id,
+                    snapshot.instance.offer_id,
+                )
+                .await
+                {
+                    warn!("Post-provision setup failed (non-fatal): {error}");
+                }
+            } else {
+                warn!("Skipping post-provision setup because SSH private key path is missing");
+            }
         }
 
         emit_transition(
@@ -392,6 +428,78 @@ impl OrchestrationService {
             .await;
         }
     }
+}
+
+async fn run_post_provision_step(
+    app: &AppHandle,
+    context: &AppContext,
+    remote: &RemoteExec,
+    instance_id: u64,
+    offer_id: Option<u64>,
+) -> AppResult<()> {
+    if server_step_is_completed(context, instance_id, ProvisionStepMarker::PostProvisionCompleted).await {
+        emit_step_skipped(
+            app,
+            context,
+            OrchestrationState::Ready,
+            "Skipping post-provision setup",
+            instance_id,
+        )
+        .await;
+        return Ok(());
+    }
+
+    emit_transition(
+        app,
+        context,
+        OrchestrationState::Ready,
+        "Running post-provision setup",
+        Some("Installing Chrome, Heroic, Wine and launcher shortcuts".to_string()),
+        false,
+    )
+    .await;
+
+    let output = PostProvisionService::run(remote, &context.config.audio_target_user).await?;
+
+    if let Err(error) = SharedStorageManager::auto_restore_instance(
+        context,
+        remote,
+        instance_id,
+        &context.config.audio_target_user,
+    )
+    .await
+    {
+        warn!(
+            instance_id = instance_id,
+            error = %error,
+            "Auto-restore after post-provision failed (non-blocking)"
+        );
+    }
+
+    let snapshot = context.state.read().await.clone();
+    mark_server_step_completed(
+        context,
+        instance_id,
+        ProvisionStepMarker::PostProvisionCompleted,
+        OrchestrationState::Ready,
+        &snapshot.instance.status,
+        &snapshot.instance.ssh_host,
+        snapshot.instance.ssh_port,
+        offer_id,
+    )
+    .await?;
+
+    emit_transition(
+        app,
+        context,
+        OrchestrationState::Ready,
+        "Post-provision setup complete",
+        Some(summarize_verification_output(&output)),
+        false,
+    )
+    .await;
+
+    Ok(())
 }
 
 async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()> {
@@ -1254,6 +1362,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
+                    ProvisionStepMarker::PostProvisionCompleted,
                 ],
             )
             .await?;
@@ -2113,6 +2222,7 @@ async fn run_existing_instance_orchestration(
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
+                    ProvisionStepMarker::PostProvisionCompleted,
                 ],
             )
             .await?;
@@ -2816,15 +2926,20 @@ async fn try_launch_existing_moonlight_session(
 ) -> AppResult<bool> {
     let snapshot = context.state.read().await.clone();
     let target_instance_id = instance_id.or(snapshot.instance.instance_id);
-    let pairing_completed = target_instance_id
+    let (pairing_completed, post_provision_completed) = target_instance_id
         .and_then(|id| {
             snapshot
                 .provisioned_servers
                 .iter()
                 .find(|record| record.instance_id == id)
-                .map(|record| record.steps.pairing_completed)
+                .map(|record| {
+                    (
+                        record.steps.pairing_completed,
+                        record.steps.post_provision_completed,
+                    )
+                })
         })
-        .unwrap_or(false);
+        .unwrap_or((false, false));
 
     let has_pin_in_memory = {
         let pin_memory = context.pairing_pin_in_memory.read().await;
@@ -2839,6 +2954,7 @@ async fn try_launch_existing_moonlight_session(
         && snapshot.sunshine.configured
         && !snapshot.wireguard.server_ip.trim().is_empty()
         && pairing_completed
+        && post_provision_completed
         && has_pin_in_memory;
 
     if !ready {
@@ -3030,6 +3146,7 @@ enum ProvisionStepMarker {
     MoonlightConfigured,
     AwaitingPairPin,
     PairingCompleted,
+    PostProvisionCompleted,
 }
 
 fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> bool {
@@ -3047,6 +3164,7 @@ fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> 
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin,
         ProvisionStepMarker::PairingCompleted => steps.pairing_completed,
+        ProvisionStepMarker::PostProvisionCompleted => steps.post_provision_completed,
     }
 }
 
@@ -3069,15 +3187,21 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured = value,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin = value,
         ProvisionStepMarker::PairingCompleted => steps.pairing_completed = value,
+        ProvisionStepMarker::PostProvisionCompleted => steps.post_provision_completed = value,
     }
 }
 
 /// Determines the resume step for an existing instance based on saved progress
 fn determine_resume_step(steps: &ProvisionedServerSteps) -> (OrchestrationState, String) {
-    if steps.pairing_completed {
+    if steps.post_provision_completed {
         (
             OrchestrationState::Ready,
-            "Resuming: Pairing already completed".to_string(),
+            "Resuming: Post-provision setup already completed".to_string(),
+        )
+    } else if steps.pairing_completed {
+        (
+            OrchestrationState::Ready,
+            "Resuming: Pairing done, pending post-provision setup".to_string(),
         )
     } else if steps.awaiting_pair_pin {
         (
@@ -3097,7 +3221,7 @@ fn determine_resume_step(steps: &ProvisionedServerSteps) -> (OrchestrationState,
     } else if steps.low_latency_audio_configured {
         (
             OrchestrationState::ConfiguringSunshine,
-            "Resuming: Starting from Sunshine setup".to_string(),
+            "Resuming: Starting from WireGuard setup".to_string(),
         )
     } else if steps.sunshine_configured {
         (

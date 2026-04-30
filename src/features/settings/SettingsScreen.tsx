@@ -4,25 +4,32 @@ import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
+import { SharedStorageSettings } from "../shared-storage-manager/SharedStorageSettings";
 import type {
   MoonlightPreferences,
   PlatformCredentialsUpdate,
   PersistedAppState,
   ServerPreferencesUpdate,
+  SharedStorageSettingsResponse,
+  SharedStorageSettingsUpdate,
   SshCredentialsUpdate
 } from "../../lib/types";
 
-type SettingsSection = "profile" | "server" | "client";
+type SettingsSection = "profile" | "server" | "client" | "storage";
 type ClientForm = Record<keyof MoonlightPreferences, string>;
 
 interface Props {
   appState: PersistedAppState;
   busy: boolean;
+  sharedStorageSettings: SharedStorageSettingsResponse | null;
   onSaveApiKey: (apiKey: string) => Promise<void>;
   onSavePlatformCredentials: (payload: PlatformCredentialsUpdate) => Promise<void>;
   onSaveServerPreferences: (payload: Partial<ServerPreferencesUpdate>) => Promise<void>;
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  onSaveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
+  onTestSharedStorageConfig: () => Promise<string | null>;
+  onLoadSharedStorageSettings: () => Promise<void>;
 }
 
 function toNumber(value: string, fallback: number): number {
@@ -56,11 +63,15 @@ const clientFields: Array<keyof MoonlightPreferences> = [
 export function SettingsScreen({
   appState,
   busy,
+  sharedStorageSettings,
   onSaveApiKey,
   onSavePlatformCredentials,
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
-  onSaveSshCredentials
+  onSaveSshCredentials,
+  onSaveSharedStorageSettings,
+  onTestSharedStorageConfig,
+  onLoadSharedStorageSettings
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
@@ -128,6 +139,10 @@ export function SettingsScreen({
       detectnetblocking: appState.moonlightPreferences.detectnetblocking.toString()
     });
   }, [appState]);
+
+  useEffect(() => {
+    void onLoadSharedStorageSettings();
+  }, []);
 
   const profilePanel = (
     <Card className="pixel-frame">
@@ -311,7 +326,21 @@ export function SettingsScreen({
     </Card>
   );
 
-  const panel = section === "profile" ? profilePanel : section === "server" ? serverPanel : clientPanel;
+  const storagePanel = (
+    <Card className="pixel-frame">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Shared Storage</h2>
+      <div className="mt-4">
+        <SharedStorageSettings
+          settings={sharedStorageSettings}
+          busy={busy}
+          onSave={onSaveSharedStorageSettings}
+          onTest={onTestSharedStorageConfig}
+        />
+      </div>
+    </Card>
+  );
+
+  const panel = section === "profile" ? profilePanel : section === "server" ? serverPanel : section === "storage" ? storagePanel : clientPanel;
 
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
@@ -346,6 +375,9 @@ export function SettingsScreen({
               </Button>
               <Button variant={section === "client" ? "secondary" : "ghost"} onClick={() => setSection("client")}>
                 Client
+              </Button>
+              <Button variant={section === "storage" ? "secondary" : "ghost"} onClick={() => setSection("storage")}>
+                Shared Storage
               </Button>
             </div>
           </Card>

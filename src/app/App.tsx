@@ -16,6 +16,8 @@ function RootRoute() {
   const searchingOffers = useAppStore((state) => state.searching);
   const offersPage = useAppStore((state) => state.offersPage);
   const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
+  const instanceActionRunning = useAppStore((state) => state.instanceActionRunning);
+  const sunshineSettings = useAppStore((state) => state.sunshineSettings);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
   const discoverOffers = useAppStore((state) => state.discoverOffers);
   const nextOffersPage = useAppStore((state) => state.nextOffersPage);
@@ -26,6 +28,12 @@ function RootRoute() {
   const startPlay = useAppStore((state) => state.startPlay);
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
   const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
+  const loadSunshineSettings = useAppStore((state) => state.loadSunshineSettings);
+  const saveSunshineSettings = useAppStore((state) => state.saveSunshineSettings);
+  const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
+  const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
+  const pauseInstance = useAppStore((state) => state.pauseInstance);
+  const destroyInstance = useAppStore((state) => state.destroyInstance);
 
   if (!appState) {
     return null;
@@ -44,6 +52,8 @@ function RootRoute() {
       offersPage={offersPage}
       offersHasNextPage={offersHasNextPage}
       busy={busy}
+      instanceActionRunning={instanceActionRunning}
+      sunshineSettings={sunshineSettings}
       onSearchOffers={discoverOffers}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
@@ -53,6 +63,12 @@ function RootRoute() {
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
       onSaveServerPreferences={saveServerPreferences}
+      onLoadSunshineSettings={loadSunshineSettings}
+      onSaveSunshineSettings={saveSunshineSettings}
+      onReconnectWireguard={reconnectWireguard}
+      onRebootInstanceServices={rebootInstanceServices}
+      onPauseInstance={pauseInstance}
+      onDestroyInstance={destroyInstance}
     />
   );
 }
@@ -111,6 +127,10 @@ export function App() {
   const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
   const saveMoonlightPreferences = useAppStore((state) => state.saveMoonlightPreferences);
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
+  const sharedStorageSettings = useAppStore((state) => state.sharedStorageSettings);
+  const saveSharedStorageSettings = useAppStore((state) => state.saveSharedStorageSettings);
+  const testSharedStorageConfig = useAppStore((state) => state.testSharedStorageConfig);
+  const loadSharedStorageSettings = useAppStore((state) => state.loadSharedStorageSettings);
 
   useEffect(() => {
     void initialize();
@@ -149,11 +169,15 @@ export function App() {
                 <SettingsScreen
                   appState={appState}
                   busy={busy}
+                  sharedStorageSettings={sharedStorageSettings}
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
+                  onSaveSharedStorageSettings={saveSharedStorageSettings}
+                  onTestSharedStorageConfig={testSharedStorageConfig}
+                  onLoadSharedStorageSettings={loadSharedStorageSettings}
                 />
               ) : null
             }

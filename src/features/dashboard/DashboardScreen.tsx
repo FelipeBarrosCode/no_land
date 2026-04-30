@@ -8,8 +8,10 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences } from "../../lib/types";
+import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
+import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
+import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
 
 interface Props {
   appState: PersistedAppState;
@@ -19,6 +21,8 @@ interface Props {
   offersPage: number;
   offersHasNextPage: boolean;
   busy: boolean;
+  instanceActionRunning: boolean;
+  sunshineSettings: SunshineSettingsResponse | null;
   onSearchOffers: (page?: number) => Promise<void>;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
@@ -34,6 +38,12 @@ interface Props {
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
+  onLoadSunshineSettings: (instanceId: number) => Promise<void>;
+  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
+  onReconnectWireguard: (instanceId: number) => Promise<string | null>;
+  onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
+  onPauseInstance: (instanceId: number) => Promise<void>;
+  onDestroyInstance: (instanceId: number) => Promise<void>;
 }
 
 const placeholders = [
@@ -52,6 +62,8 @@ export function DashboardScreen({
   offersPage,
   offersHasNextPage,
   busy,
+  instanceActionRunning,
+  sunshineSettings,
   onSearchOffers,
   onNextOffersPage,
   onPreviousOffersPage,
@@ -60,9 +72,16 @@ export function DashboardScreen({
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
-  onSaveServerPreferences
+  onSaveServerPreferences,
+  onLoadSunshineSettings,
+  onSaveSunshineSettings,
+  onReconnectWireguard,
+  onRebootInstanceServices,
+  onPauseInstance,
+  onDestroyInstance
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
 
   async function handleMoonlightDownload() {
@@ -82,6 +101,39 @@ export function DashboardScreen({
   async function handlePlayExisting(instanceId: number) {
     await onStartPlayExisting(instanceId);
     navigate("/provisioning");
+  }
+
+  async function handleOpenSettings(instanceId: number) {
+    setSettingsInstanceId(instanceId);
+    await onLoadSunshineSettings(instanceId);
+  }
+
+  async function handleSaveSunshineSettings(settings: Record<string, unknown>) {
+    if (settingsInstanceId !== null) {
+      await onSaveSunshineSettings(settingsInstanceId, settings);
+    }
+  }
+
+  function handleCloseSunshineSettings() {
+    setSettingsInstanceId(null);
+  }
+
+  async function handleReconnect(instanceId: number) {
+    await onReconnectWireguard(instanceId);
+  }
+
+  async function handleReboot(instanceId: number) {
+    await onRebootInstanceServices(instanceId);
+  }
+
+  async function handlePause(instanceId: number) {
+    await onPauseInstance(instanceId);
+    await onLoadRentedInstances();
+  }
+
+  async function handleDestroy(instanceId: number) {
+    await onDestroyInstance(instanceId);
+    await onLoadRentedInstances();
   }
 
   return (
@@ -174,13 +226,19 @@ export function DashboardScreen({
                       <p>GPU: {instance.gpuName}</p>
                       <p>SSH: {instance.sshHost || "pending"}</p>
                     </div>
-                    <Button
-                      className="mt-3 w-full"
-                      disabled={busy}
-                      onClick={() => handlePlayExisting(instance.instanceId)}
-                    >
-                      Play This Server
-                    </Button>
+                    <div className="mt-3">
+                      <InstanceCardActions
+                        instance={instance}
+                        busy={busy}
+                        instanceActionRunning={instanceActionRunning}
+                        onPlay={handlePlayExisting}
+                        onSettings={handleOpenSettings}
+                        onReconnect={handleReconnect}
+                        onReboot={handleReboot}
+                        onPause={handlePause}
+                        onDestroy={handleDestroy}
+                      />
+                    </div>
                   </Card>
                 ))}
               </div>
@@ -281,6 +339,15 @@ export function DashboardScreen({
           </Card>
         </section>
       </div>
+
+      {settingsInstanceId !== null && (
+        <SunshineSettingsPanel
+          settings={sunshineSettings}
+          busy={instanceActionRunning}
+          onSave={handleSaveSunshineSettings}
+          onClose={handleCloseSunshineSettings}
+        />
+      )}
 
       <ServerPickerModal
         open={pickerOpen}

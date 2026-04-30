@@ -10,7 +10,21 @@ import type {
   ProvisioningEvent,
   RentedInstanceSummary,
   ServerPreferencesUpdate,
-  SshCredentialsUpdate
+  SshCredentialsUpdate,
+  SharedStorageSettingsResponse,
+  SharedStorageSettingsUpdate,
+  BackupStatusResponse,
+  SharedStorageInstanceStatus,
+  SunshineSettingsResponse,
+  BundleIndex,
+  RestoreRequest,
+  RestoreDryRunResult,
+  RestoreJob,
+  InstanceMicConfig,
+  InstanceMicRuntimeStatus,
+  MicSessionResponse,
+  MicSettingsUpdate,
+  MicQualityProfile
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -111,4 +125,123 @@ export async function subscribeProvisioningEvents(
   return () => {
     unlisten();
   };
+}
+
+export async function getSharedStorageSettings(): Promise<SharedStorageSettingsResponse> {
+  return invokeSafe<SharedStorageSettingsResponse>("get_shared_storage_settings");
+}
+
+export async function saveSharedStorageSettings(
+  payload: SharedStorageSettingsUpdate
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("save_shared_storage_settings", { payload });
+}
+
+export async function testSharedStorageConfig(): Promise<string> {
+  return invokeSafe<string>("test_shared_storage_config");
+}
+
+export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
+  return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
+}
+
+export async function getInstanceBackupStatus(): Promise<SharedStorageInstanceStatus> {
+  return invokeSafe<SharedStorageInstanceStatus>("get_instance_backup_status");
+}
+
+export async function setupInstanceBackupSchedule(): Promise<string> {
+  return invokeSafe<string>("setup_instance_backup_schedule");
+}
+
+export async function removeInstanceBackupSchedule(): Promise<string> {
+  return invokeSafe<string>("remove_instance_backup_schedule");
+}
+
+export async function getInstanceSunshineSettings(
+  instanceId: number
+): Promise<SunshineSettingsResponse> {
+  return invokeSafe<SunshineSettingsResponse>("get_instance_sunshine_settings", { instanceId });
+}
+
+export async function updateInstanceSunshineSettings(
+  instanceId: number,
+  settings: Record<string, unknown>
+): Promise<void> {
+  return invokeSafe<void>("update_instance_sunshine_settings", { instanceId, settings });
+}
+
+export async function reconnectInstanceWireguard(instanceId: number): Promise<string> {
+  return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
+}
+
+export async function rebootInstanceServices(instanceId: number): Promise<string> {
+  return invokeSafe<string>("reboot_instance_services", { instanceId });
+}
+
+export async function pauseInstance(instanceId: number): Promise<void> {
+  return invokeSafe<void>("pause_instance", { instanceId });
+}
+
+export async function destroyInstance(instanceId: number): Promise<void> {
+  return invokeSafe<void>("destroy_instance", { instanceId });
+}
+
+export async function generateBundleIndex(): Promise<void> {
+  return invokeSafe<void>("generate_bundle_index");
+}
+
+export async function getInstanceRestoreBundles(instanceId: number): Promise<BundleIndex> {
+  return invokeSafe<BundleIndex>("get_instance_restore_bundles", { instanceId });
+}
+
+export async function dryRunRestore(
+  instanceId: number,
+  payload: RestoreRequest
+): Promise<RestoreDryRunResult> {
+  return invokeSafe<RestoreDryRunResult>("dry_run_restore", { instanceId, payload });
+}
+
+export async function restoreBundle(
+  instanceId: number,
+  payload: RestoreRequest
+): Promise<RestoreJob> {
+  return invokeSafe<RestoreJob>("restore_bundle", { instanceId, payload });
+}
+
+export async function getRestoreJob(jobId: string): Promise<RestoreJob> {
+  return invokeSafe<RestoreJob>("get_restore_job", { jobId });
+}
+
+export async function getInstanceMicConfig(instanceId: number): Promise<InstanceMicConfig> {
+  return invokeSafe<InstanceMicConfig>("get_instance_mic_config", { instanceId });
+}
+
+export async function updateInstanceMicSettings(
+  instanceId: number,
+  payload: MicSettingsUpdate
+): Promise<InstanceMicConfig> {
+  return invokeSafe<InstanceMicConfig>("update_instance_mic_settings", { instanceId, payload });
+}
+
+export async function enableInstanceMic(
+  instanceId: number,
+  qualityProfile?: MicQualityProfile
+): Promise<MicSessionResponse> {
+  return invokeSafe<MicSessionResponse>("enable_instance_mic", { instanceId, qualityProfile });
+}
+
+export async function disableInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("disable_instance_mic", { instanceId });
+}
+
+export async function reconnectInstanceMic(instanceId: number): Promise<MicSessionResponse> {
+  return invokeSafe<MicSessionResponse>("reconnect_instance_mic", { instanceId });
+}
+
+export async function recreateInstanceMicDevice(instanceId: number): Promise<void> {
+  return invokeSafe<void>("recreate_instance_mic_device", { instanceId });
+}
+
+export async function getInstanceMicStatus(instanceId: number): Promise<InstanceMicRuntimeStatus> {
+  return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", { instanceId });
 }
