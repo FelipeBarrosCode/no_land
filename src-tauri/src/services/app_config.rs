@@ -59,6 +59,7 @@ pub struct WireGuardDefaults {
     pub listen_port: u16,
     pub stream_max_rate: String,
     pub tunnel_mtu: u16,
+    pub persistent_keepalive_secs: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -127,7 +128,7 @@ impl Default for AppConfig {
                 av1_mode: 1,
                 capture: "nvfbc".to_string(),
                 encoder: "nvenc".to_string(),
-                fec_percentage: 30,
+                fec_percentage: 20,
                 hevc_mode: 0,
                 nvenc_preset: 4,
                 output_name: 0,
@@ -146,7 +147,8 @@ impl Default for AppConfig {
                 client_tunnel_ip: "10.77.0.2/32".to_string(),
                 listen_port: 51820,
                 stream_max_rate: "80mbit".to_string(),
-                tunnel_mtu: 1380,
+                tunnel_mtu: 1280,
+                persistent_keepalive_secs: 25,
             },
             scoring: OfferScoring {
                 distance_weight: 0.7,

@@ -302,10 +302,10 @@ pub struct MoonlightPreferences {
 impl Default for MoonlightPreferences {
     fn default() -> Self {
         Self {
-            bitrate: 80000,
+            bitrate: 20000,
             fps: 60,
-            width: 2560,
-            height: 1440,
+            width: 1920,
+            height: 1080,
             hostaudio: 1,
             showperfoverlay: 1,
             keepawake: 1,

@@ -563,10 +563,11 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
 
     fn render_server_config(&self, server_private: &str, client_public: &str) -> String {
         format!(
-            "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\n",
+            "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\n",
             self.defaults.server_tunnel_ip,
             self.defaults.listen_port,
             server_private,
+            self.defaults.tunnel_mtu,
             client_public,
             self.defaults.client_tunnel_ip,
         )
@@ -611,13 +612,15 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         allowed_ips: &str,
     ) -> String {
         format!(
-            "[Interface]\nAddress = {}\nPrivateKey = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\n",
+            "[Interface]\nAddress = {}\nPrivateKey = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
             self.defaults.client_tunnel_ip,
             client_private,
+            self.defaults.tunnel_mtu,
             server_public,
             endpoint_host,
             listen_port,
             allowed_ips,
+            self.defaults.persistent_keepalive_secs,
         )
     }
 
