@@ -22,6 +22,7 @@ import {
   saveSharedStorageSettings,
   testSharedStorageConfig,
   triggerInstanceBackup,
+  triggerInstanceBackupFor,
   getInstanceBackupStatus,
   setupInstanceBackupSchedule,
   removeInstanceBackupSchedule,
@@ -42,7 +43,8 @@ import {
   disableInstanceMic,
   reconnectInstanceMic,
   recreateInstanceMicDevice,
-  getInstanceMicStatus
+  getInstanceMicStatus,
+  syncInstanceFromSharedStorage
 } from "../lib/backend";
 import type {
   ManualLocationInput,
@@ -112,6 +114,8 @@ interface AppStore {
   saveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
   testSharedStorageConfig: () => Promise<string | null>;
   triggerBackup: () => Promise<void>;
+  triggerBackupForInstance: (instanceId: number) => Promise<void>;
+  syncInstanceStorage: (instanceId: number) => Promise<string | null>;
   loadBackupStatus: () => Promise<void>;
   loadInstanceBackupStatus: () => Promise<void>;
   setupBackupSchedule: () => Promise<string | null>;
@@ -496,6 +500,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ backupStatus: status, busy: false });
     } catch (error) {
       set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  triggerBackupForInstance: async (instanceId) => {
+    set({ busy: true, error: null });
+    try {
+      const status = await triggerInstanceBackupFor(instanceId);
+      set({ backupStatus: status, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  syncInstanceStorage: async (instanceId) => {
+    set({ busy: true, error: null });
+    try {
+      const message = await syncInstanceFromSharedStorage(instanceId);
+      set({ busy: false });
+      return message;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
     }
   },
 

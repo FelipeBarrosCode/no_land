@@ -34,6 +34,8 @@ function RootRoute() {
   const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
+  const triggerBackupForInstance = useAppStore((state) => state.triggerBackupForInstance);
+  const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
 
   if (!appState) {
     return null;
@@ -69,6 +71,8 @@ function RootRoute() {
       onRebootInstanceServices={rebootInstanceServices}
       onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
+      onSaveInstanceStorage={triggerBackupForInstance}
+      onSyncInstanceStorage={syncInstanceStorage}
     />
   );
 }

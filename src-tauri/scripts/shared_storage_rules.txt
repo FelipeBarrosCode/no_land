@@ -56,6 +56,7 @@
 + /home/*/.local/share/lutris/coverart/**
 
 # Exclude cloud save caches and launcher/game payload data
+- /home/ubuntu/**
 - /home/*/.local/share/Steam/userdata/*/*/remote/**
 - /home/*/.local/share/Steam/userdata/*/*/remotecache.vdf
 - /home/*/.local/share/Steam/steamapps/common/**

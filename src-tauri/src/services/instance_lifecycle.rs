@@ -169,18 +169,6 @@ impl InstanceLifecycleService {
                 api_key,
             );
 
-            // Blocking sync cleanup before destruction so deleted files are also
-            // deleted from Backblaze according to current filter rules.
-            let target_user = context.config.audio_target_user.clone();
-            let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-            SharedStorageManager::sync_cleanup_on_destroy(
-                context,
-                &remote,
-                instance_id,
-                &target_user,
-            )
-            .await?;
-
             vast.destroy_instance(instance_id).await?;
 
             // Clean up local state references to the destroyed instance
@@ -347,6 +335,56 @@ impl InstanceLifecycleService {
 
         info!("Sunshine settings updated successfully");
         Ok(())
+    }
+
+    pub async fn save_instance_to_shared_storage(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user).await?;
+        SharedStorageManager::get_backup_status(context).await
+    }
+
+    pub async fn sync_instance_from_shared_storage(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<String> {
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::auto_restore_instance(context, &remote, instance_id, &target_user).await?;
+        Ok("Shared storage sync completed".to_string())
     }
 
     /// Check if a lifecycle action is currently running for an instance.

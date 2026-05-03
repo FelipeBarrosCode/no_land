@@ -145,6 +145,14 @@ export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
   return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
 }
 
+export async function triggerInstanceBackupFor(instanceId: number): Promise<BackupStatusResponse> {
+  return invokeSafe<BackupStatusResponse>("trigger_instance_backup_for", { instanceId });
+}
+
+export async function syncInstanceFromSharedStorage(instanceId: number): Promise<string> {
+  return invokeSafe<string>("sync_instance_from_shared_storage", { instanceId });
+}
+
 export async function getInstanceBackupStatus(): Promise<SharedStorageInstanceStatus> {
   return invokeSafe<SharedStorageInstanceStatus>("get_instance_backup_status");
 }

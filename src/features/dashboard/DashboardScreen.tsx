@@ -44,6 +44,8 @@ interface Props {
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
+  onSaveInstanceStorage: (instanceId: number) => Promise<void>;
+  onSyncInstanceStorage: (instanceId: number) => Promise<string | null>;
 }
 
 const placeholders = [
@@ -78,7 +80,9 @@ export function DashboardScreen({
   onReconnectWireguard,
   onRebootInstanceServices,
   onPauseInstance,
-  onDestroyInstance
+  onDestroyInstance,
+  onSaveInstanceStorage,
+  onSyncInstanceStorage
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
@@ -134,6 +138,14 @@ export function DashboardScreen({
   async function handleDestroy(instanceId: number) {
     await onDestroyInstance(instanceId);
     await onLoadRentedInstances();
+  }
+
+  async function handleSaveStorage(instanceId: number) {
+    await onSaveInstanceStorage(instanceId);
+  }
+
+  async function handleSyncStorage(instanceId: number) {
+    await onSyncInstanceStorage(instanceId);
   }
 
   return (
@@ -237,6 +249,8 @@ export function DashboardScreen({
                         onReboot={handleReboot}
                         onPause={handlePause}
                         onDestroy={handleDestroy}
+                        onSaveStorage={handleSaveStorage}
+                        onSyncStorage={handleSyncStorage}
                       />
                     </div>
                   </Card>

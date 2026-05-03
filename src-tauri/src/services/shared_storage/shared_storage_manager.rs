@@ -368,6 +368,15 @@ impl SharedStorageManager {
         }
 
         if output.status_code != 0 {
+            let combined = format!("{}\n{}", stdout, stderr).to_ascii_lowercase();
+            if combined.contains("storage_cap_exceeded")
+                || combined.contains("cannot upload files, storage cap exceeded")
+            {
+                return Err(AppError::Provisioning(
+                    "Backblaze storage cap exceeded. Increase your B2 cap/quota in Caps & Alerts, then retry Save."
+                        .to_string(),
+                ));
+            }
             return Err(AppError::Provisioning(format!(
                 "rclone sync failed (exit {}): {}",
                 output.status_code,

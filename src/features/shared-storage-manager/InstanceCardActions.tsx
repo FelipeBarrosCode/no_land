@@ -13,6 +13,8 @@ interface Props {
   onReboot: (instanceId: number) => void;
   onPause: (instanceId: number) => void;
   onDestroy: (instanceId: number) => void;
+  onSaveStorage: (instanceId: number) => void;
+  onSyncStorage: (instanceId: number) => void;
 }
 
 export function InstanceCardActions({
@@ -24,7 +26,9 @@ export function InstanceCardActions({
   onReconnect,
   onReboot,
   onPause,
-  onDestroy
+  onDestroy,
+  onSaveStorage,
+  onSyncStorage
 }: Props) {
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
@@ -62,7 +66,24 @@ export function InstanceCardActions({
         </Button>
       </div>
 
-      <div className="grid grid-cols-4 gap-2">
+      <div className="grid grid-cols-3 gap-2">
+        <Button
+          variant="ghost"
+          className="w-full text-xs"
+          disabled={actionDisabled || !isRunning}
+          onClick={() => onSaveStorage(instance.instanceId)}
+        >
+          Save
+        </Button>
+
+        <Button
+          variant="ghost"
+          className="w-full text-xs"
+          disabled={actionDisabled || !isRunning}
+          onClick={() => onSyncStorage(instance.instanceId)}
+        >
+          Sync
+        </Button>
 
         <Button
           variant="ghost"
@@ -72,7 +93,9 @@ export function InstanceCardActions({
         >
           Reconnect
         </Button>
+      </div>
 
+      <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
           className="w-full text-xs"

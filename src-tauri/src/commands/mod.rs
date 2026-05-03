@@ -1047,6 +1047,26 @@ pub async fn trigger_instance_backup(
 }
 
 #[tauri::command]
+pub async fn trigger_instance_backup_for(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<BackupStatusResponse, FrontendError> {
+    InstanceLifecycleService::save_instance_to_shared_storage(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn sync_instance_from_shared_storage(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<String, FrontendError> {
+    InstanceLifecycleService::sync_instance_from_shared_storage(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn get_instance_backup_status(
     context: State<'_, AppContext>,
 ) -> Result<SharedStorageInstanceStatus, FrontendError> {
