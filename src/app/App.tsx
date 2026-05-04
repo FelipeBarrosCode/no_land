@@ -36,6 +36,7 @@ function RootRoute() {
   const destroyInstance = useAppStore((state) => state.destroyInstance);
   const triggerBackupForInstance = useAppStore((state) => state.triggerBackupForInstance);
   const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
+  const listSyncableStorageObjects = useAppStore((state) => state.listSyncableStorageObjects);
 
   if (!appState) {
     return null;
@@ -73,6 +74,7 @@ function RootRoute() {
       onDestroyInstance={destroyInstance}
       onSaveInstanceStorage={triggerBackupForInstance}
       onSyncInstanceStorage={syncInstanceStorage}
+      onListSyncableStorageObjects={listSyncableStorageObjects}
     />
   );
 }

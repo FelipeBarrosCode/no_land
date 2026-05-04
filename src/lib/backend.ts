@@ -15,6 +15,7 @@ import type {
   SharedStorageSettingsUpdate,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
+  SharedStorageObjectEntry,
   SunshineSettingsResponse,
   BundleIndex,
   RestoreRequest,
@@ -151,6 +152,23 @@ export async function triggerInstanceBackupFor(instanceId: number): Promise<Back
 
 export async function syncInstanceFromSharedStorage(instanceId: number): Promise<string> {
   return invokeSafe<string>("sync_instance_from_shared_storage", { instanceId });
+}
+
+export async function listInstanceSharedStorageObjects(instanceId: number) {
+  return invokeSafe<SharedStorageObjectEntry[]>(
+    "list_instance_shared_storage_objects",
+    { instanceId }
+  );
+}
+
+export async function syncInstanceFromSharedStorageSelected(
+  instanceId: number,
+  selectedPaths: string[]
+): Promise<string> {
+  return invokeSafe<string>("sync_instance_from_shared_storage_selected", {
+    instanceId,
+    payload: { selectedPaths }
+  });
 }
 
 export async function getInstanceBackupStatus(): Promise<SharedStorageInstanceStatus> {

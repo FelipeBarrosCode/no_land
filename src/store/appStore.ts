@@ -44,7 +44,9 @@ import {
   reconnectInstanceMic,
   recreateInstanceMicDevice,
   getInstanceMicStatus,
-  syncInstanceFromSharedStorage
+  syncInstanceFromSharedStorage,
+  listInstanceSharedStorageObjects,
+  syncInstanceFromSharedStorageSelected
 } from "../lib/backend";
 import type {
   ManualLocationInput,
@@ -61,6 +63,7 @@ import type {
   SharedStorageSettingsResponse,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
+  SharedStorageObjectEntry,
   SunshineSettingsResponse,
   BundleIndex,
   RestoreDryRunResult,
@@ -115,7 +118,8 @@ interface AppStore {
   testSharedStorageConfig: () => Promise<string | null>;
   triggerBackup: () => Promise<void>;
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
-  syncInstanceStorage: (instanceId: number) => Promise<string | null>;
+  syncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
+  listSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   loadBackupStatus: () => Promise<void>;
   loadInstanceBackupStatus: () => Promise<void>;
   setupBackupSchedule: () => Promise<string | null>;
@@ -513,14 +517,39 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  syncInstanceStorage: async (instanceId) => {
+  syncInstanceStorage: async (instanceId, selectedPaths) => {
     set({ busy: true, error: null });
     try {
-      const message = await syncInstanceFromSharedStorage(instanceId);
+      console.info("[shared-storage] sync start", {
+        instanceId,
+        selectedCount: selectedPaths?.length ?? 0
+      });
+      const message = selectedPaths && selectedPaths.length > 0
+        ? await syncInstanceFromSharedStorageSelected(instanceId, selectedPaths)
+        : await syncInstanceFromSharedStorage(instanceId);
+      console.info("[shared-storage] sync complete", { instanceId, message });
       set({ busy: false });
       return message;
     } catch (error) {
+      console.error("[shared-storage] sync failed", { instanceId, error });
       set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  listSyncableStorageObjects: async (instanceId) => {
+    set({ error: null });
+    try {
+      console.info("[shared-storage] listing remote objects start", { instanceId });
+      const entries = await listInstanceSharedStorageObjects(instanceId);
+      console.info("[shared-storage] listing remote objects complete", {
+        instanceId,
+        count: entries.length
+      });
+      return entries;
+    } catch (error) {
+      console.error("[shared-storage] listing remote objects failed", { instanceId, error });
+      set({ error: mapError(error) });
       return null;
     }
   },

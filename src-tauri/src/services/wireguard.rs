@@ -28,6 +28,18 @@ pub struct WireGuardService {
     pub defaults: WireGuardDefaults,
 }
 
+#[derive(Debug, Clone)]
+struct ExistingRemoteIdentity {
+    server_private_key: String,
+    client_public_key: String,
+}
+
+#[derive(Debug, Clone)]
+struct ExistingLocalIdentity {
+    client_private_key: String,
+    server_public_key: String,
+}
+
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
 const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
@@ -150,8 +162,54 @@ exit 0"#
     ) -> AppResult<WireGuardProvisionResult> {
         ensure_local_wireguard_tools()?;
 
-        let (server_private, server_public) = generate_keypair()?;
-        let (client_private, client_public) = generate_keypair()?;
+        let local_config_dir = local_app_data_dir.join("wireguard");
+        fs::create_dir_all(&local_config_dir).await?;
+        let local_config_path = local_config_dir.join("noland-connect-client.conf");
+
+        let existing_remote_identity = self.load_existing_remote_identity(remote).await?;
+        let existing_local_identity = load_existing_local_identity(&local_config_path).await?;
+
+        let (server_private, server_public, client_private, client_public) =
+            match (existing_remote_identity, existing_local_identity) {
+                (Some(remote_identity), Some(local_identity)) => {
+                    let derived_server_public = derive_public_key(&remote_identity.server_private_key)?;
+                    let derived_client_public = derive_public_key(&local_identity.client_private_key)?;
+                    if derived_server_public != local_identity.server_public_key
+                        || derived_client_public != remote_identity.client_public_key
+                    {
+                        return Err(AppError::Provisioning(
+                            "WireGuard identity mismatch detected. Refusing to rotate keys during reinitialize. Use explicit key regeneration flow to replace keys."
+                                .to_string(),
+                        ));
+                    }
+
+                    info!("Reusing existing WireGuard key material from prior provisioning");
+                    (
+                        remote_identity.server_private_key,
+                        derived_server_public,
+                        local_identity.client_private_key,
+                        derived_client_public,
+                    )
+                }
+                (Some(_), None) => {
+                    return Err(AppError::Provisioning(
+                        "WireGuard server config exists but local client key is missing. Refusing to rotate keys during reinitialize. Restore local WireGuard config or run explicit key regeneration."
+                            .to_string(),
+                    ));
+                }
+                (None, Some(_)) => {
+                    return Err(AppError::Provisioning(
+                        "Local WireGuard config exists but server key material is missing. Refusing to rotate keys during reinitialize. Restore server config or run explicit key regeneration."
+                            .to_string(),
+                    ));
+                }
+                (None, None) => {
+                    info!("No existing WireGuard key material found; bootstrapping new keys");
+                    let (server_private, server_public) = generate_keypair()?;
+                    let (client_private, client_public) = generate_keypair()?;
+                    (server_private, server_public, client_private, client_public)
+                }
+            };
 
         self.cleanup_existing_wireguard(remote).await?;
         self.setup_cpu_governor(remote).await?;
@@ -237,9 +295,6 @@ exit 0"#
         self.validate_network_tuning(remote, &primary_interface)
             .await?;
 
-        let local_config_dir = local_app_data_dir.join("wireguard");
-        fs::create_dir_all(&local_config_dir).await?;
-        let local_config_path = local_config_dir.join("noland-connect-client.conf");
         fs::write(&local_config_path, client_config).await?;
 
         Ok(WireGuardProvisionResult {
@@ -249,6 +304,45 @@ exit 0"#
             client_public_key: client_public,
             client_config_path: local_config_path,
         })
+    }
+
+    async fn load_existing_remote_identity(
+        &self,
+        remote: &RemoteExec,
+    ) -> AppResult<Option<ExistingRemoteIdentity>> {
+        let iface = self.defaults.server_interface_name.clone();
+        let command = format!(
+            "sudo test -f /etc/wireguard/{iface}.conf && sudo cat /etc/wireguard/{iface}.conf"
+        );
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if output.status_code != 0 {
+            return Ok(None);
+        }
+
+        let server_private_key = match parse_wireguard_config_value(
+            &output.stdout,
+            "Interface",
+            "PrivateKey",
+        ) {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+        let client_public_key = match parse_wireguard_config_value(&output.stdout, "Peer", "PublicKey") {
+            Some(value) => value,
+            None => return Ok(None),
+        };
+
+        Ok(Some(ExistingRemoteIdentity {
+            server_private_key,
+            client_public_key,
+        }))
     }
 
     async fn check_wireguard_packages_needed(&self, remote: &RemoteExec) -> AppResult<Vec<String>> {
@@ -1012,7 +1106,7 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
 
     let path = config_path.display().to_string().replace('"', "\\\"");
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; wg-quick down {LOCAL_TUNNEL_NAME} >/dev/null 2>&1 || true; wg-quick down {LEGACY_TUNNEL_NAME} >/dev/null 2>&1 || true; for iface in $(wg show interfaces 2>/dev/null || true); do [ \"$iface\" = \"{LOCAL_TUNNEL_NAME}\" ] || ifconfig \"$iface\" down >/dev/null 2>&1 || true; done; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; wg-quick up {LOCAL_CONF_PATH}; for _ in 1 2 3 4 5; do wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; if grep -qi 'latest handshake:' /tmp/noland-wg-show.txt && ! grep -qi 'latest handshake: never' /tmp/noland-wg-show.txt; then break; fi; sleep 1; done; if grep -qi 'allowed ips: 0.0.0.0/0' /tmp/noland-wg-show.txt; then echo 'WireGuard came up in full-tunnel mode (0.0.0.0/0), refusing configuration' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi; if ! grep -qi 'allowed ips: 10.77.0.1/32' /tmp/noland-wg-show.txt; then echo 'WireGuard came up but allowed ips are not scoped to 10.77.0.1/32' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; wg-quick down {LOCAL_TUNNEL_NAME} >/dev/null 2>&1 || true; wg-quick down {LEGACY_TUNNEL_NAME} >/dev/null 2>&1 || true; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; wg-quick up {LOCAL_CONF_PATH}; for _ in 1 2 3 4 5; do wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; if grep -qi 'latest handshake:' /tmp/noland-wg-show.txt && ! grep -qi 'latest handshake: never' /tmp/noland-wg-show.txt; then break; fi; sleep 1; done; if grep -qi 'allowed ips: 0.0.0.0/0' /tmp/noland-wg-show.txt; then echo 'WireGuard came up in full-tunnel mode (0.0.0.0/0), refusing configuration' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi; if ! grep -qi 'allowed ips: 10.77.0.1/32' /tmp/noland-wg-show.txt; then echo 'WireGuard came up but allowed ips are not scoped to 10.77.0.1/32' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -1159,6 +1253,94 @@ fn generate_keypair() -> AppResult<(String, String)> {
     }
 
     Ok((private.trim().to_string(), public))
+}
+
+fn derive_public_key(private_key: &str) -> AppResult<String> {
+    let mut child = Command::new("wg")
+        .arg("pubkey")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| AppError::Command(format!("Failed to spawn wg pubkey: {error}")))?;
+
+    if let Some(stdin) = child.stdin.as_mut() {
+        stdin
+            .write_all(private_key.as_bytes())
+            .map_err(|error| AppError::Command(format!("Failed writing to wg pubkey stdin: {error}")))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| AppError::Command(format!("Failed reading wg pubkey output: {error}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "wg pubkey failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+async fn load_existing_local_identity(config_path: &Path) -> AppResult<Option<ExistingLocalIdentity>> {
+    let content = match fs::read_to_string(config_path).await {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AppError::Command(format!(
+                "Failed reading local WireGuard config {}: {error}",
+                config_path.display()
+            )))
+        }
+    };
+
+    let client_private_key = match parse_wireguard_config_value(&content, "Interface", "PrivateKey") {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    let server_public_key = match parse_wireguard_config_value(&content, "Peer", "PublicKey") {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+
+    Ok(Some(ExistingLocalIdentity {
+        client_private_key,
+        server_public_key,
+    }))
+}
+
+fn parse_wireguard_config_value(content: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    let target_section = format!("[{}]", section);
+    let key_lower = key.to_ascii_lowercase();
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            in_section = trimmed.eq_ignore_ascii_case(&target_section);
+            continue;
+        }
+
+        if !in_section {
+            continue;
+        }
+
+        let Some((raw_key, raw_value)) = trimmed.split_once('=') else {
+            continue;
+        };
+
+        if raw_key.trim().to_ascii_lowercase() == key_lower {
+            return Some(raw_value.trim().to_string());
+        }
+    }
+
+    None
 }
 
 fn strip_cidr(ip: &str) -> String {

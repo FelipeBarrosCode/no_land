@@ -574,6 +574,21 @@ pub struct SharedStorageInstanceStatus {
     pub last_backup_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageObjectEntry {
+    pub path: String,
+    pub name: String,
+    pub parent_path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageSyncSelectionRequest {
+    pub selected_paths: Vec<String>,
+}
+
 // ============================================================
 // Bundle Index + Restore types
 // ============================================================

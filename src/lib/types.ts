@@ -321,6 +321,17 @@ export interface SharedStorageInstanceStatus {
   lastBackupError: string | null;
 }
 
+export interface SharedStorageObjectEntry {
+  path: string;
+  name: string;
+  parentPath: string;
+  isDir: boolean;
+}
+
+export interface SharedStorageSyncSelectionRequest {
+  selectedPaths: string[];
+}
+
 export interface SunshineSetting {
   key: string;
   value: unknown;

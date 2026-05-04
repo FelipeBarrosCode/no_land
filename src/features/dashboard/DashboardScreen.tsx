@@ -8,9 +8,10 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SunshineSettingsResponse } from "../../lib/types";
+import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
+import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
 
 interface Props {
@@ -45,7 +46,8 @@ interface Props {
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
   onSaveInstanceStorage: (instanceId: number) => Promise<void>;
-  onSyncInstanceStorage: (instanceId: number) => Promise<string | null>;
+  onSyncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
+  onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
 }
 
 const placeholders = [
@@ -82,10 +84,12 @@ export function DashboardScreen({
   onPauseInstance,
   onDestroyInstance,
   onSaveInstanceStorage,
-  onSyncInstanceStorage
+  onSyncInstanceStorage,
+  onListSyncableStorageObjects
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
+  const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
 
   async function handleMoonlightDownload() {
@@ -145,7 +149,16 @@ export function DashboardScreen({
   }
 
   async function handleSyncStorage(instanceId: number) {
-    await onSyncInstanceStorage(instanceId);
+    setSyncInstanceId(instanceId);
+  }
+
+  async function handleSyncSelection(selectedPaths: string[]) {
+    if (syncInstanceId === null) {
+      return;
+    }
+
+    await onSyncInstanceStorage(syncInstanceId, selectedPaths);
+    setSyncInstanceId(null);
   }
 
   return (
@@ -381,6 +394,15 @@ export function DashboardScreen({
         onManualLocationSave={onManualLocationSave}
         onSelectOffer={onSelectOffer}
         onUpdateServerPreferences={onSaveServerPreferences}
+      />
+
+      <SharedStorageSyncModal
+        open={syncInstanceId !== null}
+        busy={busy || instanceActionRunning}
+        instanceId={syncInstanceId}
+        onClose={() => setSyncInstanceId(null)}
+        onLoadObjects={onListSyncableStorageObjects}
+        onConfirmSync={handleSyncSelection}
       />
     </main>
   );

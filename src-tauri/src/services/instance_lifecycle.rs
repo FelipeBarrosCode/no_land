@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, process::Command, time::Duration};
 
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -87,8 +87,42 @@ impl InstanceLifecycleService {
                 ));
             }
 
-            // Reuse existing local WireGuard setup flow
-            let message = setup_local_wireguard_client(std::path::Path::new(&config_path))?;
+            let mut last_error: Option<AppError> = None;
+            let mut message = String::new();
+            for attempt in 1..=2 {
+                match setup_local_wireguard_client(std::path::Path::new(&config_path)) {
+                    Ok(result) => {
+                        message = result;
+                        last_error = None;
+
+                        if local_wireguard_has_peer() {
+                            break;
+                        }
+
+                        warn!(
+                            instance_id = instance_id,
+                            attempt = attempt,
+                            "WireGuard reconnect completed but local peer state is not visible yet"
+                        );
+
+                        if attempt == 2 {
+                            message = format!(
+                                "{} (peer state is still initializing; retry in a few seconds if needed)",
+                                message
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        last_error = Some(error);
+                    }
+                }
+
+                std::thread::sleep(Duration::from_millis(750));
+            }
+
+            if let Some(error) = last_error {
+                return Err(error);
+            }
 
             info!(
                 instance_id = instance_id,
@@ -102,6 +136,7 @@ impl InstanceLifecycleService {
         Self::release_lock(instance_id).await;
         result
     }
+
 
     /// Pause a provisioned instance. Runs backup first if available.
     pub async fn pause_instance(
@@ -387,11 +422,91 @@ impl InstanceLifecycleService {
         Ok("Shared storage sync completed".to_string())
     }
 
+    pub async fn list_shared_storage_objects(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
+        info!(instance_id = instance_id, "instance lifecycle list_shared_storage_objects start");
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        let result = SharedStorageManager::list_remote_objects(context, &remote, &target_user).await;
+        if let Ok(entries) = &result {
+            info!(instance_id = instance_id, count = entries.len(), "instance lifecycle list_shared_storage_objects complete");
+        }
+        result
+    }
+
+    pub async fn sync_instance_from_shared_storage_selected(
+        context: &AppContext,
+        instance_id: u64,
+        selected_paths: Vec<String>,
+    ) -> AppResult<String> {
+        info!(instance_id = instance_id, selected_count = selected_paths.len(), "instance lifecycle sync_selected start");
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        let result = SharedStorageManager::restore_selected_paths(
+            context,
+            &remote,
+            instance_id,
+            &target_user,
+            &selected_paths,
+        )
+        .await;
+        if result.is_ok() {
+            info!(instance_id = instance_id, "instance lifecycle sync_selected complete");
+        }
+        result
+    }
+
     /// Check if a lifecycle action is currently running for an instance.
     pub async fn is_action_running(instance_id: u64) -> bool {
         let actions = get_lifecycle_actions().read().await;
         actions.contains_key(&instance_id)
     }
+}
+
+fn local_wireguard_has_peer() -> bool {
+    let output = match Command::new("wg").arg("show").output() {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+
+    if !output.status.success() {
+        return false;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.lines().any(|line| line.trim_start().starts_with("peer:"))
 }
 
 async fn build_remote_exec_for_instance(

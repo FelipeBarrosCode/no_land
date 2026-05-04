@@ -1067,6 +1067,31 @@ pub async fn sync_instance_from_shared_storage(
 }
 
 #[tauri::command]
+pub async fn list_instance_shared_storage_objects(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<Vec<crate::models::app_state::SharedStorageObjectEntry>, FrontendError> {
+    InstanceLifecycleService::list_shared_storage_objects(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn sync_instance_from_shared_storage_selected(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    payload: crate::models::app_state::SharedStorageSyncSelectionRequest,
+) -> Result<String, FrontendError> {
+    InstanceLifecycleService::sync_instance_from_shared_storage_selected(
+        context.inner(),
+        instance_id,
+        payload.selected_paths,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn get_instance_backup_status(
     context: State<'_, AppContext>,
 ) -> Result<SharedStorageInstanceStatus, FrontendError> {

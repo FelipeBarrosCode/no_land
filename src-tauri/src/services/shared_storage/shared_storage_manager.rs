@@ -1,4 +1,4 @@
-use std::{collections::HashMap, time::Duration};
+use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
 
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
@@ -15,9 +15,15 @@ use super::bundle_indexer::BundleIndexer;
 /// In-memory tracking of running backups per instance to prevent overlap.
 static RUNNING_BACKUPS: std::sync::OnceLock<RwLock<HashMap<u64, BackupJobInfo>>> =
     std::sync::OnceLock::new();
+static LISTING_READY_CACHE: std::sync::OnceLock<RwLock<HashSet<String>>> =
+    std::sync::OnceLock::new();
 
 fn get_running_backups() -> &'static RwLock<HashMap<u64, BackupJobInfo>> {
     RUNNING_BACKUPS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn get_listing_ready_cache() -> &'static RwLock<HashSet<String>> {
+    LISTING_READY_CACHE.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +39,285 @@ struct BackupJobInfo {
 pub struct SharedStorageManager;
 
 impl SharedStorageManager {
+    pub async fn list_remote_objects(
+        context: &AppContext,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
+        info!(target_user = target_user, "shared-storage list_remote_objects start");
+        let total_started = Instant::now();
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        if !settings.enabled {
+            return Err(AppError::InvalidInput(
+                "Shared storage is disabled. Enable it in settings first.".to_string(),
+            ));
+        }
+
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
+            return Err(AppError::InvalidInput(
+                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+            ));
+        }
+
+        let cache_key = listing_cache_key(remote, target_user, settings);
+        let cached_ready = {
+            let cache = get_listing_ready_cache().read().await;
+            cache.contains(&cache_key)
+        };
+
+        if !cached_ready {
+            let setup_started = Instant::now();
+            Self::ensure_rclone_installed(remote).await?;
+            Self::configure_rclone_remote(remote, target_user, settings).await?;
+            {
+                let mut cache = get_listing_ready_cache().write().await;
+                cache.insert(cache_key.clone());
+            }
+            info!(
+                elapsed_ms = setup_started.elapsed().as_millis() as u64,
+                "shared-storage list setup complete"
+            );
+        } else {
+            info!("shared-storage list setup cache hit");
+        }
+
+        let source = Self::build_storage_source(settings, false);
+        info!(source = source, "shared-storage list source resolved");
+
+        let list_cmd = format!(
+            "sudo -u {user} rclone lsf {src} --recursive --files-only --fast-list",
+            user = target_user,
+            src = shell_escape(&source),
+        );
+
+        let listing_started = Instant::now();
+        let first_attempt = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&list_cmd))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        info!(
+            status_code = first_attempt.status_code,
+            stdout_len = first_attempt.stdout.len(),
+            stderr_len = first_attempt.stderr.len(),
+            elapsed_ms = listing_started.elapsed().as_millis() as u64,
+            "shared-storage list_remote_objects command finished"
+        );
+
+        let lower_error_blob = format!(
+            "{}\n{}",
+            first_attempt.stdout.to_ascii_lowercase(),
+            first_attempt.stderr.to_ascii_lowercase()
+        );
+
+        let needs_plain_fallback = first_attempt.status_code != 0
+            && (lower_error_blob.contains("password not set in config file")
+                || lower_error_blob.contains("failed to create file system for")
+                || lower_error_blob.contains("crypt"));
+
+        let output = if needs_plain_fallback {
+            warn!("shared-storage list failed on crypt remote, retrying with plain B2 remote");
+            {
+                let mut cache = get_listing_ready_cache().write().await;
+                cache.remove(&cache_key);
+            }
+
+            let reconfigure_started = Instant::now();
+            Self::configure_rclone_remote(remote, target_user, settings).await?;
+            info!(
+                elapsed_ms = reconfigure_started.elapsed().as_millis() as u64,
+                "shared-storage list reconfigured rclone after failure"
+            );
+
+            let fallback_source = Self::build_storage_source(settings, true);
+            info!(source = fallback_source, "shared-storage list fallback source resolved");
+            let fallback_cmd = format!(
+                "sudo -u {user} rclone lsf {src} --recursive --files-only --fast-list",
+                user = target_user,
+                src = shell_escape(&fallback_source),
+            );
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&fallback_cmd))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        } else {
+            first_attempt
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed listing Backblaze objects: {}",
+                redact_secrets(&format!("{}\n{}", output.stdout, output.stderr), settings).trim()
+            )));
+        }
+
+        let parsing_started = Instant::now();
+        let mut entries = Vec::new();
+        let mut directory_paths = HashSet::new();
+
+        for raw_line in output.stdout.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            let is_dir = false;
+            let normalized = line.trim_end_matches('/').trim();
+            if normalized.is_empty() {
+                continue;
+            }
+
+            let path = format!("/{}", normalized);
+            let (parent_path, name) = split_parent_and_name(&path);
+
+            entries.push(crate::models::app_state::SharedStorageObjectEntry {
+                path,
+                name,
+                parent_path,
+                is_dir,
+            });
+
+            let mut cursor = parent_dir(normalized);
+            while !cursor.is_empty() && cursor != "/" {
+                directory_paths.insert(cursor.clone());
+                cursor = parent_dir(&cursor);
+            }
+        }
+
+        for dir_path in directory_paths {
+            let (parent_path, name) = split_parent_and_name(&dir_path);
+            entries.push(crate::models::app_state::SharedStorageObjectEntry {
+                path: dir_path,
+                name,
+                parent_path,
+                is_dir: true,
+            });
+        }
+
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        entries.dedup_by(|a, b| a.path == b.path && a.is_dir == b.is_dir);
+        info!(
+            count = entries.len(),
+            parse_elapsed_ms = parsing_started.elapsed().as_millis() as u64,
+            total_elapsed_ms = total_started.elapsed().as_millis() as u64,
+            "shared-storage list_remote_objects complete"
+        );
+        Ok(entries)
+    }
+
+    pub async fn restore_selected_paths(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+        selected_paths: &[String],
+    ) -> AppResult<String> {
+        info!(
+            instance_id = instance_id,
+            selected_count = selected_paths.len(),
+            "shared-storage restore_selected_paths start"
+        );
+        if selected_paths.is_empty() {
+            return Err(AppError::InvalidInput(
+                "Select at least one file or folder to sync.".to_string(),
+            ));
+        }
+
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        if !settings.enabled {
+            return Err(AppError::InvalidInput(
+                "Shared storage is disabled. Enable it in settings first.".to_string(),
+            ));
+        }
+
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
+            return Err(AppError::InvalidInput(
+                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+            ));
+        }
+
+        Self::ensure_rclone_installed(remote).await?;
+        Self::write_filter_rules(remote, target_user).await?;
+        Self::configure_rclone_remote(remote, target_user, settings).await?;
+
+        let source = Self::build_storage_source(settings, false);
+
+        let mut include_lines = String::new();
+        for path in selected_paths {
+            let normalized = normalize_selection_path(path)?;
+            info!(path = normalized, "shared-storage selected path");
+            include_lines.push_str(&format!("+ {normalized}\n"));
+            include_lines.push_str(&format!("+ {normalized}/**\n"));
+        }
+        include_lines.push_str("- **\n");
+
+        let filter_path = format!("/home/{}/noland-sync-selection.filter", target_user);
+        let write_filter_cmd = format!(
+            r#"sudo -u {user} bash -lc 'cat > {path} <<'"'"'EOF'"'"'
+{content}EOF
+chmod 600 {path}'"#,
+            user = target_user,
+            path = filter_path,
+            content = include_lines,
+        );
+
+        {
+            let remote = remote.clone();
+            let write = tokio::task::spawn_blocking(move || remote.ssh(&write_filter_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
+            info!(
+                status_code = write.status_code,
+                "shared-storage selection filter file written"
+            );
+        }
+
+        let restore_cmd = format!(
+            "sudo -u {user} rclone copy {src} / --filter-from {filter} --checksum --update 2>&1",
+            user = target_user,
+            src = shell_escape(&source),
+            filter = shell_escape(&filter_path),
+        );
+
+        let restore = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&restore_cmd))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        info!(
+            status_code = restore.status_code,
+            stdout_len = restore.stdout.len(),
+            stderr_len = restore.stderr.len(),
+            "shared-storage selective restore command finished"
+        );
+
+        if restore.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Selective sync failed (exit {}): {}",
+                restore.status_code,
+                redact_secrets(&restore.stderr, settings).trim()
+            )));
+        }
+
+        info!(instance_id = instance_id, count = selected_paths.len(), "Selective shared storage sync completed");
+        Ok(format!(
+            "Synced {} selected items from Backblaze",
+            selected_paths.len()
+        ))
+    }
+
     /// Save shared storage settings into persisted app state.
     pub async fn save_settings(
         context: &AppContext,
@@ -321,11 +606,7 @@ impl SharedStorageManager {
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         let filter_path = format!("/home/{}/rules.txt", target_user);
-        let effective_remote = Self::effective_remote_name(settings);
-        let dest = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let dest = Self::build_storage_source(settings, false);
 
         let progress_flag = if trigger == "manual" { " --progress" } else { "" };
         let cmd = format!(
@@ -344,7 +625,7 @@ impl SharedStorageManager {
 
         let output = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(3600)))
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&cmd))
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
@@ -544,6 +825,32 @@ impl SharedStorageManager {
         }
     }
 
+    fn build_storage_source(
+        settings: &crate::models::app_state::SharedStorageSettings,
+        force_plain: bool,
+    ) -> String {
+        let effective_remote = if force_plain {
+            settings.remote_name.clone()
+        } else {
+            Self::effective_remote_name(settings)
+        };
+
+        if !force_plain
+            && settings
+                .crypt_password
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        {
+            format!("{}:{}", effective_remote, settings.destination_prefix)
+        } else {
+            format!(
+                "{}:{}/{}",
+                effective_remote, settings.bucket_name, settings.destination_prefix
+            )
+        }
+    }
+
     /// Set up the hourly backup schedule via cron.
     pub async fn setup_scheduled_backup(
         context: &AppContext,
@@ -572,11 +879,7 @@ impl SharedStorageManager {
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         let filter_path = format!("/home/{}/rules.txt", target_user);
-        let effective_remote = Self::effective_remote_name(settings);
-        let dest = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let dest = Self::build_storage_source(settings, false);
 
         // Create cron entry for the user
         let cron_cmd = format!(
@@ -720,11 +1023,7 @@ impl SharedStorageManager {
         Self::write_filter_rules(remote, target_user).await?;
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
-        let effective_remote = Self::effective_remote_name(settings);
-        let source = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let source = Self::build_storage_source(settings, false);
         let filter_path = format!("/home/{}/rules.txt", target_user);
 
         // Check if backup content exists; skip silently when empty.
@@ -812,11 +1111,7 @@ impl SharedStorageManager {
         Self::write_filter_rules(remote, target_user).await?;
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
-        let effective_remote = Self::effective_remote_name(settings);
-        let dest = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let dest = Self::build_storage_source(settings, false);
         let filter_path = format!("/home/{}/rules.txt", target_user);
 
         let sync_cmd = format!(
@@ -906,6 +1201,67 @@ impl SharedStorageManager {
 /// Simple shell escaping for single-quoted strings.
 fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
+}
+
+fn split_parent_and_name(path: &str) -> (String, String) {
+    let trimmed = path.trim_matches('/');
+    if trimmed.is_empty() {
+        return ("/".to_string(), "/".to_string());
+    }
+
+    if let Some((parent, name)) = trimmed.rsplit_once('/') {
+        (format!("/{parent}"), name.to_string())
+    } else {
+        ("/".to_string(), trimmed.to_string())
+    }
+}
+
+fn parent_dir(path: &str) -> String {
+    let trimmed = path.trim_matches('/');
+    if let Some((parent, _)) = trimmed.rsplit_once('/') {
+        if parent.is_empty() {
+            "/".to_string()
+        } else {
+            format!("/{parent}")
+        }
+    } else {
+        "/".to_string()
+    }
+}
+
+fn normalize_selection_path(path: &str) -> AppResult<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Selected sync path cannot be empty.".to_string(),
+        ));
+    }
+
+    if trimmed.contains("..") {
+        return Err(AppError::InvalidInput(
+            "Selected sync path cannot contain '..'.".to_string(),
+        ));
+    }
+
+    let normalized = format!("/{}", trimmed.trim_start_matches('/').trim_end_matches('/'));
+    Ok(normalized)
+}
+
+fn listing_cache_key(
+    remote: &RemoteExec,
+    target_user: &str,
+    settings: &crate::models::app_state::SharedStorageSettings,
+) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        remote.ssh_host,
+        remote.ssh_port,
+        target_user,
+        settings.remote_name,
+        settings.bucket_name,
+        settings.destination_prefix,
+        settings.backblaze_key_id
+    )
 }
 
 /// Generate the crypt remote overlay name from the base remote name.

@@ -1,6 +1,8 @@
 use std::{
+    io::Read,
     path::Path,
     process::{Command, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -32,11 +34,15 @@ impl RemoteExec {
     pub fn run_local(program: &str, args: &[&str], timeout: Duration) -> AppResult<ExecOutput> {
         let mut command = Command::new(program);
         command.args(args);
-        run_with_timeout(command, timeout)
+        run_with_timeout(command, Some(timeout))
     }
 
     pub fn ssh(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
         self.ssh_with_key(remote_command, timeout)
+    }
+
+    pub fn ssh_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        self.ssh_with_key_until_complete(remote_command)
     }
 
     pub fn wait_for_dpkg_lock(&self, max_wait_secs: u64) -> AppResult<bool> {
@@ -94,7 +100,7 @@ exit 0"#,
             .arg(&connection_string)
             .arg(&wait_script);
 
-        let output = run_with_timeout(command, Duration::from_secs(max_wait_secs + 30))?;
+        let output = run_with_timeout(command, Some(Duration::from_secs(max_wait_secs + 30)))?;
 
         if output.status_code != 0 {
             warn!(
@@ -142,7 +148,44 @@ exit 0"#,
             .arg(&connection_string)
             .arg(remote_command);
 
-        run_with_timeout(command, timeout)
+        run_with_timeout(command, Some(timeout))
+    }
+
+    fn ssh_with_key_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
+        let port_str = self.ssh_port.to_string();
+
+        info!(
+            "SSH command (no timeout): ssh -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
+            port_str, connection_string, remote_command
+        );
+
+        let mut command = Command::new("ssh");
+        command
+            .arg("-p")
+            .arg(&port_str)
+            .arg("-i")
+            .arg(&self.private_key_path)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg("UserKnownHostsFile=/dev/null")
+            .arg("-o")
+            .arg("ConnectTimeout=10")
+            .arg("-o")
+            .arg("ServerAliveInterval=30")
+            .arg("-o")
+            .arg("ServerAliveCountMax=3")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("PreferredAuthentications=publickey")
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg(&connection_string)
+            .arg(remote_command);
+
+        run_with_timeout(command, None)
     }
 
     #[allow(dead_code)]
@@ -170,14 +213,17 @@ exit 0"#,
             .arg("IdentitiesOnly=yes")
             .arg(local_path)
             .arg(format!("{}@{}:{remote_path}", self.ssh_user, self.ssh_host));
-        run_with_timeout(command, timeout)
+        run_with_timeout(command, Some(timeout))
     }
 }
 
-fn run_with_timeout(mut command: Command, timeout: Duration) -> AppResult<ExecOutput> {
+fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {
     let rendered = render_command(&command);
     let started = Instant::now();
-    info!("Running command with timeout {:?}: {}", timeout, rendered);
+    match timeout {
+        Some(value) => info!("Running command with timeout {:?}: {}", value, rendered),
+        None => info!("Running command without timeout: {}", rendered),
+    }
 
     let mut child = command
         .stdout(Stdio::piped())
@@ -185,73 +231,136 @@ fn run_with_timeout(mut command: Command, timeout: Duration) -> AppResult<ExecOu
         .spawn()
         .map_err(|error| AppError::Command(format!("Failed to spawn `{rendered}`: {error}")))?;
 
-    loop {
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| AppError::Command(format!("Failed to capture stdout for `{rendered}`")))?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| AppError::Command(format!("Failed to capture stderr for `{rendered}`")))?;
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+    let stdout_buf_reader = Arc::clone(&stdout_buf);
+    let stdout_handle = thread::spawn(move || -> Result<(), String> {
+        let mut reader = stdout_pipe;
+        let mut data = Vec::new();
+        reader
+            .read_to_end(&mut data)
+            .map_err(|error| format!("Failed reading stdout: {error}"))?;
+        let mut guard = stdout_buf_reader
+            .lock()
+            .map_err(|_| "Failed locking stdout buffer".to_string())?;
+        *guard = data;
+        Ok(())
+    });
+
+    let stderr_buf_reader = Arc::clone(&stderr_buf);
+    let stderr_handle = thread::spawn(move || -> Result<(), String> {
+        let mut reader = stderr_pipe;
+        let mut data = Vec::new();
+        reader
+            .read_to_end(&mut data)
+            .map_err(|error| format!("Failed reading stderr: {error}"))?;
+        let mut guard = stderr_buf_reader
+            .lock()
+            .map_err(|_| "Failed locking stderr buffer".to_string())?;
+        *guard = data;
+        Ok(())
+    });
+
+    let exit_status = loop {
         match child.try_wait() {
-            Ok(Some(_status)) => {
-                let output = child.wait_with_output().map_err(|error| {
-                    AppError::Command(format!("Failed waiting for `{rendered}`: {error}"))
-                })?;
-
-                let result = ExecOutput {
-                    command: rendered.clone(),
-                    status_code: output.status.code().unwrap_or(-1),
-                    stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                    stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                    duration_ms: started.elapsed().as_millis(),
-                };
-
-                let stdout = if result.stdout.trim().is_empty() {
-                    "<empty>"
-                } else {
-                    result.stdout.trim()
-                };
-                let stderr = if result.stderr.trim().is_empty() {
-                    "<empty>"
-                } else {
-                    result.stderr.trim()
-                };
-
-                info!(
-                    "command finished (exit {}) in {}ms: {} | stdout: {} | stderr: {}",
-                    result.status_code, result.duration_ms, result.command, stdout, stderr
-                );
-
-                if result.status_code != 0 {
-                    warn!(
-                        "command exited non-zero ({}) in {}ms: {} | stderr: {}",
-                        result.status_code,
-                        result.duration_ms,
-                        result.command,
-                        result.stderr.trim()
-                    );
-                } else {
-                    debug!(
-                        "command completed in {}ms: {}",
-                        result.duration_ms, result.command
-                    );
-                }
-
-                return Ok(result);
-            }
+            Ok(Some(status)) => break Ok(status),
             Ok(None) => {
-                if started.elapsed() > timeout {
-                    warn!("command timed out after {:?}: {}", timeout, rendered);
-                    let _ = child.kill();
-                    return Err(AppError::Timeout(format!(
-                        "Command exceeded {:?}: {rendered}",
-                        timeout
-                    )));
+                if let Some(limit) = timeout {
+                    if started.elapsed() > limit {
+                        warn!("command timed out after {:?}: {}", limit, rendered);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break Err(AppError::Timeout(format!(
+                            "Command exceeded {:?}: {rendered}",
+                            limit
+                        )));
+                    }
                 }
-
                 thread::sleep(Duration::from_millis(100));
             }
             Err(error) => {
-                return Err(AppError::Command(format!(
+                break Err(AppError::Command(format!(
                     "Failed polling `{rendered}`: {error}"
                 )));
             }
         }
+    };
+
+    let stdout_join = stdout_handle
+        .join()
+        .map_err(|_| AppError::Command(format!("stdout reader panicked for `{rendered}`")))?;
+    if let Err(error) = stdout_join {
+        return Err(AppError::Command(format!("{error} for `{rendered}`")));
     }
+
+    let stderr_join = stderr_handle
+        .join()
+        .map_err(|_| AppError::Command(format!("stderr reader panicked for `{rendered}`")))?;
+    if let Err(error) = stderr_join {
+        return Err(AppError::Command(format!("{error} for `{rendered}`")));
+    }
+
+    let status = exit_status?;
+
+    let stdout_bytes = stdout_buf
+        .lock()
+        .map_err(|_| AppError::Command(format!("Failed locking stdout data for `{rendered}`")))?
+        .clone();
+    let stderr_bytes = stderr_buf
+        .lock()
+        .map_err(|_| AppError::Command(format!("Failed locking stderr data for `{rendered}`")))?
+        .clone();
+
+    let result = ExecOutput {
+        command: rendered.clone(),
+        status_code: status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+        duration_ms: started.elapsed().as_millis(),
+    };
+
+    let stdout = if result.stdout.trim().is_empty() {
+        "<empty>"
+    } else {
+        result.stdout.trim()
+    };
+    let stderr = if result.stderr.trim().is_empty() {
+        "<empty>"
+    } else {
+        result.stderr.trim()
+    };
+
+    info!(
+        "command finished (exit {}) in {}ms: {} | stdout: {} | stderr: {}",
+        result.status_code, result.duration_ms, result.command, stdout, stderr
+    );
+
+    if result.status_code != 0 {
+        warn!(
+            "command exited non-zero ({}) in {}ms: {} | stderr: {}",
+            result.status_code,
+            result.duration_ms,
+            result.command,
+            result.stderr.trim()
+        );
+    } else {
+        debug!(
+            "command completed in {}ms: {}",
+            result.duration_ms, result.command
+        );
+    }
+
+    Ok(result)
 }
 
 fn render_command(command: &Command) -> String {

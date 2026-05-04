@@ -104,6 +104,8 @@ fn main() {
             trigger_instance_backup,
             trigger_instance_backup_for,
             sync_instance_from_shared_storage,
+            list_instance_shared_storage_objects,
+            sync_instance_from_shared_storage_selected,
             get_instance_backup_status,
             setup_instance_backup_schedule,
             remove_instance_backup_schedule,
