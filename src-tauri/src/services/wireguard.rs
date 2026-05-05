@@ -164,7 +164,7 @@ exit 0"#
 
         let local_config_dir = local_app_data_dir.join("wireguard");
         fs::create_dir_all(&local_config_dir).await?;
-        let local_config_path = local_config_dir.join("noland-connect-client.conf");
+        let local_config_path = local_config_dir.join("nolandwg0.conf");
 
         let existing_remote_identity = self.load_existing_remote_identity(remote).await?;
         let existing_local_identity = load_existing_local_identity(&local_config_path).await?;
@@ -1102,11 +1102,10 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
     const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
     const LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
     const HOMEBREW_CONF_PATH: &str = "/opt/homebrew/etc/wireguard/nolandwg0.conf";
-    const LEGACY_TUNNEL_NAME: &str = "noland-connect-client";
 
     let path = config_path.display().to_string().replace('"', "\\\"");
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; wg-quick down {LOCAL_TUNNEL_NAME} >/dev/null 2>&1 || true; wg-quick down {LEGACY_TUNNEL_NAME} >/dev/null 2>&1 || true; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; wg-quick up {LOCAL_CONF_PATH}; for _ in 1 2 3 4 5; do wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; if grep -qi 'latest handshake:' /tmp/noland-wg-show.txt && ! grep -qi 'latest handshake: never' /tmp/noland-wg-show.txt; then break; fi; sleep 1; done; if grep -qi 'allowed ips: 0.0.0.0/0' /tmp/noland-wg-show.txt; then echo 'WireGuard came up in full-tunnel mode (0.0.0.0/0), refusing configuration' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi; if ! grep -qi 'allowed ips: 10.77.0.1/32' /tmp/noland-wg-show.txt; then echo 'WireGuard came up but allowed ips are not scoped to 10.77.0.1/32' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; if wg show interfaces 2>/dev/null | tr ' ' '\n' | grep -qx {LOCAL_TUNNEL_NAME}; then wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; else wg-quick up {LOCAL_CONF_PATH}; for _ in 1 2 3 4 5; do wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; if grep -qi 'latest handshake:' /tmp/noland-wg-show.txt && ! grep -qi 'latest handshake: never' /tmp/noland-wg-show.txt; then break; fi; sleep 1; done; fi; if grep -qi 'allowed ips: 0.0.0.0/0' /tmp/noland-wg-show.txt; then echo 'WireGuard came up in full-tunnel mode (0.0.0.0/0), refusing configuration' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi; if ! grep -qi 'allowed ips: 10.77.0.1/32' /tmp/noland-wg-show.txt; then echo 'WireGuard came up but allowed ips are not scoped to 10.77.0.1/32' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -1135,7 +1134,6 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
 #[cfg(target_os = "linux")]
 fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
-    const LEGACY_TUNNEL_NAME: &str = "noland-connect-client";
 
     let destination = "/etc/wireguard/nolandwg0.conf";
     let copy = Command::new("sudo")
@@ -1155,22 +1153,23 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
         ));
     }
 
-    let _ = Command::new("sudo")
-        .args(["wg-quick", "down", LOCAL_TUNNEL_NAME])
-        .status();
-    let _ = Command::new("sudo")
-        .args(["wg-quick", "down", LEGACY_TUNNEL_NAME])
-        .status();
+    let interface_exists = Command::new("sudo")
+        .args(["wg", "show", LOCAL_TUNNEL_NAME])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
 
-    let up = Command::new("sudo")
-        .args(["wg-quick", "up", destination])
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to start local WireGuard: {error}")))?;
+    if !interface_exists {
+        let up = Command::new("sudo")
+            .args(["wg-quick", "up", destination])
+            .output()
+            .map_err(|error| AppError::Command(format!("Failed to start local WireGuard: {error}")))?;
 
-    if !up.status.success() {
-        return Err(AppError::Command(
-            "Failed to start local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
-        ));
+        if !up.status.success() {
+            return Err(AppError::Command(
+                "Failed to start local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
+            ));
+        }
     }
 
     Ok("WireGuard client tunnel configured and activated on this Linux machine".to_string())
@@ -1179,25 +1178,25 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
 #[cfg(target_os = "windows")]
 fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String> {
     const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
-    const LEGACY_TUNNEL_NAME: &str = "noland-connect-client";
     let config = config_path.display().to_string();
-    let _ = Command::new("wireguard.exe")
-        .args(["/uninstalltunnelservice", LOCAL_TUNNEL_NAME])
-        .status();
-    let _ = Command::new("wireguard.exe")
-        .args(["/uninstalltunnelservice", LEGACY_TUNNEL_NAME])
-        .status();
+    let already_active = Command::new("wg")
+        .args(["show", LOCAL_TUNNEL_NAME])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
 
-    let output = Command::new("wireguard.exe")
-        .args(["/installtunnelservice", &config])
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+    if !already_active {
+        let output = Command::new("wireguard.exe")
+            .args(["/installtunnelservice", &config])
+            .output()
+            .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
 
-    if !output.status.success() {
-        return Err(AppError::Command(format!(
-            "Failed to setup local WireGuard client: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
+        if !output.status.success() {
+            return Err(AppError::Command(format!(
+                "Failed to setup local WireGuard client: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
     }
 
     Ok("WireGuard client tunnel installed as Windows service".to_string())

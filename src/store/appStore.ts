@@ -46,7 +46,9 @@ import {
   getInstanceMicStatus,
   syncInstanceFromSharedStorage,
   listInstanceSharedStorageObjects,
-  syncInstanceFromSharedStorageSelected
+  syncInstanceFromSharedStorageSelected,
+  listInstanceExportableStorageObjects,
+  saveInstanceToSharedStorageSelected
 } from "../lib/backend";
 import type {
   ManualLocationInput,
@@ -120,6 +122,8 @@ interface AppStore {
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
   syncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
   listSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
+  saveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
+  listExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   loadBackupStatus: () => Promise<void>;
   loadInstanceBackupStatus: () => Promise<void>;
   setupBackupSchedule: () => Promise<string | null>;
@@ -549,6 +553,28 @@ export const useAppStore = create<AppStore>((set, get) => ({
       return entries;
     } catch (error) {
       console.error("[shared-storage] listing remote objects failed", { instanceId, error });
+      set({ error: mapError(error) });
+      return null;
+    }
+  },
+
+  saveInstanceStorageSelected: async (instanceId, selectedPaths) => {
+    set({ busy: true, error: null });
+    try {
+      const message = await saveInstanceToSharedStorageSelected(instanceId, selectedPaths);
+      set({ busy: false });
+      return message;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  listExportableStorageObjects: async (instanceId) => {
+    set({ error: null });
+    try {
+      return await listInstanceExportableStorageObjects(instanceId);
+    } catch (error) {
       set({ error: mapError(error) });
       return null;
     }

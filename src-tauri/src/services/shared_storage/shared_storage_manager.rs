@@ -39,6 +39,169 @@ struct BackupJobInfo {
 pub struct SharedStorageManager;
 
 impl SharedStorageManager {
+    pub async fn list_local_objects(
+        context: &AppContext,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        if !settings.enabled {
+            return Err(AppError::InvalidInput(
+                "Shared storage is disabled. Enable it in settings first.".to_string(),
+            ));
+        }
+
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
+            return Err(AppError::InvalidInput(
+                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+            ));
+        }
+
+        Self::ensure_rclone_installed(remote).await?;
+        Self::write_filter_rules(remote, target_user).await?;
+        Self::configure_rclone_remote(remote, target_user, settings).await?;
+
+        let filter_path = format!("/home/{}/rules.txt", target_user);
+        let list_cmd = format!(
+            "sudo rclone lsf / --files-only --recursive --filter-from {filter} --checksum",
+            filter = shell_escape(&filter_path),
+        );
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&list_cmd))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed listing local files for export: {}",
+                format!("{}\n{}", output.stdout.trim(), output.stderr.trim())
+            )));
+        }
+
+        let mut entries = Vec::new();
+        let mut directory_paths = HashSet::new();
+        for line in output.stdout.lines() {
+            let normalized = line.trim().trim_start_matches('/').trim_end_matches('/');
+            if normalized.is_empty() {
+                continue;
+            }
+
+            let path = format!("/{}", normalized);
+            let (parent_path, name) = split_parent_and_name(&path);
+            entries.push(crate::models::app_state::SharedStorageObjectEntry {
+                path: path.to_string(),
+                name,
+                parent_path,
+                is_dir: false,
+            });
+
+            let mut cursor = parent_dir(normalized);
+            while !cursor.is_empty() && cursor != "/" {
+                directory_paths.insert(cursor.clone());
+                cursor = parent_dir(&cursor);
+            }
+        }
+
+        for dir_path in directory_paths {
+            let (parent_path, name) = split_parent_and_name(&dir_path);
+            entries.push(crate::models::app_state::SharedStorageObjectEntry {
+                path: dir_path,
+                name,
+                parent_path,
+                is_dir: true,
+            });
+        }
+
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        entries.dedup_by(|a, b| a.path == b.path && a.is_dir == b.is_dir);
+        Ok(entries)
+    }
+
+    pub async fn backup_selected_paths(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+        selected_paths: &[String],
+    ) -> AppResult<String> {
+        if selected_paths.is_empty() {
+            return Err(AppError::InvalidInput(
+                "Select at least one file or folder to export.".to_string(),
+            ));
+        }
+
+        let state = context.load_state().await;
+        let settings = &state.shared_storage.settings;
+
+        Self::ensure_rclone_installed(remote).await?;
+        Self::configure_rclone_remote(remote, target_user, settings).await?;
+
+        let dest = Self::build_storage_source(settings, false);
+        let rclone_config_path = format!("/home/{}/.config/rclone/rclone.conf", target_user);
+
+        let mut include_lines = String::new();
+        for path in selected_paths {
+            let normalized = normalize_selection_path(path)?;
+            include_lines.push_str(&format!("+ {normalized}\n"));
+            include_lines.push_str(&format!("+ {normalized}/**\n"));
+        }
+        include_lines.push_str("- **\n");
+
+        let filter_path = format!("/home/{}/noland-export-selection.filter", target_user);
+        let write_filter_cmd = format!(
+            r#"sudo -u {user} bash -lc 'cat > {path} <<'"'"'EOF'"'"'
+{content}EOF
+chmod 600 {path}'"#,
+            user = target_user,
+            path = filter_path,
+            content = include_lines,
+        );
+
+        {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&write_filter_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
+        }
+
+        let backup_cmd = format!(
+            "sudo rclone copy / {dest} --config {config} --filter-from {filter} --checksum",
+            dest = shell_escape(&dest),
+            config = shell_escape(&rclone_config_path),
+            filter = shell_escape(&filter_path),
+        );
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&backup_cmd))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        if output.status_code != 0 {
+            let combined = format!("{}\n{}", output.stdout, output.stderr);
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
+            return Err(AppError::Provisioning(format!(
+                "Selective export failed (exit {}): {}",
+                output.status_code, actionable
+            )));
+        }
+
+        info!(instance_id = instance_id, count = selected_paths.len(), "Selective shared storage export completed");
+        Ok(format!(
+            "Exported {} selected items to shared storage",
+            selected_paths.len()
+        ))
+    }
+
     pub async fn list_remote_objects(
         context: &AppContext,
         remote: &RemoteExec,
@@ -606,13 +769,14 @@ chmod 600 {path}'"#,
         Self::configure_rclone_remote(remote, target_user, settings).await?;
 
         let filter_path = format!("/home/{}/rules.txt", target_user);
+        let rclone_config_path = format!("/home/{}/.config/rclone/rclone.conf", target_user);
         let dest = Self::build_storage_source(settings, false);
 
         let progress_flag = if trigger == "manual" { " --progress" } else { "" };
         let cmd = format!(
-            "sudo -u {user} rclone copy / {dest} --filter-from {filter} --checksum{progress} 2>&1",
-            user = target_user,
+            "sudo rclone copy / {dest} --config {config} --filter-from {filter} --checksum{progress}",
             dest = shell_escape(&dest),
+            config = shell_escape(&rclone_config_path),
             filter = shell_escape(&filter_path),
             progress = progress_flag,
         );
@@ -649,6 +813,9 @@ chmod 600 {path}'"#,
         }
 
         if output.status_code != 0 {
+            let combined = format!("{}\n{}", stdout.trim(), stderr.trim());
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
             let combined = format!("{}\n{}", stdout, stderr).to_ascii_lowercase();
             if combined.contains("storage_cap_exceeded")
                 || combined.contains("cannot upload files, storage cap exceeded")
@@ -661,11 +828,7 @@ chmod 600 {path}'"#,
             return Err(AppError::Provisioning(format!(
                 "rclone sync failed (exit {}): {}",
                 output.status_code,
-                if !stderr.trim().is_empty() {
-                    stderr.trim()
-                } else {
-                    stdout.trim()
-                }
+                actionable
             )));
         }
 
@@ -1262,6 +1425,28 @@ fn listing_cache_key(
         settings.destination_prefix,
         settings.backblaze_key_id
     )
+}
+
+fn extract_actionable_rclone_error(output: &str) -> Option<String> {
+    let known_host_noise = "warning: permanently added";
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains(known_host_noise) {
+            continue;
+        }
+        if lower.contains("failed to")
+            || lower.contains("permission denied")
+            || lower.contains("critical:")
+            || lower.contains("error")
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 /// Generate the crypt remote overlay name from the base remote name.

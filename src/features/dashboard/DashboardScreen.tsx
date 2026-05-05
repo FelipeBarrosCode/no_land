@@ -10,6 +10,7 @@ import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
 import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
+import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
@@ -45,9 +46,10 @@ interface Props {
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
-  onSaveInstanceStorage: (instanceId: number) => Promise<void>;
+  onSaveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
   onSyncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
   onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
+  onListExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
 }
 
 const placeholders = [
@@ -83,13 +85,15 @@ export function DashboardScreen({
   onRebootInstanceServices,
   onPauseInstance,
   onDestroyInstance,
-  onSaveInstanceStorage,
+  onSaveInstanceStorageSelected,
   onSyncInstanceStorage,
-  onListSyncableStorageObjects
+  onListSyncableStorageObjects,
+  onListExportableStorageObjects
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
+  const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
 
   async function handleMoonlightDownload() {
@@ -145,7 +149,7 @@ export function DashboardScreen({
   }
 
   async function handleSaveStorage(instanceId: number) {
-    await onSaveInstanceStorage(instanceId);
+    setExportInstanceId(instanceId);
   }
 
   async function handleSyncStorage(instanceId: number) {
@@ -159,6 +163,15 @@ export function DashboardScreen({
 
     await onSyncInstanceStorage(syncInstanceId, selectedPaths);
     setSyncInstanceId(null);
+  }
+
+  async function handleExportSelection(selectedPaths: string[]) {
+    if (exportInstanceId === null) {
+      return;
+    }
+
+    await onSaveInstanceStorageSelected(exportInstanceId, selectedPaths);
+    setExportInstanceId(null);
   }
 
   return (
@@ -403,6 +416,15 @@ export function DashboardScreen({
         onClose={() => setSyncInstanceId(null)}
         onLoadObjects={onListSyncableStorageObjects}
         onConfirmSync={handleSyncSelection}
+      />
+
+      <SharedStorageExportModal
+        open={exportInstanceId !== null}
+        busy={busy || instanceActionRunning}
+        instanceId={exportInstanceId}
+        onClose={() => setExportInstanceId(null)}
+        onLoadObjects={onListExportableStorageObjects}
+        onConfirmExport={handleExportSelection}
       />
     </main>
   );

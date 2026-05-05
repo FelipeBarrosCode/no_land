@@ -87,41 +87,16 @@ impl InstanceLifecycleService {
                 ));
             }
 
-            let mut last_error: Option<AppError> = None;
-            let mut message = String::new();
-            for attempt in 1..=2 {
-                match setup_local_wireguard_client(std::path::Path::new(&config_path)) {
-                    Ok(result) => {
-                        message = result;
-                        last_error = None;
-
-                        if local_wireguard_has_peer() {
-                            break;
-                        }
-
-                        warn!(
-                            instance_id = instance_id,
-                            attempt = attempt,
-                            "WireGuard reconnect completed but local peer state is not visible yet"
-                        );
-
-                        if attempt == 2 {
-                            message = format!(
-                                "{} (peer state is still initializing; retry in a few seconds if needed)",
-                                message
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        last_error = Some(error);
-                    }
-                }
-
-                std::thread::sleep(Duration::from_millis(750));
-            }
-
-            if let Some(error) = last_error {
-                return Err(error);
+            let mut message = setup_local_wireguard_client(std::path::Path::new(&config_path))?;
+            if !local_wireguard_has_peer() {
+                warn!(
+                    instance_id = instance_id,
+                    "WireGuard reconnect completed but local peer state is not visible yet"
+                );
+                message = format!(
+                    "{} (peer state is still initializing; retry in a few seconds if needed)",
+                    message
+                );
             }
 
             info!(
@@ -486,6 +461,60 @@ impl InstanceLifecycleService {
             info!(instance_id = instance_id, "instance lifecycle sync_selected complete");
         }
         result
+    }
+
+    pub async fn list_instance_exportable_objects(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::list_local_objects(context, &remote, &target_user).await
+    }
+
+    pub async fn save_instance_to_shared_storage_selected(
+        context: &AppContext,
+        instance_id: u64,
+        selected_paths: Vec<String>,
+    ) -> AppResult<String> {
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::backup_selected_paths(
+            context,
+            &remote,
+            instance_id,
+            &target_user,
+            &selected_paths,
+        )
+        .await
     }
 
     /// Check if a lifecycle action is currently running for an instance.

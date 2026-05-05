@@ -171,6 +171,23 @@ export async function syncInstanceFromSharedStorageSelected(
   });
 }
 
+export async function listInstanceExportableStorageObjects(instanceId: number) {
+  return invokeSafe<SharedStorageObjectEntry[]>(
+    "list_instance_exportable_storage_objects",
+    { instanceId }
+  );
+}
+
+export async function saveInstanceToSharedStorageSelected(
+  instanceId: number,
+  selectedPaths: string[]
+): Promise<string> {
+  return invokeSafe<string>("save_instance_to_shared_storage_selected", {
+    instanceId,
+    payload: { selectedPaths }
+  });
+}
+
 export async function getInstanceBackupStatus(): Promise<SharedStorageInstanceStatus> {
   return invokeSafe<SharedStorageInstanceStatus>("get_instance_backup_status");
 }
