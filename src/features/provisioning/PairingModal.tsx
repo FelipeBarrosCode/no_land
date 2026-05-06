@@ -1,6 +1,5 @@
 import { useState } from "react";
 import { Button } from "../../components/ui/Button";
-import { InputField } from "../../components/ui/InputField";
 
 interface Props {
   open: boolean;
@@ -8,17 +7,8 @@ interface Props {
   wireguardIp: string;
   wireguardConfigPath: string;
   onSetupWireguardClient: () => Promise<void>;
+  onReconnectLocalWireguardClient: () => Promise<string | null>;
   onSkip: () => Promise<void>;
-  onSubmit: (pin: string) => Promise<void>;
-}
-
-const SUNSHINE_PORTS = [47984, 47989, 47990];
-
-function buildSunshineUrls(serverIp: string) {
-  return SUNSHINE_PORTS.map((port) => ({
-    url: `https://${serverIp}:${port}`,
-    port,
-  }));
 }
 
 export function PairingModal({
@@ -27,13 +17,12 @@ export function PairingModal({
   wireguardIp,
   wireguardConfigPath,
   onSetupWireguardClient,
-  onSkip,
-  onSubmit
+  onReconnectLocalWireguardClient,
+  onSkip
 }: Props) {
-  const [pin, setPin] = useState("");
   const [wireguardReadyConfirmed, setWireguardReadyConfirmed] = useState(false);
   const hostToType = wireguardIp || "pending";
-  const sunshineUrls = wireguardIp ? buildSunshineUrls(wireguardIp) : [];
+  const sunshineUrl = `https://${hostToType}:47990`;
 
   if (!open) {
     return null;
@@ -45,26 +34,28 @@ export function PairingModal({
         <h3 className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base" data-text="Pair Moonlight">
           Pair Moonlight
         </h3>
-        <ol className="mt-3 list-decimal space-y-1 pl-5 text-[1.35rem] leading-none text-[#d9efff]">
-          <li>Import and enable this WireGuard client config first: {wireguardConfigPath || "pending"}.</li>
-          <li>Disable any other active WireGuard tunnel on your client device.</li>
-          <li>Open Moonlight and add PC manually with this IP: {hostToType}.</li>
-          <li>When Moonlight shows a PIN, enter it below to complete pairing.</li>
-          <li>If pairing fails, open Sunshine Web UI and enter the PIN there. Try these URLs in order:</li>
-          <ul className="mt-1 mb-2 list-disc pl-8 text-[1.1rem] leading-snug text-[#d9efff]">
-            {sunshineUrls.map(({ url, port }) => (
-              <li key={port}>
-                <a href={url} target="_blank" rel="noopener noreferrer" className="text-neon-cyan underline break-all">
-                  {url}
-                </a>
-                {port === 47984 && " (try first)"}
-              </li>
-            ))}
-          </ul>
-          <li className="text-[1rem] text-[#8b9dc3] italic">
-            If the browser says &quot;unsafe&quot; or shows an SSL error, that is normal for this setup. Click &quot;Advanced&quot; and proceed anyway — the connection is safe over WireGuard.
+        <ol className="mt-3 list-decimal space-y-2 pl-5 text-[1.25rem] leading-snug text-[#d9efff]">
+          <li>
+            Click <span className="text-neon-lime">Setup WireGuard On This PC</span>.
+            <div className="mt-1 text-[1.05rem] text-[#9ab0cc]">Config: {wireguardConfigPath || "pending"}</div>
+          </li>
+          <li>
+            Open Moonlight and add PC manually with IP: <span className="text-neon-cyan">10.77.0.1</span>.
+          </li>
+          <li>
+            Open Sunshine in browser: <a href={sunshineUrl} target="_blank" rel="noopener noreferrer" className="text-neon-cyan underline break-all">{sunshineUrl}</a>
+          </li>
+          <li>
+            In Sunshine top bar, click <span className="text-neon-lime">PIN</span> and enter the PIN shown by Moonlight.
+          </li>
+          <li>
+            When Moonlight connects successfully, click <span className="text-neon-lime">Continue</span> below.
           </li>
         </ol>
+
+        <p className="mt-3 text-[1rem] text-[#8b9dc3] italic">
+          If the browser shows an SSL warning, click Advanced and continue. This is expected on this local WireGuard path.
+        </p>
 
         <div className="mt-4 grid gap-3">
           <Button
@@ -79,28 +70,21 @@ export function PairingModal({
           </Button>
 
           <Button
-            disabled={busy}
-            onClick={() => onSkip()}
+            disabled={busy || !wireguardReadyConfirmed}
+            onClick={() => onReconnectLocalWireguardClient()}
             variant="secondary"
           >
-            Skip WireGuard Step And Continue
+            {busy ? "Reconnecting..." : "Reconnect WireGuard"}
           </Button>
 
           {wireguardReadyConfirmed && (
             <p className="text-[1rem] leading-snug text-neon-lime">
-              WireGuard marked as ready. Proceed with PIN submission.
+              WireGuard marked as ready. Complete Moonlight + Sunshine PIN steps, then click Continue.
             </p>
           )}
 
-          <InputField
-            label="Pairing PIN"
-            placeholder="1234"
-            value={pin}
-            onChange={(event) => setPin(event.target.value.replace(/[^0-9]/g, ""))}
-          />
-
-          <Button disabled={busy || pin.length < 4 || !wireguardReadyConfirmed} onClick={() => onSubmit(pin)}>
-            {busy ? "Submitting..." : "Submit PIN"}
+          <Button disabled={busy || !wireguardReadyConfirmed} onClick={() => onSkip()}>
+            {busy ? "Continuing..." : "Continue"}
           </Button>
         </div>
       </div>

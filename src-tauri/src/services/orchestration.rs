@@ -30,7 +30,10 @@ use super::{
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
-    wireguard::{WireGuardProvisionResult, WireGuardService},
+    wireguard::{
+        reconnect_local_wireguard_client, WireGuardProvisionMode, WireGuardProvisionResult,
+        WireGuardService,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -1244,7 +1247,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             .await;
 
             let result = wireguard
-                .configure(&remote, app_data_dir, &endpoint_host, endpoint_port)
+                .configure(
+                    &remote,
+                    app_data_dir,
+                    &endpoint_host,
+                    endpoint_port,
+                    WireGuardProvisionMode::FreshProvision,
+                )
                 .await?;
             mark_server_step_completed(
                 &context,
@@ -1284,7 +1293,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         .await;
 
         let result = wireguard
-            .configure(&remote, app_data_dir, &endpoint_host, endpoint_port)
+            .configure(
+                &remote,
+                app_data_dir,
+                &endpoint_host,
+                endpoint_port,
+                WireGuardProvisionMode::FreshProvision,
+            )
             .await?;
         mark_server_step_completed(
             &context,
@@ -1313,6 +1328,24 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         result
     };
     ensure_not_cancelled(&context)?;
+
+    if !wireguard_step_completed {
+        emit_transition(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringWireGuard,
+            "Applying local WireGuard tunnel",
+            Some(
+                "Replacing any previous local tunnel interface with the newly provisioned config"
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+
+        reconnect_local_wireguard_client(&wireguard_result.client_config_path)?;
+        ensure_not_cancelled(&context)?;
+    }
 
     let moonlight = MoonlightService;
     let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
@@ -2104,7 +2137,13 @@ async fn run_existing_instance_orchestration(
             .await;
 
             let result = wireguard
-                .configure(&remote, app_data_dir, &endpoint_host, endpoint_port)
+                .configure(
+                    &remote,
+                    app_data_dir,
+                    &endpoint_host,
+                    endpoint_port,
+                    WireGuardProvisionMode::ReinitializeExisting,
+                )
                 .await?;
             mark_server_step_completed(
                 &context,
@@ -2144,7 +2183,13 @@ async fn run_existing_instance_orchestration(
         .await;
 
         let result = wireguard
-            .configure(&remote, app_data_dir, &endpoint_host, endpoint_port)
+            .configure(
+                &remote,
+                app_data_dir,
+                &endpoint_host,
+                endpoint_port,
+                WireGuardProvisionMode::ReinitializeExisting,
+            )
             .await?;
         mark_server_step_completed(
             &context,
@@ -2173,6 +2218,24 @@ async fn run_existing_instance_orchestration(
         result
     };
     ensure_not_cancelled(&context)?;
+
+    if !wireguard_step_completed {
+        emit_transition(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringWireGuard,
+            "Applying local WireGuard tunnel",
+            Some(
+                "Replacing any previous local tunnel interface with the newly provisioned config"
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+
+        reconnect_local_wireguard_client(&wireguard_result.client_config_path)?;
+        ensure_not_cancelled(&context)?;
+    }
 
     let moonlight = MoonlightService;
     let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };

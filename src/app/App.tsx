@@ -85,23 +85,23 @@ function ProvisioningRoute() {
   const appState = useAppStore((state) => state.appState);
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
-  const submitPin = useAppStore((state) => state.submitPin);
   const skipPairing = useAppStore((state) => state.skipPairing);
   const setupLocalWireguardClient = useAppStore((state) => state.setupLocalWireguardClient);
+  const reconnectLocalWireguardClient = useAppStore((state) => state.reconnectLocalWireguardClient);
 
   if (!appState) {
     return null;
   }
 
   return (
-    <ProvisioningScreen
-      appState={appState}
-      logs={logs}
-      busy={busy}
-      onSubmitPin={submitPin}
-      onSkipPairing={skipPairing}
-      onSetupWireguardClient={setupLocalWireguardClient}
-    />
+      <ProvisioningScreen
+        appState={appState}
+        logs={logs}
+        busy={busy}
+        onSkipPairing={skipPairing}
+        onSetupWireguardClient={setupLocalWireguardClient}
+        onReconnectLocalWireguardClient={reconnectLocalWireguardClient}
+      />
   );
 }
 

@@ -11,9 +11,9 @@ interface Props {
   appState: PersistedAppState;
   logs: ProvisioningEvent[];
   busy: boolean;
-  onSubmitPin: (pin: string) => Promise<void>;
   onSkipPairing: () => Promise<void>;
   onSetupWireguardClient: () => Promise<void>;
+  onReconnectLocalWireguardClient: () => Promise<string | null>;
 }
 
 function formatTime(timestamp: string): string {
@@ -25,7 +25,7 @@ function formatTime(timestamp: string): string {
   return date.toLocaleTimeString();
 }
 
-export function ProvisioningScreen({ appState, logs, busy, onSubmitPin, onSkipPairing, onSetupWireguardClient }: Props) {
+export function ProvisioningScreen({ appState, logs, busy, onSkipPairing, onSetupWireguardClient, onReconnectLocalWireguardClient }: Props) {
   const currentIndex = useMemo(() => {
     const index = PROVISIONING_ORDER.indexOf(appState.orchestrationState as (typeof PROVISIONING_ORDER)[number]);
     return index === -1 ? 0 : index;
@@ -117,8 +117,8 @@ export function ProvisioningScreen({ appState, logs, busy, onSubmitPin, onSkipPa
         wireguardIp={moonlightHostIp}
         wireguardConfigPath={appState.wireguard.configPath}
         onSetupWireguardClient={onSetupWireguardClient}
+        onReconnectLocalWireguardClient={onReconnectLocalWireguardClient}
         onSkip={onSkipPairing}
-        onSubmit={onSubmitPin}
       />
     </main>
   );

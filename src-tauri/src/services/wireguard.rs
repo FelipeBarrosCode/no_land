@@ -23,6 +23,12 @@ pub struct WireGuardProvisionResult {
     pub client_config_path: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireGuardProvisionMode {
+    FreshProvision,
+    ReinitializeExisting,
+}
+
 #[derive(Debug, Clone)]
 pub struct WireGuardService {
     pub defaults: WireGuardDefaults,
@@ -43,6 +49,7 @@ struct ExistingLocalIdentity {
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
 const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
+const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 180;
 
 impl WireGuardService {
     async fn wait_for_dpkg_lock_with_message(
@@ -50,11 +57,6 @@ impl WireGuardService {
         remote: &RemoteExec,
         max_wait_secs: u64,
     ) -> AppResult<bool> {
-        // Option C: Surgical approach
-        // 1. Quick check first
-        // 2. If locked, aggressive kill
-        // 3. Check again
-        // 4. Only then wait with timeout
         let surgical_script = format!(
             r#"#!/bin/bash
 set -uo pipefail
@@ -126,31 +128,65 @@ echo "LOCK_RELEASED_AFTER_WAIT ${{check_count}}"
 exit 0"#
         );
 
-        let remote = remote.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            remote.ssh(&surgical_script, Duration::from_secs(max_wait_secs + 30))
-        })
-        .await
-        .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
+        for attempt in 1..=3 {
+            let remote = remote.clone();
+            let surgical_script = surgical_script.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                remote.ssh(&surgical_script, Duration::from_secs(max_wait_secs + 30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
 
-        if result.status_code != 0 {
+            if result.status_code == 0 {
+                let stdout = result.stdout.trim();
+                if stdout.contains("LOCK_FREE") || stdout.contains("LOCK_RELEASED") {
+                    info!("dpkg lock acquired: {}", stdout);
+                    return Ok(true);
+                }
+
+                info!("dpkg lock check returned unexpected output: {}", stdout);
+                return Ok(false);
+            }
+
+            let stderr = result.stderr.trim();
+            let stdout = result.stdout.trim();
+            let retryable_ssh_failure = result.status_code == 255
+                || stderr.contains("Connection closed")
+                || stderr.contains("Broken pipe")
+                || stderr.contains("Operation timed out")
+                || stderr.contains("kex_exchange_identification")
+                || stdout.contains("LOCK_HELD");
+
             info!(
-                "dpkg lock wait returned {}: stdout={} stderr={}",
+                "dpkg lock wait attempt {} returned {}: stdout={} stderr={}",
+                attempt,
                 result.status_code,
-                result.stdout.trim(),
-                result.stderr.trim()
+                stdout,
+                stderr
             );
-            return Ok(false);
+
+            if !retryable_ssh_failure || attempt == 3 {
+                return Ok(false);
+            }
+
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        let stdout = result.stdout.trim();
-        if stdout.contains("LOCK_FREE") || stdout.contains("LOCK_RELEASED") {
-            info!("dpkg lock acquired: {}", stdout);
-            Ok(true)
-        } else {
-            info!("dpkg lock check returned unexpected output: {}", stdout);
-            Ok(false)
+        Ok(false)
+    }
+
+    async fn wait_for_package_manager_ready(&self, remote: &RemoteExec) -> AppResult<()> {
+        if self
+            .wait_for_dpkg_lock_with_message(remote, PACKAGE_MANAGER_READY_WAIT_SECS)
+            .await?
+        {
+            return Ok(());
         }
+
+        Err(AppError::Provisioning(format!(
+            "Package manager is locked by another process (likely unattended-upgrades). Waiting timed out after {} seconds. Please try again in a few minutes when system updates have finished. Alternatively, you can SSH into the instance and run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a",
+            PACKAGE_MANAGER_READY_WAIT_SECS
+        )))
     }
 
     pub async fn configure(
@@ -159,6 +195,7 @@ exit 0"#
         local_app_data_dir: &Path,
         endpoint_host: &str,
         endpoint_port: u16,
+        mode: WireGuardProvisionMode,
     ) -> AppResult<WireGuardProvisionResult> {
         ensure_local_wireguard_tools()?;
 
@@ -181,15 +218,15 @@ exit 0"#
                             "WireGuard identity mismatch detected. Refusing to rotate keys during reinitialize. Use explicit key regeneration flow to replace keys."
                                 .to_string(),
                         ));
+                    } else {
+                        info!("Reusing existing WireGuard key material from prior provisioning");
+                        (
+                            remote_identity.server_private_key,
+                            derived_server_public,
+                            local_identity.client_private_key,
+                            derived_client_public,
+                        )
                     }
-
-                    info!("Reusing existing WireGuard key material from prior provisioning");
-                    (
-                        remote_identity.server_private_key,
-                        derived_server_public,
-                        local_identity.client_private_key,
-                        derived_client_public,
-                    )
                 }
                 (Some(_), None) => {
                     return Err(AppError::Provisioning(
@@ -198,10 +235,28 @@ exit 0"#
                     ));
                 }
                 (None, Some(_)) => {
-                    return Err(AppError::Provisioning(
-                        "Local WireGuard config exists but server key material is missing. Refusing to rotate keys during reinitialize. Restore server config or run explicit key regeneration."
-                            .to_string(),
-                    ));
+                    if mode == WireGuardProvisionMode::FreshProvision {
+                        warn!(
+                            "Fresh provisioning detected stale local WireGuard config with no remote key material; replacing local identity"
+                        );
+                        if let Err(error) = fs::remove_file(&local_config_path).await {
+                            if error.kind() != std::io::ErrorKind::NotFound {
+                                return Err(AppError::Command(format!(
+                                    "Failed removing stale local WireGuard config {}: {error}",
+                                    local_config_path.display()
+                                )));
+                            }
+                        }
+
+                        let (server_private, server_public) = generate_keypair()?;
+                        let (client_private, client_public) = generate_keypair()?;
+                        (server_private, server_public, client_private, client_public)
+                    } else {
+                        return Err(AppError::Provisioning(
+                            "Local WireGuard config exists but server key material is missing. Refusing to rotate keys during reinitialize. Restore server config or run explicit key regeneration."
+                                .to_string(),
+                        ));
+                    }
                 }
                 (None, None) => {
                     info!("No existing WireGuard key material found; bootstrapping new keys");
@@ -213,6 +268,7 @@ exit 0"#
 
         self.cleanup_existing_wireguard(remote).await?;
         self.setup_cpu_governor(remote).await?;
+        self.wait_for_package_manager_ready(remote).await?;
         let primary_interface = self.detect_primary_interface(remote).await?;
         let server_config = self.render_server_config(&server_private, &client_public);
         let server_tunnel_host = strip_cidr(&self.defaults.server_tunnel_ip);
@@ -702,17 +758,18 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         client_private: &str,
         server_public: &str,
         endpoint_host: &str,
-        listen_port: u16,
+        endpoint_port: u16,
         allowed_ips: &str,
     ) -> String {
         format!(
-            "[Interface]\nAddress = {}\nPrivateKey = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
+            "[Interface]\nAddress = {}\nPrivateKey = {}\nListenPort = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
             self.defaults.client_tunnel_ip,
             client_private,
+            self.defaults.client_listen_port,
             self.defaults.tunnel_mtu,
             server_public,
             endpoint_host,
-            listen_port,
+            endpoint_port,
             allowed_ips,
             self.defaults.persistent_keepalive_secs,
         )
@@ -933,6 +990,45 @@ pub fn setup_local_wireguard_client(config_path: &Path) -> AppResult<String> {
     }
 }
 
+pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String> {
+    if !config_path.exists() {
+        return Err(AppError::NotFound(format!(
+            "WireGuard client config not found at {}",
+            config_path.display()
+        )));
+    }
+
+    ensure_local_wireguard_tools()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        reconnect_local_wireguard_client_macos(config_path)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        reconnect_local_wireguard_client_linux(config_path)
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        reconnect_local_wireguard_client_windows(config_path)
+    }
+}
+
+pub fn read_local_wireguard_show_output() -> AppResult<String> {
+    let output = Command::new("wg")
+        .arg("show")
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
+
+    if !output.status.success() {
+        return Ok(String::new());
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[cfg(target_os = "macos")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
     if command_exists("wg") && command_exists("wg-quick") {
@@ -1099,13 +1195,52 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
 
 #[cfg(target_os = "macos")]
 fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
-    const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
+    enforce_single_control_plane_macos(config_path)?;
+
+    const LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
+    const HOMEBREW_CONF_PATH: &str = "/opt/homebrew/etc/wireguard/nolandwg0.conf";
+    let no_op_script = format!(
+        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if [ -f {LOCAL_CONF_PATH} ] || [ -f {HOMEBREW_CONF_PATH} ]; then wg show 2>/dev/null || true; fi"
+    );
+    let applescript = format!(
+        "do shell script \"{}\" with administrator privileges",
+        no_op_script.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+    let existing = Command::new("osascript")
+        .current_dir("/")
+        .arg("-e")
+        .arg(applescript)
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run osascript: {error}")))?;
+
+    if existing.status.success() {
+        let stdout = String::from_utf8_lossy(&existing.stdout);
+        if stdout.contains("allowed ips: 10.77.0.1/32") {
+            return Ok("WireGuard client tunnel already active on this Mac (no setup changes applied)".to_string());
+        }
+    }
+
+    hard_reconnect_local_wireguard_client_macos(config_path, true)
+}
+
+#[cfg(target_os = "macos")]
+fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
+    enforce_single_control_plane_macos(config_path)?;
+
+    hard_reconnect_local_wireguard_client_macos(config_path, false)
+}
+
+#[cfg(target_os = "macos")]
+fn hard_reconnect_local_wireguard_client_macos(
+    config_path: &Path,
+    is_setup: bool,
+) -> AppResult<String> {
     const LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
     const HOMEBREW_CONF_PATH: &str = "/opt/homebrew/etc/wireguard/nolandwg0.conf";
 
     let path = config_path.display().to_string().replace('"', "\\\"");
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; if wg show interfaces 2>/dev/null | tr ' ' '\n' | grep -qx {LOCAL_TUNNEL_NAME}; then wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; else wg-quick up {LOCAL_CONF_PATH}; for _ in 1 2 3 4 5; do wg show > /tmp/noland-wg-show.txt 2>/dev/null || true; if grep -qi 'latest handshake:' /tmp/noland-wg-show.txt && ! grep -qi 'latest handshake: never' /tmp/noland-wg-show.txt; then break; fi; sleep 1; done; fi; if grep -qi 'allowed ips: 0.0.0.0/0' /tmp/noland-wg-show.txt; then echo 'WireGuard came up in full-tunnel mode (0.0.0.0/0), refusing configuration' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi; if ! grep -qi 'allowed ips: 10.77.0.1/32' /tmp/noland-wg-show.txt; then echo 'WireGuard came up but allowed ips are not scoped to 10.77.0.1/32' >&2; cat /tmp/noland-wg-show.txt >&2; exit 1; fi"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; wg-quick down {LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; sleep 1; wg-quick up {LOCAL_CONF_PATH}; wg show"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -1121,14 +1256,70 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
 
     if !output.status.success() {
         return Err(AppError::Command(format!(
-            "Failed to setup local WireGuard client (exit {}): stdout: {} | stderr: {}",
+            "Failed to reconnect local WireGuard client (exit {}): stdout: {} | stderr: {}",
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout).trim(),
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
 
-    Ok("WireGuard client tunnel configured and activated on this Mac".to_string())
+    if is_setup {
+        Ok("WireGuard client tunnel configured and activated on this Mac".to_string())
+    } else {
+        Ok("WireGuard client tunnel reconnected on this Mac".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn enforce_single_control_plane_macos(config_path: &Path) -> AppResult<()> {
+    let expected_peer = parse_wireguard_config_value(
+        &std::fs::read_to_string(config_path).map_err(|error| {
+            AppError::Command(format!(
+                "Failed reading WireGuard client config {}: {error}",
+                config_path.display()
+            ))
+        })?,
+        "Peer",
+        "PublicKey",
+    )
+    .ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "WireGuard client config {} is missing [Peer] PublicKey",
+            config_path.display()
+        ))
+    })?;
+
+    let output = Command::new("wg")
+        .arg("show")
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
+
+    if !output.status.success() {
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut active_peers: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("peer:") {
+            active_peers.push(value.trim().to_string());
+        }
+    }
+
+    if active_peers.is_empty() {
+        return Ok(());
+    }
+
+    if active_peers.iter().any(|peer| peer == &expected_peer) {
+        return Ok(());
+    }
+
+    warn!(
+        "Another WireGuard tunnel appears active and may conflict with Noland-managed tunnel. Active peer(s): {}",
+        active_peers.join(", ")
+    );
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1136,6 +1327,16 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
 
     let destination = "/etc/wireguard/nolandwg0.conf";
+    let interface_exists = Command::new("sudo")
+        .args(["wg", "show", LOCAL_TUNNEL_NAME])
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+
+    if interface_exists {
+        return Ok("WireGuard client tunnel already active on this Linux machine (no reapply performed)".to_string());
+    }
+
     let copy = Command::new("sudo")
         .args([
             "install",
@@ -1153,26 +1354,57 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
         ));
     }
 
-    let interface_exists = Command::new("sudo")
-        .args(["wg", "show", LOCAL_TUNNEL_NAME])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
+    let up = Command::new("sudo")
+        .args(["wg-quick", "up", destination])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to start local WireGuard: {error}")))?;
 
-    if !interface_exists {
-        let up = Command::new("sudo")
-            .args(["wg-quick", "up", destination])
-            .output()
-            .map_err(|error| AppError::Command(format!("Failed to start local WireGuard: {error}")))?;
-
-        if !up.status.success() {
-            return Err(AppError::Command(
-                "Failed to start local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
-            ));
-        }
+    if !up.status.success() {
+        return Err(AppError::Command(
+            "Failed to start local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
+        ));
     }
 
     Ok("WireGuard client tunnel configured and activated on this Linux machine".to_string())
+}
+
+#[cfg(target_os = "linux")]
+fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
+    let destination = "/etc/wireguard/nolandwg0.conf";
+
+    let copy = Command::new("sudo")
+        .args([
+            "install",
+            "-m",
+            "600",
+            config_path.to_string_lossy().as_ref(),
+            destination,
+        ])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to copy WireGuard config: {error}")))?;
+
+    if !copy.status.success() {
+        return Err(AppError::Command(
+            "Failed to copy WireGuard config with sudo. Approve sudo prompt and retry.".to_string(),
+        ));
+    }
+
+    let _ = Command::new("sudo")
+        .args(["wg-quick", "down", destination])
+        .status();
+
+    let up = Command::new("sudo")
+        .args(["wg-quick", "up", destination])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to reconnect local WireGuard: {error}")))?;
+
+    if !up.status.success() {
+        return Err(AppError::Command(
+            "Failed to reconnect local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
+        ));
+    }
+
+    Ok("WireGuard client tunnel reconnected on this Linux machine".to_string())
 }
 
 #[cfg(target_os = "windows")]
@@ -1185,21 +1417,46 @@ fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String>
         .map(|status| status.success())
         .unwrap_or(false);
 
-    if !already_active {
-        let output = Command::new("wireguard.exe")
-            .args(["/installtunnelservice", &config])
-            .output()
-            .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+    if already_active {
+        return Ok("WireGuard client tunnel already active on this Windows machine (no reapply performed)".to_string());
+    }
 
-        if !output.status.success() {
-            return Err(AppError::Command(format!(
-                "Failed to setup local WireGuard client: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+    let output = Command::new("wireguard.exe")
+        .args(["/installtunnelservice", &config])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "Failed to setup local WireGuard client: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
     }
 
     Ok("WireGuard client tunnel installed as Windows service".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn reconnect_local_wireguard_client_windows(config_path: &Path) -> AppResult<String> {
+    let config = config_path.display().to_string();
+
+    let _ = Command::new("wireguard.exe")
+        .args(["/uninstalltunnelservice", "nolandwg0"])
+        .status();
+
+    let output = Command::new("wireguard.exe")
+        .args(["/installtunnelservice", &config])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "Failed to reconnect local WireGuard client: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok("WireGuard client tunnel reconnected on this Windows machine".to_string())
 }
 
 fn parse_default_route_dev(line: &str) -> Option<String> {

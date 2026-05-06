@@ -25,7 +25,10 @@ use crate::{
         shared_storage::bundle_restore::BundleRestoreService,
         mic_passthrough::MicPassthroughService,
         vast_api::VastApiClient,
-        wireguard::setup_local_wireguard_client,
+        wireguard::{
+            read_local_wireguard_show_output, reconnect_local_wireguard_client,
+            setup_local_wireguard_client,
+        },
     },
     utils::redact::redact_secret,
 };
@@ -368,50 +371,13 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    sync_wireguard_endpoint_from_vast(context.inner(), Path::new(&config_path)).await?;
-
     let message = setup_local_wireguard_client(Path::new(&config_path))?;
     let tunnel_server_ip = {
         let state = context.state.read().await;
         state.wireguard.server_ip.clone()
     };
 
-    if let Ok(local_show) = Command::new("wg").arg("show").output() {
-        let local_stdout = String::from_utf8_lossy(&local_show.stdout);
-        if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
-            if !local_snapshot.allowed_ips.contains("10.77.0.1/32") {
-                return Err(AppError::Provisioning(format!(
-                    "Local WireGuard tunnel is not scoped to 10.77.0.1/32 (found: {})",
-                    local_snapshot.allowed_ips
-                ))
-                .into());
-            }
-
-            if local_snapshot
-                .latest_handshake
-                .to_ascii_lowercase()
-                .contains("never")
-            {
-                return Err(AppError::Provisioning(
-                    "WireGuard tunnel is up but handshake has not completed yet. Check endpoint/port and firewall, then retry."
-                        .to_string(),
-                )
-                .into());
-            }
-
-            let _ = context
-                .update_state(|state| {
-                    if !local_snapshot.interface_public_key.is_empty() {
-                        state.wireguard.client_public_key =
-                            local_snapshot.interface_public_key.clone();
-                    }
-                    if !local_snapshot.peer_public_key.is_empty() {
-                        state.wireguard.server_public_key = local_snapshot.peer_public_key.clone();
-                    }
-                })
-                .await;
-        }
-    }
+    validate_local_wireguard_tunnel(context.inner(), &tunnel_server_ip, false).await?;
 
     if !tunnel_server_ip.trim().is_empty() {
         validate_wireguard_ping(&tunnel_server_ip)?;
@@ -430,101 +396,134 @@ pub async fn setup_wireguard_client(
     ))
 }
 
-async fn sync_wireguard_endpoint_from_vast(
-    context: &AppContext,
-    config_path: &Path,
-) -> Result<(), AppError> {
-    let (instance_id, api_key) = {
+#[tauri::command]
+pub async fn reconnect_local_wireguard_client_quick(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let config_path = {
         let state = context.state.read().await;
-        (
-            state.instance.instance_id,
-            state.credentials.vast_api_key.clone(),
+        state.wireguard.config_path.clone()
+    };
+
+    if config_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "WireGuard client config path is empty. Run provisioning first.".to_string(),
         )
+        .into());
+    }
+
+    let tunnel_server_ip = {
+        let state = context.state.read().await;
+        state.wireguard.server_ip.clone()
     };
 
-    let Some(instance_id) = instance_id else {
-        return Ok(());
-    };
-    if api_key.trim().is_empty() {
-        return Ok(());
+    if let Ok(local_stdout) = read_local_wireguard_show_output() {
+        if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
+            if local_snapshot.allowed_ips.contains("10.77.0.1/32")
+                && !local_snapshot.latest_handshake.to_ascii_lowercase().contains("never")
+            {
+                sync_local_wireguard_keys(context.inner(), &local_snapshot).await;
+                return Ok("WireGuard tunnel is already active and healthy on this Mac".to_string());
+            }
+        }
     }
 
-    let vast = VastApiClient::new(
-        context.http_client.clone(),
-        context.config.vast_base_url.clone(),
-        api_key,
-    );
+    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
+    validate_local_wireguard_tunnel(context.inner(), &tunnel_server_ip, true).await?;
+    Ok(message)
+}
 
-    let instance = vast.get_instance(instance_id).await?;
-    let endpoint_host = instance.wireguard_endpoint_host();
+async fn validate_local_wireguard_tunnel(
+    context: &AppContext,
+    tunnel_server_ip: &str,
+    allow_handshake_retry: bool,
+) -> Result<(), FrontendError> {
+    let attempts = if allow_handshake_retry { 15 } else { 3 };
+    let retry_delay = if allow_handshake_retry { 3 } else { 2 };
 
-    if endpoint_host.trim().is_empty() {
-        return Ok(());
+    for attempt in 1..=attempts {
+        let local_stdout = read_local_wireguard_show_output()?;
+        if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
+                if !local_snapshot.allowed_ips.contains("10.77.0.1/32") {
+                    return Err(AppError::Provisioning(format!(
+                        "Local WireGuard tunnel is not scoped to 10.77.0.1/32 (found: {})",
+                        local_snapshot.allowed_ips
+                    ))
+                    .into());
+                }
+
+                sync_local_wireguard_keys(context, &local_snapshot).await;
+
+                let handshake_missing = local_snapshot.latest_handshake.is_empty()
+                    || local_snapshot
+                        .latest_handshake
+                        .to_ascii_lowercase()
+                        .contains("never");
+
+                if !handshake_missing {
+                    break;
+                }
+
+                if attempt == attempts {
+                    return Err(AppError::Provisioning(
+                        "WireGuard tunnel exists, but peer handshake is still not visible. Tunnel state was refreshed, but the server is not responding on the WireGuard session yet. Retry reconnect once more; if it still fails, verify the server-side WireGuard service and Sunshine reachability."
+                            .to_string(),
+                    )
+                    .into());
+                }
+
+                std::thread::sleep(Duration::from_secs(retry_delay));
+                continue;
+        }
+
+        if attempt == attempts {
+            if allow_handshake_retry || cfg!(target_os = "macos") {
+                warn!(
+                    "WireGuard local wg state is unavailable after retries; continuing without hard failure"
+                );
+                return Ok(());
+            }
+            return Err(AppError::Provisioning(
+                "WireGuard reconnect completed, but no local tunnel state is visible yet. macOS likely detached the interface; retry reconnect once more."
+                    .to_string(),
+            )
+            .into());
+        }
+
+        std::thread::sleep(Duration::from_secs(retry_delay));
     }
 
-    if instance.wireguard_port == 0 {
-        return Err(AppError::Provisioning(format!(
-            "Vast instance {} does not expose a 51820/udp HostPort mapping. Pick a VM-enabled host with direct UDP ports and retry.",
-            instance.id
-        )));
+    if !tunnel_server_ip.trim().is_empty() {
+        if let Err(error) = validate_wireguard_ping(tunnel_server_ip) {
+            if cfg!(target_os = "macos") {
+                warn!(
+                    "WireGuard ping validation failed on macOS after reconnect/setup; continuing non-fatally: {}",
+                    error
+                );
+            } else {
+                return Err(error.into());
+            }
+        }
     }
 
-    let endpoint_line = format!("Endpoint = {}:{}", endpoint_host, instance.wireguard_port);
-    rewrite_wireguard_peer_endpoint(config_path, &endpoint_line)?;
+    if let Err(error) = sync_server_wireguard_keys(context).await {
+        warn!("best-effort server WireGuard key sync failed: {}", error);
+    }
+
     Ok(())
 }
 
-fn rewrite_wireguard_peer_endpoint(
-    config_path: &Path,
-    endpoint_line: &str,
-) -> Result<(), AppError> {
-    let original = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading WireGuard client config {}: {error}",
-            config_path.display()
-        ))
-    })?;
-
-    let mut in_peer_section = false;
-    let mut endpoint_replaced = false;
-    let mut lines = Vec::with_capacity(original.lines().count() + 1);
-
-    for line in original.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_peer_section = trimmed.eq_ignore_ascii_case("[Peer]");
-        }
-
-        if in_peer_section && trimmed.to_ascii_lowercase().starts_with("endpoint") {
-            lines.push(endpoint_line.to_string());
-            endpoint_replaced = true;
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-
-    if !endpoint_replaced {
-        return Err(AppError::InvalidInput(format!(
-            "WireGuard client config {} is missing Endpoint in [Peer] section",
-            config_path.display()
-        )));
-    }
-
-    let mut updated = lines.join("\n");
-    if original.ends_with('\n') {
-        updated.push('\n');
-    }
-
-    if updated != original {
-        std::fs::write(config_path, updated).map_err(|error| {
-            AppError::Command(format!(
-                "Failed writing WireGuard client config {}: {error}",
-                config_path.display()
-            ))
-        })?;
-    }
-
-    Ok(())
+async fn sync_local_wireguard_keys(context: &AppContext, local_snapshot: &WgSnapshot) {
+    let _ = context
+        .update_state(|state| {
+            if !local_snapshot.interface_public_key.is_empty() {
+                state.wireguard.client_public_key = local_snapshot.interface_public_key.clone();
+            }
+            if !local_snapshot.peer_public_key.is_empty() {
+                state.wireguard.server_public_key = local_snapshot.peer_public_key.clone();
+            }
+        })
+        .await;
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, process::Command, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use reqwest;
 use serde::{Deserialize, Serialize};
@@ -13,7 +13,9 @@ use super::{
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     vast_api::VastApiClient,
-    wireguard::setup_local_wireguard_client,
+    wireguard::{
+        read_local_wireguard_show_output, reconnect_local_wireguard_client,
+    },
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -87,7 +89,7 @@ impl InstanceLifecycleService {
                 ));
             }
 
-            let mut message = setup_local_wireguard_client(std::path::Path::new(&config_path))?;
+            let mut message = reconnect_local_wireguard_client(std::path::Path::new(&config_path))?;
             if !local_wireguard_has_peer() {
                 warn!(
                     instance_id = instance_id,
@@ -525,16 +527,11 @@ impl InstanceLifecycleService {
 }
 
 fn local_wireguard_has_peer() -> bool {
-    let output = match Command::new("wg").arg("show").output() {
+    let stdout = match read_local_wireguard_show_output() {
         Ok(value) => value,
         Err(_) => return false,
     };
 
-    if !output.status.success() {
-        return false;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
     stdout.lines().any(|line| line.trim_start().starts_with("peer:"))
 }
 

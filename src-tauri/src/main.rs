@@ -90,6 +90,7 @@ fn main() {
             submit_pairing_pin,
             skip_pairing_and_continue,
             setup_wireguard_client,
+            reconnect_local_wireguard_client_quick,
             get_provisioning_logs,
             get_moonlight_download_url,
             get_rented_instances,

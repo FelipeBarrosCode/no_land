@@ -76,6 +76,10 @@ export async function setupWireguardClient(): Promise<string> {
   return invokeSafe<string>("setup_wireguard_client");
 }
 
+export async function reconnectLocalWireguardClientQuick(): Promise<string> {
+  return invokeSafe<string>("reconnect_local_wireguard_client_quick");
+}
+
 export async function getProvisioningLogs(): Promise<ProvisioningEvent[]> {
   return invokeSafe<ProvisioningEvent[]>("get_provisioning_logs");
 }

@@ -16,12 +16,17 @@ BOTTLES_GAMES_DIR="/srv/games"
 
 GAME_COMPAT_UPDATED=0
 ENABLE_GITHUB_GAME_COMPAT="${ENABLE_GITHUB_GAME_COMPAT:-0}"
+ENABLE_OPTIONAL_GAMING_STACK="${NOLAND_ENABLE_OPTIONAL_GAMING_STACK:-0}"
 OS_ID=""
 OS_VERSION=""
 OS_CODENAME=""
 
 log() {
   printf '[post-provision] %s\n' "$*"
+}
+
+phase() {
+  printf '[post-provision][phase] %s\n' "$*"
 }
 
 run_user() {
@@ -531,19 +536,34 @@ main() {
     exit 2
   fi
 
+  phase "1/6 Detect OS and prepare user directories"
   detect_os
   run_user "mkdir -p '${USER_HOME}/Desktop'"
+
+  phase "2/6 Install base system packages"
   ensure_packages
+
+  phase "3/6 Install Chrome and Wine"
   install_chrome
   install_wine
-  install_game_compat
-  install_heroic_latest
-  setup_bottles_launchers
-  setup_shared_wine_prefix
-  configure_desktop_favorites
+
+  phase "4/6 Optional gaming stack"
+  if [[ "$ENABLE_OPTIONAL_GAMING_STACK" == "1" ]]; then
+    log "NOLAND_ENABLE_OPTIONAL_GAMING_STACK=1 -> running optional gaming setup"
+    install_game_compat
+    install_heroic_latest
+    setup_bottles_launchers
+    setup_shared_wine_prefix
+    configure_desktop_favorites
+  else
+    log "Skipping optional gaming stack (set NOLAND_ENABLE_OPTIONAL_GAMING_STACK=1 to enable)"
+  fi
+
+  phase "5/6 Repair permissions and Wine links"
   repair_user_permissions
   repair_wine_dosdevices_links
 
+  phase "6/6 Finalization"
   if [[ "$GAME_COMPAT_UPDATED" -eq 1 ]]; then
     log "Game compatibility layer updated; scheduling reboot in 1 minute"
     run_root "shutdown -r +1 'Noland: reboot after game compatibility updates'" || true

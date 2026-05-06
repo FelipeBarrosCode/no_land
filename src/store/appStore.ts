@@ -7,6 +7,7 @@ import {
   searchOffers,
   selectOffer,
   setManualLocation,
+  reconnectLocalWireguardClientQuick,
   setupWireguardClient,
   startPlayExistingInstance,
   startPlayFlow,
@@ -112,6 +113,7 @@ interface AppStore {
   submitPin: (pin: string) => Promise<void>;
   skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
+  reconnectLocalWireguardClient: () => Promise<string | null>;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
   backupStatus: BackupStatusResponse | null;
   instanceBackupStatus: SharedStorageInstanceStatus | null;
@@ -450,6 +452,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
       set({ busy: false });
     } catch (error) {
       set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  reconnectLocalWireguardClient: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await reconnectLocalWireguardClientQuick();
+      set({ busy: false });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
     }
   },
 

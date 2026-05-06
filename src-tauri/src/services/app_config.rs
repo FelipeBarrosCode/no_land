@@ -57,6 +57,7 @@ pub struct WireGuardDefaults {
     pub server_tunnel_ip: String,
     pub client_tunnel_ip: String,
     pub listen_port: u16,
+    pub client_listen_port: u16,
     pub stream_max_rate: String,
     pub tunnel_mtu: u16,
     pub persistent_keepalive_secs: u16,
@@ -146,6 +147,11 @@ impl Default for AppConfig {
                 server_tunnel_ip: "10.77.0.1/24".to_string(),
                 client_tunnel_ip: "10.77.0.2/32".to_string(),
                 listen_port: 51820,
+                client_listen_port: env::var("NOLAND_WIREGUARD_CLIENT_LISTEN_PORT")
+                    .ok()
+                    .and_then(|value| value.parse::<u16>().ok())
+                    .filter(|value| *value != 0)
+                    .unwrap_or(51821),
                 stream_max_rate: "80mbit".to_string(),
                 tunnel_mtu: 1280,
                 persistent_keepalive_secs: 25,
