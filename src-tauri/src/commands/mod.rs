@@ -199,7 +199,6 @@ pub async fn search_offers(
         .await?;
 
     let selector = OfferSelector {
-        min_reliability: state_snapshot.server_preferences.min_reliability,
         scoring: context.config.scoring.clone(),
     };
     let ranked = selector.rank_offers(offers, &state_snapshot.location);

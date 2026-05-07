@@ -27,6 +27,7 @@ use super::{
     post_provision::PostProvisionService,
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
+    sleep_inhibit::SleepInhibitService,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
@@ -501,6 +502,25 @@ async fn run_post_provision_step(
         false,
     )
     .await;
+
+    let should_keep_awake = {
+        let state = context.state.read().await;
+        state.moonlight_preferences.keepawake != 0
+    };
+    if should_keep_awake {
+        match SleepInhibitService::ensure_active() {
+            Ok(message) => {
+                info!(instance_id = instance_id, "{}", message);
+            }
+            Err(error) => {
+                warn!(
+                    instance_id = instance_id,
+                    error = %error,
+                    "Failed to enable client sleep prevention (non-blocking)"
+                );
+            }
+        }
+    }
 
     Ok(())
 }

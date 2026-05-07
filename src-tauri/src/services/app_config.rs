@@ -22,33 +22,18 @@ pub struct AppConfig {
     pub sunshine: SunshineDefaults,
     pub wireguard: WireGuardDefaults,
     pub scoring: OfferScoring,
-    pub pairing: PairingDefaults,
 }
 
 #[derive(Debug, Clone)]
 pub struct SunshineDefaults {
-    pub audio_sink: String,
     pub av1_mode: i32,
-    pub capture: String,
+    pub cpu_affinity: String,
     pub encoder: String,
     pub fec_percentage: i32,
     pub hevc_mode: i32,
     pub nvenc_preset: i32,
-    pub output_name: i32,
     pub ping_timeout: i32,
     pub port: u16,
-    pub address: String,
-    pub display: String,
-    pub cpu_affinity: String,
-    pub virtual_display_width: u32,
-    pub virtual_display_height: u32,
-    pub target_fps: u32,
-}
-
-impl SunshineDefaults {
-    pub fn virtual_display_refresh_rate(&self) -> u32 {
-        self.target_fps * 2
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +43,6 @@ pub struct WireGuardDefaults {
     pub client_tunnel_ip: String,
     pub listen_port: u16,
     pub client_listen_port: u16,
-    pub stream_max_rate: String,
     pub tunnel_mtu: u16,
     pub persistent_keepalive_secs: u16,
 }
@@ -68,11 +52,6 @@ pub struct OfferScoring {
     pub distance_weight: f64,
     pub price_weight: f64,
     pub vram_weight: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct PairingDefaults {
-    pub sunshine_pair_command: String,
 }
 
 impl Default for AppConfig {
@@ -125,22 +104,14 @@ impl Default for AppConfig {
             moonlight_download_url_linux:
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
             sunshine: SunshineDefaults {
-                audio_sink: "sunshine_audio".to_string(),
                 av1_mode: 1,
-                capture: "nvfbc".to_string(),
+                cpu_affinity: "2-5".to_string(),
                 encoder: "nvenc".to_string(),
                 fec_percentage: 20,
                 hevc_mode: 0,
                 nvenc_preset: 4,
-                output_name: 0,
                 ping_timeout: 30000,
                 port: 47989,
-                address: "0.0.0.0".to_string(),
-                display: ":0".to_string(),
-                cpu_affinity: "2-5".to_string(),
-                virtual_display_width: 1920,
-                virtual_display_height: 1080,
-                target_fps: 60,
             },
             wireguard: WireGuardDefaults {
                 server_interface_name: "wg0".to_string(),
@@ -152,7 +123,6 @@ impl Default for AppConfig {
                     .and_then(|value| value.parse::<u16>().ok())
                     .filter(|value| *value != 0)
                     .unwrap_or(51821),
-                stream_max_rate: "80mbit".to_string(),
                 tunnel_mtu: 1280,
                 persistent_keepalive_secs: 25,
             },
@@ -160,11 +130,6 @@ impl Default for AppConfig {
                 distance_weight: 0.7,
                 price_weight: 0.2,
                 vram_weight: 0.1,
-            },
-            pairing: PairingDefaults {
-                sunshine_pair_command:
-                    "printf '%s\n' '{pin}' | sunshine-cli pair || sunshine --pair-pin '{pin}'"
-                        .to_string(),
             },
         }
     }

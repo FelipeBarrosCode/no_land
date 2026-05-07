@@ -1,12 +1,11 @@
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{collections::HashMap, time::Duration};
 
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::app_state::{
     InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse, MicState,
-    ProvisionedServerState,
 };
 
 use super::{app_context::AppContext, remote_exec::RemoteExec};

@@ -4,7 +4,6 @@ import { Button } from "../../components/ui/Button";
 interface Props {
   open: boolean;
   busy: boolean;
-  wireguardIp: string;
   wireguardConfigPath: string;
   onSetupWireguardClient: () => Promise<void>;
   onReconnectLocalWireguardClient: () => Promise<string | null>;
@@ -14,15 +13,13 @@ interface Props {
 export function PairingModal({
   open,
   busy,
-  wireguardIp,
   wireguardConfigPath,
   onSetupWireguardClient,
   onReconnectLocalWireguardClient,
   onSkip
 }: Props) {
   const [wireguardReadyConfirmed, setWireguardReadyConfirmed] = useState(false);
-  const hostToType = wireguardIp || "pending";
-  const sunshineUrl = `https://${hostToType}:47990`;
+  const sunshineUrl = "https://10.77.0.1:47990";
 
   if (!open) {
     return null;

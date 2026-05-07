@@ -13,6 +13,7 @@ pub mod post_provision;
 pub mod reboot_helper;
 pub mod remote_exec;
 pub mod shared_storage;
+pub mod sleep_inhibit;
 pub mod ssh_keys;
 pub mod state_store;
 pub mod sunshine;

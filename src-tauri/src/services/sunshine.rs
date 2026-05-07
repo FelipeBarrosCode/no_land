@@ -28,13 +28,6 @@ impl DisplayProfile {
         self.fps * 2
     }
 
-    pub fn fallback() -> Self {
-        Self {
-            width: 1920,
-            height: 1080,
-            fps: 60,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -1885,12 +1878,4 @@ context.properties = {
 
 fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\"'\"'")
-}
-
-fn strip_wrapping_quotes(value: &str) -> String {
-    value
-        .trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string()
 }

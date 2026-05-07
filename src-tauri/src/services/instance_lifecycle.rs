@@ -1,10 +1,9 @@
 use std::{collections::HashMap, time::Duration};
 
-use reqwest;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
@@ -517,12 +516,6 @@ impl InstanceLifecycleService {
             &selected_paths,
         )
         .await
-    }
-
-    /// Check if a lifecycle action is currently running for an instance.
-    pub async fn is_action_running(instance_id: u64) -> bool {
-        let actions = get_lifecycle_actions().read().await;
-        actions.contains_key(&instance_id)
     }
 }
 

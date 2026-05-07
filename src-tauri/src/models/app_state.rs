@@ -637,14 +637,6 @@ pub struct FolderBundle {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RestoreDryRunRequest {
-    pub bundle_id: String,
-    pub folder_bundle_ids: Vec<String>,
-    pub mode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct RestoreRequest {
     pub bundle_id: String,
     pub folder_bundle_ids: Vec<String>,
@@ -772,29 +764,6 @@ impl MicQualityProfile {
         }
     }
 
-    pub fn jitter_min_ms(&self) -> u32 {
-        match self {
-            MicQualityProfile::Standard => 20,
-            MicQualityProfile::LowLatency => 10,
-            MicQualityProfile::HighQuality => 30,
-        }
-    }
-
-    pub fn jitter_target_ms(&self) -> u32 {
-        match self {
-            MicQualityProfile::Standard => 30,
-            MicQualityProfile::LowLatency => 15,
-            MicQualityProfile::HighQuality => 40,
-        }
-    }
-
-    pub fn jitter_max_ms(&self) -> u32 {
-        match self {
-            MicQualityProfile::Standard => 60,
-            MicQualityProfile::LowLatency => 40,
-            MicQualityProfile::HighQuality => 80,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -877,11 +846,4 @@ pub struct MicSessionResponse {
     pub channels: u32,
     pub frame_ms: u32,
     pub bitrate_kbps: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MicEnableRequest {
-    pub instance_id: u64,
-    pub quality_profile: Option<MicQualityProfile>,
 }

@@ -31,8 +31,6 @@ export function ProvisioningScreen({ appState, logs, busy, onSkipPairing, onSetu
     return index === -1 ? 0 : index;
   }, [appState.orchestrationState]);
 
-  const moonlightHostIp = appState.moonlight.hostAddress || appState.wireguard.serverIp;
-
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
@@ -114,7 +112,6 @@ export function ProvisioningScreen({ appState, logs, busy, onSkipPairing, onSetu
       <PairingModal
         open={appState.orchestrationState === "AwaitingPairPin" || appState.orchestrationState === "Pairing"}
         busy={busy}
-        wireguardIp={moonlightHostIp}
         wireguardConfigPath={appState.wireguard.configPath}
         onSetupWireguardClient={onSetupWireguardClient}
         onReconnectLocalWireguardClient={onReconnectLocalWireguardClient}

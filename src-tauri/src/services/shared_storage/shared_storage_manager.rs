@@ -27,10 +27,7 @@ fn get_listing_ready_cache() -> &'static RwLock<HashSet<String>> {
 }
 
 #[derive(Debug, Clone)]
-struct BackupJobInfo {
-    started_at: String,
-    trigger: String,
-}
+struct BackupJobInfo;
 
 /// Shared Storage Manager service.
 ///
@@ -667,13 +664,7 @@ chmod 600 {path}'"#,
         let started_at = chrono::Local::now().to_rfc3339();
         {
             let mut running = get_running_backups().write().await;
-            running.insert(
-                instance_id,
-                BackupJobInfo {
-                    started_at: started_at.clone(),
-                    trigger: trigger.to_string(),
-                },
-            );
+            running.insert(instance_id, BackupJobInfo);
         }
 
         // Update state to running
@@ -1246,82 +1237,6 @@ chmod 600 {path}'"#,
     /// Sync current VM state to B2 in destructive mode for teardown.
     ///
     /// This is used before destroy so files deleted on VM are deleted in B2.
-    pub async fn sync_cleanup_on_destroy(
-        context: &AppContext,
-        remote: &RemoteExec,
-        instance_id: u64,
-        target_user: &str,
-    ) -> AppResult<()> {
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-
-        if !settings.enabled {
-            info!(instance_id = instance_id, "Shared storage disabled; skipping destroy sync cleanup");
-            return Ok(());
-        }
-
-        if settings.backblaze_key_id.trim().is_empty()
-            || settings.backblaze_application_key.trim().is_empty()
-        {
-            info!(
-                instance_id = instance_id,
-                "Backblaze credentials missing; skipping destroy sync cleanup"
-            );
-            return Ok(());
-        }
-
-        Self::ensure_rclone_installed(remote).await?;
-        Self::write_filter_rules(remote, target_user).await?;
-        Self::configure_rclone_remote(remote, target_user, settings).await?;
-
-        let dest = Self::build_storage_source(settings, false);
-        let filter_path = format!("/home/{}/rules.txt", target_user);
-
-        let sync_cmd = format!(
-            "sudo -u {user} rclone sync / {dest} --filter-from {filter} --checksum --delete-excluded 2>&1",
-            user = target_user,
-            dest = shell_escape(&dest),
-            filter = shell_escape(&filter_path),
-        );
-
-        let sync_output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&sync_cmd, Duration::from_secs(3600)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        if sync_output.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Destroy sync cleanup failed (exit {}): {}",
-                sync_output.status_code,
-                redact_secrets(&sync_output.stdout, settings).trim()
-            )));
-        }
-
-        // Post-check to ensure destination is reachable after sync.
-        let verify_cmd = format!(
-            "sudo -u {user} rclone lsf {dest} --max-depth 1 2>&1",
-            user = target_user,
-            dest = shell_escape(&dest),
-        );
-        let verify = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&verify_cmd, Duration::from_secs(60)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-        if verify.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Destroy sync cleanup verification failed: {}",
-                redact_secrets(&verify.stdout, settings).trim()
-            )));
-        }
-
-        info!(instance_id = instance_id, "Destroy sync cleanup completed successfully");
-        Ok(())
-    }
-
     /// Get the backup status for the current app state.
     pub async fn get_backup_status(
         context: &AppContext,

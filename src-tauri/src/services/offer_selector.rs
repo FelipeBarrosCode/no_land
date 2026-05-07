@@ -8,7 +8,6 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct OfferSelector {
-    pub min_reliability: f64,
     pub scoring: OfferScoring,
 }
 

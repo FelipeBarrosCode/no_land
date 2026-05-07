@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};

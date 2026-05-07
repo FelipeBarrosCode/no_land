@@ -728,7 +728,6 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         remote: &RemoteExec,
         primary_interface: &str,
     ) -> AppResult<()> {
-        let iface = self.defaults.server_interface_name.clone();
         let nic = primary_interface.to_string();
         // Note: FORWARD rules are handled by ufw route allow in setup_firewall_rules.
         // Only NAT/MASQUERADE remains here because UFW cannot configure it.
