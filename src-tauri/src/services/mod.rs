@@ -8,6 +8,7 @@ pub mod mic_passthrough;
 pub mod moonlight;
 pub mod nvidia_headless;
 pub mod offer_selector;
+pub mod os_detection;
 pub mod orchestration;
 pub mod post_provision;
 pub mod reboot_helper;

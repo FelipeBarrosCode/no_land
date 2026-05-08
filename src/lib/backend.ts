@@ -80,6 +80,14 @@ export async function reconnectLocalWireguardClientQuick(): Promise<string> {
   return invokeSafe<string>("reconnect_local_wireguard_client_quick");
 }
 
+export async function startLocalSleepPrevention(): Promise<string> {
+  return invokeSafe<string>("start_local_sleep_prevention");
+}
+
+export async function stopLocalSleepPrevention(): Promise<string> {
+  return invokeSafe<string>("stop_local_sleep_prevention");
+}
+
 export async function getProvisioningLogs(): Promise<ProvisioningEvent[]> {
   return invokeSafe<ProvisioningEvent[]>("get_provisioning_logs");
 }
@@ -205,16 +213,41 @@ export async function removeInstanceBackupSchedule(): Promise<string> {
 }
 
 export async function getInstanceSunshineSettings(
-  instanceId: number
+  instanceId: number,
+  sunshineUsername: string,
+  sunshinePassword: string
 ): Promise<SunshineSettingsResponse> {
-  return invokeSafe<SunshineSettingsResponse>("get_instance_sunshine_settings", { instanceId });
+  return invokeSafe<SunshineSettingsResponse>("get_instance_sunshine_settings", {
+    instanceId,
+    sunshineUsername,
+    sunshinePassword
+  });
 }
 
 export async function updateInstanceSunshineSettings(
   instanceId: number,
-  settings: Record<string, unknown>
+  settings: Record<string, unknown>,
+  sunshineUsername: string,
+  sunshinePassword: string
 ): Promise<void> {
-  return invokeSafe<void>("update_instance_sunshine_settings", { instanceId, settings });
+  return invokeSafe<void>("update_instance_sunshine_settings", {
+    instanceId,
+    settings,
+    sunshineUsername,
+    sunshinePassword
+  });
+}
+
+export async function resetInstanceSunshineSettings(
+  instanceId: number,
+  sunshineUsername: string,
+  sunshinePassword: string
+): Promise<void> {
+  return invokeSafe<void>("reset_instance_sunshine_settings", {
+    instanceId,
+    sunshineUsername,
+    sunshinePassword
+  });
 }
 
 export async function reconnectInstanceWireguard(instanceId: number): Promise<string> {

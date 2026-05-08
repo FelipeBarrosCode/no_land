@@ -30,6 +30,7 @@ function RootRoute() {
   const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
   const loadSunshineSettings = useAppStore((state) => state.loadSunshineSettings);
   const saveSunshineSettings = useAppStore((state) => state.saveSunshineSettings);
+  const resetSunshineSettings = useAppStore((state) => state.resetSunshineSettings);
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
   const pauseInstance = useAppStore((state) => state.pauseInstance);
@@ -69,6 +70,7 @@ function RootRoute() {
       onSaveServerPreferences={saveServerPreferences}
       onLoadSunshineSettings={loadSunshineSettings}
       onSaveSunshineSettings={saveSunshineSettings}
+      onResetSunshineSettings={resetSunshineSettings}
       onReconnectWireguard={reconnectWireguard}
       onRebootInstanceServices={rebootInstanceServices}
       onPauseInstance={pauseInstance}
@@ -88,6 +90,9 @@ function ProvisioningRoute() {
   const skipPairing = useAppStore((state) => state.skipPairing);
   const setupLocalWireguardClient = useAppStore((state) => state.setupLocalWireguardClient);
   const reconnectLocalWireguardClient = useAppStore((state) => state.reconnectLocalWireguardClient);
+  const sleepPreventionActive = useAppStore((state) => state.sleepPreventionActive);
+  const startSleepPrevention = useAppStore((state) => state.startSleepPrevention);
+  const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
 
   if (!appState) {
     return null;
@@ -101,6 +106,9 @@ function ProvisioningRoute() {
         onSkipPairing={skipPairing}
         onSetupWireguardClient={setupLocalWireguardClient}
         onReconnectLocalWireguardClient={reconnectLocalWireguardClient}
+        sleepPreventionActive={sleepPreventionActive}
+        onStartSleepPrevention={startSleepPrevention}
+        onStopSleepPrevention={stopSleepPrevention}
       />
   );
 }

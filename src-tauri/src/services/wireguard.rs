@@ -1076,18 +1076,41 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         return Ok(());
     }
 
+    let (manager, install_cmd) = if command_exists("apt-get") {
+        (
+            "apt-get",
+            "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools",
+        )
+    } else if command_exists("dnf") {
+        ("dnf", "dnf install -y wireguard-tools")
+    } else if command_exists("yum") {
+        ("yum", "yum install -y wireguard-tools")
+    } else if command_exists("pacman") {
+        ("pacman", "pacman -Sy --noconfirm wireguard-tools")
+    } else if command_exists("zypper") {
+        (
+            "zypper",
+            "zypper --non-interactive install wireguard-tools",
+        )
+    } else {
+        return Err(AppError::Command(
+            "WireGuard tools are missing (wg/wg-quick), and no supported Linux package manager was detected. Install `wireguard-tools` manually and retry."
+                .to_string(),
+        ));
+    };
+
     let install = Command::new("sudo")
-        .args(["apt-get", "install", "-y", "wireguard", "wireguard-tools"])
+        .args(["sh", "-lc", install_cmd])
         .output()
         .map_err(|error| {
             AppError::Command(format!(
-                "Failed to run apt install for WireGuard tools: {error}"
+                "Failed to run {manager} install for WireGuard tools: {error}"
             ))
         })?;
 
     if !install.status.success() {
         return Err(AppError::Command(format!(
-            "Failed to auto-install WireGuard tools with apt (exit {}): stdout: {} | stderr: {}",
+            "Failed to auto-install WireGuard tools with {manager} (exit {}): stdout: {} | stderr: {}",
             install.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&install.stdout).trim(),
             String::from_utf8_lossy(&install.stderr).trim()
@@ -1126,7 +1149,7 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn command_exists(command: &str) -> bool {
-    Command::new("bash")
+    Command::new("sh")
         .arg("-lc")
         .arg(format!("command -v {command} >/dev/null 2>&1"))
         .status()
@@ -1348,9 +1371,11 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
         .map_err(|error| AppError::Command(format!("Failed to copy WireGuard config: {error}")))?;
 
     if !copy.status.success() {
-        return Err(AppError::Command(
-            "Failed to copy WireGuard config with sudo. Approve sudo prompt and retry.".to_string(),
-        ));
+        return Err(AppError::Command(format!(
+            "Failed to copy WireGuard config to /etc/wireguard with sudo (exit {}). Approve the sudo prompt and retry. stderr: {}",
+            copy.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&copy.stderr).trim()
+        )));
     }
 
     let up = Command::new("sudo")
@@ -1359,9 +1384,11 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
         .map_err(|error| AppError::Command(format!("Failed to start local WireGuard: {error}")))?;
 
     if !up.status.success() {
-        return Err(AppError::Command(
-            "Failed to start local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
-        ));
+        return Err(AppError::Command(format!(
+            "Failed to start local WireGuard with sudo (exit {}). Approve the sudo prompt and retry. stderr: {}",
+            up.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&up.stderr).trim()
+        )));
     }
 
     Ok("WireGuard client tunnel configured and activated on this Linux machine".to_string())
@@ -1383,9 +1410,11 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
         .map_err(|error| AppError::Command(format!("Failed to copy WireGuard config: {error}")))?;
 
     if !copy.status.success() {
-        return Err(AppError::Command(
-            "Failed to copy WireGuard config with sudo. Approve sudo prompt and retry.".to_string(),
-        ));
+        return Err(AppError::Command(format!(
+            "Failed to copy WireGuard config to /etc/wireguard with sudo (exit {}). Approve the sudo prompt and retry. stderr: {}",
+            copy.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&copy.stderr).trim()
+        )));
     }
 
     let _ = Command::new("sudo")
@@ -1398,9 +1427,11 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
         .map_err(|error| AppError::Command(format!("Failed to reconnect local WireGuard: {error}")))?;
 
     if !up.status.success() {
-        return Err(AppError::Command(
-            "Failed to reconnect local WireGuard with sudo. Approve sudo prompt and retry.".to_string(),
-        ));
+        return Err(AppError::Command(format!(
+            "Failed to reconnect local WireGuard with sudo (exit {}). Approve the sudo prompt and retry. stderr: {}",
+            up.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&up.stderr).trim()
+        )));
     }
 
     Ok("WireGuard client tunnel reconnected on this Linux machine".to_string())
@@ -1426,9 +1457,9 @@ fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String>
         .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
 
     if !output.status.success() {
-        return Err(AppError::Command(format!(
-            "Failed to setup local WireGuard client: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        return Err(AppError::Command(format_wireguard_windows_failure(
+            "setup",
+            &output,
         )));
     }
 
@@ -1449,9 +1480,9 @@ fn reconnect_local_wireguard_client_windows(config_path: &Path) -> AppResult<Str
         .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
 
     if !output.status.success() {
-        return Err(AppError::Command(format!(
-            "Failed to reconnect local WireGuard client: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+        return Err(AppError::Command(format_wireguard_windows_failure(
+            "reconnect",
+            &output,
         )));
     }
 
@@ -1604,4 +1635,31 @@ fn strip_cidr(ip: &str) -> String {
 
 fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\"'\"'")
+}
+
+#[cfg(target_os = "windows")]
+fn format_wireguard_windows_failure(action: &str, output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let combined = if stderr.is_empty() {
+        stdout.clone()
+    } else if stdout.is_empty() {
+        stderr.clone()
+    } else {
+        format!("{stderr} | {stdout}")
+    };
+
+    let lower = combined.to_ascii_lowercase();
+    if lower.contains("access is denied") || lower.contains("elevation") || lower.contains("administrator") {
+        return format!(
+            "WireGuard {action} failed due to missing administrator privileges. Run Noland Connect as Administrator (or approve UAC), then retry. Details: {}",
+            combined
+        );
+    }
+
+    format!(
+        "Failed to {action} local WireGuard client (exit {}): {}",
+        output.status.code().unwrap_or(-1),
+        combined
+    )
 }

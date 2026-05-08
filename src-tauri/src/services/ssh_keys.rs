@@ -7,7 +7,7 @@ use tokio::fs;
 
 use crate::errors::{AppError, AppResult};
 
-use super::vast_api::VastApiClient;
+use super::{os_detection::OsDetection, vast_api::VastApiClient};
 
 #[derive(Debug, Clone)]
 pub struct SshKeyPaths {
@@ -28,6 +28,13 @@ impl SshKeyService {
     }
 
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
+        if !command_exists("ssh-keygen") {
+            return Err(AppError::Command(
+                "`ssh-keygen` is not available in PATH. Install OpenSSH client tools and retry."
+                    .to_string(),
+            ));
+        }
+
         let keys_dir = root_dir.join("keys");
         fs::create_dir_all(&keys_dir).await?;
 
@@ -75,27 +82,40 @@ impl SshKeyService {
     }
 
     pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
+        if !command_exists("ssh-add") {
+            return Err(AppError::Command(
+                "`ssh-add` is not available in PATH. Install OpenSSH client tools and retry."
+                    .to_string(),
+            ));
+        }
+
         let (auth_sock, agent_pid) = self.start_or_get_ssh_agent().await?;
-        std::env::set_var("SSH_AUTH_SOCK", &auth_sock);
-        if let Some(ref pid) = agent_pid {
+        if let Some(sock) = auth_sock.as_deref() {
+            std::env::set_var("SSH_AUTH_SOCK", sock);
+        }
+        if let Some(pid) = agent_pid.as_deref() {
             std::env::set_var("SSH_AGENT_PID", pid);
         }
 
         let key_path_str = key_path.display().to_string();
         let passphrase_owned = passphrase.to_string();
         let auth_sock_owned = auth_sock.clone();
+        let os = OsDetection::new();
 
         tokio::task::spawn_blocking(move || {
             use std::io::Write;
 
-            std::env::set_var("SSH_AUTH_SOCK", &auth_sock_owned);
+            if let Some(sock) = auth_sock_owned.as_deref() {
+                std::env::set_var("SSH_AUTH_SOCK", sock);
+            }
             if let Some(ref pid_str) = agent_pid {
                 std::env::set_var("SSH_AGENT_PID", pid_str);
             }
 
-            let output = Command::new("ssh-add")
-                .arg("--apple-use-keychain")
-                .arg(&key_path_str)
+            let mut add_command = Command::new("ssh-add");
+            add_command.args(os.ssh_add_args_for_key(&key_path_str));
+
+            let output = add_command
                 .output()
                 .map_err(|error| AppError::Command(format!("Failed to spawn ssh-add: {error}")))?;
 
@@ -106,7 +126,7 @@ impl SshKeyService {
             let stderr = String::from_utf8_lossy(&output.stderr);
             if stderr.contains("passphrase") || stderr.contains("bad passphrase") {
                 let mut child = Command::new("ssh-add")
-                    .args(["--apple-use-keychain", "--stdin"])
+                    .args(os.ssh_add_stdin_args())
                     .stdin(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped())
                     .spawn()
@@ -145,15 +165,31 @@ impl SshKeyService {
         .map_err(|error| AppError::Command(format!("ssh-add task join failure: {error}")))?
     }
 
-    async fn start_or_get_ssh_agent(&self) -> AppResult<(String, Option<String>)> {
+    async fn start_or_get_ssh_agent(&self) -> AppResult<(Option<String>, Option<String>)> {
         tokio::task::spawn_blocking(|| {
+            let os = OsDetection::new();
+
             if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
                 if !sock.is_empty() {
                     let pid = std::env::var("SSH_AGENT_PID")
                         .ok()
                         .filter(|p| !p.is_empty());
-                    return Ok((sock, pid));
+                    return Ok((Some(sock), pid));
                 }
+            }
+
+            if os.is_windows() {
+                let _ = Command::new("powershell")
+                    .args([
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        "if (Get-Service ssh-agent -ErrorAction SilentlyContinue) { Start-Service ssh-agent -ErrorAction SilentlyContinue }",
+                    ])
+                    .output();
+
+                return Ok((None, None));
             }
 
             let output = Command::new("ssh-agent")
@@ -200,7 +236,7 @@ impl SshKeyService {
             }
 
             match auth_sock {
-                Some(sock) => Ok((sock, agent_pid)),
+                Some(sock) => Ok((Some(sock), agent_pid)),
                 None => Err(AppError::Command(
                     "ssh-agent did not provide SSH_AUTH_SOCK".to_string(),
                 )),
@@ -236,6 +272,27 @@ impl SshKeyService {
 
         vast_api.upload_ssh_key(&public_key).await?;
         Ok(true)
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("where")
+            .arg(command)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 

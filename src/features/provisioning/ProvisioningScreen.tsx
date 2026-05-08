@@ -14,6 +14,9 @@ interface Props {
   onSkipPairing: () => Promise<void>;
   onSetupWireguardClient: () => Promise<void>;
   onReconnectLocalWireguardClient: () => Promise<string | null>;
+  sleepPreventionActive: boolean;
+  onStartSleepPrevention: () => Promise<string | null>;
+  onStopSleepPrevention: () => Promise<string | null>;
 }
 
 function formatTime(timestamp: string): string {
@@ -25,7 +28,17 @@ function formatTime(timestamp: string): string {
   return date.toLocaleTimeString();
 }
 
-export function ProvisioningScreen({ appState, logs, busy, onSkipPairing, onSetupWireguardClient, onReconnectLocalWireguardClient }: Props) {
+export function ProvisioningScreen({
+  appState,
+  logs,
+  busy,
+  onSkipPairing,
+  onSetupWireguardClient,
+  onReconnectLocalWireguardClient,
+  sleepPreventionActive,
+  onStartSleepPrevention,
+  onStopSleepPrevention
+}: Props) {
   const currentIndex = useMemo(() => {
     const index = PROVISIONING_ORDER.indexOf(appState.orchestrationState as (typeof PROVISIONING_ORDER)[number]);
     return index === -1 ? 0 : index;
@@ -80,7 +93,16 @@ export function ProvisioningScreen({ appState, logs, busy, onSkipPairing, onSetu
           </Card>
 
           <Card className="pixel-frame">
-            <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">Progress Logs</h2>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">Progress Logs</h2>
+              <Button
+                variant={sleepPreventionActive ? "secondary" : "ghost"}
+                disabled={busy}
+                onClick={() => (sleepPreventionActive ? onStopSleepPrevention() : onStartSleepPrevention())}
+              >
+                {sleepPreventionActive ? "Stop Awake" : "Keep PC Awake"}
+              </Button>
+            </div>
             <details className="mt-3 border border-[#3d426f] bg-[#10152f] p-3" open>
               <summary className="cursor-pointer font-display text-[10px] uppercase text-[#b4c8de]">Show details</summary>
               <div className="mt-3 max-h-[440px] space-y-2 overflow-auto pr-1 text-xs">

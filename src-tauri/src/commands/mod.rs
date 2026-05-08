@@ -18,8 +18,10 @@ use crate::{
     services::{
         app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
         location::LocationService, offer_selector::OfferSelector,
+        os_detection::OsDetection,
         orchestration::OrchestrationService, reboot_helper::RebootHelperService,
         remote_exec::RemoteExec, ssh_keys::SshKeyService,
+        sleep_inhibit::SleepInhibitService,
         shared_storage::shared_storage_manager::SharedStorageManager,
         shared_storage::bundle_indexer::BundleIndexer,
         shared_storage::bundle_restore::BundleRestoreService,
@@ -421,8 +423,12 @@ pub async fn reconnect_local_wireguard_client_quick(
             if local_snapshot.allowed_ips.contains("10.77.0.1/32")
                 && !local_snapshot.latest_handshake.to_ascii_lowercase().contains("never")
             {
+                let platform_name = OsDetection::new().platform_display_name();
                 sync_local_wireguard_keys(context.inner(), &local_snapshot).await;
-                return Ok("WireGuard tunnel is already active and healthy on this Mac".to_string());
+                return Ok(format!(
+                    "WireGuard tunnel is already active and healthy on this {}",
+                    platform_name
+                ));
             }
         }
     }
@@ -437,6 +443,7 @@ async fn validate_local_wireguard_tunnel(
     tunnel_server_ip: &str,
     allow_handshake_retry: bool,
 ) -> Result<(), FrontendError> {
+    let os = OsDetection::new();
     let attempts = if allow_handshake_retry { 15 } else { 3 };
     let retry_delay = if allow_handshake_retry { 3 } else { 2 };
 
@@ -476,7 +483,7 @@ async fn validate_local_wireguard_tunnel(
         }
 
         if attempt == attempts {
-            if allow_handshake_retry || cfg!(target_os = "macos") {
+            if allow_handshake_retry || os.is_macos() {
                 warn!(
                     "WireGuard local wg state is unavailable after retries; continuing without hard failure"
                 );
@@ -494,7 +501,7 @@ async fn validate_local_wireguard_tunnel(
 
     if !tunnel_server_ip.trim().is_empty() {
         if let Err(error) = validate_wireguard_ping(tunnel_server_ip) {
-            if cfg!(target_os = "macos") {
+            if os.is_macos() {
                 warn!(
                     "WireGuard ping validation failed on macOS after reconnect/setup; continuing non-fatally: {}",
                     error
@@ -588,13 +595,9 @@ fn parse_wg_show(raw: &str) -> Option<WgSnapshot> {
 }
 
 fn validate_wireguard_ping(server_ip: &str) -> Result<(), AppError> {
-    #[cfg(target_os = "windows")]
-    let args = ["-n", "3", server_ip];
+    let args = OsDetection::new().ping_args(server_ip);
 
-    #[cfg(not(target_os = "windows"))]
-    let args = ["-c", "3", "-W", "2", server_ip];
-
-    let ping = Command::new("ping").args(args).output().map_err(|error| {
+    let ping = Command::new("ping").args(&args).output().map_err(|error| {
         AppError::Command(format!(
             "Failed to run ping for WireGuard validation: {error}"
         ))
@@ -699,15 +702,24 @@ pub async fn get_provisioning_logs(
 pub async fn get_moonlight_download_url(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
-    if cfg!(target_os = "windows") {
-        return Ok(context.config.moonlight_download_url_windows.clone());
+    let os = OsDetection::new();
+    if os.is_windows() {
+        Ok(context.config.moonlight_download_url_windows.clone())
+    } else if os.is_macos() {
+        Ok(context.config.moonlight_download_url_macos.clone())
+    } else {
+        Ok(context.config.moonlight_download_url_linux.clone())
     }
+}
 
-    if cfg!(target_os = "macos") {
-        return Ok(context.config.moonlight_download_url_macos.clone());
-    }
+#[tauri::command]
+pub async fn start_local_sleep_prevention() -> Result<String, FrontendError> {
+    SleepInhibitService::ensure_active().map_err(Into::into)
+}
 
-    Ok(context.config.moonlight_download_url_linux.clone())
+#[tauri::command]
+pub async fn stop_local_sleep_prevention() -> Result<String, FrontendError> {
+    SleepInhibitService::stop().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1159,8 +1171,15 @@ pub async fn remove_instance_backup_schedule(
 pub async fn get_instance_sunshine_settings(
     context: State<'_, AppContext>,
     instance_id: u64,
+    sunshine_username: String,
+    sunshine_password: String,
 ) -> Result<crate::services::instance_lifecycle::SunshineSettingsResponse, FrontendError> {
-    InstanceLifecycleService::get_sunshine_settings(context.inner(), instance_id)
+    InstanceLifecycleService::get_sunshine_settings(
+        context.inner(),
+        instance_id,
+        &sunshine_username,
+        &sunshine_password,
+    )
         .await
         .map_err(Into::into)
 }
@@ -1170,11 +1189,32 @@ pub async fn update_instance_sunshine_settings(
     context: State<'_, AppContext>,
     instance_id: u64,
     settings: std::collections::HashMap<String, serde_json::Value>,
+    sunshine_username: String,
+    sunshine_password: String,
 ) -> Result<(), FrontendError> {
     InstanceLifecycleService::update_sunshine_settings(
         context.inner(),
         instance_id,
         crate::services::instance_lifecycle::SunshineSettingsUpdatePayload { settings },
+        &sunshine_username,
+        &sunshine_password,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn reset_instance_sunshine_settings(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    sunshine_username: String,
+    sunshine_password: String,
+) -> Result<(), FrontendError> {
+    InstanceLifecycleService::reset_sunshine_settings(
+        context.inner(),
+        instance_id,
+        &sunshine_username,
+        &sunshine_password,
     )
     .await
     .map_err(Into::into)

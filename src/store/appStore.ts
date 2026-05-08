@@ -29,6 +29,7 @@ import {
   removeInstanceBackupSchedule,
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
+  resetInstanceSunshineSettings,
   reconnectInstanceWireguard,
   rebootInstanceServices,
   pauseInstance,
@@ -45,6 +46,8 @@ import {
   reconnectInstanceMic,
   recreateInstanceMicDevice,
   getInstanceMicStatus,
+  startLocalSleepPrevention,
+  stopLocalSleepPrevention,
   syncInstanceFromSharedStorage,
   listInstanceSharedStorageObjects,
   syncInstanceFromSharedStorageSelected,
@@ -114,6 +117,9 @@ interface AppStore {
   skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
   reconnectLocalWireguardClient: () => Promise<string | null>;
+  sleepPreventionActive: boolean;
+  startSleepPrevention: () => Promise<string | null>;
+  stopSleepPrevention: () => Promise<string | null>;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
   backupStatus: BackupStatusResponse | null;
   instanceBackupStatus: SharedStorageInstanceStatus | null;
@@ -132,8 +138,9 @@ interface AppStore {
   removeBackupSchedule: () => Promise<string | null>;
   sunshineSettings: SunshineSettingsResponse | null;
   instanceActionRunning: boolean;
-  loadSunshineSettings: (instanceId: number) => Promise<void>;
-  saveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
+  loadSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  saveSunshineSettings: (instanceId: number, settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  resetSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
   reconnectWireguard: (instanceId: number) => Promise<string | null>;
   rebootInstanceServices: (instanceId: number) => Promise<string | null>;
   pauseInstance: (instanceId: number) => Promise<void>;
@@ -202,6 +209,7 @@ export const useAppStore = create<AppStore>((set, get) => ({
   micConfig: null,
   micStatus: null,
   micSession: null,
+  sleepPreventionActive: false,
 
   initialize: async () => {
     set({ loading: true, error: null });
@@ -467,6 +475,30 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
+  startSleepPrevention: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await startLocalSleepPrevention();
+      set({ busy: false, sleepPreventionActive: true });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
+  stopSleepPrevention: async () => {
+    set({ busy: true, error: null });
+    try {
+      const result = await stopLocalSleepPrevention();
+      set({ busy: false, sleepPreventionActive: false });
+      return result;
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+      return null;
+    }
+  },
+
   loadSharedStorageSettings: async () => {
     set({ busy: true, error: null });
     try {
@@ -646,21 +678,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
     }
   },
 
-  loadSunshineSettings: async (instanceId) => {
+  loadSunshineSettings: async (instanceId, sunshineUsername, sunshinePassword) => {
     set({ instanceActionRunning: true, error: null });
     try {
-      const settings = await getInstanceSunshineSettings(instanceId);
+      const settings = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
       set({ sunshineSettings: settings, instanceActionRunning: false });
     } catch (error) {
       set({ instanceActionRunning: false, error: mapError(error) });
     }
   },
 
-  saveSunshineSettings: async (instanceId, settings) => {
+  saveSunshineSettings: async (instanceId, settings, sunshineUsername, sunshinePassword) => {
     set({ instanceActionRunning: true, error: null });
     try {
-      await updateInstanceSunshineSettings(instanceId, settings);
-      const refreshed = await getInstanceSunshineSettings(instanceId);
+      await updateInstanceSunshineSettings(instanceId, settings, sunshineUsername, sunshinePassword);
+      const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+      set({ sunshineSettings: refreshed, instanceActionRunning: false });
+    } catch (error) {
+      set({ instanceActionRunning: false, error: mapError(error) });
+    }
+  },
+
+  resetSunshineSettings: async (instanceId, sunshineUsername, sunshinePassword) => {
+    set({ instanceActionRunning: true, error: null });
+    try {
+      await resetInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+      const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
       set({ sunshineSettings: refreshed, instanceActionRunning: false });
     } catch (error) {
       set({ instanceActionRunning: false, error: mapError(error) });

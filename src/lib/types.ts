@@ -337,6 +337,7 @@ export interface SunshineSetting {
   value: unknown;
   label: string;
   description?: string;
+  category: string;
   valueType: string;
   requiresRestart: boolean;
 }

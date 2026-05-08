@@ -40,8 +40,9 @@ interface Props {
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
-  onLoadSunshineSettings: (instanceId: number) => Promise<void>;
-  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>) => Promise<void>;
+  onLoadSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onResetSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
   onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
@@ -81,6 +82,7 @@ export function DashboardScreen({
   onSaveServerPreferences,
   onLoadSunshineSettings,
   onSaveSunshineSettings,
+  onResetSunshineSettings,
   onReconnectWireguard,
   onRebootInstanceServices,
   onPauseInstance,
@@ -117,12 +119,27 @@ export function DashboardScreen({
 
   async function handleOpenSettings(instanceId: number) {
     setSettingsInstanceId(instanceId);
-    await onLoadSunshineSettings(instanceId);
   }
 
-  async function handleSaveSunshineSettings(settings: Record<string, unknown>) {
+  async function handleLoadSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
     if (settingsInstanceId !== null) {
-      await onSaveSunshineSettings(settingsInstanceId, settings);
+      await onLoadSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
+    }
+  }
+
+  async function handleSaveSunshineSettings(
+    settings: Record<string, unknown>,
+    sunshineUsername: string,
+    sunshinePassword: string
+  ) {
+    if (settingsInstanceId !== null) {
+      await onSaveSunshineSettings(settingsInstanceId, settings, sunshineUsername, sunshinePassword);
+    }
+  }
+
+  async function handleResetSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
+    if (settingsInstanceId !== null) {
+      await onResetSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
     }
   }
 
@@ -384,7 +401,11 @@ export function DashboardScreen({
         <SunshineSettingsPanel
           settings={sunshineSettings}
           busy={instanceActionRunning}
+          defaultUsername={appState.credentials.appUsername}
+          defaultPassword={appState.credentials.appPassword}
+          onLoad={handleLoadSunshineSettings}
           onSave={handleSaveSunshineSettings}
+          onReset={handleResetSunshineSettings}
           onClose={handleCloseSunshineSettings}
         />
       )}

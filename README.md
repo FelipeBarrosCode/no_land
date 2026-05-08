@@ -82,6 +82,34 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
+## Beta desktop releases (direct download)
+
+This repo is configured to publish direct-download desktop binaries (no app stores).
+
+- GitHub Actions workflow: `.github/workflows/release.yml`
+- Trigger automatically on tags like `v0.1.1`
+- Builds on macOS, Linux, and Windows runners
+- Uploads artifacts to the workflow run and attaches installers to the GitHub Release
+
+### Manual trigger
+
+Use **Actions -> Build Desktop Binaries -> Run workflow**.
+
+### Tag-based release trigger
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+### Downloadable artifacts produced
+
+- macOS: `.dmg` (and app archive)
+- Windows: `.msi` / `.exe`
+- Linux: `.AppImage` and distro packages when supported by runner tooling
+
+Note: this beta flow does not enforce code signing/notarization. End users may see OS security warnings.
+
 ## State persistence
 
 State is saved to a single JSON file in the OS app data directory:

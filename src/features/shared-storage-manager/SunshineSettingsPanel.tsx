@@ -2,18 +2,38 @@ import { useState, useEffect } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import type { SunshineSettingsResponse } from "../../lib/types";
+import type { SunshineSetting, SunshineSettingsResponse } from "../../lib/types";
 
 interface Props {
   settings: SunshineSettingsResponse | null;
   busy: boolean;
-  onSave: (settings: Record<string, unknown>) => Promise<void>;
+  defaultUsername: string;
+  defaultPassword: string;
+  onLoad: (sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onSave: (settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onReset: (sunshineUsername: string, sunshinePassword: string) => Promise<void>;
   onClose: () => void;
 }
 
-export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props) {
+export function SunshineSettingsPanel({
+  settings,
+  busy,
+  defaultUsername,
+  defaultPassword,
+  onLoad,
+  onSave,
+  onReset,
+  onClose
+}: Props) {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
+  const [sunshineUsername, setSunshineUsername] = useState(defaultUsername);
+  const [sunshinePassword, setSunshinePassword] = useState(defaultPassword);
   const [hasChanges, setHasChanges] = useState(false);
+
+  useEffect(() => {
+    setSunshineUsername(defaultUsername);
+    setSunshinePassword(defaultPassword);
+  }, [defaultUsername, defaultPassword]);
 
   useEffect(() => {
     if (settings?.raw) {
@@ -50,9 +70,11 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
         payload[key] = value;
       }
     });
-    await onSave(payload);
+    await onSave(payload, sunshineUsername.trim(), sunshinePassword);
     setHasChanges(false);
   };
+
+  const canUseApi = sunshineUsername.trim().length > 0 && sunshinePassword.trim().length > 0;
 
   const renderInput = (setting: { key: string; value: unknown; label: string; description?: string; valueType: string; requiresRestart: boolean }) => {
     const { key, label, description, valueType } = setting;
@@ -74,6 +96,9 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
             <label htmlFor={`sunshine-${key}`} className="text-sm text-gray-200 font-medium">
               {label}
             </label>
+            {setting.requiresRestart && (
+              <p className="text-[10px] uppercase tracking-wide text-[#ffbb66]">Restart required</p>
+            )}
             {description && (
               <p className="text-xs text-gray-500">{description}</p>
             )}
@@ -85,7 +110,7 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
     return (
       <InputField
         key={key}
-        label={label}
+        label={`${label}${setting.requiresRestart ? " (restart required)" : ""}`}
         value={currentValue}
         onChange={(event) => handleChange(key, event.target.value)}
         placeholder={description}
@@ -94,13 +119,41 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
     );
   };
 
-  const basicSettings = settings?.settings.filter((s) =>
-    ["port", "address", "audio_sink", "encoder", "capture", "output_name", "system_tray", "upnp"].includes(s.key)
-  ) ?? [];
+  const categoryOrder = [
+    "General",
+    "Input",
+    "Audio/Video",
+    "Network",
+    "Advanced",
+    "NVIDIA NVENC",
+    "Intel QuickSync",
+    "AMD AMF",
+    "VideoToolbox",
+    "VA-API",
+    "Software Encoder",
+    "Config Files",
+    "Other"
+  ];
 
-  const advancedSettings = settings?.settings.filter((s) =>
-    !["port", "address", "audio_sink", "encoder", "capture", "output_name", "system_tray", "upnp"].includes(s.key)
-  ) ?? [];
+  const groupedSettings = (settings?.settings ?? []).reduce<Record<string, SunshineSetting[]>>(
+    (acc, setting) => {
+      const category = setting.category || "Other";
+      if (!acc[category]) {
+        acc[category] = [];
+      }
+      acc[category].push(setting);
+      return acc;
+    },
+    {}
+  );
+
+  const sortedCategories = Object.keys(groupedSettings).sort((a, b) => {
+    const indexA = categoryOrder.indexOf(a);
+    const indexB = categoryOrder.indexOf(b);
+    const rankA = indexA === -1 ? categoryOrder.length : indexA;
+    const rankB = indexB === -1 ? categoryOrder.length : indexB;
+    return rankA - rankB;
+  });
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
@@ -113,20 +166,63 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
         </div>
 
         {!settings ? (
-          <p className="text-gray-400">Loading settings...</p>
+          <div className="space-y-4">
+            <p className="text-gray-300">Enter Sunshine credentials to load settings.</p>
+            <div className="grid gap-3 md:grid-cols-2">
+              <InputField
+                label="Sunshine Username"
+                value={sunshineUsername}
+                onChange={(event) => setSunshineUsername(event.target.value)}
+                disabled={busy}
+              />
+              <InputField
+                label="Sunshine Password"
+                type="password"
+                value={sunshinePassword}
+                onChange={(event) => setSunshinePassword(event.target.value)}
+                disabled={busy}
+              />
+            </div>
+            <div>
+              <Button
+                variant="primary"
+                onClick={() => onLoad(sunshineUsername.trim(), sunshinePassword)}
+                disabled={busy || !canUseApi}
+              >
+                {busy ? "Loading..." : "Load Settings"}
+              </Button>
+            </div>
+          </div>
         ) : (
           <div className="space-y-6">
-            <div className="space-y-4">
-              <h4 className="text-sm font-display text-neon-lime uppercase tracking-wider">Basic</h4>
-              {basicSettings.map(renderInput)}
+            <div className="grid gap-3 md:grid-cols-2">
+              <InputField
+                label="Sunshine Username"
+                value={sunshineUsername}
+                onChange={(event) => setSunshineUsername(event.target.value)}
+                disabled={busy}
+              />
+              <InputField
+                label="Sunshine Password"
+                type="password"
+                value={sunshinePassword}
+                onChange={(event) => setSunshinePassword(event.target.value)}
+                disabled={busy}
+              />
             </div>
 
-            {advancedSettings.length > 0 && (
-              <div className="space-y-4">
-                <h4 className="text-sm font-display text-neon-lime uppercase tracking-wider">Advanced</h4>
-                {advancedSettings.map(renderInput)}
+            <div className="space-y-4">
+              <p className="text-xs text-[#9bb4d7]">
+                Loaded from Sunshine API at <span className="text-neon-cyan">http://10.77.0.1:47990/api/config</span>
+              </p>
+            </div>
+
+            {sortedCategories.map((category) => (
+              <div key={category} className="space-y-4">
+                <h4 className="text-sm font-display text-neon-lime uppercase tracking-wider">{category}</h4>
+                {groupedSettings[category].map(renderInput)}
               </div>
-            )}
+            ))}
 
             {hasChanges && (
               <div className="text-xs text-neon-cyan bg-neon-cyan/10 p-2 rounded">
@@ -136,9 +232,16 @@ export function SunshineSettingsPanel({ settings, busy, onSave, onClose }: Props
 
             <div className="flex gap-3 pt-2">
               <Button
+                variant="ghost"
+                onClick={() => onReset(sunshineUsername.trim(), sunshinePassword)}
+                disabled={busy || !canUseApi}
+              >
+                Reset to Provision Defaults
+              </Button>
+              <Button
                 variant="primary"
                 onClick={handleSave}
-                disabled={busy || !hasChanges}
+                disabled={busy || !hasChanges || !canUseApi}
               >
                 {busy ? "Saving..." : "Save Settings"}
               </Button>

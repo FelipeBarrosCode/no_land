@@ -12,6 +12,8 @@ use tracing::{debug, info, warn};
 
 use crate::errors::{AppError, AppResult};
 
+use super::os_detection::OsDetection;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecOutput {
@@ -38,14 +40,17 @@ impl RemoteExec {
     }
 
     pub fn ssh(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
+        ensure_command_available("ssh")?;
         self.ssh_with_key(remote_command, timeout)
     }
 
     pub fn ssh_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        ensure_command_available("ssh")?;
         self.ssh_with_key_until_complete(remote_command)
     }
 
     fn ssh_with_key(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
+        let os = OsDetection::new();
         let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
         let port_str = self.ssh_port.to_string();
 
@@ -63,7 +68,10 @@ impl RemoteExec {
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                os.ssh_known_hosts_null_file()
+            ))
             .arg("-o")
             .arg("ConnectTimeout=10")
             .arg("-o")
@@ -83,6 +91,7 @@ impl RemoteExec {
     }
 
     fn ssh_with_key_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        let os = OsDetection::new();
         let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
         let port_str = self.ssh_port.to_string();
 
@@ -100,7 +109,10 @@ impl RemoteExec {
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                os.ssh_known_hosts_null_file()
+            ))
             .arg("-o")
             .arg("ConnectTimeout=10")
             .arg("-o")
@@ -126,6 +138,8 @@ impl RemoteExec {
         remote_path: &str,
         timeout: Duration,
     ) -> AppResult<ExecOutput> {
+        ensure_command_available("scp")?;
+        let os = OsDetection::new();
         let mut command = Command::new("scp");
         command
             .arg("-i")
@@ -135,7 +149,10 @@ impl RemoteExec {
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg("-o")
-            .arg("UserKnownHostsFile=/dev/null")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                os.ssh_known_hosts_null_file()
+            ))
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
@@ -145,6 +162,37 @@ impl RemoteExec {
             .arg(local_path)
             .arg(format!("{}@{}:{remote_path}", self.ssh_user, self.ssh_host));
         run_with_timeout(command, Some(timeout))
+    }
+}
+
+fn ensure_command_available(command: &str) -> AppResult<()> {
+    if command_exists(command) {
+        return Ok(());
+    }
+
+    Err(AppError::Command(format!(
+        "`{command}` is not available in PATH. Install OpenSSH client tools and retry."
+    )))
+}
+
+fn command_exists(command: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("where")
+            .arg(command)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 }
 
