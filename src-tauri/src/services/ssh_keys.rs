@@ -28,10 +28,13 @@ impl SshKeyService {
     }
 
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
-        if !command_exists("ssh-keygen") {
+        let os = OsDetection::new();
+        if !os.command_exists("ssh-keygen") {
             return Err(AppError::Command(
-                "`ssh-keygen` is not available in PATH. Install OpenSSH client tools and retry."
-                    .to_string(),
+                format!(
+                    "`ssh-keygen` is not available in PATH. {}",
+                    os.install_hint_for_tool("ssh-keygen")
+                ),
             ));
         }
 
@@ -82,10 +85,13 @@ impl SshKeyService {
     }
 
     pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
-        if !command_exists("ssh-add") {
+        let os = OsDetection::new();
+        if !os.command_exists("ssh-add") {
             return Err(AppError::Command(
-                "`ssh-add` is not available in PATH. Install OpenSSH client tools and retry."
-                    .to_string(),
+                format!(
+                    "`ssh-add` is not available in PATH. {}",
+                    os.install_hint_for_tool("ssh-add")
+                ),
             ));
         }
 
@@ -272,27 +278,6 @@ impl SshKeyService {
 
         vast_api.upload_ssh_key(&public_key).await?;
         Ok(true)
-    }
-}
-
-fn command_exists(command: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return Command::new("where")
-            .arg(command)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .arg("-lc")
-            .arg(format!("command -v {command} >/dev/null 2>&1"))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 }
 

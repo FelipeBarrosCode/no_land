@@ -61,12 +61,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            ca-certificates \
+            curl \
             xdg-utils \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
+
+      - name: Environment diagnostics
+        shell: bash
+        run: |
+          rustc -Vv
+          node -v
+          npm -v
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            where ssh || true
+            where wg || true
+          else
+            command -v ssh || true
+            command -v wg || true
+            command -v xdg-open || true
+          fi
 
       - name: Install dependencies
         run: npm ci
@@ -86,6 +103,7 @@ jobs:
         with:
           name: tauri-${{ matrix.platform }}-${{ matrix.arch }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
 
       - name: Attach assets to GitHub release
         if: startsWith(github.ref, 'refs/tags/v')

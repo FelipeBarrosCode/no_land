@@ -89,6 +89,7 @@ fn main() {
             start_play_existing_instance,
             submit_pairing_pin,
             skip_pairing_and_continue,
+            local_environment_preflight,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
             start_local_sleep_prevention,

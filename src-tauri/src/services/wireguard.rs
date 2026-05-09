@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
-use super::{app_config::WireGuardDefaults, remote_exec::RemoteExec};
+use super::{app_config::WireGuardDefaults, os_detection::OsDetection, remote_exec::RemoteExec};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1016,7 +1016,18 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
 }
 
 pub fn read_local_wireguard_show_output() -> AppResult<String> {
-    let output = Command::new("wg")
+    let os = OsDetection::new();
+    if !os.command_exists("wg") {
+        return Ok(String::new());
+    }
+
+    let wg_program = os
+        .resolve_command_path("wg")
+        .unwrap_or_else(|| "wg".to_string());
+    let mut command = Command::new(wg_program);
+    os.with_augmented_path(&mut command);
+
+    let output = command
         .arg("show")
         .output()
         .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
@@ -1030,11 +1041,12 @@ pub fn read_local_wireguard_show_output() -> AppResult<String> {
 
 #[cfg(target_os = "macos")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
-    if command_exists("wg") && command_exists("wg-quick") {
+    let os = OsDetection::new();
+    if os.command_exists("wg") && os.command_exists("wg-quick") {
         return Ok(());
     }
 
-    if !command_exists("brew") {
+    if !os.command_exists("brew") {
         return Err(AppError::Command(
             "WireGuard tools are missing (wg/wg-quick). Install Homebrew and run `brew install wireguard-tools`, then retry."
                 .to_string(),
@@ -1060,7 +1072,7 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         )));
     }
 
-    if !command_exists("wg") || !command_exists("wg-quick") {
+    if !os.command_exists("wg") || !os.command_exists("wg-quick") {
         return Err(AppError::Command(
             "wireguard-tools installation completed, but wg/wg-quick are still unavailable in PATH. Open a new terminal session and retry."
                 .to_string(),
@@ -1072,22 +1084,23 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
 
 #[cfg(target_os = "linux")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
-    if command_exists("wg") && command_exists("wg-quick") {
+    let os = OsDetection::new();
+    if os.command_exists("wg") && os.command_exists("wg-quick") {
         return Ok(());
     }
 
-    let (manager, install_cmd) = if command_exists("apt-get") {
+    let (manager, install_cmd) = if os.command_exists("apt-get") {
         (
             "apt-get",
             "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools",
         )
-    } else if command_exists("dnf") {
+    } else if os.command_exists("dnf") {
         ("dnf", "dnf install -y wireguard-tools")
-    } else if command_exists("yum") {
+    } else if os.command_exists("yum") {
         ("yum", "yum install -y wireguard-tools")
-    } else if command_exists("pacman") {
+    } else if os.command_exists("pacman") {
         ("pacman", "pacman -Sy --noconfirm wireguard-tools")
-    } else if command_exists("zypper") {
+    } else if os.command_exists("zypper") {
         (
             "zypper",
             "zypper --non-interactive install wireguard-tools",
@@ -1117,7 +1130,7 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         )));
     }
 
-    if !command_exists("wg") || !command_exists("wg-quick") {
+    if !os.command_exists("wg") || !os.command_exists("wg-quick") {
         return Err(AppError::Command(
             "WireGuard packages installed, but wg/wg-quick are still unavailable in PATH. Open a new terminal session and retry."
                 .to_string(),
@@ -1145,16 +1158,6 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         "WireGuard tools are not installed on Windows. Please install WireGuard from https://wireguard.com/install and retry."
             .to_string(),
     ))
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn command_exists(command: &str) -> bool {
-    Command::new("sh")
-        .arg("-lc")
-        .arg(format!("command -v {command} >/dev/null 2>&1"))
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
@@ -1356,10 +1359,7 @@ fn enforce_single_control_plane_macos(config_path: &Path) -> AppResult<()> {
         ))
     })?;
 
-    let output = Command::new("wg")
-        .arg("show")
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
+    let output = resolved_command_output("wg", &["show"])?;
 
     if !output.status.success() {
         return Ok(());
@@ -1486,20 +1486,16 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
 fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String> {
     const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
     let config = config_path.display().to_string();
-    let already_active = Command::new("wg")
-        .args(["show", LOCAL_TUNNEL_NAME])
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false);
+    let already_active = match resolved_command_status("wg", &["show", LOCAL_TUNNEL_NAME]) {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    };
 
     if already_active {
         return Ok("WireGuard client tunnel already active on this Windows machine (no reapply performed)".to_string());
     }
 
-    let output = Command::new("wireguard.exe")
-        .args(["/installtunnelservice", &config])
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+    let output = resolved_command_output("wireguard.exe", &["/installtunnelservice", &config])?;
 
     if !output.status.success() {
         return Err(AppError::Command(format_wireguard_windows_failure(
@@ -1515,14 +1511,9 @@ fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String>
 fn reconnect_local_wireguard_client_windows(config_path: &Path) -> AppResult<String> {
     let config = config_path.display().to_string();
 
-    let _ = Command::new("wireguard.exe")
-        .args(["/uninstalltunnelservice", "nolandwg0"])
-        .status();
+    let _ = resolved_command_status("wireguard.exe", &["/uninstalltunnelservice", "nolandwg0"]);
 
-    let output = Command::new("wireguard.exe")
-        .args(["/installtunnelservice", &config])
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run wireguard.exe: {error}")))?;
+    let output = resolved_command_output("wireguard.exe", &["/installtunnelservice", &config])?;
 
     if !output.status.success() {
         return Err(AppError::Command(format_wireguard_windows_failure(
@@ -1542,16 +1533,16 @@ fn parse_default_route_dev(line: &str) -> Option<String> {
 }
 
 fn generate_keypair() -> AppResult<(String, String)> {
-    let private_result = RemoteExec::run_local("wg", &["genkey"], Duration::from_secs(15))?;
-    if private_result.status_code != 0 {
+    let private_output = resolved_command_output("wg", &["genkey"])?;
+    if !private_output.status.success() {
         return Err(AppError::Command(format!(
             "wg genkey failed: {}",
-            private_result.stderr
+            String::from_utf8_lossy(&private_output.stderr)
         )));
     }
-    let private = private_result.stdout;
+    let private = String::from_utf8_lossy(&private_output.stdout).to_string();
 
-    let mut child = Command::new("wg")
+    let mut child = resolved_command("wg")?
         .arg("pubkey")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1587,7 +1578,7 @@ fn generate_keypair() -> AppResult<(String, String)> {
 }
 
 fn derive_public_key(private_key: &str) -> AppResult<String> {
-    let mut child = Command::new("wg")
+    let mut child = resolved_command("wg")?
         .arg("pubkey")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1613,6 +1604,34 @@ fn derive_public_key(private_key: &str) -> AppResult<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn resolved_command(tool: &str) -> AppResult<Command> {
+    let os = OsDetection::new();
+    let program = os.resolve_command_path(tool).ok_or_else(|| {
+        AppError::Command(format!(
+            "`{tool}` is not available in PATH. {}",
+            os.install_hint_for_tool(tool)
+        ))
+    })?;
+    let mut command = Command::new(program);
+    os.with_augmented_path(&mut command);
+    Ok(command)
+}
+
+fn resolved_command_output(tool: &str, args: &[&str]) -> AppResult<std::process::Output> {
+    resolved_command(tool)?
+        .args(args)
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run {tool}: {error}")))
+}
+
+#[cfg(target_os = "windows")]
+fn resolved_command_status(tool: &str, args: &[&str]) -> AppResult<std::process::ExitStatus> {
+    resolved_command(tool)?
+        .args(args)
+        .status()
+        .map_err(|error| AppError::Command(format!("Failed to run {tool}: {error}")))
 }
 
 async fn load_existing_local_identity(config_path: &Path) -> AppResult<Option<ExistingLocalIdentity>> {

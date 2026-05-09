@@ -1,5 +1,6 @@
 use std::{path::Path, process::Command, time::Duration};
 
+use serde::Serialize;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -35,6 +36,119 @@ use crate::{
     utils::redact::redact_secret,
 };
 use tracing::{info, warn};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCheck {
+    pub tool: String,
+    pub found: bool,
+    pub path: Option<String>,
+    pub required_for: String,
+    pub install_hint: String,
+    pub install_attempted: bool,
+    pub install_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalEnvironmentCheck {
+    pub os: String,
+    pub arch: String,
+    pub ok: bool,
+    pub checks: Vec<ToolCheck>,
+}
+
+fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
+    let os = OsDetection::new();
+    let build_check = |tool: &str, required_for: &str| {
+        let mut install_attempted = false;
+        let mut install_error = None;
+        if attempt_install && !os.command_exists(tool) {
+            install_attempted = true;
+            if let Err(error) = os.try_install_tool(tool) {
+                install_error = Some(error);
+            }
+        }
+
+        ToolCheck {
+            tool: tool.to_string(),
+            found: os.command_exists(tool),
+            path: os.resolve_command_path(tool),
+            required_for: required_for.to_string(),
+            install_hint: os.install_hint_for_tool(tool),
+            install_attempted,
+            install_error,
+        }
+    };
+
+    let mut checks = vec![
+        build_check("ssh", "remote commands and provisioning"),
+        build_check("ssh-keygen", "SSH key generation"),
+        build_check("ssh-add", "SSH agent key loading"),
+        build_check("wg", "WireGuard status and diagnostics"),
+        build_check("wg-quick", "WireGuard tunnel up/down"),
+    ];
+
+    if os.is_windows() {
+        let mut install_attempted = false;
+        let mut install_error = None;
+        if attempt_install && !os.command_exists("wireguard.exe") {
+            install_attempted = true;
+            if let Err(error) = os.try_install_tool("wireguard.exe") {
+                install_error = Some(error);
+            }
+        }
+        checks.push(ToolCheck {
+            tool: "wireguard.exe".to_string(),
+            found: os.command_exists("wireguard.exe"),
+            path: os.resolve_command_path("wireguard.exe"),
+            required_for: "WireGuard service integration on Windows".to_string(),
+            install_hint: os.install_hint_for_tool("wireguard.exe"),
+            install_attempted,
+            install_error,
+        });
+    }
+
+    if os.is_linux() {
+        let mut install_attempted = false;
+        let mut install_error = None;
+        if attempt_install && !os.command_exists("xdg-open") {
+            install_attempted = true;
+            if let Err(error) = os.try_install_tool("xdg-open") {
+                install_error = Some(error);
+            }
+        }
+        checks.push(ToolCheck {
+            tool: "xdg-open".to_string(),
+            found: os.command_exists("xdg-open"),
+            path: os.resolve_command_path("xdg-open"),
+            required_for: "Moonlight protocol launch fallback".to_string(),
+            install_hint: os.install_hint_for_tool("xdg-open"),
+            install_attempted,
+            install_error,
+        });
+    }
+
+    let arch = match os.arch() {
+        crate::services::os_detection::ArchKind::X64 => "x64",
+        crate::services::os_detection::ArchKind::Arm64 => "arm64",
+        crate::services::os_detection::ArchKind::Unknown => "unknown",
+    }
+    .to_string();
+
+    let ok = checks.iter().all(|check| check.found);
+    LocalEnvironmentCheck {
+        os: os.platform_display_name().to_string(),
+        arch,
+        ok,
+        checks,
+    }
+}
+
+#[tauri::command]
+pub async fn local_environment_preflight() -> Result<LocalEnvironmentCheck, FrontendError> {
+    Ok(local_environment_check(false))
+}
 
 #[tauri::command]
 pub async fn get_app_state(
@@ -318,6 +432,28 @@ pub async fn start_play_flow(
     app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<(), FrontendError> {
+    let preflight = local_environment_check(true);
+    if !preflight.ok {
+        let missing = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.found)
+            .map(|check| {
+                let install_context = check
+                    .install_error
+                    .as_ref()
+                    .map(|error| format!(" | install error: {error}"))
+                    .unwrap_or_default();
+                format!("{} ({}){}", check.tool, check.install_hint, install_context)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Command(format!(
+            "Local environment check failed before provisioning. Missing tools: {missing}"
+        ))
+        .into());
+    }
+
     OrchestrationService::start_play_flow(app, context.inner().clone()).await?;
     Ok(())
 }
@@ -328,6 +464,28 @@ pub async fn start_play_existing_instance(
     instance_id: u64,
     context: State<'_, AppContext>,
 ) -> Result<(), FrontendError> {
+    let preflight = local_environment_check(true);
+    if !preflight.ok {
+        let missing = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.found)
+            .map(|check| {
+                let install_context = check
+                    .install_error
+                    .as_ref()
+                    .map(|error| format!(" | install error: {error}"))
+                    .unwrap_or_default();
+                format!("{} ({}){}", check.tool, check.install_hint, install_context)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Command(format!(
+            "Local environment check failed before provisioning. Missing tools: {missing}"
+        ))
+        .into());
+    }
+
     OrchestrationService::start_play_for_existing_instance(
         app,
         context.inner().clone(),
@@ -360,6 +518,21 @@ pub async fn skip_pairing_and_continue(
 pub async fn setup_wireguard_client(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
+    let preflight = local_environment_check(true);
+    if !preflight.ok {
+        let missing = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.found)
+            .map(|check| format!("{} ({})", check.tool, check.install_hint))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Command(format!(
+            "Local environment check failed. Missing tools: {missing}"
+        ))
+        .into());
+    }
+
     let config_path = {
         let state = context.state.read().await;
         state.wireguard.config_path.clone()
@@ -401,6 +574,21 @@ pub async fn setup_wireguard_client(
 pub async fn reconnect_local_wireguard_client_quick(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
+    let preflight = local_environment_check(true);
+    if !preflight.ok {
+        let missing = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.found)
+            .map(|check| format!("{} ({})", check.tool, check.install_hint))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Command(format!(
+            "Local environment check failed. Missing tools: {missing}"
+        ))
+        .into());
+    }
+
     let config_path = {
         let state = context.state.read().await;
         state.wireguard.config_path.clone()

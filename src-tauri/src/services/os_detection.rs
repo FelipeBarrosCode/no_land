@@ -1,8 +1,17 @@
+use std::{env, process::Command};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsKind {
     Macos,
     Linux,
     Windows,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchKind {
+    X64,
+    Arm64,
     Unknown,
 }
 
@@ -35,6 +44,18 @@ impl OsDetection {
 
     pub fn is_windows(&self) -> bool {
         self.os == OsKind::Windows
+    }
+
+    pub fn is_linux(&self) -> bool {
+        self.os == OsKind::Linux
+    }
+
+    pub fn arch(&self) -> ArchKind {
+        match env::consts::ARCH {
+            "x86_64" => ArchKind::X64,
+            "aarch64" => ArchKind::Arm64,
+            _ => ArchKind::Unknown,
+        }
     }
 
     pub fn platform_display_name(&self) -> &'static str {
@@ -82,5 +103,189 @@ impl OsDetection {
         } else {
             vec!["--stdin".to_string()]
         }
+    }
+
+    pub fn command_exists(&self, command: &str) -> bool {
+        if self.is_windows() {
+            return Command::new("where")
+                .arg(command)
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+        }
+
+        Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
+    pub fn resolve_command_path(&self, command: &str) -> Option<String> {
+        if self.is_windows() {
+            let output = Command::new("where").arg(command).output().ok()?;
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let first = stdout
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())?;
+            return Some(first.to_string());
+        }
+
+        let output = Command::new("sh")
+            .arg("-lc")
+            .arg(format!("command -v {command} 2>/dev/null"))
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let first = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if first.is_empty() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    pub fn default_path_prefixes(&self) -> &'static [&'static str] {
+        if self.is_macos() {
+            &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+        } else if self.is_linux() {
+            &["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+        } else {
+            &[]
+        }
+    }
+
+    pub fn with_augmented_path(&self, command: &mut Command) {
+        if self.is_windows() {
+            return;
+        }
+
+        let current = env::var("PATH").unwrap_or_default();
+        let mut segments = self.default_path_prefixes().join(":");
+        if !current.trim().is_empty() {
+            segments.push(':');
+            segments.push_str(&current);
+        }
+        command.env("PATH", segments);
+    }
+
+    pub fn install_hint_for_tool(&self, tool: &str) -> String {
+        if self.is_macos() {
+            return match tool {
+                "wg" | "wg-quick" => {
+                    "Install Homebrew, then run `brew install wireguard-tools`.".to_string()
+                }
+                "ssh" | "ssh-keygen" | "ssh-add" => {
+                    "Install Xcode Command Line Tools or OpenSSH client tools.".to_string()
+                }
+                _ => format!("Install `{tool}` and ensure it is available in PATH."),
+            };
+        }
+
+        if self.is_linux() {
+            return match tool {
+                "wg" | "wg-quick" => {
+                    "Install WireGuard tools (example: `sudo apt-get install -y wireguard-tools`)."
+                        .to_string()
+                }
+                "xdg-open" => "Install xdg-utils (`sudo apt-get install -y xdg-utils`).".to_string(),
+                "ssh" | "ssh-keygen" | "ssh-add" => {
+                    "Install OpenSSH client tools (example: `sudo apt-get install -y openssh-client`)."
+                        .to_string()
+                }
+                _ => format!("Install `{tool}` with your package manager and ensure it is in PATH."),
+            };
+        }
+
+        if self.is_windows() {
+            return match tool {
+                "wg" | "wg-quick" | "wireguard.exe" => {
+                    "Install WireGuard from https://wireguard.com/install and reopen the app.".to_string()
+                }
+                "ssh" | "ssh-keygen" | "ssh-add" => {
+                    "Install or enable OpenSSH Client in Windows optional features.".to_string()
+                }
+                _ => format!("Install `{tool}` and add it to your PATH."),
+            };
+        }
+
+        format!("Install `{tool}` and ensure it is available in PATH.")
+    }
+
+    pub fn install_command_for_tool(&self, tool: &str) -> Option<&'static str> {
+        if self.is_macos() {
+            return match tool {
+                "wg" | "wg-quick" => Some("brew install wireguard-tools"),
+                "ssh" | "ssh-keygen" | "ssh-add" => Some("xcode-select --install"),
+                _ => None,
+            };
+        }
+
+        if self.is_linux() {
+            return match tool {
+                "wg" | "wg-quick" => Some(
+                    "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y wireguard-tools; elif command -v yum >/dev/null 2>&1; then sudo yum install -y wireguard-tools; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm wireguard-tools; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install wireguard-tools; else exit 127; fi",
+                ),
+                "xdg-open" => Some(
+                    "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xdg-utils; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y xdg-utils; elif command -v yum >/dev/null 2>&1; then sudo yum install -y xdg-utils; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm xdg-utils; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install xdg-utils; else exit 127; fi",
+                ),
+                "ssh" | "ssh-keygen" | "ssh-add" => Some(
+                    "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-client; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y openssh-clients; elif command -v yum >/dev/null 2>&1; then sudo yum install -y openssh-clients; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm openssh; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install openssh; else exit 127; fi",
+                ),
+                _ => None,
+            };
+        }
+
+        if self.is_windows() {
+            return match tool {
+                "wg" | "wg-quick" | "wireguard.exe" => Some(
+                    "winget install --id WireGuard.WireGuard -e --accept-package-agreements --accept-source-agreements",
+                ),
+                "ssh" | "ssh-keygen" | "ssh-add" => Some(
+                    "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\"",
+                ),
+                _ => None,
+            };
+        }
+
+        None
+    }
+
+    pub fn try_install_tool(&self, tool: &str) -> Result<bool, String> {
+        let Some(install_cmd) = self.install_command_for_tool(tool) else {
+            return Ok(false);
+        };
+
+        if self.command_exists(tool) {
+            return Ok(true);
+        }
+
+        let output = if self.is_windows() {
+            Command::new("cmd").args(["/C", install_cmd]).output()
+        } else {
+            let mut command = Command::new("sh");
+            command.arg("-lc").arg(install_cmd);
+            self.with_augmented_path(&mut command);
+            command.output()
+        }
+        .map_err(|error| format!("Failed to run installer for `{tool}`: {error}"))?;
+
+        if !output.status.success() {
+            return Err(format!(
+                "Auto-install failed for `{tool}` (exit {}): stdout: {} | stderr: {}",
+                output.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+
+        Ok(self.command_exists(tool))
     }
 }

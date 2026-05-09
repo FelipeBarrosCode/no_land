@@ -12,6 +12,9 @@ use crate::{
     models::app_state::MoonlightPreferences,
 };
 
+#[cfg(target_os = "linux")]
+use super::os_detection::OsDetection;
+
 #[derive(Debug, Clone)]
 pub struct MoonlightService;
 
@@ -66,6 +69,14 @@ impl MoonlightService {
                 if status.success() {
                     return Ok(());
                 }
+            }
+
+            let os = OsDetection::new();
+            if !os.command_exists("xdg-open") {
+                return Err(AppError::Command(format!(
+                    "Moonlight CLI is unavailable and Linux fallback launcher is missing. {}",
+                    os.install_hint_for_tool("xdg-open")
+                )));
             }
 
             let fallback = Command::new("xdg-open")

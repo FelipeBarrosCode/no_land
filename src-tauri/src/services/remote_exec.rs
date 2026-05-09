@@ -166,34 +166,15 @@ impl RemoteExec {
 }
 
 fn ensure_command_available(command: &str) -> AppResult<()> {
-    if command_exists(command) {
+    let os = OsDetection::new();
+    if os.command_exists(command) {
         return Ok(());
     }
 
     Err(AppError::Command(format!(
-        "`{command}` is not available in PATH. Install OpenSSH client tools and retry."
+        "`{command}` is not available in PATH. {}",
+        os.install_hint_for_tool(command)
     )))
-}
-
-fn command_exists(command: &str) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return Command::new("where")
-            .arg(command)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Command::new("sh")
-            .arg("-lc")
-            .arg(format!("command -v {command} >/dev/null 2>&1"))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
-    }
 }
 
 fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {
