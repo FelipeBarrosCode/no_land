@@ -1170,25 +1170,43 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
     let mut in_peer_section = false;
     let mut in_interface_section = false;
     let mut replaced = false;
+    let mut saw_save_config = false;
     let mut normalized_lines = Vec::with_capacity(original.lines().count() + 2);
 
     for line in original.lines() {
         let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            if in_interface_section && !saw_save_config {
+                normalized_lines.push("SaveConfig = false".to_string());
+            }
             in_peer_section = trimmed.eq_ignore_ascii_case("[Peer]");
             in_interface_section = trimmed.eq_ignore_ascii_case("[Interface]");
+            if in_interface_section {
+                saw_save_config = false;
+            }
         }
 
-        if in_interface_section && trimmed.to_ascii_lowercase().starts_with("dns") {
+        if in_interface_section && lower.starts_with("dns") {
             continue;
         }
 
-        if in_peer_section && trimmed.to_ascii_lowercase().starts_with("allowedips") {
+        if in_interface_section && lower.starts_with("saveconfig") {
+            normalized_lines.push("SaveConfig = false".to_string());
+            saw_save_config = true;
+            continue;
+        }
+
+        if in_peer_section && lower.starts_with("allowedips") {
             normalized_lines.push(format!("AllowedIPs = {SCOPED_ALLOWED_IPS}"));
             replaced = true;
         } else {
             normalized_lines.push(line.to_string());
         }
+    }
+
+    if in_interface_section && !saw_save_config {
+        normalized_lines.push("SaveConfig = false".to_string());
     }
 
     if !replaced {
@@ -1261,8 +1279,29 @@ fn hard_reconnect_local_wireguard_client_macos(
     const HOMEBREW_CONF_PATH: &str = "/opt/homebrew/etc/wireguard/nolandwg0.conf";
 
     let path = config_path.display().to_string().replace('"', "\\\"");
+    let launchd_plist = r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key>
+  <string>com.noland.wireguard.nolandwg0</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-lc</string>
+    <string>export PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH; wg show nolandwg0 >/dev/null 2>&amp;1 || wg-quick up /usr/local/etc/wireguard/nolandwg0.conf</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/noland-wireguard.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/noland-wireguard.log</string>
+</dict>
+</plist>
+"#;
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; wg-quick down {LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; sleep 1; wg-quick up {LOCAL_CONF_PATH}; wg show"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard; install -m 600 \"{path}\" {LOCAL_CONF_PATH}; install -m 600 \"{path}\" {HOMEBREW_CONF_PATH}; cat > /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; chmod 644 /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; launchctl bootout system/com.noland.wireguard.nolandwg0 >/dev/null 2>&1 || true; wg-quick down {LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; sleep 1; wg-quick up {LOCAL_CONF_PATH}; launchctl bootstrap system /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; launchctl kickstart -k system/com.noland.wireguard.nolandwg0; wg show"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -1294,6 +1333,12 @@ fn hard_reconnect_local_wireguard_client_macos(
 
 #[cfg(target_os = "macos")]
 fn enforce_single_control_plane_macos(config_path: &Path) -> AppResult<()> {
+    if Path::new("/Applications/WireGuard.app").exists() {
+        warn!(
+            "WireGuard.app is installed. Avoid reusing GUI tunnel names with CLI-managed tunnels to prevent tunnel ownership conflicts."
+        );
+    }
+
     let expected_peer = parse_wireguard_config_value(
         &std::fs::read_to_string(config_path).map_err(|error| {
             AppError::Command(format!(
