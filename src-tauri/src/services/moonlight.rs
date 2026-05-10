@@ -5,6 +5,12 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::env;
+
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
+
 use tokio::fs;
 
 use crate::{
@@ -22,6 +28,21 @@ impl MoonlightService {
     pub fn launch_native_client(&self) -> AppResult<()> {
         #[cfg(target_os = "macos")]
         {
+            if let Some(app_path) = find_macos_moonlight_app() {
+                let status = Command::new("open")
+                    .arg(app_path)
+                    .status()
+                    .map_err(|error| {
+                        AppError::Command(format!(
+                            "Failed to launch Moonlight from the detected macOS app path: {error}"
+                        ))
+                    })?;
+
+                if status.success() {
+                    return Ok(());
+                }
+            }
+
             let status = Command::new("open")
                 .arg("-a")
                 .arg("Moonlight")
@@ -34,13 +55,35 @@ impl MoonlightService {
                 return Ok(());
             }
 
+            let fallback = Command::new("open")
+                .arg("moonlight://")
+                .status()
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to launch Moonlight via macOS URL handler fallback: {error}"
+                    ))
+                })?;
+
+            if fallback.success() {
+                return Ok(());
+            }
+
             return Err(AppError::Command(
-                "Moonlight app launch returned non-zero status".to_string(),
+                "Moonlight launch failed on macOS".to_string(),
             ));
         }
 
         #[cfg(target_os = "windows")]
         {
+            if let Some(executable) = find_windows_moonlight_executable() {
+                Command::new(executable).spawn().map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to launch Moonlight from the detected Windows executable: {error}"
+                    ))
+                })?;
+                return Ok(());
+            }
+
             let status = Command::new("cmd")
                 .arg("/C")
                 .arg("start")
@@ -64,11 +107,15 @@ impl MoonlightService {
 
         #[cfg(target_os = "linux")]
         {
-            let primary = Command::new("moonlight").status();
-            if let Ok(status) = primary {
-                if status.success() {
-                    return Ok(());
-                }
+            if let Some((command, args)) = find_linux_moonlight_command() {
+                let mut child = Command::new(command);
+                child.args(args);
+                child.spawn().map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to launch Moonlight from the detected Linux command: {error}"
+                    ))
+                })?;
+                return Ok(());
             }
 
             let os = OsDetection::new();
@@ -155,6 +202,70 @@ impl MoonlightService {
         fs::write(&config_path, output).await?;
         Ok(config_path)
     }
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_moonlight_app() -> Option<PathBuf> {
+    let mut candidates = vec![PathBuf::from("/Applications/Moonlight.app")];
+
+    if let Some(home) = dirs::home_dir() {
+        candidates.push(home.join("Applications").join("Moonlight.app"));
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_moonlight_executable() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+
+    for key in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
+        if let Some(base) = env::var_os(key) {
+            let base = PathBuf::from(base);
+            candidates.push(
+                base.join("Moonlight Game Streaming Project")
+                    .join("Moonlight.exe"),
+            );
+            candidates.push(
+                base.join("Programs")
+                    .join("Moonlight Game Streaming Project")
+                    .join("Moonlight.exe"),
+            );
+        }
+    }
+
+    candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_moonlight_command() -> Option<(OsString, Vec<OsString>)> {
+    if resolve_command_in_path("moonlight").is_some() {
+        return Some((OsString::from("moonlight"), Vec::new()));
+    }
+
+    if resolve_command_in_path("flatpak").is_some() {
+        return Some((
+            OsString::from("flatpak"),
+            vec![OsString::from("run"), OsString::from("com.moonlight_stream.Moonlight")],
+        ));
+    }
+
+    if resolve_command_in_path("snap").is_some() {
+        return Some((
+            OsString::from("snap"),
+            vec![OsString::from("run"), OsString::from("moonlight")],
+        ));
+    }
+
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_command_in_path(command: &str) -> Option<PathBuf> {
+    let path_var = env::var_os("PATH")?;
+    env::split_paths(&path_var)
+        .map(|dir| dir.join(command))
+        .find(|candidate| candidate.exists())
 }
 
 fn resolve_moonlight_config_path() -> AppResult<PathBuf> {

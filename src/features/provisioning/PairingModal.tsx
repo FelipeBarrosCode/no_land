@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
+import { launchMoonlightClient, resolveMoonlightDownloadUrl } from "../../lib/backend";
 
 interface Props {
   open: boolean;
@@ -20,6 +22,21 @@ export function PairingModal({
 }: Props) {
   const [wireguardReadyConfirmed, setWireguardReadyConfirmed] = useState(false);
   const sunshineUrl = "https://10.77.0.1:47990";
+
+  async function openMoonlightOrFallback() {
+    try {
+      await launchMoonlightClient();
+      return;
+    } catch {
+      const downloadUrl = await resolveMoonlightDownloadUrl();
+
+      try {
+        await openUrl(downloadUrl);
+      } catch {
+        window.open(downloadUrl, "_blank", "noopener,noreferrer");
+      }
+    }
+  }
 
   if (!open) {
     return null;
@@ -57,21 +74,25 @@ export function PairingModal({
         <div className="mt-4 grid gap-3">
           <Button
             disabled={busy}
+            loading={busy}
+            loadingText="Setting up WireGuard..."
             onClick={async () => {
               await onSetupWireguardClient();
               setWireguardReadyConfirmed(true);
             }}
             variant="ghost"
           >
-            {busy ? "Setting up WireGuard..." : "Setup WireGuard On This PC"}
+            Setup WireGuard On This PC
           </Button>
 
           <Button
             disabled={busy || !wireguardReadyConfirmed}
+            loading={busy && wireguardReadyConfirmed}
+            loadingText="Reconnecting..."
             onClick={() => onReconnectLocalWireguardClient()}
             variant="secondary"
           >
-            {busy ? "Reconnecting..." : "Reconnect WireGuard"}
+            Reconnect WireGuard
           </Button>
 
           {wireguardReadyConfirmed && (
@@ -80,8 +101,16 @@ export function PairingModal({
             </p>
           )}
 
-          <Button disabled={busy || !wireguardReadyConfirmed} onClick={() => onSkip()}>
-            {busy ? "Continuing..." : "Continue"}
+          <Button
+            disabled={busy || !wireguardReadyConfirmed}
+            loading={busy && wireguardReadyConfirmed}
+            loadingText="Continuing..."
+            onClick={async () => {
+              await onSkip();
+              await openMoonlightOrFallback();
+            }}
+          >
+            Continue To Moonlight
           </Button>
         </div>
       </div>

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import type { SharedStorageObjectEntry } from "../../lib/types";
 
@@ -43,6 +44,7 @@ export function SharedStorageSyncModal({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
+  const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
     if (!open || instanceId === null) {
@@ -51,6 +53,14 @@ export function SharedStorageSyncModal({
 
     let active = true;
     setLoading(true);
+    setPendingAction({
+      key: "sync-modal.load",
+      label: "Loading shared storage tree",
+      detail: "Fetching the available cloud files and folders.",
+      mode: "indeterminate",
+      progress: null,
+      startedAt: Date.now()
+    });
     setLoadError(null);
     setSelectedPaths([]);
 
@@ -75,6 +85,7 @@ export function SharedStorageSyncModal({
         if (active) {
           window.clearTimeout(timeoutId);
           setLoading(false);
+          setPendingAction(null);
         }
       });
 
@@ -158,7 +169,7 @@ export function SharedStorageSyncModal({
 
         <div className="max-h-[65vh] overflow-y-auto px-5 py-4">
           {loading ? (
-            <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
+            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
           ) : loadError ? (
             <div className="space-y-2">
               <p className="text-[1.2rem] text-red-300">{loadError}</p>
@@ -179,7 +190,20 @@ export function SharedStorageSyncModal({
             </Button>
             <Button
               disabled={busy || loading || selectedPaths.length === 0}
-              onClick={() => void onConfirmSync(selectedPaths)}
+              loading={busy}
+              loadingText="Syncing..."
+              onClick={async () => {
+                setPendingAction({
+                  key: "sync-modal.run",
+                  label: "Syncing selected files",
+                  detail: "Copying your selected files from shared storage to the instance.",
+                  mode: "indeterminate",
+                  progress: null,
+                  startedAt: Date.now()
+                });
+                await onConfirmSync(selectedPaths);
+                setPendingAction(null);
+              }}
             >
               Sync Selected
             </Button>

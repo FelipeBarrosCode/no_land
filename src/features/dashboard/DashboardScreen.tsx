@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
+import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
@@ -24,6 +25,7 @@ interface Props {
   offersHasNextPage: boolean;
   busy: boolean;
   instanceActionRunning: boolean;
+  blockingAction: BlockingActionState | null;
   sunshineSettings: SunshineSettingsResponse | null;
   onSearchOffers: (page?: number) => Promise<void>;
   onNextOffersPage: () => Promise<void>;
@@ -70,6 +72,7 @@ export function DashboardScreen({
   offersHasNextPage,
   busy,
   instanceActionRunning,
+  blockingAction,
   sunshineSettings,
   onSearchOffers,
   onNextOffersPage,
@@ -97,6 +100,8 @@ export function DashboardScreen({
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const navigate = useNavigate();
+  const blockingLabel = blockingAction?.label ?? null;
+  const blockingDetail = blockingAction?.detail ?? null;
 
   async function handleMoonlightDownload() {
     const downloadUrl = await resolveMoonlightDownloadUrl();
@@ -255,8 +260,16 @@ export function DashboardScreen({
         <section>
           <Card className="pixel-frame">
             <div className="mb-3 flex items-center justify-between">
-              <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Rented Servers</h3>
-              <Button variant="secondary" onClick={onLoadRentedInstances} disabled={busy}>
+              <div>
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Rented Servers</h3>
+                {blockingAction && blockingAction.key.startsWith("instance.") && (
+                  <p className="mt-1 text-[1.1rem] text-[#9ec4df]" aria-live="polite">
+                    {blockingLabel}
+                    {blockingDetail ? `: ${blockingDetail}` : "..."}
+                  </p>
+                )}
+              </div>
+              <Button variant="secondary" onClick={onLoadRentedInstances} disabled={busy} loading={busy && !blockingAction} loadingText="Refreshing...">
                 Refresh Rented
               </Button>
             </div>
@@ -283,10 +296,11 @@ export function DashboardScreen({
                     </div>
                     <div className="mt-3">
                       <InstanceCardActions
-                        instance={instance}
-                        busy={busy}
-                        instanceActionRunning={instanceActionRunning}
-                        onPlay={handlePlayExisting}
+                         instance={instance}
+                         busy={busy}
+                         instanceActionRunning={instanceActionRunning}
+                         blockingAction={blockingAction}
+                         onPlay={handlePlayExisting}
                         onSettings={handleOpenSettings}
                         onReconnect={handleReconnect}
                         onReboot={handleReboot}
@@ -389,9 +403,11 @@ export function DashboardScreen({
             <Button
               className="h-12 w-full justify-center text-[12px]"
               disabled={busy || !appState.selectedOffer}
+              loading={blockingAction?.key === "provisioning.flow"}
+              loadingText="Starting session..."
               onClick={handlePlay}
             >
-              {busy ? "Starting session..." : "Play"}
+              Play
             </Button>
           </Card>
         </section>

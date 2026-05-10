@@ -281,6 +281,41 @@ impl SshKeyService {
     }
 }
 
+pub fn normalize_ssh_state_from_disk(
+    state: &mut crate::models::app_state::PersistedAppState,
+    app_data_dir: &Path,
+) -> bool {
+    let mut changed = false;
+    let key_name = if state.ssh.key_name.trim().is_empty() {
+        "nolandConnectSSH"
+    } else {
+        state.ssh.key_name.as_str()
+    };
+
+    let private_key_path = app_data_dir.join("keys").join(key_name);
+    let public_key_path = app_data_dir.join("keys").join(format!("{key_name}.pub"));
+
+    if private_key_path.exists() && public_key_path.exists() {
+        let private_key_path = private_key_path.display().to_string();
+        let public_key_path = public_key_path.display().to_string();
+
+        if state.ssh.key_name != key_name {
+            state.ssh.key_name = key_name.to_string();
+            changed = true;
+        }
+        if state.ssh.private_key_path != private_key_path {
+            state.ssh.private_key_path = private_key_path;
+            changed = true;
+        }
+        if state.ssh.public_key_path != public_key_path {
+            state.ssh.public_key_path = public_key_path;
+            changed = true;
+        }
+    }
+
+    changed
+}
+
 fn normalize_key(key: &str) -> String {
     key.trim()
         .split_whitespace()

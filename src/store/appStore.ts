@@ -54,6 +54,8 @@ import {
   listInstanceExportableStorageObjects,
   saveInstanceToSharedStorageSelected
 } from "../lib/backend";
+import { PROVISIONING_ORDER } from "../lib/constants";
+import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
 import type {
   ManualLocationInput,
   MoonlightPreferences,
@@ -79,7 +81,8 @@ import type {
   InstanceMicRuntimeStatus,
   MicSessionResponse,
   MicSettingsUpdate,
-  MicQualityProfile
+  MicQualityProfile,
+  OrchestrationState
 } from "../lib/types";
 
 interface AppStore {
@@ -93,6 +96,8 @@ interface AppStore {
   offersPageSize: number;
   offersHasNextPage: boolean;
   busy: boolean;
+  blockingAction: BlockingActionState | null;
+  isBlocking: boolean;
   serverPickerOpen: boolean;
   error: string | null;
   _eventsBound: boolean;
@@ -185,7 +190,154 @@ function mapError(error: unknown): string {
   return "Something went wrong. Check logs and try again.";
 }
 
-export const useAppStore = create<AppStore>((set, get) => ({
+interface AsyncActionOptions {
+  key: string;
+  label: string;
+  detail?: string;
+  blocking?: boolean;
+}
+
+const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
+  "AwaitingPairPin",
+  "Pairing",
+  "Ready",
+  "Error"
+]);
+
+const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
+  GeneratingSshKey: "Generating SSH key",
+  UploadingSshKeyToVast: "Uploading SSH key to Vast.ai",
+  CreatingInstance: "Creating rented instance",
+  WaitingForInstance: "Waiting for instance readiness",
+  VerifyingReservation: "Verifying reservation",
+  ConnectingSsh: "Connecting over SSH",
+  ConfiguringSunshine: "Configuring Sunshine",
+  ConfiguringWireGuard: "Configuring WireGuard",
+  ConfiguringNvidiaHeadless: "Configuring NVIDIA headless mode",
+  ConfiguringMoonlight: "Preparing Moonlight pairing",
+  AwaitingPairPin: "Awaiting Moonlight PIN",
+  Pairing: "Completing Moonlight pairing",
+  Ready: "Session ready"
+};
+
+function getProvisioningProgress(state: OrchestrationState): number | null {
+  const index = PROVISIONING_ORDER.indexOf(state as (typeof PROVISIONING_ORDER)[number]);
+  if (index === -1) {
+    return null;
+  }
+
+  return ((index + 1) / PROVISIONING_ORDER.length) * 100;
+}
+
+function createBlockingAction(
+  state: AppStore,
+  next: Omit<BlockingActionState, "startedAt"> & { startedAt?: number }
+): BlockingActionState {
+  const startedAt =
+    state.blockingAction?.key === next.key ? state.blockingAction.startedAt : (next.startedAt ?? Date.now());
+
+  return {
+    ...next,
+    startedAt
+  };
+}
+
+export const useAppStore = create<AppStore>((set, get) => {
+  const runBusyTask = async <T,>(
+    options: AsyncActionOptions,
+    task: () => Promise<T>,
+    fallback: T
+  ): Promise<T> => {
+    set({ busy: true, error: null });
+
+    if (options.blocking) {
+      set((state) => ({
+        blockingAction: createBlockingAction(state, {
+          key: options.key,
+          label: options.label,
+          detail: options.detail,
+          progress: null,
+          mode: "indeterminate"
+        }),
+        isBlocking: true
+      }));
+    }
+
+    try {
+      return await task();
+    } catch (error) {
+      set({ error: mapError(error) });
+      return fallback;
+    } finally {
+      set((state) => ({
+        busy: false,
+        ...(options.blocking && state.blockingAction?.key === options.key
+          ? { blockingAction: null, isBlocking: false }
+          : {})
+      }));
+    }
+  };
+
+  const runInstanceTask = async <T,>(
+    options: AsyncActionOptions,
+    task: () => Promise<T>,
+    fallback: T
+  ): Promise<T> => {
+    set({ instanceActionRunning: true, error: null });
+
+    if (options.blocking) {
+      set((state) => ({
+        blockingAction: createBlockingAction(state, {
+          key: options.key,
+          label: options.label,
+          detail: options.detail,
+          progress: null,
+          mode: "indeterminate"
+        }),
+        isBlocking: true
+      }));
+    }
+
+    try {
+      return await task();
+    } catch (error) {
+      set({ error: mapError(error) });
+      return fallback;
+    } finally {
+      set((state) => ({
+        instanceActionRunning: false,
+        ...(options.blocking && state.blockingAction?.key === options.key
+          ? { blockingAction: null, isBlocking: false }
+          : {})
+      }));
+    }
+  };
+
+  const beginProvisioningBlock = (detail: string) => {
+    set((state) => ({
+      busy: true,
+      error: null,
+      blockingAction: createBlockingAction(state, {
+        key: "provisioning.flow",
+        label: "Provisioning session",
+        detail,
+        progress: getProvisioningProgress(state.appState?.orchestrationState ?? "CreatingInstance") ?? 0,
+        mode: "determinate"
+      }),
+      isBlocking: true
+    }));
+  };
+
+  const endProvisioningBlock = () => {
+    set((state) => ({
+      busy: false,
+      ...(state.blockingAction?.key === "provisioning.flow"
+        ? { blockingAction: null, isBlocking: false }
+        : {})
+    }));
+  };
+
+  return ({
   appState: null,
   offers: [],
   rentedInstances: [],
@@ -196,6 +348,8 @@ export const useAppStore = create<AppStore>((set, get) => ({
   offersPageSize: 24,
   offersHasNextPage: false,
   busy: false,
+  blockingAction: null,
+  isBlocking: false,
   serverPickerOpen: false,
   error: null,
   _eventsBound: false,
@@ -242,11 +396,32 @@ export const useAppStore = create<AppStore>((set, get) => ({
             }
           : state.appState;
 
-        return {
+        const updates: Partial<AppStore> = {
           logs: nextLogs,
           appState: nextState,
           error: event.isError ? event.message : state.error
         };
+
+        if (event.isError || PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
+          updates.busy = false;
+          if (state.blockingAction?.key === "provisioning.flow") {
+            updates.blockingAction = null;
+            updates.isBlocking = false;
+          }
+          return updates;
+        }
+
+        updates.busy = true;
+        updates.isBlocking = true;
+        updates.blockingAction = createBlockingAction(state, {
+          key: "provisioning.flow",
+          label: "Provisioning session",
+          detail: event.message || PROVISIONING_STEP_LABELS[event.state] || "Preparing your instance",
+          progress: getProvisioningProgress(event.state),
+          mode: "determinate"
+        });
+
+        return updates;
       });
     });
 
@@ -256,24 +431,36 @@ export const useAppStore = create<AppStore>((set, get) => ({
   setServerPickerOpen: (serverPickerOpen) => set({ serverPickerOpen }),
 
   runOnboarding: async (payload) => {
-    set({ busy: true, error: null });
-    try {
-      const appState = await completeOnboarding(payload);
-      const rentedInstances = await getRentedInstances();
-      set({ appState, rentedInstances, busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "onboarding.setup",
+        label: "Configuring Noland Connect",
+        detail: "Saving local credentials and preparing your account.",
+        blocking: true
+      },
+      async () => {
+        const appState = await completeOnboarding(payload);
+        const rentedInstances = await getRentedInstances();
+        set({ appState, rentedInstances });
+      },
+      undefined
+    );
   },
 
   saveManualLocation: async (payload) => {
-    set({ busy: true, error: null });
-    try {
-      const appState = await setManualLocation(payload);
-      set({ appState, busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "server.location",
+        label: "Updating search location",
+        detail: "Saving your server region filters.",
+        blocking: true
+      },
+      async () => {
+        const appState = await setManualLocation(payload);
+        set({ appState });
+      },
+      undefined
+    );
   },
 
   discoverOffers: async (page) => {
@@ -312,34 +499,48 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   chooseOffer: async (offerId, storageGb) => {
-    set({ busy: true, error: null });
-    try {
-      const appState = await selectOffer(offerId, storageGb);
-      set({ appState, busy: false, serverPickerOpen: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "server.select",
+        label: "Selecting server offer",
+        detail: "Applying the selected GPU host and storage size.",
+        blocking: true
+      },
+      async () => {
+        const appState = await selectOffer(offerId, storageGb);
+        set({ appState, serverPickerOpen: false });
+      },
+      undefined
+    );
   },
 
   startPlay: async () => {
-    set({ busy: true, error: null });
+    beginProvisioningBlock("Reserving hardware and starting your cloud gaming session.");
     try {
       await startPlayFlow();
       const appState = await getAppState();
-      set({ appState, busy: false });
+      set({ appState });
+      if (PROVISIONING_INTERACTIVE_STATES.has(appState.orchestrationState)) {
+        endProvisioningBlock();
+      }
     } catch (error) {
-      set({ busy: false, error: mapError(error) });
+      endProvisioningBlock();
+      set({ error: mapError(error) });
     }
   },
 
   startPlayExisting: async (instanceId) => {
-    set({ busy: true, error: null });
+    beginProvisioningBlock("Reconnecting to your existing gaming instance.");
     try {
       await startPlayExistingInstance(instanceId);
       const appState = await getAppState();
-      set({ appState, busy: false });
+      set({ appState });
+      if (PROVISIONING_INTERACTIVE_STATES.has(appState.orchestrationState)) {
+        endProvisioningBlock();
+      }
     } catch (error) {
-      set({ busy: false, error: mapError(error) });
+      endProvisioningBlock();
+      set({ error: mapError(error) });
     }
   },
 
@@ -375,12 +576,18 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   saveServerPreferences: async (payload) => {
-    set({ busy: true, error: null });
-    try {
+    await runBusyTask(
+      {
+        key: "settings.server",
+        label: "Saving server preferences",
+        detail: "Updating your offer filters and hardware requirements.",
+        blocking: true
+      },
+      async () => {
       const state = get();
       const current = state.appState?.serverPreferences;
       if (!current) {
-        set({ busy: false, error: "App state not initialized" });
+        set({ error: "App state not initialized" });
         return;
       }
 
@@ -407,10 +614,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
       };
 
       const appState = await updateServerPreferences(fullPayload);
-      set({ appState, busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+      set({ appState });
+      },
+      undefined
+    );
   },
 
   saveMoonlightPreferences: async (payload) => {
@@ -454,25 +661,29 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   setupLocalWireguardClient: async () => {
-    set({ busy: true, error: null });
-    try {
-      await setupWireguardClient();
-      set({ busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "wireguard.local.setup",
+        label: "Setting up WireGuard",
+        detail: "Installing the local tunnel configuration on this PC."
+      },
+      async () => {
+        await setupWireguardClient();
+      },
+      undefined
+    );
   },
 
   reconnectLocalWireguardClient: async () => {
-    set({ busy: true, error: null });
-    try {
-      const result = await reconnectLocalWireguardClientQuick();
-      set({ busy: false });
-      return result;
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+    return await runBusyTask(
+      {
+        key: "wireguard.local.reconnect",
+        label: "Reconnecting WireGuard",
+        detail: "Refreshing the local tunnel so Moonlight can reach the instance."
+      },
+      async () => await reconnectLocalWireguardClientQuick(),
+      null
+    );
   },
 
   startSleepPrevention: async () => {
@@ -500,36 +711,47 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   loadSharedStorageSettings: async () => {
-    set({ busy: true, error: null });
-    try {
-      const settings = await getSharedStorageSettings();
-      set({ sharedStorageSettings: settings, busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "storage.settings.load",
+        label: "Loading shared storage settings",
+        detail: "Fetching your Backblaze and rclone configuration."
+      },
+      async () => {
+        const settings = await getSharedStorageSettings();
+        set({ sharedStorageSettings: settings });
+      },
+      undefined
+    );
   },
 
   saveSharedStorageSettings: async (payload) => {
-    set({ busy: true, error: null });
-    try {
-      const appState = await saveSharedStorageSettings(payload);
-      const settings = await getSharedStorageSettings();
-      set({ appState, sharedStorageSettings: settings, busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "storage.settings.save",
+        label: "Saving shared storage settings",
+        detail: "Updating backup credentials and destination settings.",
+        blocking: true
+      },
+      async () => {
+        const appState = await saveSharedStorageSettings(payload);
+        const settings = await getSharedStorageSettings();
+        set({ appState, sharedStorageSettings: settings });
+      },
+      undefined
+    );
   },
 
   testSharedStorageConfig: async () => {
-    set({ busy: true, error: null });
-    try {
-      const result = await testSharedStorageConfig();
-      set({ busy: false });
-      return result;
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+    return await runBusyTask(
+      {
+        key: "storage.settings.test",
+        label: "Testing shared storage connection",
+        detail: "Checking your Backblaze bucket and remote access."
+      },
+      async () => await testSharedStorageConfig(),
+      null
+    );
   },
 
   triggerBackup: async () => {
@@ -568,8 +790,14 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   syncInstanceStorage: async (instanceId, selectedPaths) => {
-    set({ busy: true, error: null });
-    try {
+    return await runInstanceTask(
+      {
+        key: "instance.storage.sync",
+        label: "Syncing files from shared storage",
+        detail: "Copying the selected files and folders to the remote instance.",
+        blocking: true
+      },
+      async () => {
       console.info("[shared-storage] sync start", {
         instanceId,
         selectedCount: selectedPaths?.length ?? 0
@@ -578,13 +806,10 @@ export const useAppStore = create<AppStore>((set, get) => ({
         ? await syncInstanceFromSharedStorageSelected(instanceId, selectedPaths)
         : await syncInstanceFromSharedStorage(instanceId);
       console.info("[shared-storage] sync complete", { instanceId, message });
-      set({ busy: false });
       return message;
-    } catch (error) {
-      console.error("[shared-storage] sync failed", { instanceId, error });
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+      },
+      null
+    );
   },
 
   listSyncableStorageObjects: async (instanceId) => {
@@ -605,15 +830,16 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   saveInstanceStorageSelected: async (instanceId, selectedPaths) => {
-    set({ busy: true, error: null });
-    try {
-      const message = await saveInstanceToSharedStorageSelected(instanceId, selectedPaths);
-      set({ busy: false });
-      return message;
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+    return await runInstanceTask(
+      {
+        key: "instance.storage.export",
+        label: "Exporting files to shared storage",
+        detail: "Saving the selected instance files back to cloud storage.",
+        blocking: true
+      },
+      async () => await saveInstanceToSharedStorageSelected(instanceId, selectedPaths),
+      null
+    );
   },
 
   listExportableStorageObjects: async (instanceId) => {
@@ -679,124 +905,167 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   loadSunshineSettings: async (instanceId, sunshineUsername, sunshinePassword) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const settings = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
-      set({ sunshineSettings: settings, instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "sunshine.settings.load",
+        label: "Loading Sunshine settings",
+        detail: "Fetching the current Sunshine configuration from the instance."
+      },
+      async () => {
+        const settings = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+        set({ sunshineSettings: settings });
+      },
+      undefined
+    );
   },
 
   saveSunshineSettings: async (instanceId, settings, sunshineUsername, sunshinePassword) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      await updateInstanceSunshineSettings(instanceId, settings, sunshineUsername, sunshinePassword);
-      const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
-      set({ sunshineSettings: refreshed, instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "sunshine.settings.save",
+        label: "Saving Sunshine settings",
+        detail: "Applying the updated Sunshine configuration on the instance."
+      },
+      async () => {
+        await updateInstanceSunshineSettings(instanceId, settings, sunshineUsername, sunshinePassword);
+        const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+        set({ sunshineSettings: refreshed });
+      },
+      undefined
+    );
   },
 
   resetSunshineSettings: async (instanceId, sunshineUsername, sunshinePassword) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      await resetInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
-      const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
-      set({ sunshineSettings: refreshed, instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "sunshine.settings.reset",
+        label: "Resetting Sunshine settings",
+        detail: "Restoring the provisioned Sunshine defaults on the instance."
+      },
+      async () => {
+        await resetInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+        const refreshed = await getInstanceSunshineSettings(instanceId, sunshineUsername, sunshinePassword);
+        set({ sunshineSettings: refreshed });
+      },
+      undefined
+    );
   },
 
   reconnectWireguard: async (instanceId) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const result = await reconnectInstanceWireguard(instanceId);
-      set({ instanceActionRunning: false });
-      return result;
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-      return null;
-    }
+    return await runInstanceTask(
+      {
+        key: "instance.wireguard.reconnect",
+        label: "Reconnecting WireGuard",
+        detail: "Refreshing the remote WireGuard tunnel.",
+        blocking: true
+      },
+      async () => await reconnectInstanceWireguard(instanceId),
+      null
+    );
   },
 
   rebootInstanceServices: async (instanceId) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const result = await rebootInstanceServices(instanceId);
-      set({ instanceActionRunning: false });
-      return result;
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-      return null;
-    }
+    return await runInstanceTask(
+      {
+        key: "instance.services.reboot",
+        label: "Rebooting instance services",
+        detail: "Restarting Sunshine, networking, and related streaming services.",
+        blocking: true
+      },
+      async () => await rebootInstanceServices(instanceId),
+      null
+    );
   },
 
   pauseInstance: async (instanceId) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      await pauseInstance(instanceId);
-      set({ instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "instance.pause",
+        label: "Pausing instance",
+        detail: "Suspending the rented machine until you resume it.",
+        blocking: true
+      },
+      async () => {
+        await pauseInstance(instanceId);
+      },
+      undefined
+    );
   },
 
   destroyInstance: async (instanceId) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      await destroyInstance(instanceId);
-      const appState = await getAppState();
-      set({ appState, instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "instance.destroy",
+        label: "Destroying instance",
+        detail: "Tearing down the rented machine and finalizing any backup steps.",
+        blocking: true
+      },
+      async () => {
+        await destroyInstance(instanceId);
+        const appState = await getAppState();
+        set({ appState });
+      },
+      undefined
+    );
   },
 
   generateBundleIndex: async () => {
-    set({ busy: true, error: null });
-    try {
-      await generateBundleIndex();
-      set({ busy: false });
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-    }
+    await runBusyTask(
+      {
+        key: "restore.index.generate",
+        label: "Generating restore index",
+        detail: "Scanning backup metadata so bundles can be restored.",
+        blocking: true
+      },
+      async () => {
+        await generateBundleIndex();
+      },
+      undefined
+    );
   },
 
   loadRestoreBundles: async (instanceId) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const index = await getInstanceRestoreBundles(instanceId);
-      set({ bundleIndex: index, instanceActionRunning: false });
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-    }
+    await runInstanceTask(
+      {
+        key: "restore.index.load",
+        label: "Loading restore bundles",
+        detail: "Fetching indexed backup bundles for this instance."
+      },
+      async () => {
+        const index = await getInstanceRestoreBundles(instanceId);
+        set({ bundleIndex: index });
+      },
+      undefined
+    );
   },
 
   runDryRunRestore: async (instanceId, payload) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const result = await dryRunRestore(instanceId, payload);
-      set({ instanceActionRunning: false });
-      return result;
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-      return null;
-    }
+    return await runInstanceTask(
+      {
+        key: "restore.dry_run",
+        label: "Running restore dry run",
+        detail: "Previewing which files would be restored before making changes."
+      },
+      async () => await dryRunRestore(instanceId, payload),
+      null
+    );
   },
 
   runRestoreBundle: async (instanceId, payload) => {
-    set({ instanceActionRunning: true, error: null });
-    try {
-      const job = await restoreBundle(instanceId, payload);
-      set({ restoreJob: job, instanceActionRunning: false });
-      return job;
-    } catch (error) {
-      set({ instanceActionRunning: false, error: mapError(error) });
-      return null;
-    }
+    return await runInstanceTask(
+      {
+        key: "restore.run",
+        label: "Restoring backup bundle",
+        detail: "Copying the selected backup data back onto the instance.",
+        blocking: true
+      },
+      async () => {
+        const job = await restoreBundle(instanceId, payload);
+        set({ restoreJob: job });
+        return job;
+      },
+      null
+    );
   },
 
   pollRestoreJob: async (jobId) => {
@@ -882,4 +1151,5 @@ export const useAppStore = create<AppStore>((set, get) => ({
   },
 
   clearError: () => set({ error: null })
-}));
+  });
+});

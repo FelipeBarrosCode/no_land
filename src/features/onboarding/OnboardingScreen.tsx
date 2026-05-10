@@ -116,8 +116,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
             >
               Get your Vast.ai API key
             </button>
-            <Button disabled={busy} onClick={submitForm} className="px-8">
-              {busy ? "Configuring..." : "Continue"}
+            <Button disabled={busy} loading={busy} loadingText="Configuring..." onClick={submitForm} className="px-8">
+              Continue
             </Button>
           </div>
         </Card>

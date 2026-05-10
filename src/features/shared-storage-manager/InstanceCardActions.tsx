@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import type { RentedInstanceSummary } from "../../lib/types";
@@ -7,6 +8,7 @@ interface Props {
   instance: RentedInstanceSummary;
   busy: boolean;
   instanceActionRunning: boolean;
+  blockingAction: BlockingActionState | null;
   onPlay: (instanceId: number) => void;
   onSettings: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
@@ -21,6 +23,7 @@ export function InstanceCardActions({
   instance,
   busy,
   instanceActionRunning,
+  blockingAction,
   onPlay,
   onSettings,
   onReconnect,
@@ -33,6 +36,7 @@ export function InstanceCardActions({
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
   const actionDisabled = busy || instanceActionRunning;
+  const loadingKey = blockingAction?.key ?? null;
 
   const handleDestroy = () => {
     if (showDestroyConfirm) {
@@ -49,6 +53,8 @@ export function InstanceCardActions({
         <Button
           className="w-full"
           disabled={actionDisabled}
+          loading={loadingKey === "provisioning.flow"}
+          loadingText="Launching..."
           onClick={() => onPlay(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
@@ -71,6 +77,8 @@ export function InstanceCardActions({
           variant="ghost"
           className="w-full text-xs"
           disabled={actionDisabled || !isRunning}
+          loading={loadingKey === "instance.storage.export"}
+          loadingText="Saving files..."
           onClick={() => onSaveStorage(instance.instanceId)}
         >
           Save
@@ -80,6 +88,8 @@ export function InstanceCardActions({
           variant="ghost"
           className="w-full text-xs"
           disabled={actionDisabled || !isRunning}
+          loading={loadingKey === "instance.storage.sync"}
+          loadingText="Syncing files..."
           onClick={() => onSyncStorage(instance.instanceId)}
         >
           Sync
@@ -89,6 +99,8 @@ export function InstanceCardActions({
           variant="ghost"
           className="w-full text-xs"
           disabled={actionDisabled}
+          loading={loadingKey === "instance.wireguard.reconnect"}
+          loadingText="Reconnecting..."
           onClick={() => onReconnect(instance.instanceId)}
         >
           Reconnect
@@ -100,6 +112,8 @@ export function InstanceCardActions({
           variant="ghost"
           className="w-full text-xs"
           disabled={actionDisabled}
+          loading={loadingKey === "instance.services.reboot"}
+          loadingText="Rebooting..."
           onClick={() => onReboot(instance.instanceId)}
         >
           Reboot
@@ -109,6 +123,8 @@ export function InstanceCardActions({
           variant="ghost"
           className="w-full text-xs"
           disabled={actionDisabled || !isRunning}
+          loading={loadingKey === "instance.pause"}
+          loadingText="Pausing..."
           onClick={() => onPause(instance.instanceId)}
         >
           Pause
@@ -118,6 +134,8 @@ export function InstanceCardActions({
           variant="ghost"
           className={`w-full text-xs ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
           disabled={actionDisabled}
+          loading={loadingKey === "instance.destroy"}
+          loadingText="Destroying..."
           onClick={handleDestroy}
         >
           {showDestroyConfirm ? "Confirm Destroy" : "Destroy"}

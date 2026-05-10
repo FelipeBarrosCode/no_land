@@ -13,7 +13,9 @@ use services::{
     app_config::AppConfig,
     app_context::AppContext,
     orchestration::OrchestrationService,
+    ssh_keys::normalize_ssh_state_from_disk,
     state_store::{JsonStateStore, StateStore},
+    wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
 };
 use tauri::Manager;
 use tracing::{error, info};
@@ -60,6 +62,16 @@ fn main() {
                 state_changed = true;
             }
 
+            if normalize_ssh_state_from_disk(&mut initial_state, &app_data_dir) {
+                state_changed = true;
+            }
+
+            if normalize_wireguard_state_from_disk(&mut initial_state, &app_data_dir)
+                .map_err(|error| format!("Failed normalizing WireGuard state from disk: {error}"))?
+            {
+                state_changed = true;
+            }
+
             if state_changed {
                 tauri::async_runtime::block_on(state_store.save_state(&initial_state))
                     .map_err(|error| format!("Failed normalizing persisted state: {error}"))?;
@@ -71,8 +83,20 @@ fn main() {
             app.manage(context.clone());
 
             let app_handle = app.handle().clone();
+            let resume_context = context.clone();
             tauri::async_runtime::spawn(async move {
-                OrchestrationService::resume_if_needed(&app_handle, &context).await;
+                OrchestrationService::resume_if_needed(&app_handle, &resume_context).await;
+            });
+
+            let monitor_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                let interval = std::time::Duration::from_secs(30);
+                loop {
+                    tokio::time::sleep(interval).await;
+                    if let Err(error) = maintain_persisted_local_tunnel(&monitor_context).await {
+                        error!("WireGuard tunnel health monitor failed: {error}");
+                    }
+                }
             });
 
             Ok(())
@@ -96,6 +120,7 @@ fn main() {
             stop_local_sleep_prevention,
             get_provisioning_logs,
             get_moonlight_download_url,
+            launch_moonlight_client,
             get_rented_instances,
             update_vast_api_key,
             update_platform_credentials,

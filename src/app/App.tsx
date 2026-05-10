@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Card } from "../components/ui/Card";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
@@ -18,6 +19,7 @@ function RootRoute() {
   const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
   const instanceActionRunning = useAppStore((state) => state.instanceActionRunning);
   const sunshineSettings = useAppStore((state) => state.sunshineSettings);
+  const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
   const discoverOffers = useAppStore((state) => state.discoverOffers);
   const nextOffersPage = useAppStore((state) => state.nextOffersPage);
@@ -58,6 +60,7 @@ function RootRoute() {
       offersHasNextPage={offersHasNextPage}
       busy={busy}
       instanceActionRunning={instanceActionRunning}
+      blockingAction={blockingAction}
       sunshineSettings={sunshineSettings}
       onSearchOffers={discoverOffers}
       onNextOffersPage={nextOffersPage}
@@ -87,6 +90,7 @@ function ProvisioningRoute() {
   const appState = useAppStore((state) => state.appState);
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
+  const blockingAction = useAppStore((state) => state.blockingAction);
   const skipPairing = useAppStore((state) => state.skipPairing);
   const setupLocalWireguardClient = useAppStore((state) => state.setupLocalWireguardClient);
   const reconnectLocalWireguardClient = useAppStore((state) => state.reconnectLocalWireguardClient);
@@ -103,6 +107,7 @@ function ProvisioningRoute() {
         appState={appState}
         logs={logs}
         busy={busy}
+        blockingAction={blockingAction}
         onSkipPairing={skipPairing}
         onSetupWireguardClient={setupLocalWireguardClient}
         onReconnectLocalWireguardClient={reconnectLocalWireguardClient}
@@ -136,6 +141,8 @@ export function App() {
   const loading = useAppStore((state) => state.loading);
   const error = useAppStore((state) => state.error);
   const clearError = useAppStore((state) => state.clearError);
+  const blockingAction = useAppStore((state) => state.blockingAction);
+  const isBlocking = useAppStore((state) => state.isBlocking);
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
@@ -173,6 +180,8 @@ export function App() {
           </div>
         </div>
       )}
+
+      {isBlocking && blockingAction && <BlockingLoaderOverlay action={blockingAction} />}
 
       <HashRouter>
         <Routes>

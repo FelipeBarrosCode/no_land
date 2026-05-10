@@ -45,7 +45,7 @@ impl JsonStateStore {
         migrated.version = self.current_version;
         migrated.server_preferences.template_hash =
             if migrated.server_preferences.template_hash.is_empty() {
-                "2a62a7d5089a50a5ad89a9480f540d25".to_string()
+                "566868bff8b15eef891ee706acbbb5e5".to_string()
             } else {
                 migrated.server_preferences.template_hash
             };

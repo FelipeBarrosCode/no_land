@@ -71,7 +71,7 @@ impl Default for SshState {
             public_key_path: String::new(),
             uploaded_to_vast: false,
             ssh_username: "root".to_string(),
-            ssh_password: String::new(),
+            ssh_password: "user".to_string(),
         }
     }
 }
@@ -147,7 +147,7 @@ impl Default for ServerPreferences {
         Self {
             min_reliability: 0.8,
             storage_gb: 100,
-            template_hash: "2a62a7d5089a50a5ad89a9480f540d25".to_string(),
+            template_hash: "566868bff8b15eef891ee706acbbb5e5".to_string(),
             max_hourly_price: 0.0, // 0 means no limit
             min_hourly_price: 0.0,
             require_verified: false,
@@ -248,6 +248,18 @@ pub struct WireGuardState {
     pub server_public_key: String,
     pub client_public_key: String,
     pub config_path: String,
+    #[serde(default)]
+    pub client_private_key_fingerprint: String,
+    #[serde(default)]
+    pub client_public_key_fingerprint: String,
+    #[serde(default)]
+    pub server_public_key_fingerprint: String,
+    #[serde(default)]
+    pub endpoint_host: String,
+    #[serde(default)]
+    pub endpoint_port: u16,
+    #[serde(default)]
+    pub last_runtime_interface: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

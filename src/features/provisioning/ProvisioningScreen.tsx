@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
+import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { PROVISIONING_ORDER } from "../../lib/constants";
@@ -11,6 +12,7 @@ interface Props {
   appState: PersistedAppState;
   logs: ProvisioningEvent[];
   busy: boolean;
+  blockingAction: BlockingActionState | null;
   onSkipPairing: () => Promise<void>;
   onSetupWireguardClient: () => Promise<void>;
   onReconnectLocalWireguardClient: () => Promise<string | null>;
@@ -32,6 +34,7 @@ export function ProvisioningScreen({
   appState,
   logs,
   busy,
+  blockingAction,
   onSkipPairing,
   onSetupWireguardClient,
   onReconnectLocalWireguardClient,
@@ -68,6 +71,11 @@ export function ProvisioningScreen({
 
         <section className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
           <Card className="pixel-frame">
+            {blockingAction?.key === "provisioning.flow" && (
+              <div className="mb-4">
+                <BlockingLoaderOverlay action={blockingAction} inline className="max-w-none p-4" />
+              </div>
+            )}
             <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">Pipeline Steps</h2>
             <ul className="mt-4 space-y-2">
               {PROVISIONING_ORDER.map((step, index) => {
@@ -98,6 +106,8 @@ export function ProvisioningScreen({
               <Button
                 variant={sleepPreventionActive ? "secondary" : "ghost"}
                 disabled={busy}
+                loading={busy && blockingAction?.key !== "provisioning.flow"}
+                loadingText={sleepPreventionActive ? "Stopping..." : "Starting..."}
                 onClick={() => (sleepPreventionActive ? onStopSleepPrevention() : onStartSleepPrevention())}
               >
                 {sleepPreventionActive ? "Stop Awake" : "Keep PC Awake"}

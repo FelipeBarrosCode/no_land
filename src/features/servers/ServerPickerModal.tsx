@@ -212,6 +212,12 @@ export function ServerPickerModal({
         </div>
 
         <div className="max-h-[80vh] overflow-y-auto px-5 py-4">
+          {(busy || searchingOffers) && (
+            <p className="mb-4 text-[1.1rem] text-[#9ec4df]" aria-live="polite" aria-busy="true">
+              {searchingOffers ? "Searching available offers..." : "Updating server filters..."}
+            </p>
+          )}
+
           <div className="mb-4 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
             <InputField
               label="Region / State / Province"
@@ -248,8 +254,14 @@ export function ServerPickerModal({
             </div>
 
             <div className="flex items-end">
-              <Button variant="secondary" disabled={disabledSearch} onClick={runRegionCountrySearch}>
-                {searchingOffers ? "Searching..." : "Find Offers"}
+              <Button
+                variant="secondary"
+                disabled={disabledSearch}
+                loading={searchingOffers}
+                loadingText="Searching..."
+                onClick={runRegionCountrySearch}
+              >
+                Find Offers
               </Button>
             </div>
           </div>
@@ -494,6 +506,8 @@ export function ServerPickerModal({
                       className="mt-3 w-full"
                       variant={isSelected ? "secondary" : "primary"}
                       disabled={busy}
+                      loading={busy && isSelected}
+                      loadingText="Selecting..."
                       onClick={() => onSelectOffer(offer.id, selectedStorage)}
                     >
                       {isSelected ? "Selected" : "Select"}
@@ -512,6 +526,8 @@ export function ServerPickerModal({
               <Button
                 variant="ghost"
                 disabled={busy || searchingOffers || offersPage <= 1}
+                loading={searchingOffers}
+                loadingText="Loading..."
                 onClick={onPreviousPage}
               >
                 Prev Page
@@ -519,6 +535,8 @@ export function ServerPickerModal({
               <Button
                 variant="secondary"
                 disabled={busy || searchingOffers || !offersHasNextPage}
+                loading={searchingOffers}
+                loadingText="Loading..."
                 onClick={onNextPage}
               >
                 Next Page

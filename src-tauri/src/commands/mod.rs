@@ -19,6 +19,7 @@ use crate::{
     services::{
         app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
         location::LocationService, offer_selector::OfferSelector,
+        moonlight::MoonlightService,
         os_detection::OsDetection,
         orchestration::OrchestrationService, reboot_helper::RebootHelperService,
         remote_exec::RemoteExec, ssh_keys::SshKeyService,
@@ -186,8 +187,6 @@ pub async fn complete_onboarding(
     let uploaded = ssh_service
         .upload_public_key_if_missing(&vast, &key_paths.public_key_path)
         .await?;
-    let sanitized_ssh_username = sanitize_ssh_username(&payload.app_username);
-
     let next_state = context
         .update_state(|state| {
             state.onboarding_completed = true;
@@ -198,8 +197,8 @@ pub async fn complete_onboarding(
             state.ssh.private_key_path = key_paths.private_key_path.display().to_string();
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
             state.ssh.uploaded_to_vast = uploaded || state.ssh.uploaded_to_vast;
-            state.ssh.ssh_username = sanitized_ssh_username.clone();
-            state.ssh.ssh_password = payload.app_password.clone();
+            state.ssh.ssh_username = "root".to_string();
+            state.ssh.ssh_password = "user".to_string();
             state.orchestration_state = OrchestrationState::Idle;
             state.last_error = None;
         })
@@ -901,6 +900,13 @@ pub async fn get_moonlight_download_url(
 }
 
 #[tauri::command]
+pub async fn launch_moonlight_client() -> Result<(), FrontendError> {
+    let moonlight = MoonlightService;
+    moonlight.launch_native_client()?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn start_local_sleep_prevention() -> Result<String, FrontendError> {
     SleepInhibitService::ensure_active().map_err(Into::into)
 }
@@ -1171,6 +1177,7 @@ fn sanitize_ssh_username(value: &str) -> String {
         .trim()
         .trim_matches('"')
         .trim_matches('\'')
+        .to_lowercase()
         .to_string()
 }
 

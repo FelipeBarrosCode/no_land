@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
@@ -29,6 +30,7 @@ export function SunshineSettingsPanel({
   const [sunshineUsername, setSunshineUsername] = useState(defaultUsername);
   const [sunshinePassword, setSunshinePassword] = useState(defaultPassword);
   const [hasChanges, setHasChanges] = useState(false);
+  const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
     setSunshineUsername(defaultUsername);
@@ -59,6 +61,14 @@ export function SunshineSettingsPanel({
   };
 
   const handleSave = async () => {
+    setPendingAction({
+      key: "sunshine.settings.save",
+      label: "Saving Sunshine settings",
+      detail: "Applying the updated Sunshine configuration on the instance.",
+      mode: "indeterminate",
+      progress: null,
+      startedAt: Date.now()
+    });
     const payload: Record<string, unknown> = {};
     Object.entries(formValues).forEach(([key, value]) => {
       const original = settings?.raw[key];
@@ -72,6 +82,7 @@ export function SunshineSettingsPanel({
     });
     await onSave(payload, sunshineUsername.trim(), sunshinePassword);
     setHasChanges(false);
+    setPendingAction(null);
   };
 
   const canUseApi = sunshineUsername.trim().length > 0 && sunshinePassword.trim().length > 0;
@@ -167,6 +178,7 @@ export function SunshineSettingsPanel({
 
         {!settings ? (
           <div className="space-y-4">
+            {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
             <p className="text-gray-300">Enter Sunshine credentials to load settings.</p>
             <div className="grid gap-3 md:grid-cols-2">
               <InputField
@@ -186,15 +198,29 @@ export function SunshineSettingsPanel({
             <div>
               <Button
                 variant="primary"
-                onClick={() => onLoad(sunshineUsername.trim(), sunshinePassword)}
+                onClick={async () => {
+                  setPendingAction({
+                    key: "sunshine.settings.load",
+                    label: "Loading Sunshine settings",
+                    detail: "Fetching the current Sunshine configuration from the instance.",
+                    mode: "indeterminate",
+                    progress: null,
+                    startedAt: Date.now()
+                  });
+                  await onLoad(sunshineUsername.trim(), sunshinePassword);
+                  setPendingAction(null);
+                }}
                 disabled={busy || !canUseApi}
+                loading={busy}
+                loadingText="Loading..."
               >
-                {busy ? "Loading..." : "Load Settings"}
+                Load Settings
               </Button>
             </div>
           </div>
         ) : (
           <div className="space-y-6">
+            {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
             <div className="grid gap-3 md:grid-cols-2">
               <InputField
                 label="Sunshine Username"
@@ -233,8 +259,21 @@ export function SunshineSettingsPanel({
             <div className="flex gap-3 pt-2">
               <Button
                 variant="ghost"
-                onClick={() => onReset(sunshineUsername.trim(), sunshinePassword)}
+                onClick={async () => {
+                  setPendingAction({
+                    key: "sunshine.settings.reset",
+                    label: "Resetting Sunshine settings",
+                    detail: "Restoring the provisioned Sunshine defaults on the instance.",
+                    mode: "indeterminate",
+                    progress: null,
+                    startedAt: Date.now()
+                  });
+                  await onReset(sunshineUsername.trim(), sunshinePassword);
+                  setPendingAction(null);
+                }}
                 disabled={busy || !canUseApi}
+                loading={busy && pendingAction?.key === "sunshine.settings.reset"}
+                loadingText="Resetting..."
               >
                 Reset to Provision Defaults
               </Button>
@@ -242,8 +281,10 @@ export function SunshineSettingsPanel({
                 variant="primary"
                 onClick={handleSave}
                 disabled={busy || !hasChanges || !canUseApi}
+                loading={busy && pendingAction?.key === "sunshine.settings.save"}
+                loadingText="Saving..."
               >
-                {busy ? "Saving..." : "Save Settings"}
+                Save Settings
               </Button>
               <Button variant="secondary" onClick={onClose} disabled={busy}>
                 Cancel

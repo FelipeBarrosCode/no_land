@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import type {
@@ -40,9 +41,21 @@ export function RestoreBundlesPanel({
   const [selectedFolders, setSelectedFolders] = useState<Record<string, Set<string>>>({});
   const [dryRunResult, setDryRunResult] = useState<RestoreDryRunResult | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
-    void onLoadBundles(instanceId);
+    void (async () => {
+      setPendingAction({
+        key: "restore.index.load",
+        label: "Loading restore bundles",
+        detail: "Fetching indexed backup bundles for this instance.",
+        mode: "indeterminate",
+        progress: null,
+        startedAt: Date.now()
+      });
+      await onLoadBundles(instanceId);
+      setPendingAction(null);
+    })();
   }, [instanceId]);
 
   // Poll active job
@@ -101,20 +114,38 @@ export function RestoreBundlesPanel({
   async function handleDryRun(bundle: AppBundle) {
     const folderIds = getSelectedFolderIds(bundle.id);
     if (folderIds.length === 0) return;
+    setPendingAction({
+      key: "restore.dry_run",
+      label: "Running restore dry run",
+      detail: "Previewing the changes before any files are restored.",
+      mode: "indeterminate",
+      progress: null,
+      startedAt: Date.now()
+    });
     const result = await onDryRun(instanceId, bundle.id, folderIds, "merge");
     if (result) {
       setDryRunResult(result);
     }
+    setPendingAction(null);
   }
 
   async function handleRestore(bundle: AppBundle, mode: string) {
     const folderIds = getSelectedFolderIds(bundle.id);
     if (folderIds.length === 0) return;
+    setPendingAction({
+      key: "restore.run",
+      label: "Restoring backup bundle",
+      detail: "Copying the selected backup data back onto the instance.",
+      mode: "indeterminate",
+      progress: null,
+      startedAt: Date.now()
+    });
     const job = await onRestore(instanceId, bundle.id, folderIds, mode);
     if (job) {
       setActiveJobId(job.jobId);
       setDryRunResult(null);
     }
+    setPendingAction(null);
   }
 
   const actionDisabled = busy || instanceActionRunning;
@@ -122,6 +153,7 @@ export function RestoreBundlesPanel({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
       <Card className="w-full max-w-3xl max-h-[85vh] overflow-y-auto p-6">
+        {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="mb-4 max-w-none p-4" />}
         <div className="flex items-center justify-between mb-4">
           <div>
             <h3 className="text-lg font-display text-neon-cyan">Backup & Restore</h3>
@@ -134,9 +166,22 @@ export function RestoreBundlesPanel({
           <div className="flex items-center gap-2">
             <Button
               variant="secondary"
-              onClick={onGenerateIndex}
+              onClick={async () => {
+                setPendingAction({
+                  key: "restore.index.generate",
+                  label: "Generating restore index",
+                  detail: "Scanning backup metadata so bundles can be restored.",
+                  mode: "indeterminate",
+                  progress: null,
+                  startedAt: Date.now()
+                });
+                await onGenerateIndex();
+                setPendingAction(null);
+              }}
               disabled={actionDisabled}
               className="text-xs"
+              loading={busy}
+              loadingText="Generating..."
             >
               Regenerate Index
             </Button>

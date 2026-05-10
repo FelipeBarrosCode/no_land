@@ -165,15 +165,19 @@ export function SharedStorageSettings({
             variant="primary"
             onClick={handleSave}
             disabled={busy}
+            loading={busy}
+            loadingText="Saving..."
           >
-            {busy ? "Saving..." : "Save Settings"}
+            Save Settings
           </Button>
           <Button
             variant="secondary"
             onClick={handleTest}
             disabled={busy || !keyId.trim()}
+            loading={busy}
+            loadingText="Testing..."
           >
-            {busy ? "Testing..." : "Test Connection"}
+            Test Connection
           </Button>
         </div>
       </Card>
