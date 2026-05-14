@@ -121,6 +121,8 @@ fn main() {
             get_provisioning_logs,
             get_moonlight_download_url,
             launch_moonlight_client,
+            configure_moonlight_client,
+            restore_moonlight_backup,
             get_rented_instances,
             update_vast_api_key,
             update_platform_credentials,

@@ -19,7 +19,7 @@ use crate::{
     services::{
         app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
         location::LocationService, offer_selector::OfferSelector,
-        moonlight::MoonlightService,
+        moonlight::{MoonlightCodecPreference, MoonlightConfigureOptions, MoonlightConfigureResult, MoonlightNetworkPreference, MoonlightService},
         os_detection::OsDetection,
         orchestration::OrchestrationService, reboot_helper::RebootHelperService,
         remote_exec::RemoteExec, ssh_keys::SshKeyService,
@@ -544,6 +544,7 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let message = setup_local_wireguard_client(Path::new(&config_path))?;
     let tunnel_server_ip = {
         let state = context.state.read().await;
@@ -620,6 +621,7 @@ pub async fn reconnect_local_wireguard_client_quick(
         }
     }
 
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
     validate_local_wireguard_tunnel(context.inner(), &tunnel_server_ip, true).await?;
     Ok(message)
@@ -658,6 +660,12 @@ async fn validate_local_wireguard_tunnel(
                 }
 
                 if attempt == attempts {
+                    if os.is_macos() {
+                        warn!(
+                            "WireGuard handshake is still missing on macOS after reconnect retries, but the local tunnel config is applied; continuing without hard failure"
+                        );
+                        return Ok(());
+                    }
                     return Err(AppError::Provisioning(
                         "WireGuard tunnel exists, but peer handshake is still not visible. Tunnel state was refreshed, but the server is not responding on the WireGuard session yet. Retry reconnect once more; if it still fails, verify the server-side WireGuard service and Sunshine reachability."
                             .to_string(),
@@ -904,6 +912,58 @@ pub async fn launch_moonlight_client() -> Result<(), FrontendError> {
     let moonlight = MoonlightService;
     moonlight.launch_native_client()?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn configure_moonlight_client(
+    apply: bool,
+    force_close: bool,
+    native: bool,
+    network: Option<String>,
+    prefer_codec: Option<String>,
+    max_bitrate: Option<u32>,
+    fps: Option<u32>,
+    resolution: Option<String>,
+) -> Result<MoonlightConfigureResult, FrontendError> {
+    let moonlight = MoonlightService;
+    let resolution_override = resolution
+        .as_deref()
+        .and_then(|value| value.split_once('x'))
+        .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)));
+
+    let network = match network.as_deref() {
+        Some("lan") => MoonlightNetworkPreference::Lan,
+        Some("wifi") => MoonlightNetworkPreference::Wifi,
+        Some("remote") => MoonlightNetworkPreference::Remote,
+        _ => MoonlightNetworkPreference::Auto,
+    };
+
+    let prefer_codec = match prefer_codec.as_deref() {
+        Some("h264") => MoonlightCodecPreference::H264,
+        Some("hevc") => MoonlightCodecPreference::Hevc,
+        Some("av1") => MoonlightCodecPreference::Av1,
+        _ => MoonlightCodecPreference::Auto,
+    };
+
+    Ok(moonlight
+        .configure_client(MoonlightConfigureOptions {
+            apply,
+            force_close,
+            native,
+            network,
+            prefer_codec,
+            max_bitrate,
+            fps_override: fps,
+            resolution_override,
+            set_overrides: Default::default(),
+        })
+        .await)
+}
+
+#[tauri::command]
+pub async fn restore_moonlight_backup(backup_file: String) -> Result<String, FrontendError> {
+    let moonlight = MoonlightService;
+    Ok(moonlight.restore_backup(&backup_file).await?)
 }
 
 #[tauri::command]

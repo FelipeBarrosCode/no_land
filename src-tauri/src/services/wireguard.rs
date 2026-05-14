@@ -2,7 +2,8 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::Duration,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -65,7 +66,14 @@ struct ExpectedLocalTunnel {
 #[derive(Debug, Clone, Default)]
 struct LocalWireGuardRuntimeState {
     interface_name: String,
-    interface_public_key: String,
+    peer_public_key: String,
+    allowed_ips: String,
+    latest_handshake: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LocalWireGuardPeerState {
+    interface_name: String,
     peer_public_key: String,
     allowed_ips: String,
     latest_handshake: String,
@@ -77,6 +85,35 @@ const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 180;
 const MACOS_LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
 const MACOS_HOMEBREW_CONF_PATH: &str = "/opt/homebrew/etc/wireguard/nolandwg0.conf";
+const LEGACY_LOCAL_CONFIG_NAME: &str = "nolandwg0.conf";
+#[cfg(target_os = "macos")]
+const MACOS_WIREGUARD_HELPER_LABEL: &str = "com.noland.wireguard.nolandwg0";
+#[cfg(target_os = "macos")]
+const MACOS_WIREGUARD_HELPER_SCRIPT_PATH: &str = "/usr/local/libexec/noland-wireguard-repair.sh";
+#[cfg(target_os = "macos")]
+const MACOS_WIREGUARD_HELPER_PLIST_PATH: &str = "/Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist";
+#[cfg(target_os = "macos")]
+const MACOS_HELPER_MONITOR_REPAIR_COOLDOWN_SECS: u64 = 180;
+#[cfg(target_os = "macos")]
+static MACOS_HELPER_LAST_MONITOR_REPAIR: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MacosHelperGeneration {
+    Legacy,
+    WatchRequests,
+}
+
+fn legacy_local_config_path(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("wireguard").join(LEGACY_LOCAL_CONFIG_NAME)
+}
+
+fn instance_local_config_path(app_data_dir: &Path, instance_id: u64) -> PathBuf {
+    app_data_dir
+        .join("wireguard")
+        .join(instance_id.to_string())
+        .join(LEGACY_LOCAL_CONFIG_NAME)
+}
 
 impl WireGuardService {
     async fn wait_for_dpkg_lock_with_message(
@@ -220,18 +257,31 @@ exit 0"#
         &self,
         remote: &RemoteExec,
         local_app_data_dir: &Path,
+        instance_id: u64,
         endpoint_host: &str,
         endpoint_port: u16,
         mode: WireGuardProvisionMode,
     ) -> AppResult<WireGuardProvisionResult> {
         ensure_local_wireguard_tools()?;
 
-        let local_config_dir = local_app_data_dir.join("wireguard");
+        let local_config_path = instance_local_config_path(local_app_data_dir, instance_id);
+        let local_config_dir = local_config_path.parent().unwrap_or(local_app_data_dir);
         fs::create_dir_all(&local_config_dir).await?;
-        let local_config_path = local_config_dir.join("nolandwg0.conf");
+        let legacy_config_path = legacy_local_config_path(local_app_data_dir);
 
         let existing_remote_identity = self.load_existing_remote_identity(remote).await?;
-        let existing_local_identity = load_existing_local_identity(&local_config_path).await?;
+        let existing_local_identity = match load_existing_local_identity(&local_config_path).await? {
+            Some(identity) => Some(identity),
+            None if legacy_config_path != local_config_path => {
+                load_existing_local_identity(&legacy_config_path).await?
+            }
+            None => None,
+        };
+        let generate_fresh_identity = || -> AppResult<(String, String, String, String)> {
+            let (server_private, server_public) = generate_keypair()?;
+            let (client_private, client_public) = generate_keypair()?;
+            Ok((server_private, server_public, client_private, client_public))
+        };
 
         let (server_private, server_public, client_private, client_public) =
             match (existing_remote_identity, existing_local_identity) {
@@ -241,10 +291,10 @@ exit 0"#
                     if derived_server_public != local_identity.server_public_key
                         || derived_client_public != remote_identity.client_public_key
                     {
-                        return Err(AppError::Provisioning(
-                            "WireGuard identity mismatch detected. Refusing to rotate keys during reinitialize. Use explicit key regeneration flow to replace keys."
-                                .to_string(),
-                        ));
+                        warn!(
+                            "WireGuard identity mismatch detected (mode={mode:?}); regenerating tunnel identity"
+                        );
+                        generate_fresh_identity()?
                     } else {
                         info!("Reusing existing WireGuard key material from prior provisioning");
                         (
@@ -256,22 +306,22 @@ exit 0"#
                     }
                 }
                 (Some(_), None) => {
-                    return Err(AppError::Provisioning(format!(
-                        "Remote WireGuard identity exists but local client config {} is missing (mode={mode:?}). Refusing to rotate keys during reconnect/reinitialize; restore the saved app-data WireGuard config before retrying.",
+                    warn!(
+                        "Remote WireGuard identity exists but local client config {} is missing (mode={mode:?}); regenerating local and remote tunnel identity",
                         local_config_path.display()
-                    )));
+                    );
+                    generate_fresh_identity()?
                 }
                 (None, Some(_)) => {
-                    return Err(AppError::Provisioning(format!(
-                        "Local WireGuard identity exists at {} but remote server identity is missing (mode={mode:?}). Refusing to silently replace the saved tunnel identity; use an explicit replacement flow if the instance was intentionally rebuilt.",
+                    warn!(
+                        "Local WireGuard identity exists at {} but remote server identity is missing (mode={mode:?}); regenerating local and remote tunnel identity",
                         local_config_path.display()
-                    )));
+                    );
+                    generate_fresh_identity()?
                 }
                 (None, None) => {
                     info!("No existing WireGuard key material found; bootstrapping new keys");
-                    let (server_private, server_public) = generate_keypair()?;
-                    let (client_private, client_public) = generate_keypair()?;
-                    (server_private, server_public, client_private, client_public)
+                    generate_fresh_identity()?
                 }
             };
 
@@ -641,7 +691,8 @@ iptables -C OUTPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || ipt
 iptables -C OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
 
 # Sunshine ports via WireGuard only
-ufw status | grep -q "on {}" || ufw allow in on {} to any port 47984,47989,48010 comment 'Sunshine streaming'
+ufw status | grep -q "47984,47989,47990,47991,48010/tcp" || ufw allow in on {} to any port 47984,47989,47990,47991,48010 proto tcp comment 'Sunshine TCP over WireGuard'
+ufw status | grep -q "47998,47999,48000,48002/udp" || ufw allow in on {} to any port 47998,47999,48000,48002 proto udp comment 'Sunshine UDP over WireGuard'
 "#,
             self.defaults.listen_port,
             self.defaults.listen_port,
@@ -1055,7 +1106,43 @@ pub fn normalize_wireguard_state_from_disk(
     app_data_dir: &Path,
 ) -> AppResult<bool> {
     let mut changed = false;
-    let persisted_config_path = app_data_dir.join("wireguard").join("nolandwg0.conf");
+    if let Some(instance_id) = state.instance.instance_id {
+        let legacy_path = legacy_local_config_path(app_data_dir);
+        let instance_path = instance_local_config_path(app_data_dir, instance_id);
+        if legacy_path.exists() && !instance_path.exists() {
+            if let Some(parent) = instance_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed creating WireGuard config directory {}: {error}",
+                        parent.display()
+                    ))
+                })?;
+            }
+            std::fs::copy(&legacy_path, &instance_path).map_err(|error| {
+                AppError::Command(format!(
+                    "Failed migrating legacy WireGuard config {} -> {}: {error}",
+                    legacy_path.display(),
+                    instance_path.display()
+                ))
+            })?;
+            changed = true;
+        }
+    }
+    let current_instance_id = state.instance.instance_id;
+    let persisted_config_path = current_instance_id
+        .map(|instance_id| instance_local_config_path(app_data_dir, instance_id))
+        .filter(|path| path.exists())
+        .or_else(|| {
+            state
+                .provisioned_servers
+                .iter()
+                .find(|record| Some(record.instance_id) == current_instance_id)
+                .and_then(|record| {
+                    let path = PathBuf::from(record.wireguard_config_path.clone());
+                    if path.exists() { Some(path) } else { None }
+                })
+        })
+        .unwrap_or_else(|| legacy_local_config_path(app_data_dir));
 
     if let Some(record) = state
         .instance
@@ -1112,6 +1199,13 @@ pub fn normalize_wireguard_state_from_disk(
         changed |= apply_expected_tunnel_to_state(state, &expected);
 
         for record in &mut state.provisioned_servers {
+            let should_sync_record = current_instance_id
+                .map(|instance_id| record.instance_id == instance_id)
+                .unwrap_or(false);
+            if !should_sync_record {
+                continue;
+            }
+
             if record.wireguard_config_path != persisted_path_string {
                 record.wireguard_config_path = persisted_path_string.clone();
                 changed = true;
@@ -1148,6 +1242,10 @@ pub fn normalize_wireguard_state_from_disk(
 }
 
 pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<()> {
+    if context.wireguard_mutation_in_progress() {
+        return Ok(());
+    }
+
     let snapshot = context.load_state().await;
     if snapshot.instance.instance_id.is_none()
         || snapshot.wireguard.config_path.trim().is_empty()
@@ -1162,30 +1260,101 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
     }
 
     #[cfg(target_os = "macos")]
-    if !Path::new("/Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist").exists() {
+    if !Path::new(MACOS_WIREGUARD_HELPER_PLIST_PATH).exists() {
         return Ok(());
     }
 
     let expected = load_expected_local_tunnel(&config_path)?;
-    let runtime_before = collect_local_wireguard_runtime_state()?;
+    let runtime_before = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
     let handshake_missing = runtime_before.latest_handshake.is_empty()
         || runtime_before
             .latest_handshake
             .to_ascii_lowercase()
             .contains("never");
-    let needs_repair = runtime_before.peer_public_key != expected.peer_public_key
-        || runtime_before.allowed_ips != expected.allowed_ips
-        || handshake_missing
-        || !can_ping_tunnel_host(&expected.server_ip);
+    let config_mismatch = !local_tunnel_runtime_matches_expected(&runtime_before, &expected);
+    let ping_ok = can_ping_tunnel_host(&expected.server_ip);
 
-    if needs_repair {
-        warn!(
-            "WireGuard health monitor detected stale local tunnel state; reapplying the saved config without rotating keys"
-        );
-        reconnect_local_wireguard_client(&config_path)?;
+    if ping_ok {
+        #[cfg(target_os = "macos")]
+        clear_macos_monitor_repair_cooldown();
+
+        let _ = context
+            .update_state(|state| {
+                apply_expected_tunnel_to_state(state, &expected);
+                if !runtime_before.interface_name.trim().is_empty() {
+                    state.wireguard.last_runtime_interface = runtime_before.interface_name.clone();
+                }
+            })
+            .await;
+
+        return Ok(());
     }
 
-    let runtime_after = collect_local_wireguard_runtime_state()?;
+    let connectivity_missing = handshake_missing || !ping_ok;
+    #[cfg(target_os = "macos")]
+    let helper_generation = macos_helper_generation();
+    #[cfg(target_os = "macos")]
+    let needs_repair = match helper_generation {
+        Some(MacosHelperGeneration::WatchRequests) => config_mismatch,
+        Some(MacosHelperGeneration::Legacy) => false,
+        None => config_mismatch || connectivity_missing,
+    };
+    #[cfg(not(target_os = "macos"))]
+    let needs_repair = config_mismatch || connectivity_missing;
+
+    #[cfg(target_os = "macos")]
+    if matches!(helper_generation, Some(MacosHelperGeneration::Legacy)) && config_mismatch {
+        if can_attempt_macos_monitor_repair() {
+            warn!(
+                "Legacy Noland WireGuard helper detected; background auto-repair is disabled until you run an explicit reconnect/setup to upgrade it (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                runtime_before.peer_public_key == expected.peer_public_key,
+                runtime_before.allowed_ips == expected.allowed_ips,
+                handshake_missing,
+                ping_ok
+            );
+        }
+        return Ok(());
+    }
+
+    if needs_repair {
+        #[cfg(target_os = "macos")]
+        if !can_attempt_macos_monitor_repair() {
+            return Ok(());
+        }
+
+        warn!(
+            "WireGuard health monitor detected stale local tunnel state; reapplying the saved config without rotating keys (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+            runtime_before.peer_public_key == expected.peer_public_key,
+            runtime_before.allowed_ips == expected.allowed_ips,
+            handshake_missing,
+            ping_ok
+        );
+        #[cfg(target_os = "macos")]
+        {
+            if let Err(error) = request_macos_helper_repair(&config_path, "health-monitor") {
+                warn!(
+                    "WireGuard health monitor helper repair failed; leaving explicit reconnect/setup to recover tunnel: {error}"
+                );
+                return Ok(());
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            if let Err(error) = reconnect_local_wireguard_client(&config_path) {
+                warn!(
+                    "WireGuard health monitor reconnect failed; leaving explicit reconnect/setup to recover tunnel: {error}"
+                );
+                return Ok(());
+            }
+        }
+    }
+
+    let runtime_after = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
+    #[cfg(target_os = "macos")]
+    if local_tunnel_runtime_matches_expected(&runtime_after, &expected) {
+        clear_macos_monitor_repair_cooldown();
+    }
+
     let _ = context
         .update_state(|state| {
             apply_expected_tunnel_to_state(state, &expected);
@@ -1407,26 +1576,24 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
         );
     }
 
-    let no_op_script = format!(
-        "export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if [ -f {MACOS_LOCAL_CONF_PATH} ] || [ -f {MACOS_HOMEBREW_CONF_PATH} ]; then wg show 2>/dev/null || true; fi"
-    );
-    let applescript = format!(
-        "do shell script \"{}\" with administrator privileges",
-        no_op_script.replace('\\', "\\\\").replace('"', "\\\"")
-    );
-    let existing = Command::new("osascript")
-        .current_dir("/")
-        .arg("-e")
-        .arg(applescript)
-        .output()
-        .map_err(|error| AppError::Command(format!("Failed to run osascript: {error}")))?;
-
-    if existing.status.success() {
-        let stdout = String::from_utf8_lossy(&existing.stdout);
-        if stdout.contains(&format!("peer: {}", expected.peer_public_key))
-            && stdout.contains(&format!("allowed ips: {}", expected.allowed_ips))
-        {
-            return Ok("WireGuard client tunnel already active on this Mac (no setup changes applied)".to_string());
+    if matches!(
+        macos_helper_generation(),
+        Some(MacosHelperGeneration::WatchRequests)
+    ) {
+        match request_macos_helper_repair(config_path, "setup-local-wireguard-client") {
+            Ok(()) => {
+                if local_tunnel_runtime_is_healthy(&expected) {
+                    return Ok(
+                        "WireGuard client tunnel repaired on this Mac using the installed Noland helper"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "WireGuard helper setup failed; falling back to hard reconnect: {error}"
+                );
+            }
         }
     }
 
@@ -1445,6 +1612,27 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
         );
     }
 
+    if matches!(
+        macos_helper_generation(),
+        Some(MacosHelperGeneration::WatchRequests)
+    ) {
+        match request_macos_helper_repair(config_path, "reconnect-local-wireguard-client") {
+            Ok(()) => {
+                if local_tunnel_runtime_is_healthy(&expected) {
+                    return Ok(
+                        "WireGuard client tunnel reconnected on this Mac using the installed Noland helper"
+                            .to_string(),
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    "WireGuard helper reconnect failed; falling back to hard reconnect: {error}"
+                );
+            }
+        }
+    }
+
     hard_reconnect_local_wireguard_client_macos(config_path, false)
 }
 
@@ -1456,6 +1644,14 @@ fn hard_reconnect_local_wireguard_client_macos(
     let expected = load_expected_local_tunnel(config_path)?;
 
     let path = config_path.display().to_string().replace('"', "\\\"");
+    let request_path = macos_helper_request_path(config_path)
+        .display()
+        .to_string()
+        .replace('"', "\\\"");
+    let status_path = macos_helper_status_path(config_path)
+        .display()
+        .to_string()
+        .replace('"', "\\\"");
     let expected_peer = expected.peer_public_key.replace('"', "\\\"");
     let expected_allowed_ips = expected.allowed_ips.replace('"', "\\\"");
     let expected_server_ip = expected.server_ip.replace('"', "\\\"");
@@ -1465,11 +1661,35 @@ set -eu
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
+SOURCE_CONF_PATH="{path}"
 LOCAL_CONF_PATH="{MACOS_LOCAL_CONF_PATH}"
 HOMEBREW_CONF_PATH="{MACOS_HOMEBREW_CONF_PATH}"
+REQUEST_PATH="{request_path}"
+STATUS_PATH="{status_path}"
 EXPECTED_PEER="{expected_peer}"
 EXPECTED_ALLOWED_IPS="{expected_allowed_ips}"
 EXPECTED_SERVER_IP="{expected_server_ip}"
+
+write_status() {{
+  status="$1"
+  message="$2"
+  mkdir -p "$(dirname "$STATUS_PATH")"
+  printf 'status=%s\ntimestamp=%s\nmessage=%s\n' "$status" "$(date +%s)" "$message" > "$STATUS_PATH"
+  chmod 644 "$STATUS_PATH" 2>/dev/null || true
+}}
+
+compact_output() {{
+  printf '%s' "$1" | tr '\n' ' ' | tr '\r' ' '
+}}
+
+mkdir -p "$(dirname "$REQUEST_PATH")"
+if [ ! -f "$SOURCE_CONF_PATH" ]; then
+  write_status "error" "Missing source WireGuard config at $SOURCE_CONF_PATH"
+  exit 1
+fi
+
+install -m 600 "$SOURCE_CONF_PATH" "$LOCAL_CONF_PATH"
+install -m 600 "$SOURCE_CONF_PATH" "$HOMEBREW_CONF_PATH"
 
 CONF_PATH="$LOCAL_CONF_PATH"
 if [ ! -f "$CONF_PATH" ] && [ -f "$HOMEBREW_CONF_PATH" ]; then
@@ -1477,7 +1697,7 @@ if [ ! -f "$CONF_PATH" ] && [ -f "$HOMEBREW_CONF_PATH" ]; then
 fi
 
 if [ ! -f "$CONF_PATH" ]; then
-  echo "Missing saved WireGuard config at $LOCAL_CONF_PATH and $HOMEBREW_CONF_PATH" >&2
+  write_status "error" "Missing saved WireGuard config at $LOCAL_CONF_PATH and $HOMEBREW_CONF_PATH"
   exit 1
 fi
 
@@ -1487,6 +1707,8 @@ if [ -n "$CURRENT_SHOW" ] \
   && printf '%s\n' "$CURRENT_SHOW" | grep -F "allowed ips: $EXPECTED_ALLOWED_IPS" >/dev/null 2>&1
 then
   if [ -z "$EXPECTED_SERVER_IP" ] || ping -c 1 -t 3 "$EXPECTED_SERVER_IP" >/dev/null 2>&1; then
+    rm -f "$REQUEST_PATH" 2>/dev/null || true
+    write_status "healthy" "WireGuard tunnel already healthy"
     exit 0
   fi
 fi
@@ -1494,38 +1716,58 @@ fi
 wg-quick down "$LOCAL_CONF_PATH" >/dev/null 2>&1 || true
 wg-quick down "$HOMEBREW_CONF_PATH" >/dev/null 2>&1 || true
 sleep 1
-wg-quick up "$CONF_PATH"
-wg show
+if ! UP_OUTPUT=$(wg-quick up "$CONF_PATH" 2>&1); then
+  SUMMARY=$(compact_output "$UP_OUTPUT")
+  rm -f "$REQUEST_PATH" 2>/dev/null || true
+  write_status "error" "wg-quick up failed: $SUMMARY"
+  printf '%s\n' "$UP_OUTPUT"
+  exit 1
+fi
+SHOW_OUTPUT=$(wg show 2>/dev/null || true)
+rm -f "$REQUEST_PATH" 2>/dev/null || true
+if [ -n "$SHOW_OUTPUT" ] \
+  && printf '%s\n' "$SHOW_OUTPUT" | grep -F "peer: $EXPECTED_PEER" >/dev/null 2>&1 \
+  && printf '%s\n' "$SHOW_OUTPUT" | grep -F "allowed ips: $EXPECTED_ALLOWED_IPS" >/dev/null 2>&1
+then
+  write_status "repaired" "WireGuard tunnel applied successfully"
+else
+  SUMMARY=$(compact_output "$SHOW_OUTPUT")
+  write_status "error" "WireGuard helper could not verify the expected tunnel after reconnect; wg show: $SUMMARY"
+  printf '%s\n' "$SHOW_OUTPUT"
+  exit 1
+fi
+
+printf '%s\n' "$SHOW_OUTPUT"
 "#
     );
-    let launchd_plist = r#"<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+    let launchd_plist = format!(r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
 <dict>
   <key>Label</key>
-  <string>com.noland.wireguard.nolandwg0</string>
+  <string>{MACOS_WIREGUARD_HELPER_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/local/libexec/noland-wireguard-repair.sh</string>
+    <string>{MACOS_WIREGUARD_HELPER_SCRIPT_PATH}</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
+  <key>WatchPaths</key>
+  <array>
+    <string>{path}</string>
+    <string>{request_path}</string>
+  </array>
   <key>StartInterval</key>
-  <integer>30</integer>
-  <key>KeepAlive</key>
-  <dict>
-    <key>SuccessfulExit</key>
-    <false/>
-  </dict>
+  <integer>60</integer>
   <key>StandardOutPath</key>
   <string>/var/log/noland-wireguard.log</string>
   <key>StandardErrorPath</key>
   <string>/var/log/noland-wireguard.log</string>
 </dict>
 </plist>
-"#;
+"#);
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; cat > /usr/local/libexec/noland-wireguard-repair.sh <<'EOF'\n{repair_script}\nEOF\nchmod 755 /usr/local/libexec/noland-wireguard-repair.sh; cat > /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; chmod 644 /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; launchctl bootout system/com.noland.wireguard.nolandwg0 >/dev/null 2>&1 || true; /usr/local/libexec/noland-wireguard-repair.sh; launchctl bootstrap system /Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist; launchctl kickstart -k system/com.noland.wireguard.nolandwg0; wg show"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec \"$(dirname \"{request_path}\")\"; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; wg show"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -1553,6 +1795,177 @@ wg show
     } else {
         Ok("WireGuard client tunnel reconnected on this Mac".to_string())
     }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_helper_request_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension("repair.request")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_helper_status_path(config_path: &Path) -> PathBuf {
+    config_path.with_extension("repair.status")
+}
+
+#[cfg(target_os = "macos")]
+fn macos_helper_is_installed() -> bool {
+    Path::new(MACOS_WIREGUARD_HELPER_PLIST_PATH).exists()
+        && Path::new(MACOS_WIREGUARD_HELPER_SCRIPT_PATH).exists()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_helper_generation() -> Option<MacosHelperGeneration> {
+    if !macos_helper_is_installed() {
+        return None;
+    }
+
+    let Ok(plist) = std::fs::read_to_string(MACOS_WIREGUARD_HELPER_PLIST_PATH) else {
+        return Some(MacosHelperGeneration::Legacy);
+    };
+
+    if plist.contains("WatchPaths") && plist.contains("repair.request") {
+        Some(MacosHelperGeneration::WatchRequests)
+    } else {
+        Some(MacosHelperGeneration::Legacy)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_helper_monitor_repair_state() -> &'static Mutex<Option<Instant>> {
+    MACOS_HELPER_LAST_MONITOR_REPAIR.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(target_os = "macos")]
+fn can_attempt_macos_monitor_repair() -> bool {
+    let mut state = macos_helper_monitor_repair_state()
+        .lock()
+        .expect("macos helper monitor repair mutex poisoned");
+    let now = Instant::now();
+
+    if let Some(last_attempt) = *state {
+        if now.duration_since(last_attempt) < Duration::from_secs(MACOS_HELPER_MONITOR_REPAIR_COOLDOWN_SECS) {
+            return false;
+        }
+    }
+
+    *state = Some(now);
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn clear_macos_monitor_repair_cooldown() {
+    if let Ok(mut state) = macos_helper_monitor_repair_state().lock() {
+        *state = None;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn request_macos_helper_repair(config_path: &Path, reason: &str) -> AppResult<()> {
+    if !matches!(
+        macos_helper_generation(),
+        Some(MacosHelperGeneration::WatchRequests)
+    ) {
+        return Err(AppError::Command(
+            format!(
+                "Legacy Noland WireGuard helper detected; run the explicit {} flow to upgrade the helper before using request-based repairs.",
+                if reason.contains("setup") { "setup" } else { "reconnect" }
+            )
+        ));
+    }
+
+    let request_path = macos_helper_request_path(config_path);
+    let status_path = macos_helper_status_path(config_path);
+    if let Some(parent) = request_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Command(format!(
+                "Failed creating Noland WireGuard helper request directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let _ = std::fs::remove_file(&status_path);
+
+    std::fs::write(&request_path, format!("reason={reason}\ntimestamp={}\n", current_unix_timestamp()?))
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed writing Noland WireGuard helper request {}: {error}",
+                request_path.display()
+            ))
+        })?;
+
+    let _ = std::fs::write(
+        config_path,
+        std::fs::read(config_path).map_err(|error| {
+            AppError::Command(format!(
+                "Failed reading WireGuard config {} before helper repair request: {error}",
+                config_path.display()
+            ))
+        })?,
+    );
+
+    wait_for_macos_helper_result(config_path)
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_macos_helper_result(config_path: &Path) -> AppResult<()> {
+    let expected = load_expected_local_tunnel(config_path)?;
+    let status_path = macos_helper_status_path(config_path);
+    let start = std::time::Instant::now();
+    let timeout = if matches!(
+        macos_helper_generation(),
+        Some(MacosHelperGeneration::WatchRequests)
+    ) {
+        Duration::from_secs(20)
+    } else {
+        Duration::from_secs(75)
+    };
+
+    while start.elapsed() < timeout {
+        if local_tunnel_runtime_is_healthy(&expected) {
+            return Ok(());
+        }
+
+        if let Ok(runtime) = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key)) {
+            if local_tunnel_runtime_matches_expected(&runtime, &expected) {
+                return Ok(());
+            }
+        }
+
+        if let Ok(content) = std::fs::read_to_string(&status_path) {
+            let status = content
+                .lines()
+                .find_map(|line| line.strip_prefix("status="))
+                .unwrap_or("");
+            let message = content
+                .lines()
+                .find_map(|line| line.strip_prefix("message="))
+                .unwrap_or("WireGuard helper did not report a specific failure.");
+            if status == "healthy" || status == "repaired" {
+                return Ok(());
+            }
+            if status == "error" {
+                return Err(AppError::Command(message.to_string()));
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    Err(AppError::Command(
+        format!(
+            "Timed out waiting for the installed Noland WireGuard helper to repair the local tunnel after {} seconds.",
+            timeout.as_secs()
+        ),
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn current_unix_timestamp() -> AppResult<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|error| AppError::State(format!("Clock failure while writing helper request: {error}")))
 }
 
 #[cfg(target_os = "macos")]
@@ -1929,58 +2342,101 @@ fn load_expected_local_tunnel(config_path: &Path) -> AppResult<ExpectedLocalTunn
     })
 }
 
-fn collect_local_wireguard_runtime_state() -> AppResult<LocalWireGuardRuntimeState> {
+fn collect_local_wireguard_runtime_state(
+    expected_peer_public_key: Option<&str>,
+) -> AppResult<LocalWireGuardRuntimeState> {
     let output = read_local_wireguard_show_output()?;
     if output.trim().is_empty() {
         return Ok(LocalWireGuardRuntimeState::default());
     }
 
-    let mut runtime = LocalWireGuardRuntimeState::default();
-    let mut in_peer = false;
+    let mut peers = Vec::new();
+    let mut current_interface_name = String::new();
+    let mut current_interface_public_key = String::new();
+    let mut current_peer: Option<LocalWireGuardPeerState> = None;
+
     for line in output.lines() {
         let trimmed = line.trim();
         if let Some(value) = trimmed.strip_prefix("interface:") {
-            runtime.interface_name = value.trim().to_string();
-            in_peer = false;
+            if let Some(peer) = current_peer.take() {
+                peers.push(peer);
+            }
+            current_interface_name = value.trim().to_string();
+            current_interface_public_key.clear();
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("public key:") {
-            if in_peer {
-                if runtime.peer_public_key.is_empty() {
-                    runtime.peer_public_key = value.trim().to_string();
+            if let Some(peer) = current_peer.as_mut() {
+                if peer.peer_public_key.is_empty() {
+                    peer.peer_public_key = value.trim().to_string();
                 }
-            } else if runtime.interface_public_key.is_empty() {
-                runtime.interface_public_key = value.trim().to_string();
+            } else if current_interface_public_key.is_empty() {
+                current_interface_public_key = value.trim().to_string();
             }
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("peer:") {
-            runtime.peer_public_key = value.trim().to_string();
-            in_peer = true;
+            if let Some(peer) = current_peer.take() {
+                peers.push(peer);
+            }
+            current_peer = Some(LocalWireGuardPeerState {
+                interface_name: current_interface_name.clone(),
+                peer_public_key: value.trim().to_string(),
+                allowed_ips: String::new(),
+                latest_handshake: String::new(),
+            });
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("allowed ips:") {
-            if in_peer && runtime.allowed_ips.is_empty() {
-                runtime.allowed_ips = value.trim().to_string();
+            if let Some(peer) = current_peer.as_mut() {
+                if peer.allowed_ips.is_empty() {
+                    peer.allowed_ips = value.trim().to_string();
+                }
             }
             continue;
         }
         if let Some(value) = trimmed.strip_prefix("latest handshake:") {
-            if in_peer && runtime.latest_handshake.is_empty() {
-                runtime.latest_handshake = value.trim().to_string();
+            if let Some(peer) = current_peer.as_mut() {
+                if peer.latest_handshake.is_empty() {
+                    peer.latest_handshake = value.trim().to_string();
+                }
             }
         }
     }
 
-    Ok(runtime)
+    if let Some(peer) = current_peer.take() {
+        peers.push(peer);
+    }
+
+    let selected = expected_peer_public_key
+        .and_then(|expected_peer| peers.iter().find(|peer| peer.peer_public_key == expected_peer))
+        .or_else(|| peers.first());
+
+    Ok(selected
+        .map(|peer| LocalWireGuardRuntimeState {
+            interface_name: peer.interface_name.clone(),
+            peer_public_key: peer.peer_public_key.clone(),
+            allowed_ips: peer.allowed_ips.clone(),
+            latest_handshake: peer.latest_handshake.clone(),
+        })
+        .unwrap_or_default())
+}
+
+fn local_tunnel_runtime_matches_expected(
+    runtime: &LocalWireGuardRuntimeState,
+    expected: &ExpectedLocalTunnel,
+) -> bool {
+    !runtime.interface_name.trim().is_empty()
+        && runtime.peer_public_key == expected.peer_public_key
+        && normalize_allowed_ips(&runtime.allowed_ips) == normalize_allowed_ips(&expected.allowed_ips)
 }
 
 fn local_tunnel_runtime_is_healthy(expected: &ExpectedLocalTunnel) -> bool {
-    let Ok(runtime) = collect_local_wireguard_runtime_state() else {
+    let Ok(runtime) = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key)) else {
         return false;
     };
 
-    if runtime.peer_public_key != expected.peer_public_key || runtime.allowed_ips != expected.allowed_ips {
+    if !local_tunnel_runtime_matches_expected(&runtime, expected) {
         return false;
     }
 
@@ -1999,9 +2455,21 @@ fn can_ping_tunnel_host(server_ip: &str) -> bool {
     let args = OsDetection::new().ping_args(server_ip);
     Command::new("ping")
         .args(&args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn normalize_allowed_ips(value: &str) -> String {
+    let mut parts = value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    parts.sort_unstable();
+    parts.join(",")
 }
 
 fn parse_wireguard_config_value(content: &str, section: &str, key: &str) -> Option<String> {

@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
-import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
+import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { PROVISIONING_ORDER } from "../../lib/constants";
@@ -72,8 +72,33 @@ export function ProvisioningScreen({
         <section className="grid gap-4 lg:grid-cols-[1.1fr_1fr]">
           <Card className="pixel-frame">
             {blockingAction?.key === "provisioning.flow" && (
-              <div className="mb-4">
-                <BlockingLoaderOverlay action={blockingAction} inline className="max-w-none p-4" />
+              <div className="mb-4" aria-busy="true" aria-live="polite">
+                <div className="mb-2 flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center justify-between gap-2 text-[1.05rem] text-[#9ec4df]">
+                      <span>{blockingAction.label}</span>
+                      <span>
+                        {typeof blockingAction.progress === "number"
+                          ? `${Math.round(blockingAction.progress)}%`
+                          : "Working..."}
+                      </span>
+                    </div>
+                  </div>
+                  <Link to="/">
+                    <Button variant="ghost" className="px-3 py-1 text-[10px]">
+                      Close
+                    </Button>
+                  </Link>
+                </div>
+                <div className="h-2 overflow-hidden border border-[#3f476c] bg-[#0b0f23] shadow-[inset_0_0_0_1px_#121731]">
+                  <div
+                    className="h-full bg-gradient-to-r from-[#2d5844] via-[#61f7ff] to-[#7bff48] transition-[width] duration-300"
+                    style={{ width: `${Math.max(0, Math.min(100, blockingAction.progress ?? 0))}%` }}
+                  />
+                </div>
+                {blockingAction.detail && (
+                  <p className="mt-2 text-[1.05rem] text-[#8fb5d4]">{blockingAction.detail}</p>
+                )}
               </div>
             )}
             <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">Pipeline Steps</h2>

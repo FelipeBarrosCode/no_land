@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter};
@@ -28,6 +28,17 @@ pub struct AppContext {
     pub orchestration_guard: Arc<Mutex<bool>>,
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
+    pub wireguard_mutation_in_progress: Arc<AtomicBool>,
+}
+
+pub struct WireGuardMutationGuard {
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for WireGuardMutationGuard {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,7 +65,20 @@ impl AppContext {
             orchestration_guard: Arc::new(Mutex::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
+            wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn begin_wireguard_mutation(&self) -> WireGuardMutationGuard {
+        self.wireguard_mutation_in_progress
+            .store(true, Ordering::SeqCst);
+        WireGuardMutationGuard {
+            flag: self.wireguard_mutation_in_progress.clone(),
+        }
+    }
+
+    pub fn wireguard_mutation_in_progress(&self) -> bool {
+        self.wireguard_mutation_in_progress.load(Ordering::SeqCst)
     }
 
     pub async fn update_state<F>(&self, update: F) -> AppResult<PersistedAppState>

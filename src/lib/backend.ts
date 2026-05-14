@@ -8,6 +8,7 @@ import type {
   PlatformCredentialsUpdate,
   PersistedAppState,
   ProvisioningEvent,
+  MoonlightConfigureResult,
   RentedInstanceSummary,
   ServerPreferencesUpdate,
   SshCredentialsUpdate,
@@ -98,6 +99,32 @@ export async function resolveMoonlightDownloadUrl(): Promise<string> {
 
 export async function launchMoonlightClient(): Promise<void> {
   await invokeSafe<void>("launch_moonlight_client");
+}
+
+export async function configureMoonlightClient(options?: {
+  apply?: boolean;
+  forceClose?: boolean;
+  native?: boolean;
+  network?: "lan" | "wifi" | "remote" | "auto";
+  preferCodec?: "auto" | "h264" | "hevc" | "av1";
+  maxBitrate?: number;
+  fps?: number;
+  resolution?: string;
+}): Promise<MoonlightConfigureResult> {
+  return invokeSafe<MoonlightConfigureResult>("configure_moonlight_client", {
+    apply: options?.apply ?? false,
+    forceClose: options?.forceClose ?? false,
+    native: options?.native ?? false,
+    network: options?.network ?? "auto",
+    preferCodec: options?.preferCodec ?? "auto",
+    maxBitrate: options?.maxBitrate ?? null,
+    fps: options?.fps ?? null,
+    resolution: options?.resolution ?? null,
+  });
+}
+
+export async function restoreMoonlightBackup(backupFile: string): Promise<string> {
+  return invokeSafe<string>("restore_moonlight_backup", { backupFile });
 }
 
 export async function getRentedInstances(): Promise<RentedInstanceSummary[]> {

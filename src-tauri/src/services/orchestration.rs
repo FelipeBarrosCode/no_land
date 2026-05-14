@@ -1193,6 +1193,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_port == 0 {
@@ -1270,6 +1271,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 .configure(
                     &remote,
                     app_data_dir,
+                    instance.id,
                     &endpoint_host,
                     endpoint_port,
                     WireGuardProvisionMode::FreshProvision,
@@ -1316,6 +1318,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             .configure(
                 &remote,
                 app_data_dir,
+                instance.id,
                 &endpoint_host,
                 endpoint_port,
                 WireGuardProvisionMode::FreshProvision,
@@ -2083,6 +2086,7 @@ async fn run_existing_instance_orchestration(
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_port == 0 {
@@ -2160,9 +2164,10 @@ async fn run_existing_instance_orchestration(
                 .configure(
                     &remote,
                     app_data_dir,
+                    instance.id,
                     &endpoint_host,
                     endpoint_port,
-                    WireGuardProvisionMode::ReinitializeExisting,
+                    WireGuardProvisionMode::FreshProvision,
                 )
                 .await?;
             mark_server_step_completed(
@@ -2206,6 +2211,7 @@ async fn run_existing_instance_orchestration(
             .configure(
                 &remote,
                 app_data_dir,
+                instance.id,
                 &endpoint_host,
                 endpoint_port,
                 WireGuardProvisionMode::ReinitializeExisting,

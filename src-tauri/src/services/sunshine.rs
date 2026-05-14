@@ -76,7 +76,7 @@ impl SunshineService {
         target_user: &str,
     ) -> AppResult<()> {
         let health_command = format!(
-            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \t\"); if [ \"$PROC_COUNT\" = \"1\" ] && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- web ---'; curl -k -I -s --connect-timeout 5 https://localhost:47990/pin 2>&1 || true; fi",
+            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \\\t\"); if [ \"$PROC_COUNT\" = \"1\" ] && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- web ---'; curl -k -I -s --connect-timeout 5 https://localhost:47990/pin 2>&1 || true; fi",
             user = target_user,
         );
 

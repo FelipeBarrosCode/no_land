@@ -164,6 +164,7 @@ impl InstanceLifecycleService {
                 ));
             }
 
+            let _wireguard_mutation_guard = context.begin_wireguard_mutation();
             let mut message = reconnect_local_wireguard_client(std::path::Path::new(&config_path))?;
             if !local_wireguard_has_peer() {
                 warn!(

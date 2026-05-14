@@ -1,7 +1,12 @@
 import { useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
-import { launchMoonlightClient, resolveMoonlightDownloadUrl } from "../../lib/backend";
+import {
+  configureMoonlightClient,
+  launchMoonlightClient,
+  resolveMoonlightDownloadUrl,
+} from "../../lib/backend";
+import type { MoonlightConfigureResult } from "../../lib/types";
 
 interface Props {
   open: boolean;
@@ -21,6 +26,8 @@ export function PairingModal({
   onSkip
 }: Props) {
   const [wireguardReadyConfirmed, setWireguardReadyConfirmed] = useState(false);
+  const [launchingMoonlight, setLaunchingMoonlight] = useState(false);
+  const [moonlightError, setMoonlightError] = useState<MoonlightConfigureResult | null>(null);
   const sunshineUrl = "https://10.77.0.1:47990";
 
   async function openMoonlightOrFallback() {
@@ -35,6 +42,35 @@ export function PairingModal({
       } catch {
         window.open(downloadUrl, "_blank", "noopener,noreferrer");
       }
+    }
+  }
+
+  async function handleContinue() {
+    setMoonlightError(null);
+    setLaunchingMoonlight(true);
+
+    try {
+      await onSkip();
+
+      const result = await configureMoonlightClient({
+        apply: true,
+        network: "auto",
+        preferCodec: "auto",
+      });
+
+      if (!result.installed) {
+        await openMoonlightOrFallback();
+        return;
+      }
+
+      if (!result.success) {
+        setMoonlightError(result);
+        return;
+      }
+
+      await openMoonlightOrFallback();
+    } finally {
+      setLaunchingMoonlight(false);
     }
   }
 
@@ -71,6 +107,36 @@ export function PairingModal({
           If the browser shows an SSL warning, click Advanced and continue. This is expected on this local WireGuard path.
         </p>
 
+        {moonlightError && (
+          <div className="mt-4 rounded border border-red-500/40 bg-red-950/30 p-4 text-[1.05rem] text-red-100">
+            <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-red-200">
+              Moonlight Setup Incomplete
+            </h4>
+            <p className="mt-2">
+              Moonlight is installed, but Noland could not safely update its settings.
+            </p>
+            {moonlightError.error && <p className="mt-2 text-red-200">{moonlightError.error}</p>}
+            {moonlightError.settingsLocation && (
+              <p className="mt-2 text-red-200">Settings store: {moonlightError.settingsLocation}</p>
+            )}
+            <p className="mt-2 text-red-200">
+              Paired hosts, credentials, and saved connection data were not modified.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => void openMoonlightOrFallback()}
+                disabled={launchingMoonlight}
+              >
+                Launch Moonlight Anyway
+              </Button>
+              <Button variant="ghost" onClick={() => setMoonlightError(null)} disabled={launchingMoonlight}>
+                Close
+              </Button>
+            </div>
+          </div>
+        )}
+
         <div className="mt-4 grid gap-3">
           <Button
             disabled={busy}
@@ -102,13 +168,10 @@ export function PairingModal({
           )}
 
           <Button
-            disabled={busy || !wireguardReadyConfirmed}
-            loading={busy && wireguardReadyConfirmed}
+            disabled={busy || launchingMoonlight || !wireguardReadyConfirmed}
+            loading={launchingMoonlight}
             loadingText="Continuing..."
-            onClick={async () => {
-              await onSkip();
-              await openMoonlightOrFallback();
-            }}
+            onClick={() => void handleContinue()}
           >
             Continue To Moonlight
           </Button>

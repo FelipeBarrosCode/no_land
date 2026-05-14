@@ -277,6 +277,35 @@ export interface FrontendError {
   retryable: boolean;
 }
 
+export interface MoonlightCodecSupport {
+  h264: boolean;
+  hevc: boolean;
+  av1: boolean;
+}
+
+export interface MoonlightAppliedSetting {
+  key: string;
+  value: string;
+}
+
+export interface MoonlightConfigureResult {
+  installed: boolean;
+  success: boolean;
+  platform: string;
+  settingsLocation: string | null;
+  backupPath: string | null;
+  displayResolution: string;
+  refreshRateHz: number;
+  networkType: string;
+  codecSupport: MoonlightCodecSupport;
+  selectedSettings: MoonlightAppliedSetting[];
+  staticDefaults: MoonlightAppliedSetting[];
+  preservedSettings: string[];
+  warnings: string[];
+  error: string | null;
+  canLaunchAnyway: boolean;
+}
+
 export interface SharedStorageSettings {
   enabled: boolean;
   backblazeKeyId: string;
