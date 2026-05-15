@@ -1593,31 +1593,9 @@ pub async fn reboot_instance_services(
 ) -> Result<String, FrontendError> {
     let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
     let target_user = context.config.audio_target_user.clone();
-    RebootHelperService::reboot_and_reinitialize(&remote, &target_user).await?;
-
-    let sunshine = crate::services::sunshine::SunshineService {
-        defaults: context.config.sunshine.clone(),
-    };
-
-    if let Err(error) = sunshine.verify_resume_health(&remote, &target_user).await {
-        warn!(
-            instance_id = instance_id,
-            "Sunshine health check failed after reboot button flow; applying single-display remediation. {}",
-            error
-        );
-        sunshine
-            .remediate_display_access_after_reboot(&remote, &target_user)
-            .await?;
-        if let Err(error) = sunshine.verify_resume_health(&remote, &target_user).await {
-            return Err(AppError::Provisioning(format!(
-                "Reboot completed, but Sunshine is still unhealthy after single-display remediation (DISPLAY=:0, XAUTHORITY=/home/{}/.Xauthority, output=HDMI-0): {}",
-                target_user, error
-            ))
-            .into());
-        }
-    }
-
-    Ok("Instance reboot completed and Sunshine recovered successfully".to_string())
+    RebootHelperService::reboot_and_reinitialize(&remote, &target_user)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
