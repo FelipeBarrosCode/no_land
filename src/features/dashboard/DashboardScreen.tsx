@@ -50,7 +50,7 @@ interface Props {
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
   onSaveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
-  onSyncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
+  onSyncInstanceStorage: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
   onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onListExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
 }

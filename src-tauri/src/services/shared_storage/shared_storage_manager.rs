@@ -36,6 +36,11 @@ struct BackupJobInfo;
 pub struct SharedStorageManager;
 
 impl SharedStorageManager {
+    const SELECTED_ONLY_MESSAGE: &'static str =
+        "Shared storage now only moves files you explicitly select in the interface.";
+    const SCHEDULED_BACKUPS_DISABLED_MESSAGE: &'static str =
+        "Scheduled shared-storage backups are disabled. Save selected files manually from the shared storage interface.";
+
     pub async fn list_local_objects(
         context: &AppContext,
         remote: &RemoteExec,
@@ -647,10 +652,15 @@ chmod 600 {path}'"#,
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<()> {
-        Self::trigger_backup(context, remote, instance_id, target_user, "manual").await
+        let _ = (context, remote, instance_id, target_user);
+        Err(AppError::InvalidInput(format!(
+            "{} Use the shared storage export picker to choose specific files first.",
+            Self::SELECTED_ONLY_MESSAGE
+        )))
     }
 
     /// Internal backup trigger with concurrency guard.
+    #[allow(dead_code)]
     async fn trigger_backup(
         context: &AppContext,
         remote: &RemoteExec,
@@ -773,6 +783,7 @@ chmod 600 {path}'"#,
     }
 
     /// Run the actual rclone sync backup.
+    #[allow(dead_code)]
     async fn run_backup(
         remote: &RemoteExec,
         target_user: &str,
@@ -1052,133 +1063,18 @@ chmod 600 {path}'"#,
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<()> {
-        info!(
-            event = "shared_storage_schedule_setup_start",
-            instance_id = instance_id,
-            target_user = target_user,
-            "Shared storage schedule setup started"
-        );
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-
-        if !settings.enabled {
-            return Err(AppError::Provisioning(
-                "Shared storage backup is not enabled.".to_string(),
-            ));
-        }
-
-        // Ensure rclone is installed and remote is configured
-        Self::ensure_rclone_installed(remote).await?;
-        Self::write_filter_rules(remote, target_user).await?;
-        Self::configure_rclone_remote(remote, target_user, settings).await?;
-
-        let filter_path = format!("/home/{}/rules.txt", target_user);
-        let dest = Self::build_storage_source(settings, false);
-
-        // Create cron entry for the user
-        let cron_cmd = format!(
-            "0 * * * * rclone copy / {dest} --filter-from {filter} --checksum",
-            dest = shell_escape(&dest),
-            filter = shell_escape(&filter_path),
-        );
-
-        let cmd = format!(
-            "(crontab -u {user} -l 2>/dev/null | grep -v 'noland-backup' || true; echo '{cron}') | crontab -u {user} -",
-            user = target_user,
-            cron = cron_cmd,
-        );
-
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(30)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        info!(
-            event = "shared_storage_schedule_setup_output",
-            target_user = target_user,
-            status_code = output.status_code,
-            stdout = %output.stdout.trim(),
-            stderr = %output.stderr.trim(),
-            "Shared storage schedule setup command output"
-        );
-
-        if output.status_code != 0 {
-            warn!(
-                event = "shared_storage_schedule_setup_failure",
-                instance_id = instance_id,
-                target_user = target_user,
-                status_code = output.status_code,
-                "Shared storage schedule setup failed"
-            );
-            return Err(AppError::Provisioning(format!(
-                "Failed to configure cron schedule: stdout: {} | stderr: {}",
-                output.stdout.trim(),
-                output.stderr.trim()
-            )));
-        }
-
-        info!(
-            event = "shared_storage_schedule_setup_success",
-            instance_id = instance_id,
-            target_user = target_user,
-            "Shared storage schedule setup succeeded"
-        );
-        info!(
-            instance_id = instance_id,
-            "Hourly backup schedule configured; output now goes to system cron handling"
-        );
-        Ok(())
+        let _ = (context, remote, instance_id, target_user);
+        Err(AppError::InvalidInput(
+            Self::SCHEDULED_BACKUPS_DISABLED_MESSAGE.to_string(),
+        ))
     }
 
     /// Remove the scheduled backup cron entry.
     pub async fn remove_scheduled_backup(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-        info!(
-            event = "shared_storage_schedule_remove_start",
-            target_user = target_user,
-            "Shared storage schedule removal started"
-        );
-        let cmd = format!(
-            "crontab -u {user} -l 2>/dev/null | grep -v 'noland-backup' | crontab -u {user} -",
-            user = target_user,
-        );
-
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(30)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        info!(
-            event = "shared_storage_schedule_remove_output",
-            target_user = target_user,
-            status_code = output.status_code,
-            stdout = %output.stdout.trim(),
-            stderr = %output.stderr.trim(),
-            "Shared storage schedule removal command output"
-        );
-
-        if output.status_code != 0 {
-            warn!(
-                event = "shared_storage_schedule_remove_failure",
-                target_user = target_user,
-                status_code = output.status_code,
-                "Failed to remove cron schedule (may not exist): stdout: {} | stderr: {}",
-                output.stdout.trim(),
-                output.stderr.trim()
-            );
-        } else {
-            info!(
-                event = "shared_storage_schedule_remove_success",
-                target_user = target_user,
-                "Shared storage schedule removed"
-            );
-            info!("Hourly backup schedule removed");
-        }
-
-        Ok(())
+        let _ = (remote, target_user);
+        Err(AppError::InvalidInput(
+            Self::SCHEDULED_BACKUPS_DISABLED_MESSAGE.to_string(),
+        ))
     }
 
     /// Auto-restore backup contents from B2 into the VM after post-provision.
@@ -1192,90 +1088,10 @@ chmod 600 {path}'"#,
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<()> {
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-
-        if !settings.enabled {
-            info!(
-                instance_id = instance_id,
-                "Shared storage disabled; skipping auto-restore"
-            );
-            return Ok(());
-        }
-
-        if settings.backblaze_key_id.trim().is_empty()
-            || settings.backblaze_application_key.trim().is_empty()
-        {
-            info!(
-                instance_id = instance_id,
-                "Backblaze credentials missing; skipping auto-restore"
-            );
-            return Ok(());
-        }
-
-        Self::ensure_rclone_installed(remote).await?;
-        Self::write_filter_rules(remote, target_user).await?;
-        Self::configure_rclone_remote(remote, target_user, settings).await?;
-
-        let source = Self::build_storage_source(settings, false);
-        let filter_path = format!("/home/{}/rules.txt", target_user);
-
-        // Check if backup content exists; skip silently when empty.
-        let check_cmd = format!(
-            "sudo -u {user} rclone lsf {src} --max-depth 1 2>&1",
-            user = target_user,
-            src = shell_escape(&source),
-        );
-
-        let check = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&check_cmd, Duration::from_secs(60)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        if check.status_code != 0 {
-            warn!(
-                instance_id = instance_id,
-                "Auto-restore source check failed; skipping. stdout={} stderr={}",
-                check.stdout.trim(),
-                check.stderr.trim()
-            );
-            return Ok(());
-        }
-
-        if check.stdout.trim().is_empty() {
-            info!(
-                instance_id = instance_id,
-                "No prior backup contents found; skipping auto-restore"
-            );
-            return Ok(());
-        }
-
-        let restore_cmd = format!(
-            "sudo -u {user} rclone copy {src} / --filter-from {filter} --checksum --update 2>&1",
-            user = target_user,
-            src = shell_escape(&source),
-            filter = shell_escape(&filter_path),
-        );
-
-        let restore = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&restore_cmd, Duration::from_secs(3600)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        if restore.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Auto-restore failed: {}",
-                redact_secrets(&restore.stdout, settings).trim()
-            )));
-        }
-
+        let _ = (context, remote, target_user);
         info!(
             instance_id = instance_id,
-            "Auto-restore completed successfully"
+            "Skipping shared-storage auto-restore because only explicit user-selected transfers are allowed"
         );
         Ok(())
     }

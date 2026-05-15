@@ -1281,6 +1281,58 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     })
 }
 
+async fn build_remote_exec_for_instance(
+    context: &AppContext,
+    instance_id: u64,
+) -> Result<RemoteExec, AppError> {
+    let state = context.state.read().await.clone();
+    let private_key_path = state.ssh.private_key_path.clone();
+    if private_key_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "SSH private key path is empty. Run provisioning first.".to_string(),
+        ));
+    }
+
+    let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+        context.config.audio_target_user.clone()
+    } else {
+        state.ssh.ssh_username.clone()
+    };
+
+    let target = state
+        .provisioned_servers
+        .iter()
+        .find(|server| server.instance_id == instance_id)
+        .map(|server| (server.ssh_host.clone(), server.ssh_port))
+        .or_else(|| {
+            state.instance.instance_id.and_then(|active_id| {
+                (active_id == instance_id)
+                    .then(|| (state.instance.ssh_host.clone(), state.instance.ssh_port))
+            })
+        })
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "Instance {} is not tracked locally. Refresh rented instances and try again.",
+                instance_id
+            ))
+        })?;
+
+    let (ssh_host, ssh_port) = target;
+    if ssh_host.trim().is_empty() || ssh_port == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "SSH details are not available for instance {}. Ensure it is running and refreshed.",
+            instance_id
+        )));
+    }
+
+    Ok(RemoteExec {
+        ssh_user,
+        ssh_host,
+        ssh_port,
+        private_key_path,
+    })
+}
+
 #[tauri::command]
 pub async fn get_shared_storage_settings(
     context: State<'_, AppContext>,
@@ -1438,7 +1490,7 @@ pub async fn setup_instance_backup_schedule(
         &target_user,
     )
     .await?;
-    Ok("Hourly backup schedule configured".to_string())
+    Ok("Scheduled backups are disabled".to_string())
 }
 
 #[tauri::command]
@@ -1448,7 +1500,7 @@ pub async fn remove_instance_backup_schedule(
     let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     SharedStorageManager::remove_scheduled_backup(&remote, &target_user).await?;
-    Ok("Backup schedule removed".to_string())
+    Ok("Scheduled backups are disabled".to_string())
 }
 
 #[tauri::command]
@@ -1537,13 +1589,35 @@ pub async fn destroy_instance(
 #[tauri::command]
 pub async fn reboot_instance_services(
     context: State<'_, AppContext>,
-    _instance_id: u64,
+    instance_id: u64,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
     let target_user = context.config.audio_target_user.clone();
-    RebootHelperService::reboot_and_reinitialize(&remote, &target_user)
-        .await
-        .map_err(Into::into)
+    RebootHelperService::reboot_and_reinitialize(&remote, &target_user).await?;
+
+    let sunshine = crate::services::sunshine::SunshineService {
+        defaults: context.config.sunshine.clone(),
+    };
+
+    if let Err(error) = sunshine.verify_resume_health(&remote, &target_user).await {
+        warn!(
+            instance_id = instance_id,
+            "Sunshine health check failed after reboot button flow; applying single-display remediation. {}",
+            error
+        );
+        sunshine
+            .remediate_display_access_after_reboot(&remote, &target_user)
+            .await?;
+        if let Err(error) = sunshine.verify_resume_health(&remote, &target_user).await {
+            return Err(AppError::Provisioning(format!(
+                "Reboot completed, but Sunshine is still unhealthy after single-display remediation (DISPLAY=:0, XAUTHORITY=/home/{}/.Xauthority, output=HDMI-0): {}",
+                target_user, error
+            ))
+            .into());
+        }
+    }
+
+    Ok("Instance reboot completed and Sunshine recovered successfully".to_string())
 }
 
 #[tauri::command]

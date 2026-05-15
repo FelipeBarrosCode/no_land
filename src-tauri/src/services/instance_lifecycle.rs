@@ -3,16 +3,14 @@ use std::{collections::HashMap, time::Duration};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::errors::{AppError, AppResult};
 
 use super::{
-    app_context::AppContext,
-    remote_exec::RemoteExec,
-    shared_storage::shared_storage_manager::SharedStorageManager,
-    vast_api::VastApiClient,
-    wireguard::{read_local_wireguard_show_output, reconnect_local_wireguard_client},
+    app_context::AppContext, remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
+    wireguard::reconnect_local_wireguard_client,
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -160,17 +158,7 @@ impl InstanceLifecycleService {
             }
 
             let _wireguard_mutation_guard = context.begin_wireguard_mutation();
-            let mut message = reconnect_local_wireguard_client(std::path::Path::new(&config_path))?;
-            if !local_wireguard_has_peer() {
-                warn!(
-                    instance_id = instance_id,
-                    "WireGuard reconnect completed but local peer state is not visible yet"
-                );
-                message = format!(
-                    "{} (peer state is still initializing; retry in a few seconds if needed)",
-                    message
-                );
-            }
+            let message = reconnect_local_wireguard_client(std::path::Path::new(&config_path))?;
 
             info!(instance_id = instance_id, "WireGuard reconnect completed");
 
@@ -444,56 +432,22 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
-            .await?;
-        SharedStorageManager::get_backup_status(context).await
+        let _ = (context, instance_id);
+        Err(AppError::InvalidInput(
+            "Shared storage now only saves files you explicitly select in the interface. Use Export Selected instead of full backup."
+                .to_string(),
+        ))
     }
 
     pub async fn sync_instance_from_shared_storage(
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<String> {
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::auto_restore_instance(context, &remote, instance_id, &target_user)
-            .await?;
-        Ok("Shared storage sync completed".to_string())
+        let _ = (context, instance_id);
+        Err(AppError::InvalidInput(
+            "Shared storage now only restores files you explicitly select in the interface. Open Sync and choose the files or folders you want."
+                .to_string(),
+        ))
     }
 
     pub async fn list_shared_storage_objects(
@@ -638,17 +592,6 @@ impl InstanceLifecycleService {
         )
         .await
     }
-}
-
-fn local_wireguard_has_peer() -> bool {
-    let stdout = match read_local_wireguard_show_output() {
-        Ok(value) => value,
-        Err(_) => return false,
-    };
-
-    stdout
-        .lines()
-        .any(|line| line.trim_start().starts_with("peer:"))
 }
 
 async fn build_remote_exec_for_instance(

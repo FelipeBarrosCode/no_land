@@ -25,8 +25,6 @@ import {
   triggerInstanceBackup,
   triggerInstanceBackupFor,
   getInstanceBackupStatus,
-  setupInstanceBackupSchedule,
-  removeInstanceBackupSchedule,
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
   resetInstanceSunshineSettings,
@@ -48,7 +46,6 @@ import {
   getInstanceMicStatus,
   startLocalSleepPrevention,
   stopLocalSleepPrevention,
-  syncInstanceFromSharedStorage,
   listInstanceSharedStorageObjects,
   syncInstanceFromSharedStorageSelected,
   listInstanceExportableStorageObjects,
@@ -133,7 +130,7 @@ interface AppStore {
   testSharedStorageConfig: () => Promise<string | null>;
   triggerBackup: () => Promise<void>;
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
-  syncInstanceStorage: (instanceId: number, selectedPaths?: string[]) => Promise<string | null>;
+  syncInstanceStorage: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
   listSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   saveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
   listExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
@@ -798,15 +795,16 @@ export const useAppStore = create<AppStore>((set, get) => {
         blocking: true
       },
       async () => {
-      console.info("[shared-storage] sync start", {
-        instanceId,
-        selectedCount: selectedPaths?.length ?? 0
-      });
-      const message = selectedPaths && selectedPaths.length > 0
-        ? await syncInstanceFromSharedStorageSelected(instanceId, selectedPaths)
-        : await syncInstanceFromSharedStorage(instanceId);
-      console.info("[shared-storage] sync complete", { instanceId, message });
-      return message;
+        console.info("[shared-storage] sync start", {
+          instanceId,
+          selectedCount: selectedPaths.length
+        });
+        if (selectedPaths.length === 0) {
+          throw new Error("Select at least one file or folder to sync.");
+        }
+        const message = await syncInstanceFromSharedStorageSelected(instanceId, selectedPaths);
+        console.info("[shared-storage] sync complete", { instanceId, message });
+        return message;
       },
       null
     );
@@ -881,27 +879,13 @@ export const useAppStore = create<AppStore>((set, get) => {
   },
 
   setupBackupSchedule: async () => {
-    set({ busy: true, error: null });
-    try {
-      const result = await setupInstanceBackupSchedule();
-      set({ busy: false });
-      return result;
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+    set({ error: "Scheduled backups are disabled. Save selected files manually from the shared storage interface." });
+    return null;
   },
 
   removeBackupSchedule: async () => {
-    set({ busy: true, error: null });
-    try {
-      const result = await removeInstanceBackupSchedule();
-      set({ busy: false });
-      return result;
-    } catch (error) {
-      set({ busy: false, error: mapError(error) });
-      return null;
-    }
+    set({ error: "Scheduled backups are disabled. There is no active schedule to remove." });
+    return null;
   },
 
   loadSunshineSettings: async (instanceId, sunshineUsername, sunshinePassword) => {
