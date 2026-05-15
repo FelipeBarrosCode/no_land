@@ -148,11 +148,26 @@ fn start_linux_terminal_inhibitor() -> AppResult<()> {
     };
 
     let launchers = [
-        format!("gnome-terminal -- bash -lc \"{}\"", shell_escape_double_quotes(payload)),
-        format!("konsole -e bash -lc \"{}\"", shell_escape_double_quotes(payload)),
-        format!("xfce4-terminal -e \"bash -lc '{}\'\"", payload.replace('"', "\\\"")),
-        format!("x-terminal-emulator -e bash -lc \"{}\"", shell_escape_double_quotes(payload)),
-        format!("xterm -e bash -lc \"{}\"", shell_escape_double_quotes(payload)),
+        format!(
+            "gnome-terminal -- bash -lc \"{}\"",
+            shell_escape_double_quotes(payload)
+        ),
+        format!(
+            "konsole -e bash -lc \"{}\"",
+            shell_escape_double_quotes(payload)
+        ),
+        format!(
+            "xfce4-terminal -e \"bash -lc '{}\'\"",
+            payload.replace('"', "\\\"")
+        ),
+        format!(
+            "x-terminal-emulator -e bash -lc \"{}\"",
+            shell_escape_double_quotes(payload)
+        ),
+        format!(
+            "xterm -e bash -lc \"{}\"",
+            shell_escape_double_quotes(payload)
+        ),
     ];
 
     for launcher in launchers {
@@ -172,7 +187,14 @@ fn start_linux_terminal_inhibitor() -> AppResult<()> {
 fn start_windows_terminal_inhibitor() -> AppResult<()> {
     let script = r#"powershell -NoProfile -ExecutionPolicy Bypass -Command "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public class SleepUtil { [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern uint SetThreadExecutionState(uint esFlags); }'; [SleepUtil]::SetThreadExecutionState(0x80000000 -bor 0x00000001 -bor 0x00000002) | Out-Null; while ($true) { Start-Sleep -Seconds 60 } # NOLAND_SLEEP_BLOCK""#;
     let output = Command::new("cmd")
-        .args(["/C", "start", "Noland Sleep Prevention", "cmd", "/K", script])
+        .args([
+            "/C",
+            "start",
+            "Noland Sleep Prevention",
+            "cmd",
+            "/K",
+            script,
+        ])
         .output()
         .map_err(|error| AppError::Command(format!("Failed to launch terminal: {error}")))?;
 

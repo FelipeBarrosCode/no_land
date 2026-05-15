@@ -56,9 +56,7 @@ impl BundleIndexer {
         let script_path = "/tmp/noland_bundle_indexer.py";
         let write_script_cmd = format!(
             "cat > {} <<'PYTHON_EOF'\n{}\nPYTHON_EOF\nchmod +x {}",
-            script_path,
-            INDEXER_PYTHON_SCRIPT,
-            script_path
+            script_path, INDEXER_PYTHON_SCRIPT, script_path
         );
         let write_out = {
             let r = remote.clone();
@@ -178,7 +176,9 @@ impl BundleIndexer {
             .header(header::AUTHORIZATION, auth.authorization_token)
             .send()
             .await
-            .map_err(|e| AppError::Provisioning(format!("Failed to read bundle index from B2: {e}")))?;
+            .map_err(|e| {
+                AppError::Provisioning(format!("Failed to read bundle index from B2: {e}"))
+            })?;
 
         if response.status() == StatusCode::NOT_FOUND {
             return Err(AppError::NotFound(
@@ -196,10 +196,9 @@ impl BundleIndexer {
             )));
         }
 
-        let json_str = response
-            .text()
-            .await
-            .map_err(|e| AppError::Provisioning(format!("Failed reading bundle index body: {e}")))?;
+        let json_str = response.text().await.map_err(|e| {
+            AppError::Provisioning(format!("Failed reading bundle index body: {e}"))
+        })?;
         let json_str = json_str.trim();
         if json_str.is_empty() {
             return Err(AppError::NotFound(
@@ -259,10 +258,9 @@ impl BundleIndexer {
             )));
         }
 
-        response
-            .json::<B2AuthorizeResponse>()
-            .await
-            .map_err(|e| AppError::Serialization(format!("Failed to parse Backblaze auth response: {e}")))
+        response.json::<B2AuthorizeResponse>().await.map_err(|e| {
+            AppError::Serialization(format!("Failed to parse Backblaze auth response: {e}"))
+        })
     }
 
     fn build_b2_index_url(
@@ -273,12 +271,18 @@ impl BundleIndexer {
             .map_err(|e| AppError::InvalidInput(format!("Invalid Backblaze download URL: {e}")))?;
 
         {
-            let mut segments = url
-                .path_segments_mut()
-                .map_err(|_| AppError::InvalidInput("Backblaze download URL does not support path segments".to_string()))?;
+            let mut segments = url.path_segments_mut().map_err(|_| {
+                AppError::InvalidInput(
+                    "Backblaze download URL does not support path segments".to_string(),
+                )
+            })?;
             segments.push("file");
             segments.push(&settings.bucket_name);
-            for seg in settings.destination_prefix.split('/').filter(|s| !s.trim().is_empty()) {
+            for seg in settings
+                .destination_prefix
+                .split('/')
+                .filter(|s| !s.trim().is_empty())
+            {
                 segments.push(seg);
             }
             segments.push("metadata");

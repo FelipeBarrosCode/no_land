@@ -775,7 +775,6 @@ impl MicQualityProfile {
             MicQualityProfile::HighQuality => 20,
         }
     }
-
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

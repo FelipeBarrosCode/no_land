@@ -240,12 +240,13 @@ impl OrchestrationService {
             SunshinePairingMode::SunshineCli => {
                 let command = format!("sudo -u {sunshine_user} bash -lc 'printf \"%s\\n\" \"{pin}\" | sunshine-cli pair'");
                 let remote_for_pair = remote.clone();
-                let pair_result =
-                    tokio::task::spawn_blocking(move || remote_for_pair.ssh(&command, Duration::from_secs(45)))
-                        .await
-                        .map_err(|error| {
-                            AppError::Command(format!("Failed to join pairing task: {error}"))
-                        })??;
+                let pair_result = tokio::task::spawn_blocking(move || {
+                    remote_for_pair.ssh(&command, Duration::from_secs(45))
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("Failed to join pairing task: {error}"))
+                })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -257,14 +258,16 @@ impl OrchestrationService {
                 }
             }
             SunshinePairingMode::SunshinePairPin => {
-                let command = format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
+                let command =
+                    format!("sudo -u {sunshine_user} bash -lc 'sunshine --pair-pin \"{pin}\"'");
                 let remote_for_pair = remote.clone();
-                let pair_result =
-                    tokio::task::spawn_blocking(move || remote_for_pair.ssh(&command, Duration::from_secs(45)))
-                        .await
-                        .map_err(|error| {
-                            AppError::Command(format!("Failed to join pairing task: {error}"))
-                        })??;
+                let pair_result = tokio::task::spawn_blocking(move || {
+                    remote_for_pair.ssh(&command, Duration::from_secs(45))
+                })
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("Failed to join pairing task: {error}"))
+                })??;
 
                 if pair_result.status_code != 0 {
                     return Err(AppError::Provisioning(format!(
@@ -441,7 +444,13 @@ async fn run_post_provision_step(
     instance_id: u64,
     offer_id: Option<u64>,
 ) -> AppResult<()> {
-    if server_step_is_completed(context, instance_id, ProvisionStepMarker::PostProvisionCompleted).await {
+    if server_step_is_completed(
+        context,
+        instance_id,
+        ProvisionStepMarker::PostProvisionCompleted,
+    )
+    .await
+    {
         emit_step_skipped(
             app,
             context,

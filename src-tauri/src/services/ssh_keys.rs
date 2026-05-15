@@ -30,12 +30,10 @@ impl SshKeyService {
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
         let os = OsDetection::new();
         if !os.command_exists("ssh-keygen") {
-            return Err(AppError::Command(
-                format!(
-                    "`ssh-keygen` is not available in PATH. {}",
-                    os.install_hint_for_tool("ssh-keygen")
-                ),
-            ));
+            return Err(AppError::Command(format!(
+                "`ssh-keygen` is not available in PATH. {}",
+                os.install_hint_for_tool("ssh-keygen")
+            )));
         }
 
         let keys_dir = root_dir.join("keys");
@@ -87,12 +85,10 @@ impl SshKeyService {
     pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
         let os = OsDetection::new();
         if !os.command_exists("ssh-add") {
-            return Err(AppError::Command(
-                format!(
-                    "`ssh-add` is not available in PATH. {}",
-                    os.install_hint_for_tool("ssh-add")
-                ),
-            ));
+            return Err(AppError::Command(format!(
+                "`ssh-add` is not available in PATH. {}",
+                os.install_hint_for_tool("ssh-add")
+            )));
         }
 
         let (auth_sock, agent_pid) = self.start_or_get_ssh_agent().await?;

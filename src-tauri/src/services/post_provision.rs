@@ -16,7 +16,11 @@ impl PostProvisionService {
     pub async fn run(remote: &RemoteExec, target_user: &str) -> AppResult<String> {
         let encoded_script = STANDARD.encode(POST_PROVISION_SCRIPT.as_bytes());
         let safe_user = sanitize_username(target_user)?;
-        info!(event = "post_provision_start", target_user = safe_user, "Post-provision started");
+        info!(
+            event = "post_provision_start",
+            target_user = safe_user,
+            "Post-provision started"
+        );
         let command = format!(
             "sudo bash -lc 'set -euo pipefail; base64 -d > /tmp/noland-post-provision.sh <<\"EOF\"\n{}\nEOF\nchmod +x /tmp/noland-post-provision.sh\n/tmp/noland-post-provision.sh {}\nrm -f /tmp/noland-post-provision.sh'",
             encoded_script,
@@ -34,10 +38,16 @@ impl PostProvisionService {
         let stderr = output.stderr.trim();
 
         if !stdout.is_empty() {
-            info!(target_user = safe_user, "post-provision stdout:\n{}", stdout);
+            info!(
+                target_user = safe_user,
+                "post-provision stdout:\n{}", stdout
+            );
         }
         if !stderr.is_empty() {
-            warn!(target_user = safe_user, "post-provision stderr:\n{}", stderr);
+            warn!(
+                target_user = safe_user,
+                "post-provision stderr:\n{}", stderr
+            );
         }
 
         if output.status_code != 0 {
@@ -49,8 +59,7 @@ impl PostProvisionService {
             );
             return Err(AppError::Provisioning(format!(
                 "Post-provision setup failed: {} {}",
-                stderr,
-                stdout
+                stderr, stdout
             )));
         }
 

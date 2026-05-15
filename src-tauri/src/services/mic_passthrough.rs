@@ -35,7 +35,10 @@ pub struct MicPassthroughService;
 
 impl MicPassthroughService {
     /// Get mic configuration for an instance.
-    pub async fn get_config(context: &AppContext, instance_id: u64) -> AppResult<InstanceMicConfig> {
+    pub async fn get_config(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<InstanceMicConfig> {
         let state = context.load_state().await;
 
         // Find provisioned server
@@ -218,7 +221,9 @@ impl MicPassthroughService {
         // Get current profile before removing
         let current_profile = {
             let sessions = get_mic_sessions().read().await;
-            sessions.get(&instance_id).map(|s| s.quality_profile.clone())
+            sessions
+                .get(&instance_id)
+                .map(|s| s.quality_profile.clone())
         };
 
         // Disable then enable
@@ -232,7 +237,10 @@ impl MicPassthroughService {
         let target_user = context.config.audio_target_user.clone();
 
         Self::call_vm_agent_recreate_device(&remote, &target_user).await?;
-        info!(instance_id = instance_id, "Cloud Mic device recreated on VM");
+        info!(
+            instance_id = instance_id,
+            "Cloud Mic device recreated on VM"
+        );
         Ok(())
     }
 
@@ -340,10 +348,7 @@ impl MicPassthroughService {
         Ok(())
     }
 
-    async fn call_vm_agent_stop_session(
-        remote: &RemoteExec,
-        target_user: &str,
-    ) -> AppResult<()> {
+    async fn call_vm_agent_stop_session(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
         let cmd = format!(
             "sudo -u {user} curl -sf -X POST http://localhost:34779/session/stop 2>&1",
             user = target_user,
@@ -558,7 +563,10 @@ mod tests {
             enabled: false,
             ..Default::default()
         };
-        assert_eq!(MicPassthroughService::map_runtime_state(&status), MicState::Disabled);
+        assert_eq!(
+            MicPassthroughService::map_runtime_state(&status),
+            MicState::Disabled
+        );
     }
 
     #[test]
@@ -568,7 +576,10 @@ mod tests {
             vm_agent_reachable: false,
             ..Default::default()
         };
-        assert_eq!(MicPassthroughService::map_runtime_state(&status), MicState::VmAgentUnreachable);
+        assert_eq!(
+            MicPassthroughService::map_runtime_state(&status),
+            MicState::VmAgentUnreachable
+        );
     }
 
     #[test]
@@ -581,7 +592,10 @@ mod tests {
             receiving_audio: true,
             ..Default::default()
         };
-        assert_eq!(MicPassthroughService::map_runtime_state(&status), MicState::Streaming);
+        assert_eq!(
+            MicPassthroughService::map_runtime_state(&status),
+            MicState::Streaming
+        );
     }
 
     #[test]
@@ -595,7 +609,10 @@ mod tests {
             packet_loss_percent: 15.0,
             ..Default::default()
         };
-        assert_eq!(MicPassthroughService::map_runtime_state(&status), MicState::PacketLossHigh);
+        assert_eq!(
+            MicPassthroughService::map_runtime_state(&status),
+            MicState::PacketLossHigh
+        );
     }
 
     #[test]
@@ -608,7 +625,10 @@ mod tests {
             receiving_audio: false,
             ..Default::default()
         };
-        assert_eq!(MicPassthroughService::map_runtime_state(&status), MicState::NoAudioDetected);
+        assert_eq!(
+            MicPassthroughService::map_runtime_state(&status),
+            MicState::NoAudioDetected
+        );
     }
 
     #[test]

@@ -154,9 +154,23 @@ impl OsDetection {
 
     pub fn default_path_prefixes(&self) -> &'static [&'static str] {
         if self.is_macos() {
-            &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            &[
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            ]
         } else if self.is_linux() {
-            &["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]
+            &[
+                "/usr/local/sbin",
+                "/usr/local/bin",
+                "/usr/sbin",
+                "/usr/bin",
+                "/sbin",
+                "/bin",
+            ]
         } else {
             &[]
         }
@@ -207,7 +221,8 @@ impl OsDetection {
         if self.is_windows() {
             return match tool {
                 "wg" | "wg-quick" | "wireguard.exe" => {
-                    "Install WireGuard from https://wireguard.com/install and reopen the app.".to_string()
+                    "Install WireGuard from https://wireguard.com/install and reopen the app."
+                        .to_string()
                 }
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install or enable OpenSSH Client in Windows optional features.".to_string()

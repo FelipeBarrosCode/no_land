@@ -424,7 +424,10 @@ impl VastApiClient {
             .map_err(|error| map_send_error("DELETE", &url, error))?;
 
         let _ = parse_response(response, "DELETE", &url, started).await?;
-        info!("Vast destroy_instance instance_id={} succeeded", instance_id);
+        info!(
+            "Vast destroy_instance instance_id={} succeeded",
+            instance_id
+        );
         Ok(())
     }
 }

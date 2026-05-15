@@ -27,7 +27,6 @@ impl DisplayProfile {
     pub fn virtual_hz(&self) -> u32 {
         self.fps * 2
     }
-
 }
 
 #[derive(Debug, Clone)]

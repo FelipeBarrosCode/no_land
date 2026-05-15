@@ -12,13 +12,12 @@ use super::{
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     vast_api::VastApiClient,
-    wireguard::{
-        read_local_wireguard_show_output, reconnect_local_wireguard_client,
-    },
+    wireguard::{read_local_wireguard_show_output, reconnect_local_wireguard_client},
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
-static LIFECYCLE_ACTIONS: std::sync::OnceLock<RwLock<HashMap<u64, String>>> = std::sync::OnceLock::new();
+static LIFECYCLE_ACTIONS: std::sync::OnceLock<RwLock<HashMap<u64, String>>> =
+    std::sync::OnceLock::new();
 
 fn get_lifecycle_actions() -> &'static RwLock<HashMap<u64, String>> {
     LIFECYCLE_ACTIONS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -82,10 +81,9 @@ impl InstanceLifecycleService {
             )));
         }
 
-        response
-            .json()
-            .await
-            .map_err(|error| AppError::Serialization(format!("Invalid Sunshine config payload: {error}")))
+        response.json().await.map_err(|error| {
+            AppError::Serialization(format!("Invalid Sunshine config payload: {error}"))
+        })
     }
 
     async fn post_sunshine_raw_config(
@@ -146,10 +144,7 @@ impl InstanceLifecycleService {
     }
 
     /// Reconnect WireGuard for a provisioned instance.
-    pub async fn reconnect_wireguard(
-        context: &AppContext,
-        instance_id: u64,
-    ) -> AppResult<String> {
+    pub async fn reconnect_wireguard(context: &AppContext, instance_id: u64) -> AppResult<String> {
         Self::acquire_lock(instance_id, "reconnect").await?;
 
         let result = async {
@@ -177,10 +172,7 @@ impl InstanceLifecycleService {
                 );
             }
 
-            info!(
-                instance_id = instance_id,
-                "WireGuard reconnect completed"
-            );
+            info!(instance_id = instance_id, "WireGuard reconnect completed");
 
             Ok(message)
         }
@@ -190,12 +182,8 @@ impl InstanceLifecycleService {
         result
     }
 
-
     /// Pause a provisioned instance. Runs backup first if available.
-    pub async fn pause_instance(
-        context: &AppContext,
-        instance_id: u64,
-    ) -> AppResult<()> {
+    pub async fn pause_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
         Self::acquire_lock(instance_id, "pause").await?;
 
         let result = async {
@@ -230,10 +218,7 @@ impl InstanceLifecycleService {
     }
 
     /// Destroy a provisioned instance. Runs backup first if available.
-    pub async fn destroy_instance(
-        context: &AppContext,
-        instance_id: u64,
-    ) -> AppResult<()> {
+    pub async fn destroy_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
         Self::acquire_lock(instance_id, "destroy").await?;
 
         let result = async {
@@ -263,7 +248,9 @@ impl InstanceLifecycleService {
             let _ = context
                 .update_state(|state| {
                     state.instance = crate::models::app_state::InstanceState::default();
-                    state.provisioned_servers.retain(|s| s.instance_id != instance_id);
+                    state
+                        .provisioned_servers
+                        .retain(|s| s.instance_id != instance_id);
                 })
                 .await;
 
@@ -277,23 +264,36 @@ impl InstanceLifecycleService {
     }
 
     /// Run backup before pause/destroy if shared storage is configured.
-    async fn maybe_run_backup_first(
-        context: &AppContext,
-        instance_id: u64,
-    ) -> AppResult<()> {
+    async fn maybe_run_backup_first(context: &AppContext, instance_id: u64) -> AppResult<()> {
         let state = context.state.read().await;
         let ss_enabled = state.shared_storage.settings.enabled;
-        let has_credentials = !state.shared_storage.settings.backblaze_key_id.trim().is_empty()
-            && !state.shared_storage.settings.backblaze_application_key.trim().is_empty();
+        let has_credentials = !state
+            .shared_storage
+            .settings
+            .backblaze_key_id
+            .trim()
+            .is_empty()
+            && !state
+                .shared_storage
+                .settings
+                .backblaze_application_key
+                .trim()
+                .is_empty();
         let api_key = state.credentials.vast_api_key.clone();
         drop(state);
 
         if !ss_enabled || !has_credentials {
-            info!(instance_id = instance_id, "Shared storage not configured, skipping pre-action backup");
+            info!(
+                instance_id = instance_id,
+                "Shared storage not configured, skipping pre-action backup"
+            );
             return Ok(());
         }
 
-        info!(instance_id = instance_id, "Running backup before instance lifecycle action");
+        info!(
+            instance_id = instance_id,
+            "Running backup before instance lifecycle action"
+        );
 
         if api_key.trim().is_empty() {
             return Err(AppError::InvalidInput(
@@ -310,15 +310,13 @@ impl InstanceLifecycleService {
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
-        SharedStorageManager::trigger_manual_backup(
-            context,
-            &remote,
-            instance_id,
-            &target_user,
-        )
-        .await?;
+        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
+            .await?;
 
-        info!(instance_id = instance_id, "Pre-action backup completed successfully");
+        info!(
+            instance_id = instance_id,
+            "Pre-action backup completed successfully"
+        );
         Ok(())
     }
 
@@ -404,13 +402,25 @@ impl InstanceLifecycleService {
         let mut current =
             Self::fetch_sunshine_raw_config(sunshine_username, sunshine_password).await?;
 
-        current.insert("port".to_string(), Value::from(context.config.sunshine.port));
+        current.insert(
+            "port".to_string(),
+            Value::from(context.config.sunshine.port),
+        );
         current.insert("origin_web_ui_allowed".to_string(), Value::from("all"));
         current.insert("system_tray".to_string(), Value::from("disabled"));
         current.insert("upnp".to_string(), Value::from("off"));
-        current.insert("encoder".to_string(), Value::from(context.config.sunshine.encoder.clone()));
-        current.insert("av1_mode".to_string(), Value::from(context.config.sunshine.av1_mode));
-        current.insert("hevc_mode".to_string(), Value::from(context.config.sunshine.hevc_mode));
+        current.insert(
+            "encoder".to_string(),
+            Value::from(context.config.sunshine.encoder.clone()),
+        );
+        current.insert(
+            "av1_mode".to_string(),
+            Value::from(context.config.sunshine.av1_mode),
+        );
+        current.insert(
+            "hevc_mode".to_string(),
+            Value::from(context.config.sunshine.hevc_mode),
+        );
         current.insert(
             "nvenc_preset".to_string(),
             Value::from(context.config.sunshine.nvenc_preset),
@@ -440,7 +450,9 @@ impl InstanceLifecycleService {
         };
 
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -451,7 +463,8 @@ impl InstanceLifecycleService {
 
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user).await?;
+        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
+            .await?;
         SharedStorageManager::get_backup_status(context).await
     }
 
@@ -465,7 +478,9 @@ impl InstanceLifecycleService {
         };
 
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -476,7 +491,8 @@ impl InstanceLifecycleService {
 
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::auto_restore_instance(context, &remote, instance_id, &target_user).await?;
+        SharedStorageManager::auto_restore_instance(context, &remote, instance_id, &target_user)
+            .await?;
         Ok("Shared storage sync completed".to_string())
     }
 
@@ -484,14 +500,19 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        info!(instance_id = instance_id, "instance lifecycle list_shared_storage_objects start");
+        info!(
+            instance_id = instance_id,
+            "instance lifecycle list_shared_storage_objects start"
+        );
         let api_key = {
             let state = context.state.read().await;
             state.credentials.vast_api_key.clone()
         };
 
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -502,9 +523,14 @@ impl InstanceLifecycleService {
 
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
-        let result = SharedStorageManager::list_remote_objects(context, &remote, &target_user).await;
+        let result =
+            SharedStorageManager::list_remote_objects(context, &remote, &target_user).await;
         if let Ok(entries) = &result {
-            info!(instance_id = instance_id, count = entries.len(), "instance lifecycle list_shared_storage_objects complete");
+            info!(
+                instance_id = instance_id,
+                count = entries.len(),
+                "instance lifecycle list_shared_storage_objects complete"
+            );
         }
         result
     }
@@ -514,14 +540,20 @@ impl InstanceLifecycleService {
         instance_id: u64,
         selected_paths: Vec<String>,
     ) -> AppResult<String> {
-        info!(instance_id = instance_id, selected_count = selected_paths.len(), "instance lifecycle sync_selected start");
+        info!(
+            instance_id = instance_id,
+            selected_count = selected_paths.len(),
+            "instance lifecycle sync_selected start"
+        );
         let api_key = {
             let state = context.state.read().await;
             state.credentials.vast_api_key.clone()
         };
 
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -541,7 +573,10 @@ impl InstanceLifecycleService {
         )
         .await;
         if result.is_ok() {
-            info!(instance_id = instance_id, "instance lifecycle sync_selected complete");
+            info!(
+                instance_id = instance_id,
+                "instance lifecycle sync_selected complete"
+            );
         }
         result
     }
@@ -555,7 +590,9 @@ impl InstanceLifecycleService {
             state.credentials.vast_api_key.clone()
         };
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -579,7 +616,9 @@ impl InstanceLifecycleService {
             state.credentials.vast_api_key.clone()
         };
         if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput("Vast API key is missing.".to_string()));
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
         }
 
         let vast = VastApiClient::new(
@@ -607,7 +646,9 @@ fn local_wireguard_has_peer() -> bool {
         Err(_) => return false,
     };
 
-    stdout.lines().any(|line| line.trim_start().starts_with("peer:"))
+    stdout
+        .lines()
+        .any(|line| line.trim_start().starts_with("peer:"))
 }
 
 async fn build_remote_exec_for_instance(
@@ -660,26 +701,67 @@ fn sunshine_api_client() -> AppResult<reqwest::Client> {
 
 fn category_for_key(key: &str) -> &'static str {
     match key {
-        "locale" | "sunshine_name" | "min_log_level" | "global_prep_cmd" | "notify_pre_releases"
+        "locale"
+        | "sunshine_name"
+        | "min_log_level"
+        | "global_prep_cmd"
+        | "notify_pre_releases"
         | "system_tray" => "General",
-        "controller" | "gamepad" | "ds4_back_as_touchpad_click" | "motion_as_ds4"
-        | "touchpad_as_ds4" | "ds5_inputtino_randomize_mac" | "back_button_timeout"
-        | "keyboard" | "key_repeat_delay" | "key_repeat_frequency" | "always_send_scancodes"
-        | "key_rightalt_to_key_win" | "mouse" | "high_resolution_scrolling"
-        | "native_pen_touch" | "keybindings" => "Input",
-        "audio_sink" | "virtual_sink" | "stream_audio" | "install_steam_audio_drivers"
-        | "adapter_name" | "output_name" | "dd_configuration_option" | "dd_resolution_option"
-        | "dd_manual_resolution" | "dd_refresh_rate_option" | "dd_manual_refresh_rate"
-        | "dd_hdr_option" | "dd_wa_hdr_toggle_delay" | "dd_config_revert_delay"
-        | "dd_config_revert_on_disconnect" | "dd_mode_remapping" | "max_bitrate"
+        "controller"
+        | "gamepad"
+        | "ds4_back_as_touchpad_click"
+        | "motion_as_ds4"
+        | "touchpad_as_ds4"
+        | "ds5_inputtino_randomize_mac"
+        | "back_button_timeout"
+        | "keyboard"
+        | "key_repeat_delay"
+        | "key_repeat_frequency"
+        | "always_send_scancodes"
+        | "key_rightalt_to_key_win"
+        | "mouse"
+        | "high_resolution_scrolling"
+        | "native_pen_touch"
+        | "keybindings" => "Input",
+        "audio_sink"
+        | "virtual_sink"
+        | "stream_audio"
+        | "install_steam_audio_drivers"
+        | "adapter_name"
+        | "output_name"
+        | "dd_configuration_option"
+        | "dd_resolution_option"
+        | "dd_manual_resolution"
+        | "dd_refresh_rate_option"
+        | "dd_manual_refresh_rate"
+        | "dd_hdr_option"
+        | "dd_wa_hdr_toggle_delay"
+        | "dd_config_revert_delay"
+        | "dd_config_revert_on_disconnect"
+        | "dd_mode_remapping"
+        | "max_bitrate"
         | "minimum_fps_target" => "Audio/Video",
-        "upnp" | "address_family" | "address" | "port" | "origin_web_ui_allowed"
-        | "external_ip" | "lan_encryption_mode" | "wan_encryption_mode" | "ping_timeout" => "Network",
-        "file_apps" | "credentials_file" | "log_path" | "pkey" | "cert" | "file_state" => "Config Files",
+        "upnp"
+        | "address_family"
+        | "address"
+        | "port"
+        | "origin_web_ui_allowed"
+        | "external_ip"
+        | "lan_encryption_mode"
+        | "wan_encryption_mode"
+        | "ping_timeout" => "Network",
+        "file_apps" | "credentials_file" | "log_path" | "pkey" | "cert" | "file_state" => {
+            "Config Files"
+        }
         "fec_percentage" | "qp" | "min_threads" | "hevc_mode" | "av1_mode" | "capture"
         | "encoder" => "Advanced",
-        "nvenc_preset" | "nvenc_twopass" | "nvenc_spatial_aq" | "nvenc_vbv_increase"
-        | "nvenc_realtime_hags" | "nvenc_latency_over_power" | "nvenc_opengl_vulkan_on_dxgi"
+        "nvenc_preset"
+        | "nvenc_twopass"
+        | "nvenc_spatial_aq"
+        | "nvenc_vbv_increase"
+        | "nvenc_realtime_hags"
+        | "nvenc_latency_over_power"
+        | "nvenc_opengl_vulkan_on_dxgi"
         | "nvenc_h264_cavlc" => "NVIDIA NVENC",
         "qsv_preset" | "qsv_coder" | "qsv_slow_hevc" => "Intel QuickSync",
         "amd_usage" | "amd_rc" | "amd_enforce_hrd" | "amd_quality" | "amd_preanalysis"
@@ -728,21 +810,18 @@ fn friendly_label(key: &str) -> String {
     .into_iter()
     .collect();
 
-    mapping
-        .get(key)
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            key.split('_')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        None => String::new(),
-                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
+    mapping.get(key).map(|s| s.to_string()).unwrap_or_else(|| {
+        key.split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
 }
 
 fn description_for_key(key: &str) -> Option<&'static str> {
@@ -752,7 +831,9 @@ fn description_for_key(key: &str) -> Option<&'static str> {
         "min_log_level" => Some("Minimum Sunshine log level."),
         "global_prep_cmd" => Some("Commands executed before and after app launch."),
         "notify_pre_releases" => Some("Enable Sunshine pre-release update notifications."),
-        "nvenc_preset" => Some("NVENC encoding quality preset (lower = faster, higher = better quality)."),
+        "nvenc_preset" => {
+            Some("NVENC encoding quality preset (lower = faster, higher = better quality).")
+        }
         "nvenc_twopass" => Some("NVENC two-pass mode selection."),
         "nvenc_spatial_aq" => Some("Enable NVENC spatial adaptive quantization."),
         "nvenc_vbv_increase" => Some("Increase NVENC VBV buffer target."),
@@ -783,7 +864,9 @@ fn description_for_key(key: &str) -> Option<&'static str> {
         "audio_sink" => Some("PulseAudio/PipeWire sink name for audio capture."),
         "virtual_sink" => Some("Virtual sink used to stream audio while muting host speakers."),
         "stream_audio" => Some("Enable or disable audio streaming."),
-        "install_steam_audio_drivers" => Some("Install Steam Streaming Speakers drivers on Windows."),
+        "install_steam_audio_drivers" => {
+            Some("Install Steam Streaming Speakers drivers on Windows.")
+        }
         "output_name" => Some("Display output identifier Sunshine should stream."),
         "dd_configuration_option" => Some("Windows display device validation/configuration mode."),
         "dd_resolution_option" => Some("Display resolution management mode."),
@@ -793,7 +876,9 @@ fn description_for_key(key: &str) -> Option<&'static str> {
         "dd_hdr_option" => Some("Windows HDR handling mode for streamed display."),
         "dd_wa_hdr_toggle_delay" => Some("Delay before applying HDR toggle workaround."),
         "dd_config_revert_delay" => Some("Delay before reverting temporary display configuration."),
-        "dd_config_revert_on_disconnect" => Some("Revert display configuration automatically on disconnect."),
+        "dd_config_revert_on_disconnect" => {
+            Some("Revert display configuration automatically on disconnect.")
+        }
         "dd_mode_remapping" => Some("Custom display mode remapping rules."),
         "ping_timeout" => Some("Milliseconds before disconnecting idle clients."),
         "port" => Some("TCP port Sunshine listens on for Moonlight connections."),
@@ -802,7 +887,9 @@ fn description_for_key(key: &str) -> Option<&'static str> {
         "fec_percentage" => Some("Forward Error Correction percentage for stream resilience."),
         "system_tray" => Some("Show Sunshine in the system tray and send desktop notifications."),
         "upnp" => Some("Automatically open ports via UPnP (not recommended for cloud VMs)."),
-        "origin_web_ui_allowed" => Some("Which origins can access the Web UI: pc, lan, wan, or all."),
+        "origin_web_ui_allowed" => {
+            Some("Which origins can access the Web UI: pc, lan, wan, or all.")
+        }
         "external_ip" => Some("External IP override for Sunshine network advertisements."),
         "lan_encryption_mode" => Some("Encryption mode for LAN clients."),
         "wan_encryption_mode" => Some("Encryption mode for WAN clients."),
@@ -813,7 +900,9 @@ fn description_for_key(key: &str) -> Option<&'static str> {
         "touchpad_as_ds4" => Some("Treat touchpad-capable controllers as DS4 in auto mode."),
         "ds5_inputtino_randomize_mac" => Some("Randomize virtual DS5 MAC address on Linux."),
         "keyboard" => Some("Allow keyboard input from clients."),
-        "always_send_scancodes" => Some("Always send keyboard scancodes (Windows compatibility setting)."),
+        "always_send_scancodes" => {
+            Some("Always send keyboard scancodes (Windows compatibility setting).")
+        }
         "key_rightalt_to_key_win" => Some("Map right Alt key to Windows key."),
         "mouse" => Some("Allow mouse input from clients."),
         "max_bitrate" => Some("Maximum streaming bitrate in kbps."),

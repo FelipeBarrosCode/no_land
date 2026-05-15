@@ -7,27 +7,34 @@ use crate::{
     errors::{AppError, FrontendError},
     models::{
         app_state::{
-            LocationSource, ManualLocationInput, MoonlightPreferences, OnboardingPayload,
-            OrchestrationState, PersistedAppState, RentedInstanceSummary, ServerPreferencesUpdate,
-            SharedStorageSettingsResponse, SharedStorageSettingsUpdate, BackupStatusResponse,
-            SharedStorageInstanceStatus, RestoreRequest, RestoreDryRunResult, RestoreJob,
-            BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus, MicSessionResponse,
-            MicSettingsUpdate, MicQualityProfile
+            BackupStatusResponse, BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus,
+            LocationSource, ManualLocationInput, MicQualityProfile, MicSessionResponse,
+            MicSettingsUpdate, MoonlightPreferences, OnboardingPayload, OrchestrationState,
+            PersistedAppState, RentedInstanceSummary, RestoreDryRunResult, RestoreJob,
+            RestoreRequest, ServerPreferencesUpdate, SharedStorageInstanceStatus,
+            SharedStorageSettingsResponse, SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
     },
     services::{
-        app_context::AppContext, instance_lifecycle::InstanceLifecycleService,
-        location::LocationService, offer_selector::OfferSelector,
-        moonlight::{MoonlightCodecPreference, MoonlightConfigureOptions, MoonlightConfigureResult, MoonlightNetworkPreference, MoonlightService},
+        app_context::AppContext,
+        instance_lifecycle::InstanceLifecycleService,
+        location::LocationService,
+        mic_passthrough::MicPassthroughService,
+        moonlight::{
+            MoonlightCodecPreference, MoonlightConfigureOptions, MoonlightConfigureResult,
+            MoonlightNetworkPreference, MoonlightService,
+        },
+        offer_selector::OfferSelector,
+        orchestration::OrchestrationService,
         os_detection::OsDetection,
-        orchestration::OrchestrationService, reboot_helper::RebootHelperService,
-        remote_exec::RemoteExec, ssh_keys::SshKeyService,
-        sleep_inhibit::SleepInhibitService,
-        shared_storage::shared_storage_manager::SharedStorageManager,
+        reboot_helper::RebootHelperService,
+        remote_exec::RemoteExec,
         shared_storage::bundle_indexer::BundleIndexer,
         shared_storage::bundle_restore::BundleRestoreService,
-        mic_passthrough::MicPassthroughService,
+        shared_storage::shared_storage_manager::SharedStorageManager,
+        sleep_inhibit::SleepInhibitService,
+        ssh_keys::SshKeyService,
         vast_api::VastApiClient,
         wireguard::{
             read_local_wireguard_show_output, reconnect_local_wireguard_client,
@@ -609,7 +616,10 @@ pub async fn reconnect_local_wireguard_client_quick(
     if let Ok(local_stdout) = read_local_wireguard_show_output() {
         if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
             if local_snapshot.allowed_ips.contains("10.77.0.1/32")
-                && !local_snapshot.latest_handshake.to_ascii_lowercase().contains("never")
+                && !local_snapshot
+                    .latest_handshake
+                    .to_ascii_lowercase()
+                    .contains("never")
             {
                 let platform_name = OsDetection::new().platform_display_name();
                 sync_local_wireguard_keys(context.inner(), &local_snapshot).await;
@@ -639,42 +649,42 @@ async fn validate_local_wireguard_tunnel(
     for attempt in 1..=attempts {
         let local_stdout = read_local_wireguard_show_output()?;
         if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
-                if !local_snapshot.allowed_ips.contains("10.77.0.1/32") {
-                    return Err(AppError::Provisioning(format!(
-                        "Local WireGuard tunnel is not scoped to 10.77.0.1/32 (found: {})",
-                        local_snapshot.allowed_ips
-                    ))
-                    .into());
-                }
+            if !local_snapshot.allowed_ips.contains("10.77.0.1/32") {
+                return Err(AppError::Provisioning(format!(
+                    "Local WireGuard tunnel is not scoped to 10.77.0.1/32 (found: {})",
+                    local_snapshot.allowed_ips
+                ))
+                .into());
+            }
 
-                sync_local_wireguard_keys(context, &local_snapshot).await;
+            sync_local_wireguard_keys(context, &local_snapshot).await;
 
-                let handshake_missing = local_snapshot.latest_handshake.is_empty()
-                    || local_snapshot
-                        .latest_handshake
-                        .to_ascii_lowercase()
-                        .contains("never");
+            let handshake_missing = local_snapshot.latest_handshake.is_empty()
+                || local_snapshot
+                    .latest_handshake
+                    .to_ascii_lowercase()
+                    .contains("never");
 
-                if !handshake_missing {
-                    break;
-                }
+            if !handshake_missing {
+                break;
+            }
 
-                if attempt == attempts {
-                    if os.is_macos() {
-                        warn!(
+            if attempt == attempts {
+                if os.is_macos() {
+                    warn!(
                             "WireGuard handshake is still missing on macOS after reconnect retries, but the local tunnel config is applied; continuing without hard failure"
                         );
-                        return Ok(());
-                    }
-                    return Err(AppError::Provisioning(
+                    return Ok(());
+                }
+                return Err(AppError::Provisioning(
                         "WireGuard tunnel exists, but peer handshake is still not visible. Tunnel state was refreshed, but the server is not responding on the WireGuard session yet. Retry reconnect once more; if it still fails, verify the server-side WireGuard service and Sunshine reachability."
                             .to_string(),
                     )
                     .into());
-                }
+            }
 
-                std::thread::sleep(Duration::from_secs(retry_delay));
-                continue;
+            std::thread::sleep(Duration::from_secs(retry_delay));
+            continue;
         }
 
         if attempt == attempts {
@@ -929,7 +939,9 @@ pub async fn configure_moonlight_client(
     let resolution_override = resolution
         .as_deref()
         .and_then(|value| value.split_once('x'))
-        .and_then(|(width, height)| Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?)));
+        .and_then(|(width, height)| {
+            Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
+        });
 
     let network = match network.as_deref() {
         Some("lan") => MoonlightNetworkPreference::Lan,
@@ -1273,7 +1285,9 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
 pub async fn get_shared_storage_settings(
     context: State<'_, AppContext>,
 ) -> Result<SharedStorageSettingsResponse, FrontendError> {
-    SharedStorageManager::get_settings(context.inner()).await.map_err(Into::into)
+    SharedStorageManager::get_settings(context.inner())
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1303,12 +1317,20 @@ pub async fn trigger_instance_backup(
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
-            "No active instance. Start provisioning first.".to_string(),
-        ))?
+        state.instance.instance_id.ok_or_else(|| {
+            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
+        })?
     };
-    SharedStorageManager::trigger_manual_backup(context.inner(), &remote, instance_id, &target_user).await?;
-    SharedStorageManager::get_backup_status(context.inner()).await.map_err(Into::into)
+    SharedStorageManager::trigger_manual_backup(
+        context.inner(),
+        &remote,
+        instance_id,
+        &target_user,
+    )
+    .await?;
+    SharedStorageManager::get_backup_status(context.inner())
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1387,9 +1409,10 @@ pub async fn get_instance_backup_status(
 ) -> Result<SharedStorageInstanceStatus, FrontendError> {
     let instance_id = {
         let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
-            "No active instance.".to_string(),
-        ))?
+        state
+            .instance
+            .instance_id
+            .ok_or_else(|| AppError::InvalidInput("No active instance.".to_string()))?
     };
     SharedStorageManager::get_instance_backup_status(context.inner(), instance_id)
         .await
@@ -1404,11 +1427,17 @@ pub async fn setup_instance_backup_schedule(
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
-            "No active instance. Start provisioning first.".to_string(),
-        ))?
+        state.instance.instance_id.ok_or_else(|| {
+            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
+        })?
     };
-    SharedStorageManager::setup_scheduled_backup(context.inner(), &remote, instance_id, &target_user).await?;
+    SharedStorageManager::setup_scheduled_backup(
+        context.inner(),
+        &remote,
+        instance_id,
+        &target_user,
+    )
+    .await?;
     Ok("Hourly backup schedule configured".to_string())
 }
 
@@ -1435,8 +1464,8 @@ pub async fn get_instance_sunshine_settings(
         &sunshine_username,
         &sunshine_password,
     )
-        .await
-        .map_err(Into::into)
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1518,16 +1547,14 @@ pub async fn reboot_instance_services(
 }
 
 #[tauri::command]
-pub async fn generate_bundle_index(
-    context: State<'_, AppContext>,
-) -> Result<(), FrontendError> {
+pub async fn generate_bundle_index(context: State<'_, AppContext>) -> Result<(), FrontendError> {
     let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     let instance_id = {
         let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| AppError::InvalidInput(
-            "No active instance. Start provisioning first.".to_string(),
-        ))?
+        state.instance.instance_id.ok_or_else(|| {
+            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
+        })?
     };
     BundleIndexer::generate_and_upload(context.inner(), &remote, instance_id, &target_user)
         .await
@@ -1554,9 +1581,15 @@ pub async fn dry_run_restore(
 ) -> Result<RestoreDryRunResult, FrontendError> {
     let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::dry_run_restore(context.inner(), &remote, instance_id, &target_user, payload)
-        .await
-        .map_err(Into::into)
+    BundleRestoreService::dry_run_restore(
+        context.inner(),
+        &remote,
+        instance_id,
+        &target_user,
+        payload,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -1567,15 +1600,19 @@ pub async fn restore_bundle(
 ) -> Result<RestoreJob, FrontendError> {
     let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::restore_bundle(context.inner(), &remote, instance_id, &target_user, payload)
-        .await
-        .map_err(Into::into)
+    BundleRestoreService::restore_bundle(
+        context.inner(),
+        &remote,
+        instance_id,
+        &target_user,
+        payload,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]
-pub async fn get_restore_job(
-    job_id: String,
-) -> Result<RestoreJob, FrontendError> {
+pub async fn get_restore_job(job_id: String) -> Result<RestoreJob, FrontendError> {
     BundleRestoreService::get_job(&job_id)
         .await
         .map_err(Into::into)

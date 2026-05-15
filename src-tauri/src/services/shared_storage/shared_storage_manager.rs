@@ -1,14 +1,14 @@
-use std::{collections::{HashMap, HashSet}, time::{Duration, Instant}};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::errors::{AppError, AppResult};
 
-use crate::services::{
-    app_context::AppContext,
-    remote_exec::RemoteExec,
-};
+use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
 use super::bundle_indexer::BundleIndexer;
 
@@ -54,7 +54,8 @@ impl SharedStorageManager {
             || settings.backblaze_application_key.trim().is_empty()
         {
             return Err(AppError::InvalidInput(
-                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+                "Backblaze credentials are missing. Save shared storage settings first."
+                    .to_string(),
             ));
         }
 
@@ -163,9 +164,11 @@ chmod 600 {path}'"#,
 
         {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&write_filter_cmd, Duration::from_secs(60)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_filter_cmd, Duration::from_secs(60))
+            })
+            .await
+            .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
         }
 
         let backup_cmd = format!(
@@ -192,7 +195,11 @@ chmod 600 {path}'"#,
             )));
         }
 
-        info!(instance_id = instance_id, count = selected_paths.len(), "Selective shared storage export completed");
+        info!(
+            instance_id = instance_id,
+            count = selected_paths.len(),
+            "Selective shared storage export completed"
+        );
         Ok(format!(
             "Exported {} selected items to shared storage",
             selected_paths.len()
@@ -204,7 +211,10 @@ chmod 600 {path}'"#,
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        info!(target_user = target_user, "shared-storage list_remote_objects start");
+        info!(
+            target_user = target_user,
+            "shared-storage list_remote_objects start"
+        );
         let total_started = Instant::now();
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
@@ -219,7 +229,8 @@ chmod 600 {path}'"#,
             || settings.backblaze_application_key.trim().is_empty()
         {
             return Err(AppError::InvalidInput(
-                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+                "Backblaze credentials are missing. Save shared storage settings first."
+                    .to_string(),
             ));
         }
 
@@ -296,7 +307,10 @@ chmod 600 {path}'"#,
             );
 
             let fallback_source = Self::build_storage_source(settings, true);
-            info!(source = fallback_source, "shared-storage list fallback source resolved");
+            info!(
+                source = fallback_source,
+                "shared-storage list fallback source resolved"
+            );
             let fallback_cmd = format!(
                 "sudo -u {user} rclone lsf {src} --recursive --files-only --fast-list",
                 user = target_user,
@@ -402,7 +416,8 @@ chmod 600 {path}'"#,
             || settings.backblaze_application_key.trim().is_empty()
         {
             return Err(AppError::InvalidInput(
-                "Backblaze credentials are missing. Save shared storage settings first.".to_string(),
+                "Backblaze credentials are missing. Save shared storage settings first."
+                    .to_string(),
             ));
         }
 
@@ -433,9 +448,11 @@ chmod 600 {path}'"#,
 
         {
             let remote = remote.clone();
-            let write = tokio::task::spawn_blocking(move || remote.ssh(&write_filter_cmd, Duration::from_secs(60)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
+            let write = tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_filter_cmd, Duration::from_secs(60))
+            })
+            .await
+            .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
             info!(
                 status_code = write.status_code,
                 "shared-storage selection filter file written"
@@ -471,7 +488,11 @@ chmod 600 {path}'"#,
             )));
         }
 
-        info!(instance_id = instance_id, count = selected_paths.len(), "Selective shared storage sync completed");
+        info!(
+            instance_id = instance_id,
+            count = selected_paths.len(),
+            "Selective shared storage sync completed"
+        );
         Ok(format!(
             "Synced {} selected items from Backblaze",
             selected_paths.len()
@@ -520,7 +541,9 @@ chmod 600 {path}'"#,
     }
 
     /// Return non-secret settings for the frontend.
-    pub async fn get_settings(context: &AppContext) -> AppResult<crate::models::app_state::SharedStorageSettingsResponse> {
+    pub async fn get_settings(
+        context: &AppContext,
+    ) -> AppResult<crate::models::app_state::SharedStorageSettingsResponse> {
         let state = context.load_state().await;
         let s = &state.shared_storage.settings;
         Ok(crate::models::app_state::SharedStorageSettingsResponse {
@@ -529,7 +552,11 @@ chmod 600 {path}'"#,
             bucket_name: s.bucket_name.clone(),
             remote_name: s.remote_name.clone(),
             destination_prefix: s.destination_prefix.clone(),
-            crypt_password_set: s.crypt_password.as_deref().map(|p| !p.is_empty()).unwrap_or(false),
+            crypt_password_set: s
+                .crypt_password
+                .as_deref()
+                .map(|p| !p.is_empty())
+                .unwrap_or(false),
         })
     }
 
@@ -548,9 +575,12 @@ chmod 600 {path}'"#,
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
 
-        if settings.backblaze_key_id.trim().is_empty() || settings.backblaze_application_key.trim().is_empty() {
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
             return Err(AppError::Provisioning(
-                "Backblaze credentials are missing. Please configure Key ID and Application Key.".to_string(),
+                "Backblaze credentials are missing. Please configure Key ID and Application Key."
+                    .to_string(),
             ));
         }
 
@@ -650,11 +680,14 @@ chmod 600 {path}'"#,
 
         if !settings.enabled {
             return Err(AppError::Provisioning(
-                "Shared storage backup is not enabled. Please configure settings first.".to_string(),
+                "Shared storage backup is not enabled. Please configure settings first."
+                    .to_string(),
             ));
         }
 
-        if settings.backblaze_key_id.trim().is_empty() || settings.backblaze_application_key.trim().is_empty() {
+        if settings.backblaze_key_id.trim().is_empty()
+            || settings.backblaze_application_key.trim().is_empty()
+        {
             return Err(AppError::Provisioning(
                 "Backblaze credentials are missing.".to_string(),
             ));
@@ -689,13 +722,9 @@ chmod 600 {path}'"#,
         match result {
             Ok(()) => {
                 // Keep restore choices fresh in UI after each successful backup.
-                if let Err(error) = BundleIndexer::generate_and_upload(
-                    context,
-                    remote,
-                    instance_id,
-                    target_user,
-                )
-                .await
+                if let Err(error) =
+                    BundleIndexer::generate_and_upload(context, remote, instance_id, target_user)
+                        .await
                 {
                     warn!(
                         instance_id = instance_id,
@@ -763,7 +792,11 @@ chmod 600 {path}'"#,
         let rclone_config_path = format!("/home/{}/.config/rclone/rclone.conf", target_user);
         let dest = Self::build_storage_source(settings, false);
 
-        let progress_flag = if trigger == "manual" { " --progress" } else { "" };
+        let progress_flag = if trigger == "manual" {
+            " --progress"
+        } else {
+            ""
+        };
         let cmd = format!(
             "sudo rclone copy / {dest} --config {config} --filter-from {filter} --checksum{progress}",
             dest = shell_escape(&dest),
@@ -818,8 +851,7 @@ chmod 600 {path}'"#,
             }
             return Err(AppError::Provisioning(format!(
                 "rclone sync failed (exit {}): {}",
-                output.status_code,
-                actionable
+                output.status_code, actionable
             )));
         }
 
@@ -965,14 +997,22 @@ chmod 600 {path}'"#,
             )));
         }
 
-        info!("rclone remote '{}' configured (secrets written directly to config file)", settings.remote_name);
+        info!(
+            "rclone remote '{}' configured (secrets written directly to config file)",
+            settings.remote_name
+        );
         Ok(())
     }
 
     /// Determine the effective remote name for backups.
     /// If crypt password is set, uses the crypt overlay; otherwise uses plain B2.
     fn effective_remote_name(settings: &crate::models::app_state::SharedStorageSettings) -> String {
-        if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+        if settings
+            .crypt_password
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             crypt_remote_name(&settings.remote_name)
         } else {
             settings.remote_name.clone()
@@ -1093,10 +1133,7 @@ chmod 600 {path}'"#,
     }
 
     /// Remove the scheduled backup cron entry.
-    pub async fn remove_scheduled_backup(
-        remote: &RemoteExec,
-        target_user: &str,
-    ) -> AppResult<()> {
+    pub async fn remove_scheduled_backup(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
         info!(
             event = "shared_storage_schedule_remove_start",
             target_user = target_user,
@@ -1159,7 +1196,10 @@ chmod 600 {path}'"#,
         let settings = &state.shared_storage.settings;
 
         if !settings.enabled {
-            info!(instance_id = instance_id, "Shared storage disabled; skipping auto-restore");
+            info!(
+                instance_id = instance_id,
+                "Shared storage disabled; skipping auto-restore"
+            );
             return Ok(());
         }
 
@@ -1205,7 +1245,10 @@ chmod 600 {path}'"#,
         }
 
         if check.stdout.trim().is_empty() {
-            info!(instance_id = instance_id, "No prior backup contents found; skipping auto-restore");
+            info!(
+                instance_id = instance_id,
+                "No prior backup contents found; skipping auto-restore"
+            );
             return Ok(());
         }
 
@@ -1230,7 +1273,10 @@ chmod 600 {path}'"#,
             )));
         }
 
-        info!(instance_id = instance_id, "Auto-restore completed successfully");
+        info!(
+            instance_id = instance_id,
+            "Auto-restore completed successfully"
+        );
         Ok(())
     }
 
@@ -1370,7 +1416,10 @@ fn crypt_remote_name(base: &str) -> String {
 }
 
 /// Redact secrets from a string before logging.
-fn redact_secrets(input: &str, settings: &crate::models::app_state::SharedStorageSettings) -> String {
+fn redact_secrets(
+    input: &str,
+    settings: &crate::models::app_state::SharedStorageSettings,
+) -> String {
     let mut result = input.to_string();
     if !settings.backblaze_application_key.is_empty() {
         result = result.replace(&settings.backblaze_application_key, "***REDACTED***");

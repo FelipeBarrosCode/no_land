@@ -11,8 +11,8 @@ use std::env;
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
 
-use tokio::fs;
 use serde::Serialize;
+use tokio::fs;
 
 use crate::{
     errors::{AppError, AppResult},
@@ -589,7 +589,10 @@ fn find_linux_moonlight_command() -> Option<(OsString, Vec<OsString>)> {
     if resolve_command_in_path("flatpak").is_some() {
         return Some((
             OsString::from("flatpak"),
-            vec![OsString::from("run"), OsString::from("com.moonlight_stream.Moonlight")],
+            vec![
+                OsString::from("run"),
+                OsString::from("com.moonlight_stream.Moonlight"),
+            ],
         ));
     }
 
@@ -671,7 +674,9 @@ fn detect_settings_backend() -> AppResult<MoonlightSettingsBackend> {
             }
         }
 
-        return Ok(MoonlightSettingsBackend::IniFile(resolve_moonlight_config_path()?));
+        return Ok(MoonlightSettingsBackend::IniFile(
+            resolve_moonlight_config_path()?,
+        ));
     }
 
     #[cfg(target_os = "windows")]
@@ -722,7 +727,8 @@ fn ensure_moonlight_not_running(force_close: bool) -> AppResult<()> {
 
     if !force_close {
         return Err(AppError::Command(
-            "Moonlight is currently running. Close Moonlight and retry, or use --force-close.".to_string(),
+            "Moonlight is currently running. Close Moonlight and retry, or use --force-close."
+                .to_string(),
         ));
     }
 
@@ -730,7 +736,8 @@ fn ensure_moonlight_not_running(force_close: bool) -> AppResult<()> {
 
     if is_moonlight_running()? {
         return Err(AppError::Command(
-            "Moonlight is still running after force-close. Close it manually and retry.".to_string(),
+            "Moonlight is still running after force-close. Close it manually and retry."
+                .to_string(),
         ));
     }
 
@@ -928,7 +935,10 @@ fn detect_network_type(options: &MoonlightConfigureOptions) -> Option<DetectedNe
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = Command::new("nmcli").args(["-t", "-f", "TYPE,STATE", "dev"]).output() {
+        if let Ok(output) = Command::new("nmcli")
+            .args(["-t", "-f", "TYPE,STATE", "dev"])
+            .output()
+        {
             let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
             if text.contains("wifi:connected") {
                 return Some(DetectedNetworkType::Wifi);
@@ -985,8 +995,11 @@ fn detect_codec_support() -> MoonlightCodecSupport {
             .output()
         {
             let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
-            support.hevc = text.contains(" hevc ") || text.contains("hevc_cuvid") || text.contains("hevc_vaapi");
-            support.av1 = text.contains(" av1 ") || text.contains("av1_cuvid") || text.contains("av1_vaapi");
+            support.hevc = text.contains(" hevc ")
+                || text.contains("hevc_cuvid")
+                || text.contains("hevc_vaapi");
+            support.av1 =
+                text.contains(" av1 ") || text.contains("av1_cuvid") || text.contains("av1_vaapi");
         }
 
         return support;
@@ -1009,7 +1022,9 @@ fn detect_codec_support() -> MoonlightCodecSupport {
     }
 }
 
-fn read_backend_settings(backend: &MoonlightSettingsBackend) -> AppResult<BTreeMap<String, String>> {
+fn read_backend_settings(
+    backend: &MoonlightSettingsBackend,
+) -> AppResult<BTreeMap<String, String>> {
     match backend {
         MoonlightSettingsBackend::IniFile(path) => {
             if !path.exists() {
@@ -1041,9 +1056,7 @@ async fn write_backend_settings(
     merged: &BTreeMap<String, String>,
 ) -> AppResult<()> {
     match backend {
-        MoonlightSettingsBackend::IniFile(path) => {
-            write_ini_backend(path, existing, merged).await
-        }
+        MoonlightSettingsBackend::IniFile(path) => write_ini_backend(path, existing, merged).await,
         #[cfg(target_os = "macos")]
         MoonlightSettingsBackend::PlistFile(path) => write_plist_backend(path, merged),
         #[cfg(target_os = "windows")]
@@ -1051,7 +1064,10 @@ async fn write_backend_settings(
     }
 }
 
-async fn restore_backend(backend: &MoonlightSettingsBackend, backup_file: PathBuf) -> AppResult<()> {
+async fn restore_backend(
+    backend: &MoonlightSettingsBackend,
+    backup_file: PathBuf,
+) -> AppResult<()> {
     match backend {
         MoonlightSettingsBackend::IniFile(path) => {
             let content = fs::read(&backup_file).await?;
@@ -1095,9 +1111,21 @@ fn build_setting_plan(
     let mut static_defaults = Vec::new();
     let mut preserved_settings = Vec::new();
 
-    let (width, height) = options.resolution_override.unwrap_or((display.width, display.height));
-    let fps = options.fps_override.unwrap_or(display.refresh_rate_hz).clamp(1, 240);
-    let bitrate = choose_bitrate(width, height, fps, network_type, options.max_bitrate, warnings);
+    let (width, height) = options
+        .resolution_override
+        .unwrap_or((display.width, display.height));
+    let fps = options
+        .fps_override
+        .unwrap_or(display.refresh_rate_hz)
+        .clamp(1, 240);
+    let bitrate = choose_bitrate(
+        width,
+        height,
+        fps,
+        network_type,
+        options.max_bitrate,
+        warnings,
+    );
 
     dynamic_settings.push(setting("width", width));
     dynamic_settings.push(setting("height", height));
@@ -1106,7 +1134,8 @@ fn build_setting_plan(
     dynamic_settings.push(setting("hdr", 0));
     dynamic_settings.push(setting("yuv444", 0));
 
-    let selected_videocfg = choose_videocfg(options, existing, codec_support, &mut preserved_settings);
+    let selected_videocfg =
+        choose_videocfg(options, existing, codec_support, &mut preserved_settings);
     if let Some(value) = selected_videocfg {
         dynamic_settings.push(setting("videocfg", value));
     }
@@ -1116,7 +1145,13 @@ fn build_setting_plan(
         dynamic_settings.push(setting("videodec", value));
     }
 
-    let preserve_only = ["windowmode", "uidisplaymode", "audiocfg", "defaultver", "richpresence"];
+    let preserve_only = [
+        "windowmode",
+        "uidisplaymode",
+        "audiocfg",
+        "defaultver",
+        "richpresence",
+    ];
     for key in preserve_only {
         if existing.contains_key(key) {
             preserved_settings.push(format!("{key} preserved because enum mapping is uncertain"));
@@ -1180,7 +1215,10 @@ fn choose_bitrate(
     }
 
     if bitrate > 150_000 {
-        warnings.push("Bitrate above 150000 Kbps requires unlockbitrate=true; clamped to safe maximum.".to_string());
+        warnings.push(
+            "Bitrate above 150000 Kbps requires unlockbitrate=true; clamped to safe maximum."
+                .to_string(),
+        );
     }
 
     bitrate
@@ -1205,7 +1243,10 @@ fn choose_videocfg(
         }
         _ => {
             if existing.contains_key("videocfg") {
-                preserved_settings.push("videocfg preserved because the requested codec support could not be confirmed".to_string());
+                preserved_settings.push(
+                    "videocfg preserved because the requested codec support could not be confirmed"
+                        .to_string(),
+                );
                 None
             } else {
                 Some(1)
@@ -1214,12 +1255,16 @@ fn choose_videocfg(
     }
 }
 
-fn choose_videodec(existing: &BTreeMap<String, String>, preserved_settings: &mut Vec<String>) -> Option<u8> {
+fn choose_videodec(
+    existing: &BTreeMap<String, String>,
+    preserved_settings: &mut Vec<String>,
+) -> Option<u8> {
     if existing.contains_key("videodec") {
         return Some(1);
     }
 
-    preserved_settings.push("videodec preserved because hardware decoder enum mapping is uncertain".to_string());
+    preserved_settings
+        .push("videodec preserved because hardware decoder enum mapping is uncertain".to_string());
     None
 }
 
@@ -1237,7 +1282,9 @@ fn read_plist_settings(path: &PathBuf) -> AppResult<BTreeMap<String, String>> {
         .arg(path)
         .output()?;
     if !output.status.success() {
-        return Err(AppError::Command("Failed to read Moonlight plist settings".to_string()));
+        return Err(AppError::Command(
+            "Failed to read Moonlight plist settings".to_string(),
+        ));
     }
     let value: serde_json::Value = serde_json::from_slice(&output.stdout)?;
     let mut settings = BTreeMap::new();
@@ -1257,13 +1304,17 @@ fn write_plist_backend(path: &PathBuf, merged: &BTreeMap<String, String>) -> App
         if let Ok(number) = value.parse::<i64>() {
             command.arg("-int").arg(number.to_string());
         } else if value == "0" || value == "1" {
-            command.arg("-bool").arg(if value == "1" { "true" } else { "false" });
+            command
+                .arg("-bool")
+                .arg(if value == "1" { "true" } else { "false" });
         } else {
             command.arg("-string").arg(value);
         }
         let status = command.status()?;
         if !status.success() {
-            return Err(AppError::Command(format!("Failed to write plist key {key}")));
+            return Err(AppError::Command(format!(
+                "Failed to write plist key {key}"
+            )));
         }
     }
     Ok(())
@@ -1290,9 +1341,12 @@ fn read_registry_settings(key: &str) -> AppResult<BTreeMap<String, String>> {
 fn backup_registry_backend(key: &str) -> AppResult<PathBuf> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| AppError::State(format!("Clock failure while backing up registry: {error}")))?
+        .map_err(|error| {
+            AppError::State(format!("Clock failure while backing up registry: {error}"))
+        })?
         .as_secs();
-    let backup_path = std::env::temp_dir().join(format!("moonlight-registry-backup-{timestamp}.reg"));
+    let backup_path =
+        std::env::temp_dir().join(format!("moonlight-registry-backup-{timestamp}.reg"));
     let status = Command::new("reg")
         .arg("export")
         .arg(key)
@@ -1300,7 +1354,9 @@ fn backup_registry_backend(key: &str) -> AppResult<PathBuf> {
         .arg("/y")
         .status()?;
     if !status.success() {
-        return Err(AppError::Command("Failed to export Moonlight registry settings".to_string()));
+        return Err(AppError::Command(
+            "Failed to export Moonlight registry settings".to_string(),
+        ));
     }
     Ok(backup_path)
 }
@@ -1312,7 +1368,9 @@ fn write_registry_backend(key: &str, merged: &BTreeMap<String, String>) -> AppRe
             .args(["add", key, "/v", name, "/t", "REG_SZ", "/d", value, "/f"])
             .status()?;
         if !status.success() {
-            return Err(AppError::Command(format!("Failed to write registry key {name}")));
+            return Err(AppError::Command(format!(
+                "Failed to write registry key {name}"
+            )));
         }
     }
     Ok(())
@@ -1320,9 +1378,14 @@ fn write_registry_backend(key: &str, merged: &BTreeMap<String, String>) -> AppRe
 
 #[cfg(target_os = "windows")]
 fn restore_registry_backend(_key: &str, backup_file: &PathBuf) -> AppResult<()> {
-    let status = Command::new("reg").arg("import").arg(backup_file).status()?;
+    let status = Command::new("reg")
+        .arg("import")
+        .arg(backup_file)
+        .status()?;
     if !status.success() {
-        return Err(AppError::Command("Failed to restore Moonlight registry backup".to_string()));
+        return Err(AppError::Command(
+            "Failed to restore Moonlight registry backup".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1331,7 +1394,11 @@ fn json_value_to_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::Null => String::new(),
         serde_json::Value::Bool(value) => {
-            if *value { "1".to_string() } else { "0".to_string() }
+            if *value {
+                "1".to_string()
+            } else {
+                "0".to_string()
+            }
         }
         serde_json::Value::Number(value) => value.to_string(),
         serde_json::Value::String(value) => value.clone(),

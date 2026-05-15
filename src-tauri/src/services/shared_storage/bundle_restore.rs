@@ -7,8 +7,8 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::app_state::{
-    AppBundle, BundleIndex, FolderBundle, RestoreDryRunItem, RestoreDryRunResult,
-    RestoreJob, RestoreJobItem, RestoreRequest,
+    AppBundle, BundleIndex, FolderBundle, RestoreDryRunItem, RestoreDryRunResult, RestoreJob,
+    RestoreJobItem, RestoreRequest,
 };
 
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
@@ -33,7 +33,10 @@ impl BundleRestoreService {
         target_user: &str,
     ) -> AppResult<BundleIndex> {
         super::bundle_indexer::BundleIndexer::read_from_remote(
-            context, remote, instance_id, target_user,
+            context,
+            remote,
+            instance_id,
+            target_user,
         )
         .await
     }
@@ -229,27 +232,25 @@ impl BundleRestoreService {
         Ok(selected)
     }
 
-    fn compute_target(
-        folder: &FolderBundle,
-        mode: &str,
-        home: &str,
-    ) -> AppResult<String> {
+    fn compute_target(folder: &FolderBundle, mode: &str, home: &str) -> AppResult<String> {
         Self::validate_target(&folder.target, home)?;
 
         match mode {
             "merge" => Ok(folder.target.clone()),
             "restore_to_staging" => {
-                let bundle_name = folder
-                    .target
-                    .split('/')
-                    .last()
-                    .unwrap_or("restored");
+                let bundle_name = folder.target.split('/').last().unwrap_or("restored");
                 let staging_base = format!("{}/Restored/{}", home, bundle_name);
                 // Preserve relative structure under staging
-                let relative = folder.source.strip_prefix("home/").unwrap_or(&folder.source);
+                let relative = folder
+                    .source
+                    .strip_prefix("home/")
+                    .unwrap_or(&folder.source);
                 Ok(format!("{}/{}", staging_base, relative))
             }
-            _ => Err(AppError::InvalidInput(format!("Unknown restore mode: {}", mode))),
+            _ => Err(AppError::InvalidInput(format!(
+                "Unknown restore mode: {}",
+                mode
+            ))),
         }
     }
 
@@ -305,7 +306,12 @@ impl BundleRestoreService {
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
 
-        let effective_remote = if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+        let effective_remote = if settings
+            .crypt_password
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             format!("{}-crypt", settings.remote_name)
         } else {
             settings.remote_name.clone()
@@ -387,7 +393,12 @@ impl BundleRestoreService {
     ) -> AppResult<u32> {
         let state = context.load_state().await;
         let settings = &state.shared_storage.settings;
-        let effective_remote = if settings.crypt_password.as_deref().map(|s| !s.is_empty()).unwrap_or(false) {
+        let effective_remote = if settings
+            .crypt_password
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false)
+        {
             format!("{}-crypt", settings.remote_name)
         } else {
             settings.remote_name.clone()
@@ -460,7 +471,10 @@ mod tests {
 
     #[test]
     fn test_validate_target_rejects_dotdot() {
-        assert!(BundleRestoreService::validate_target("/home/user/../../etc/passwd", "/home/user").is_err());
+        assert!(
+            BundleRestoreService::validate_target("/home/user/../../etc/passwd", "/home/user")
+                .is_err()
+        );
     }
 
     #[test]
@@ -470,7 +484,10 @@ mod tests {
 
     #[test]
     fn test_validate_target_accepts_inside_home() {
-        assert!(BundleRestoreService::validate_target("/home/user/.config/discord", "/home/user").is_ok());
+        assert!(
+            BundleRestoreService::validate_target("/home/user/.config/discord", "/home/user")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -497,7 +514,9 @@ mod tests {
             kind: "folder".to_string(),
             default_selected: true,
         };
-        let result = BundleRestoreService::compute_target(&folder, "restore_to_staging", "/home/user").unwrap();
+        let result =
+            BundleRestoreService::compute_target(&folder, "restore_to_staging", "/home/user")
+                .unwrap();
         assert!(result.contains("/Restored/"));
         assert!(result.contains("user/.config/discord"));
     }
@@ -509,17 +528,19 @@ mod tests {
             generated_at: "2026-04-24T20:00:00Z".to_string(),
             instance_id: 1,
             snapshot_id: "latest".to_string(),
-            host: BundleHost { username: "user".to_string(), home: "/home/user".to_string(), os: "ubuntu".to_string() },
-            bundles: vec![
-                crate::models::app_state::AppBundle {
-                    id: "app.discord".to_string(),
-                    name: "Discord".to_string(),
-                    bundle_type: "app".to_string(),
-                    confidence: 0.92,
-                    signals: vec!["desktop_launcher".to_string()],
-                    folder_bundles: vec![],
-                }
-            ],
+            host: BundleHost {
+                username: "user".to_string(),
+                home: "/home/user".to_string(),
+                os: "ubuntu".to_string(),
+            },
+            bundles: vec![crate::models::app_state::AppBundle {
+                id: "app.discord".to_string(),
+                name: "Discord".to_string(),
+                bundle_type: "app".to_string(),
+                confidence: 0.92,
+                signals: vec!["desktop_launcher".to_string()],
+                folder_bundles: vec![],
+            }],
         };
         let bundle = BundleRestoreService::find_bundle(&index, "app.discord").unwrap();
         assert_eq!(bundle.name, "Discord");
@@ -532,7 +553,11 @@ mod tests {
             generated_at: "2026-04-24T20:00:00Z".to_string(),
             instance_id: 1,
             snapshot_id: "latest".to_string(),
-            host: BundleHost { username: "user".to_string(), home: "/home/user".to_string(), os: "ubuntu".to_string() },
+            host: BundleHost {
+                username: "user".to_string(),
+                home: "/home/user".to_string(),
+                os: "ubuntu".to_string(),
+            },
             bundles: vec![],
         };
         assert!(BundleRestoreService::find_bundle(&index, "app.missing").is_err());
