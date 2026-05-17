@@ -652,11 +652,7 @@ chmod 600 {path}'"#,
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<()> {
-        let _ = (context, remote, instance_id, target_user);
-        Err(AppError::InvalidInput(format!(
-            "{} Use the shared storage export picker to choose specific files first.",
-            Self::SELECTED_ONLY_MESSAGE
-        )))
+        Self::trigger_backup(context, remote, instance_id, target_user, "manual").await
     }
 
     /// Internal backup trigger with concurrency guard.

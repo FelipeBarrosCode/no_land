@@ -411,8 +411,11 @@ exit 0"#
         let detected_capture = self.detect_capture_backend(remote).await?;
         info!("Detected capture backend: {}", detected_capture);
 
-        let detected_output = self.detect_output_name(remote).await?;
-        info!("Detected output name: {}", detected_output);
+        let detected_output = "HDMI-0".to_string();
+        info!(
+            "Forcing Sunshine output name for provisioning path: {}",
+            detected_output
+        );
 
         self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
             .await?;

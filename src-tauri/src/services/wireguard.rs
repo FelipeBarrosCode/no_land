@@ -96,11 +96,13 @@ const MACOS_WIREGUARD_HELPER_SCRIPT_PATH: &str = "/usr/local/libexec/noland-wire
 const MACOS_WIREGUARD_HELPER_PLIST_PATH: &str =
     "/Library/LaunchDaemons/com.noland.wireguard.nolandwg0.plist";
 #[cfg(target_os = "macos")]
-const MACOS_HELPER_MONITOR_REPAIR_COOLDOWN_SECS: u64 = 180;
+const MACOS_HELPER_MONITOR_REPAIR_COOLDOWN_SECS: u64 = 600;
+const MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD: u32 = 5;
 const MONITOR_CONFLICT_WARN_EVERY: u32 = 5;
 #[cfg(target_os = "macos")]
 static MACOS_HELPER_LAST_MONITOR_REPAIR: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 static MONITOR_MISMATCH_STREAK: OnceLock<Mutex<u32>> = OnceLock::new();
+static MONITOR_REPAIR_FAILURE_STREAK: OnceLock<Mutex<u32>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -147,6 +149,24 @@ fn note_monitor_conflict_candidate(conflict_candidate: bool) -> Option<u32> {
         *streak = 0;
         None
     }
+}
+
+fn monitor_repair_failure_streak() -> &'static Mutex<u32> {
+    MONITOR_REPAIR_FAILURE_STREAK.get_or_init(|| Mutex::new(0))
+}
+
+fn note_monitor_repair_health(healthy: bool) -> u32 {
+    let Ok(mut streak) = monitor_repair_failure_streak().lock() else {
+        return 0;
+    };
+
+    if healthy {
+        *streak = 0;
+    } else {
+        *streak = streak.saturating_add(1);
+    }
+
+    *streak
 }
 
 fn instance_local_config_path(app_data_dir: &Path, instance_id: u64) -> PathBuf {
@@ -1509,6 +1529,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         && (handshake_ok || (ping_ok && !runtime_before.interface_name.trim().is_empty()));
 
     if tunnel_healthy {
+        let _ = note_monitor_repair_health(true);
         let _ = note_monitor_conflict_candidate(false);
         #[cfg(target_os = "macos")]
         clear_macos_monitor_repair_cooldown();
@@ -1527,6 +1548,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
     }
 
     let connectivity_missing = !tunnel_healthy;
+    let hard_mismatch = config_mismatch;
     #[cfg(target_os = "macos")]
     let helper_generation = macos_helper_generation();
     #[cfg(target_os = "macos")]
@@ -1540,7 +1562,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
 
     #[cfg(target_os = "macos")]
     if matches!(helper_generation, Some(MacosHelperGeneration::Legacy)) && config_mismatch {
-        if can_attempt_macos_monitor_repair() {
+        if can_attempt_macos_monitor_repair(false) {
             warn!(
                 "Legacy Noland WireGuard helper detected; background auto-repair is disabled until you run an explicit reconnect/setup to upgrade it (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
                 runtime_before.peer_public_key == expected.peer_public_key,
@@ -1553,6 +1575,22 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
     }
 
     if needs_repair {
+        let failure_streak = note_monitor_repair_health(false);
+        if !hard_mismatch && failure_streak < MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD {
+            if failure_streak == 1 || failure_streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
+                warn!(
+                    "WireGuard health monitor observed an unhealthy check but is deferring repair until failures are consecutive (streak={}/{}, peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                    failure_streak,
+                    MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD,
+                    runtime_before.peer_public_key == expected.peer_public_key,
+                    runtime_before.allowed_ips == expected.allowed_ips,
+                    !handshake_ok,
+                    ping_ok
+                );
+            }
+            return Ok(());
+        }
+
         let conflict_candidate = config_mismatch && !runtime_empty && !handshake_ok && ping_ok;
         let conflict_streak = note_monitor_conflict_candidate(conflict_candidate);
         if runtime_empty {
@@ -1596,7 +1634,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         }
 
         #[cfg(target_os = "macos")]
-        if !can_attempt_macos_monitor_repair() {
+        if !can_attempt_macos_monitor_repair(hard_mismatch) {
             return Ok(());
         }
 
@@ -1630,6 +1668,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
     let runtime_after = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
     #[cfg(target_os = "macos")]
     if local_tunnel_runtime_matches_expected(&runtime_after, &expected) {
+        let _ = note_monitor_repair_health(true);
         clear_macos_monitor_repair_cooldown();
     }
 
@@ -1927,6 +1966,8 @@ fn hard_reconnect_local_wireguard_client_macos(
     let expected_peer = expected.peer_public_key.replace('"', "\\\"");
     let expected_allowed_ips = expected.allowed_ips.replace('"', "\\\"");
     let expected_server_ip = expected.server_ip.replace('"', "\\\"");
+    let expected_endpoint_host = expected.endpoint_host.replace('"', "\\\"");
+    let expected_endpoint_port = expected.endpoint_port;
     let repair_script = format!(
         r#"#!/bin/sh
 set -eu
@@ -1941,6 +1982,8 @@ STATUS_PATH="{status_path}"
 EXPECTED_PEER="{expected_peer}"
 EXPECTED_ALLOWED_IPS="{expected_allowed_ips}"
 EXPECTED_SERVER_IP="{expected_server_ip}"
+EXPECTED_ENDPOINT_HOST="{expected_endpoint_host}"
+EXPECTED_ENDPOINT_PORT="{expected_endpoint_port}"
 
 write_status() {{
   status="$1"
@@ -1959,37 +2002,22 @@ has_recent_handshake() {{
   [ -n "$latest_handshake" ] && ! printf '%s' "$latest_handshake" | grep -qi 'never'
 }}
 
-rx_bytes_from_transfer_line() {{
-  transfer_line="$1"
-  [ -n "$transfer_line" ] || {{
-    printf '0'
-    return
-  }}
+source_config_matches_expected() {{
+  source_path="$1"
+  [ -f "$source_path" ] || return 1
 
-  rx_field=$(printf '%s\n' "$transfer_line" | sed -n 's/^  transfer: \([^,]*\),.*/\1/p' | head -n 1)
-  [ -n "$rx_field" ] || {{
-    printf '0'
-    return
-  }}
+  source_peer=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^PublicKey[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
+  source_allowed=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^AllowedIPs[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
+  source_endpoint=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^Endpoint[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
 
-  rx_value=$(printf '%s\n' "$rx_field" | awk '{{print $1}}')
-  rx_unit=$(printf '%s\n' "$rx_field" | awk '{{print $2}}')
+  [ "$source_peer" = "$EXPECTED_PEER" ] || return 1
+  [ "$source_allowed" = "$EXPECTED_ALLOWED_IPS" ] || return 1
 
-  if [ -z "$rx_value" ]; then
-    printf '0'
-    return
-  fi
+  expected_endpoint="$EXPECTED_ENDPOINT_HOST:$EXPECTED_ENDPOINT_PORT"
+  [ -n "$source_endpoint" ] || return 1
+  [ "$source_endpoint" = "$expected_endpoint" ] || return 1
 
-  case "$rx_unit" in
-    B|Bytes|Byte|"") multiplier=1 ;;
-    KiB) multiplier=1024 ;;
-    MiB) multiplier=1048576 ;;
-    GiB) multiplier=1073741824 ;;
-    TiB) multiplier=1099511627776 ;;
-    *) multiplier=1 ;;
-  esac
-
-  awk -v value="$rx_value" -v mult="$multiplier" 'BEGIN {{ printf "%.0f", value * mult }}'
+  return 0
 }}
 
 tunnel_matches_expected() {{
@@ -2008,28 +2036,26 @@ tunnel_freshness_status() {{
   fi
 
   latest_handshake=$(printf '%s\n' "$wg_output" | sed -n 's/^  latest handshake: //p' | head -n 1)
-  if ! has_recent_handshake "$latest_handshake"; then
-    printf 'handshake_missing'
-    return
-  fi
-
-  transfer_line=$(printf '%s\n' "$wg_output" | sed -n 's/^  transfer: /  transfer: /p' | head -n 1)
-  rx_bytes=$(rx_bytes_from_transfer_line "$transfer_line")
-  if [ "${{rx_bytes:-0}}" -le 0 ]; then
-    printf 'rx_zero'
+  if has_recent_handshake "$latest_handshake"; then
+    printf 'ok'
     return
   fi
 
   if [ -z "$EXPECTED_SERVER_IP" ] || ping -c 1 -t 3 "$EXPECTED_SERVER_IP" >/dev/null 2>&1; then
     printf 'ok'
   else
-    printf 'ping_failed'
+    printf 'handshake_missing_and_ping_failed'
   fi
 }}
 
 mkdir -p "$(dirname "$REQUEST_PATH")"
 if [ ! -f "$SOURCE_CONF_PATH" ]; then
   write_status "error" "Missing source WireGuard config at $SOURCE_CONF_PATH"
+  exit 1
+fi
+
+if ! source_config_matches_expected "$SOURCE_CONF_PATH"; then
+  write_status "error" "Source WireGuard config does not match expected peer/allowedIPs/endpoint; refusing to patch helper config"
   exit 1
 fi
 
@@ -2196,7 +2222,15 @@ fn macos_helper_monitor_repair_state() -> &'static Mutex<Option<Instant>> {
 }
 
 #[cfg(target_os = "macos")]
-fn can_attempt_macos_monitor_repair() -> bool {
+fn can_attempt_macos_monitor_repair(force_bypass_cooldown: bool) -> bool {
+    if force_bypass_cooldown {
+        let mut state = macos_helper_monitor_repair_state()
+            .lock()
+            .expect("macos helper monitor repair mutex poisoned");
+        *state = Some(Instant::now());
+        return true;
+    }
+
     let mut state = macos_helper_monitor_repair_state()
         .lock()
         .expect("macos helper monitor repair mutex poisoned");

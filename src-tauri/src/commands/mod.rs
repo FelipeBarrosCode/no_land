@@ -541,7 +541,21 @@ pub async fn setup_wireguard_client(
 
     let config_path = {
         let state = context.state.read().await;
-        state.wireguard.config_path.clone()
+        if let Some(instance_id) = state.instance.instance_id {
+            if let Some(path) = state
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance_id)
+                .map(|record| record.wireguard_config_path.clone())
+                .filter(|path| std::path::Path::new(path).exists())
+            {
+                path
+            } else {
+                state.wireguard.config_path.clone()
+            }
+        } else {
+            state.wireguard.config_path.clone()
+        }
     };
 
     if config_path.trim().is_empty() {
@@ -598,7 +612,21 @@ pub async fn reconnect_local_wireguard_client_quick(
 
     let config_path = {
         let state = context.state.read().await;
-        state.wireguard.config_path.clone()
+        if let Some(instance_id) = state.instance.instance_id {
+            if let Some(path) = state
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance_id)
+                .map(|record| record.wireguard_config_path.clone())
+                .filter(|path| std::path::Path::new(path).exists())
+            {
+                path
+            } else {
+                state.wireguard.config_path.clone()
+            }
+        } else {
+            state.wireguard.config_path.clone()
+        }
     };
 
     if config_path.trim().is_empty() {
