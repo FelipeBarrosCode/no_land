@@ -218,7 +218,10 @@ impl RebootHelperService {
         }
     }
 
-    async fn recover_sunshine_after_reboot(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+    async fn recover_sunshine_after_reboot(
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<()> {
         Self::wait_for_user_display_ready(remote, target_user).await?;
 
         let target_home = Self::resolve_user_home(remote, target_user).await?;
@@ -236,11 +239,17 @@ impl RebootHelperService {
             )));
         }
 
-        info!(target_user = target_user, "Sunshine recovered after reboot with single display path");
+        info!(
+            target_user = target_user,
+            "Sunshine recovered after reboot with single display path"
+        );
         Ok(())
     }
 
-    async fn ensure_audio_ready_after_reboot(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+    async fn ensure_audio_ready_after_reboot(
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<()> {
         let target_uid = Self::resolve_user_uid(remote, target_user).await?;
         let runtime_dir = format!("/run/user/{target_uid}");
 
@@ -250,7 +259,10 @@ impl RebootHelperService {
 
         let first = Self::probe_ssh(remote, &check_command, Duration::from_secs(20)).await?;
         if first.status_code == 0 && first.stdout.contains("AUDIO_READY") {
-            info!(target_user = target_user, "Post-reboot audio stack is ready");
+            info!(
+                target_user = target_user,
+                "Post-reboot audio stack is ready"
+            );
             return Ok(());
         }
 
@@ -268,7 +280,10 @@ impl RebootHelperService {
 
         let second = Self::probe_ssh(remote, &check_command, Duration::from_secs(20)).await?;
         if second.status_code == 0 && second.stdout.contains("AUDIO_READY") {
-            info!(target_user = target_user, "Post-reboot audio stack recovered successfully");
+            info!(
+                target_user = target_user,
+                "Post-reboot audio stack recovered successfully"
+            );
             return Ok(());
         }
 
@@ -298,7 +313,11 @@ impl RebootHelperService {
 
             match Self::probe_ssh(remote, &command, Duration::from_secs(10)).await {
                 Ok(output) if output.status_code == 0 => {
-                    info!(attempt = attempt, target_user = target_user, "User display became ready after reboot");
+                    info!(
+                        attempt = attempt,
+                        target_user = target_user,
+                        "User display became ready after reboot"
+                    );
                     return Ok(());
                 }
                 Ok(output) => {
@@ -348,7 +367,10 @@ impl RebootHelperService {
         let output = Self::probe_ssh(remote, &command, Duration::from_secs(10)).await?;
         if output.status_code == 0 {
             return output.stdout.trim().parse::<u32>().map_err(|error| {
-                AppError::Provisioning(format!("Failed to parse UID for {}: {}", target_user, error))
+                AppError::Provisioning(format!(
+                    "Failed to parse UID for {}: {}",
+                    target_user, error
+                ))
             });
         }
         Err(AppError::Provisioning(format!(

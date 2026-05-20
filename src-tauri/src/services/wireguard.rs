@@ -1114,18 +1114,78 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
     }
 
     async fn setup_queue_management_persistent(&self, remote: &RemoteExec) -> AppResult<()> {
-        let script = r#"#!/usr/bin/env bash
+        let script = format!(
+            r#"#!/usr/bin/env bash
 set -uo pipefail
 
-EGRESS_IF="$(ip route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')"
-[ -n "$EGRESS_IF" ] || { echo "No egress interface detected"; exit 1; }
+EGRESS_IF="$(ip route get 1.1.1.1 | awk '{{for (i=1;i<=NF;i++) if ($i=="dev") {{print $(i+1); exit}}}}')"
+[ -n "$EGRESS_IF" ] || {{ echo "No egress interface detected"; exit 1; }}
 
-tc qdisc replace dev "$EGRESS_IF" root fq_codel || true
+QOS_MODE="{qos_mode}"
+QOS_BANDWIDTH_MBIT="{qos_bandwidth_mbit}"
+QOS_DIFFSERV_PROFILE="{qos_diffserv_profile}"
+DSCP_ENABLED="{dscp_enabled}"
+
+detect_bandwidth_mbit() {{
+  if [ "$QOS_BANDWIDTH_MBIT" -gt 0 ] 2>/dev/null; then
+    printf '%s' "$QOS_BANDWIDTH_MBIT"
+    return
+  fi
+
+  local speed
+  speed="$(cat "/sys/class/net/$EGRESS_IF/speed" 2>/dev/null || true)"
+  if [ -n "$speed" ] && [ "$speed" -gt 0 ] 2>/dev/null; then
+    awk -v raw="$speed" 'BEGIN {{ capped=int(raw * 0.90); if (capped < 100) capped=100; if (capped > 5000) capped=5000; printf "%d", capped }}'
+    return
+  fi
+
+  printf '900'
+}}
+
+apply_dscp_rules() {{
+  [ "$DSCP_ENABLED" = "1" ] || return 0
+
+  if command -v iptables >/dev/null 2>&1; then
+    iptables -t mangle -D OUTPUT -p udp --dport 47998:48010 -j DSCP --set-dscp-class CS4 2>/dev/null || true
+    iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true
+    iptables -t mangle -D OUTPUT -p udp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true
+    iptables -t mangle -A OUTPUT -p udp --dport 47998:48010 -j DSCP --set-dscp-class CS4
+    iptables -t mangle -A OUTPUT -p tcp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21
+    iptables -t mangle -A OUTPUT -p udp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21
+    return 0
+  fi
+
+  if command -v nft >/dev/null 2>&1; then
+    nft list table inet noland_qos >/dev/null 2>&1 || nft add table inet noland_qos
+    nft 'list chain inet noland_qos output' >/dev/null 2>&1 || nft 'add chain inet noland_qos output {{ type route hook output priority mangle; policy accept; }}'
+    nft flush chain inet noland_qos output
+    nft add rule inet noland_qos output udp dport 47998-48010 ip dscp set cs4
+    nft add rule inet noland_qos output tcp dport {{ 47989, 47990, 47984 }} ip dscp set af21
+    nft add rule inet noland_qos output udp dport {{ 47989, 47990, 47984 }} ip dscp set af21
+  fi
+}}
+
+RATE_MBIT="$(detect_bandwidth_mbit)"
+
+if [ "$QOS_MODE" = "cake" ] && tc qdisc replace dev "$EGRESS_IF" root cake bandwidth "${{RATE_MBIT}}mbit" "$QOS_DIFFSERV_PROFILE" nat 2>/dev/null; then
+  echo "Applied CAKE on $EGRESS_IF at ${{RATE_MBIT}}mbit with $QOS_DIFFSERV_PROFILE"
+else
+  tc qdisc replace dev "$EGRESS_IF" root fq_codel || true
+  echo "Applied fq_codel fallback on $EGRESS_IF"
+fi
+
+apply_dscp_rules || true
 tc -s qdisc show dev "$EGRESS_IF"
-"#;
+iptables -t mangle -S OUTPUT 2>/dev/null | grep -E '47998:48010|47989|47990|47984' || true
+"#,
+            qos_mode = self.defaults.qos_mode,
+            qos_bandwidth_mbit = self.defaults.qos_bandwidth_mbit,
+            qos_diffserv_profile = self.defaults.qos_diffserv_profile,
+            dscp_enabled = if self.defaults.dscp_enabled { 1 } else { 0 }
+        );
 
         let service = r#"[Unit]
-Description=Apply FQ_Codel to default-route interface
+Description=Apply Noland QoS to default-route interface
 Wants=network-online.target
 After=network-online.target
 
@@ -1145,12 +1205,20 @@ EGRESS_IF="$(ip route get 1.1.1.1 | awk '{for (i=1;i<=NF;i++) if ($i=="dev") {pr
 [ -n "$EGRESS_IF" ] || { echo "No egress interface detected"; exit 1; }
 
 tc qdisc del dev "$EGRESS_IF" root 2>/dev/null || true
+if command -v iptables >/dev/null 2>&1; then
+  iptables -t mangle -D OUTPUT -p udp --dport 47998:48010 -j DSCP --set-dscp-class CS4 2>/dev/null || true
+  iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true
+  iptables -t mangle -D OUTPUT -p udp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true
+fi
+if command -v nft >/dev/null 2>&1; then
+  nft delete table inet noland_qos 2>/dev/null || true
+fi
 tc qdisc show dev "$EGRESS_IF"
 "#;
 
         let command = format!(
             "sudo bash -lc 'cat > /usr/local/bin/noland-apply-qdisc.sh <<\"EOF\"\n{}\nEOF\nchmod +x /usr/local/bin/noland-apply-qdisc.sh\ncat > /usr/local/bin/noland-rollback-qdisc.sh <<\"EOF\"\n{}\nEOF\nchmod +x /usr/local/bin/noland-rollback-qdisc.sh\ncat > /etc/systemd/system/noland-qdisc.service <<\"EOF\"\n{}\nEOF\nsystemctl daemon-reload\nsystemctl enable --now noland-qdisc.service\n/usr/local/bin/noland-apply-qdisc.sh'",
-            shell_single_quote_escape(script),
+            shell_single_quote_escape(&script),
             shell_single_quote_escape(rollback),
             shell_single_quote_escape(service)
         );
@@ -1179,9 +1247,13 @@ tc qdisc show dev "$EGRESS_IF"
     ) -> AppResult<()> {
         let iface = self.defaults.server_interface_name.clone();
         let nic = primary_interface.to_string();
+        let qos_mode = self.defaults.qos_mode.clone();
+        let qos_bandwidth_mbit = self.defaults.qos_bandwidth_mbit;
+        let qos_diffserv_profile = self.defaults.qos_diffserv_profile.clone();
+        let dscp_enabled = if self.defaults.dscp_enabled { 1 } else { 0 };
 
         let command = format!(
-            "sudo tc qdisc replace dev {nic} root fq_codel && (sudo ethtool -C {nic} rx-usecs 0 tx-usecs 0 || true) && sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{nic}.rp_filter=0 >/dev/null && sudo sysctl -w net.ipv4.conf.{iface}.rp_filter=0 >/dev/null && (sudo systemctl stop tailscaled 2>/dev/null || true)"
+            "sudo bash -lc 'RATE_MBIT={qos_bandwidth_mbit}; if [ \"$RATE_MBIT\" -le 0 ] 2>/dev/null; then LINK_SPEED=$(cat /sys/class/net/{nic}/speed 2>/dev/null || true); if [ -n \"$LINK_SPEED\" ] && [ \"$LINK_SPEED\" -gt 0 ] 2>/dev/null; then RATE_MBIT=$(awk -v raw=\"$LINK_SPEED\" \"BEGIN {{ capped=int(raw * 0.90); if (capped < 100) capped=100; if (capped > 5000) capped=5000; printf \\\"%d\\\", capped }}\"); else RATE_MBIT=900; fi; fi; if [ \"{qos_mode}\" = \"cake\" ] && tc qdisc replace dev {nic} root cake bandwidth \"${{RATE_MBIT}}mbit\" {qos_diffserv_profile} nat 2>/dev/null; then echo qos=cake rate=${{RATE_MBIT}}mbit; else tc qdisc replace dev {nic} root fq_codel; echo qos=fq_codel; fi; if [ \"{dscp_enabled}\" = \"1\" ]; then if command -v iptables >/dev/null 2>&1; then iptables -t mangle -D OUTPUT -p udp --dport 47998:48010 -j DSCP --set-dscp-class CS4 2>/dev/null || true; iptables -t mangle -D OUTPUT -p tcp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true; iptables -t mangle -D OUTPUT -p udp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21 2>/dev/null || true; iptables -t mangle -A OUTPUT -p udp --dport 47998:48010 -j DSCP --set-dscp-class CS4; iptables -t mangle -A OUTPUT -p tcp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21; iptables -t mangle -A OUTPUT -p udp -m multiport --dports 47989,47990,47984 -j DSCP --set-dscp-class AF21; fi; fi; (sudo ethtool -C {nic} rx-usecs 0 tx-usecs 0 || true); sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null; sudo sysctl -w net.ipv4.conf.all.rp_filter=0 >/dev/null; sudo sysctl -w net.ipv4.conf.default.rp_filter=0 >/dev/null; sudo sysctl -w net.ipv4.conf.{nic}.rp_filter=0 >/dev/null; sudo sysctl -w net.ipv4.conf.{iface}.rp_filter=0 >/dev/null; (sudo systemctl stop tailscaled 2>/dev/null || true)'"
         );
 
         let output = {
@@ -1209,7 +1281,7 @@ tc qdisc show dev "$EGRESS_IF"
         let iface = self.defaults.server_interface_name.clone();
         let nic = primary_interface.to_string();
         let command = format!(
-            "ip a show {iface} && ip route && tc -s qdisc show dev {iface} && tc -s qdisc show dev {nic} && if pgrep -x sunshine >/dev/null; then taskset -p $(pgrep -x sunshine | head -n 1); fi"
+            "ip a show {iface} && ip route && tc -s qdisc show dev {iface} && tc -s qdisc show dev {nic} && (iptables -t mangle -S OUTPUT 2>/dev/null | grep -E '47998:48010|47989|47990|47984' || true) && if pgrep -x sunshine >/dev/null; then taskset -p $(pgrep -x sunshine | head -n 1); fi"
         );
 
         let output = {

@@ -34,13 +34,17 @@ pub struct SunshineService {
     pub defaults: SunshineDefaults,
 }
 
-const SUNSHINE_PACKAGES: &[&str] = &["sunshine", "pipewire", "pipewire-pulse", "wireplumber"];
+const SUNSHINE_SUPPORT_PACKAGES: &[&str] = &["pipewire", "pipewire-pulse", "wireplumber"];
 
 impl SunshineService {
     pub fn render_config(&self, detected_capture: &str, detected_output: &str) -> String {
-        let values = BTreeMap::from([
+        let mut values = BTreeMap::from([
             ("port".to_string(), self.defaults.port.to_string()),
             ("origin_web_ui_allowed".to_string(), "all".to_string()),
+            (
+                "csrf_allowed_origins".to_string(),
+                self.defaults.csrf_allowed_origins.clone(),
+            ),
             ("system_tray".to_string(), "disabled".to_string()),
             ("upnp".to_string(), "off".to_string()),
             ("encoder".to_string(), self.defaults.encoder.clone()),
@@ -62,6 +66,13 @@ impl SunshineService {
             ),
         ]);
 
+        if !self.defaults.bind_address.trim().is_empty() {
+            values.insert(
+                "bind_address".to_string(),
+                self.defaults.bind_address.clone(),
+            );
+        }
+
         values
             .into_iter()
             .map(|(key, value)| format!("{key} = {value}"))
@@ -74,9 +85,18 @@ impl SunshineService {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<()> {
+        let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+            "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+        } else {
+            format!(
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                self.defaults.bind_address
+            )
+        };
         let health_command = format!(
-            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \\\t\"); if [ \"$PROC_COUNT\" = \"1\" ] && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- web ---'; curl -k -I -s --connect-timeout 5 https://localhost:47990/pin 2>&1 || true; fi",
+            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \\\t\"); WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; WEB_URL=$url; break; fi; done; if [ \"$PROC_COUNT\" = \"1\" ] && [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; echo \"WEB_URL=$WEB_URL\"; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo \"WEB_OK=$WEB_OK\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; for url in {web_probe_targets}; do echo \"--- web $url ---\"; curl -k -I -s --connect-timeout 5 \"$url\" 2>&1 || true; done; fi",
             user = target_user,
+            web_probe_targets = web_probe_targets,
         );
 
         let health = {
@@ -209,7 +229,7 @@ exit 0"#
     }
 
     async fn check_sunshine_packages_needed(&self, remote: &RemoteExec) -> AppResult<Vec<String>> {
-        let query = SUNSHINE_PACKAGES.join(" ");
+        let query = SUNSHINE_SUPPORT_PACKAGES.join(" ");
         let check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
@@ -227,7 +247,10 @@ exit 0"#
                 "Package check returned {}, assuming all packages need installation",
                 check.status_code
             );
-            return Ok(SUNSHINE_PACKAGES.iter().map(|s| s.to_string()).collect());
+            return Ok(SUNSHINE_SUPPORT_PACKAGES
+                .iter()
+                .map(|s| s.to_string())
+                .collect());
         }
 
         let installed: std::collections::HashSet<_> = check
@@ -236,7 +259,7 @@ exit 0"#
             .map(|l| l.trim().to_lowercase())
             .collect();
 
-        let missing: Vec<String> = SUNSHINE_PACKAGES
+        let missing: Vec<String> = SUNSHINE_SUPPORT_PACKAGES
             .iter()
             .filter(|p| !installed.contains(&p.to_lowercase()))
             .map(|s| s.to_string())
@@ -251,6 +274,66 @@ exit 0"#
         Ok(missing)
     }
 
+    async fn install_latest_sunshine_package(&self, remote: &RemoteExec) -> AppResult<()> {
+        let install_script = r#"set -euo pipefail
+arch=$(dpkg --print-architecture)
+. /etc/os-release
+
+case "$arch" in
+  amd64|arm64) ;;
+  *) echo "Unsupported architecture for upstream Sunshine package: $arch" >&2; exit 1 ;;
+esac
+
+package=""
+if [ "${ID:-}" = "ubuntu" ]; then
+  case "${VERSION_ID:-}" in
+    22.04|24.04) package="sunshine-ubuntu-${VERSION_ID}-${arch}.deb" ;;
+    *) echo "Unsupported Ubuntu version for upstream Sunshine package: ${VERSION_ID:-unknown}" >&2; exit 1 ;;
+  esac
+elif [ "${ID:-}" = "debian" ]; then
+  case "${VERSION_CODENAME:-}" in
+    trixie) package="sunshine-debian-trixie-${arch}.deb" ;;
+    *) echo "Unsupported Debian codename for upstream Sunshine package: ${VERSION_CODENAME:-unknown}" >&2; exit 1 ;;
+  esac
+else
+  echo "Unsupported distro for upstream Sunshine package: ${ID:-unknown}" >&2
+  exit 1
+fi
+
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+pkg_path="$tmpdir/$package"
+url="https://github.com/LizardByte/Sunshine/releases/latest/download/$package"
+
+curl -fsSL "$url" -o "$pkg_path"
+sudo apt-get -o DPkg::Lock::Timeout=600 update
+sudo apt-get -o DPkg::Lock::Timeout=600 install -y "$pkg_path"
+sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || true"#;
+
+        let result = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(install_script, Duration::from_secs(900))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if result.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to install latest upstream Sunshine package: stdout: {} | stderr: {}",
+                result.stdout.trim(),
+                result.stderr.trim()
+            )));
+        }
+
+        info!(
+            "Installed latest upstream Sunshine package successfully: {}",
+            result.stdout.trim()
+        );
+        Ok(())
+    }
+
     pub async fn install_and_configure(
         &self,
         remote: &RemoteExec,
@@ -263,58 +346,60 @@ exit 0"#
         let packages_needed = self.check_sunshine_packages_needed(remote).await?;
 
         if packages_needed.is_empty() {
-            info!("All Sunshine packages already installed, skipping apt-get");
+            info!("All Sunshine support packages already installed, skipping apt-get for dependencies");
         } else {
             info!(
-                "Missing Sunshine packages: {} (need to install)",
+                "Missing Sunshine support packages: {} (need to install)",
                 packages_needed.join(", ")
             );
+        }
 
-            // Permanently neuter unattended-upgrades so it can't re-acquire the lock
-            let disable_auto_upgrades = {
-                let remote = remote.clone();
-                tokio::task::spawn_blocking(move || {
-                    remote.ssh(
-                        "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
-                        Duration::from_secs(30),
-                    )
-                })
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-            };
-            if disable_auto_upgrades.status_code != 0 {
-                warn!(
-                    "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
-                    disable_auto_upgrades.stdout.trim(),
-                    disable_auto_upgrades.stderr.trim()
-                );
-            } else {
-                info!(
-                    "Auto-upgrades disabled: {}",
-                    disable_auto_upgrades.stdout.trim()
-                );
-            }
-
-            let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
-            if !lock_acquired {
-                return Err(AppError::Provisioning(
-                    "Package manager is locked by another process (likely unattended-upgrades). \
-                    Waiting timed out after 10 minutes. Please try again in a few minutes when \
-                    system updates have finished. Alternatively, you can SSH into the instance and \
-                    run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
-                        .to_string(),
-                ));
-            }
-
+        // Permanently neuter unattended-upgrades so it can't re-acquire the lock
+        let disable_auto_upgrades = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if disable_auto_upgrades.status_code != 0 {
+            warn!(
+                "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
+                disable_auto_upgrades.stdout.trim(),
+                disable_auto_upgrades.stderr.trim()
+            );
+        } else {
             info!(
-                "Lock acquired, installing {} missing Sunshine packages",
+                "Auto-upgrades disabled: {}",
+                disable_auto_upgrades.stdout.trim()
+            );
+        }
+
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
+        if !lock_acquired {
+            return Err(AppError::Provisioning(
+                "Package manager is locked by another process (likely unattended-upgrades). \
+                Waiting timed out after 10 minutes. Please try again in a few minutes when \
+                system updates have finished. Alternatively, you can SSH into the instance and \
+                run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
+                    .to_string(),
+            ));
+        }
+
+        if !packages_needed.is_empty() {
+            info!(
+                "Lock acquired, installing {} missing Sunshine support packages",
                 packages_needed.len()
             );
             let install = {
                 let remote = remote.clone();
                 tokio::task::spawn_blocking(move || {
                     remote.ssh(
-                        "sudo apt-get -o DPkg::Lock::Timeout=600 update && sudo apt-get -o DPkg::Lock::Timeout=600 install -y sunshine pipewire pipewire-pulse wireplumber",
+                        "sudo apt-get -o DPkg::Lock::Timeout=600 update && sudo apt-get -o DPkg::Lock::Timeout=600 install -y pipewire pipewire-pulse wireplumber",
                         Duration::from_secs(600),
                     )
                 })
@@ -324,21 +409,22 @@ exit 0"#
 
             if install.status_code != 0 {
                 return Err(AppError::Provisioning(format!(
-                    "Failed to install Sunshine: {}",
+                    "Failed to install Sunshine support packages: {}",
                     install.stderr
                 )));
             }
 
             info!(
-                "Successfully installed {} Sunshine packages",
+                "Successfully installed {} Sunshine support packages",
                 packages_needed.len()
             );
-
-            self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
-                .await?;
-            self.assert_rtsp_port_available(remote, target_user, &target_home)
-                .await?;
         }
+
+        self.install_latest_sunshine_package(remote).await?;
+        self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
+            .await?;
+        self.assert_rtsp_port_available(remote, target_user, &target_home)
+            .await?;
 
         self.setup_headless_display(remote, target_user, display)
             .await?;

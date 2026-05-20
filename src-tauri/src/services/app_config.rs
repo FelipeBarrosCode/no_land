@@ -27,7 +27,9 @@ pub struct AppConfig {
 #[derive(Debug, Clone)]
 pub struct SunshineDefaults {
     pub av1_mode: i32,
+    pub bind_address: String,
     pub cpu_affinity: String,
+    pub csrf_allowed_origins: String,
     pub encoder: String,
     pub fec_percentage: i32,
     pub hevc_mode: i32,
@@ -45,6 +47,10 @@ pub struct WireGuardDefaults {
     pub client_listen_port: u16,
     pub tunnel_mtu: u16,
     pub persistent_keepalive_secs: u16,
+    pub qos_mode: String,
+    pub qos_bandwidth_mbit: u32,
+    pub qos_diffserv_profile: String,
+    pub dscp_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,7 +111,13 @@ impl Default for AppConfig {
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
             sunshine: SunshineDefaults {
                 av1_mode: 1,
+                bind_address: env::var("NOLAND_SUNSHINE_BIND_ADDRESS").unwrap_or_default(),
                 cpu_affinity: "2-5".to_string(),
+                csrf_allowed_origins: env::var("NOLAND_SUNSHINE_CSRF_ALLOWED_ORIGINS")
+                    .unwrap_or_else(|_| {
+                        "https://localhost:47990,https://127.0.0.1:47990,https://10.77.0.1:47990"
+                            .to_string()
+                    }),
                 encoder: "nvenc".to_string(),
                 fec_percentage: 20,
                 hevc_mode: 0,
@@ -125,6 +137,16 @@ impl Default for AppConfig {
                     .unwrap_or(51821),
                 tunnel_mtu: 1280,
                 persistent_keepalive_secs: 25,
+                qos_mode: env::var("NOLAND_WIREGUARD_QOS_MODE")
+                    .unwrap_or_else(|_| "cake".to_string()),
+                qos_bandwidth_mbit: env::var("NOLAND_WIREGUARD_QOS_BANDWIDTH_MBIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0),
+                qos_diffserv_profile: env::var("NOLAND_WIREGUARD_QOS_DIFFSERV")
+                    .unwrap_or_else(|_| "diffserv4".to_string()),
+                dscp_enabled: env_bool("NOLAND_WIREGUARD_DSCP_ENABLED")
+                    || env::var("NOLAND_WIREGUARD_DSCP_ENABLED").is_err(),
             },
             scoring: OfferScoring {
                 distance_weight: 0.7,

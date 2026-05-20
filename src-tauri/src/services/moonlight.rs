@@ -1202,6 +1202,14 @@ fn choose_bitrate(
 ) -> u32 {
     let megapixels = (width as f32 * height as f32) / 1_000_000.0;
     let mut bitrate = (megapixels * fps as f32 * 170.0).round() as u32;
+    let pacing_safe_ceiling = match network_type {
+        DetectedNetworkType::Lan if fps >= 120 => 45_000,
+        DetectedNetworkType::Lan => 35_000,
+        DetectedNetworkType::Wifi if fps >= 120 => 30_000,
+        DetectedNetworkType::Wifi => 25_000,
+        DetectedNetworkType::Remote if fps >= 120 => 22_000,
+        DetectedNetworkType::Remote => 18_000,
+    };
 
     bitrate = match network_type {
         DetectedNetworkType::Lan => bitrate,
@@ -1212,6 +1220,16 @@ fn choose_bitrate(
     bitrate = bitrate.clamp(500, 150_000);
     if let Some(limit) = max_bitrate {
         bitrate = bitrate.min(limit);
+    }
+
+    if bitrate > pacing_safe_ceiling {
+        warnings.push(
+            format!(
+                "Bitrate reduced to {} Kbps to leave pacing headroom and avoid bursty queue buildup at {}x{} {} FPS.",
+                pacing_safe_ceiling, width, height, fps
+            )
+        );
+        bitrate = pacing_safe_ceiling;
     }
 
     if bitrate > 150_000 {
