@@ -41,7 +41,7 @@ function toNumber(value: string, fallback: number): number {
   return parsed;
 }
 
-const clientFields: Array<keyof MoonlightPreferences> = [
+const clientNumericFields: Array<Exclude<keyof MoonlightPreferences, "refreshRateMode">> = [
   "bitrate",
   "fps",
   "width",
@@ -93,6 +93,7 @@ export function SettingsScreen({
   const [clientForm, setClientForm] = useState<ClientForm>(() => ({
     bitrate: appState.moonlightPreferences.bitrate.toString(),
     fps: appState.moonlightPreferences.fps.toString(),
+    refreshRateMode: appState.moonlightPreferences.refreshRateMode,
     width: appState.moonlightPreferences.width.toString(),
     height: appState.moonlightPreferences.height.toString(),
     hostaudio: appState.moonlightPreferences.hostaudio.toString(),
@@ -123,6 +124,7 @@ export function SettingsScreen({
     setClientForm({
       bitrate: appState.moonlightPreferences.bitrate.toString(),
       fps: appState.moonlightPreferences.fps.toString(),
+      refreshRateMode: appState.moonlightPreferences.refreshRateMode,
       width: appState.moonlightPreferences.width.toString(),
       height: appState.moonlightPreferences.height.toString(),
       hostaudio: appState.moonlightPreferences.hostaudio.toString(),
@@ -285,7 +287,7 @@ export function SettingsScreen({
     <Card className="pixel-frame">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Client (Moonlight)</h2>
       <div className="mt-4 grid gap-3 md:grid-cols-4">
-        {clientFields.map((key) => (
+        {clientNumericFields.map((key) => (
           <InputField
             key={key}
             label={key}
@@ -293,6 +295,19 @@ export function SettingsScreen({
             onChange={(event) => setClientForm((prev) => ({ ...prev, [key]: event.target.value }))}
           />
         ))}
+        <div className="space-y-2">
+          <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
+            Refresh Timing
+          </label>
+          <select
+            value={clientForm.refreshRateMode}
+            onChange={(event) => setClientForm((prev) => ({ ...prev, refreshRateMode: event.target.value }))}
+            className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+          >
+            <option value="60">60.00 Hz</option>
+            <option value="59.94">59.94 Hz</option>
+          </select>
+        </div>
       </div>
       <div className="mt-4">
         <Button
@@ -301,6 +316,7 @@ export function SettingsScreen({
             onSaveMoonlightPreferences({
               bitrate: Math.max(10000, Math.round(toNumber(clientForm.bitrate, appState.moonlightPreferences.bitrate))),
               fps: Math.max(30, Math.round(toNumber(clientForm.fps, appState.moonlightPreferences.fps))),
+              refreshRateMode: clientForm.refreshRateMode === "59.94" ? "59.94" : "60",
               width: Math.max(1280, Math.round(toNumber(clientForm.width, appState.moonlightPreferences.width))),
               height: Math.max(720, Math.round(toNumber(clientForm.height, appState.moonlightPreferences.height))),
               hostaudio: Math.round(toNumber(clientForm.hostaudio, appState.moonlightPreferences.hostaudio)),

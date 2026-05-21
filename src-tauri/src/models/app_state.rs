@@ -295,6 +295,8 @@ impl Default for MoonlightState {
 pub struct MoonlightPreferences {
     pub bitrate: u32,
     pub fps: u32,
+    #[serde(default = "default_refresh_rate_mode")]
+    pub refresh_rate_mode: String,
     pub width: u32,
     pub height: u32,
     pub hostaudio: u8,
@@ -316,6 +318,7 @@ impl Default for MoonlightPreferences {
         Self {
             bitrate: 20000,
             fps: 60,
+            refresh_rate_mode: default_refresh_rate_mode(),
             width: 1920,
             height: 1080,
             hostaudio: 1,
@@ -332,6 +335,10 @@ impl Default for MoonlightPreferences {
             detectnetblocking: 1,
         }
     }
+}
+
+fn default_refresh_rate_mode() -> String {
+    "60".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

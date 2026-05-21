@@ -1085,12 +1085,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             moonlight_preferences.width,
             moonlight_preferences.height,
             moonlight_preferences.fps,
+            &moonlight_preferences.refresh_rate_mode,
         );
         info!(
-            "Sunshine display profile: {}x{} @ {}Hz ({} FPS x2)",
+            "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
             display_profile.height,
-            display_profile.virtual_hz(),
+            display_profile.virtual_hz_string(),
             display_profile.fps
         );
         emit_transition(
@@ -1102,7 +1103,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 "Display: {}x{} @ {}Hz",
                 display_profile.width,
                 display_profile.height,
-                display_profile.virtual_hz()
+                display_profile.virtual_hz_string()
             )),
             false,
         )
@@ -1978,12 +1979,13 @@ async fn run_existing_instance_orchestration(
             moonlight_preferences.width,
             moonlight_preferences.height,
             moonlight_preferences.fps,
+            &moonlight_preferences.refresh_rate_mode,
         );
         info!(
-            "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS x2)",
+            "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
             display_profile.height,
-            display_profile.virtual_hz(),
+            display_profile.virtual_hz_string(),
             display_profile.fps
         );
         emit_transition(
@@ -1995,7 +1997,7 @@ async fn run_existing_instance_orchestration(
                 "Display: {}x{} @ {}Hz",
                 display_profile.width,
                 display_profile.height,
-                display_profile.virtual_hz()
+                display_profile.virtual_hz_string()
             )),
             false,
         )

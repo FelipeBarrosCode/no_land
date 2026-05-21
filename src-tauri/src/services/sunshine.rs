@@ -14,18 +14,44 @@ pub struct DisplayProfile {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    pub refresh_rate_mode: RefreshRateMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshRateMode {
+    Integer60,
+    Ntsc5994,
 }
 
 impl DisplayProfile {
-    pub fn from_moonlight_prefs(width: u32, height: u32, fps: u32) -> Self {
+    pub fn from_moonlight_prefs(
+        width: u32,
+        height: u32,
+        fps: u32,
+        refresh_rate_mode: &str,
+    ) -> Self {
         let width = width.clamp(640, 7680);
         let height = height.clamp(360, 4320);
         let fps = fps.clamp(24, 240);
-        Self { width, height, fps }
+        let refresh_rate_mode = if refresh_rate_mode == "59.94" {
+            RefreshRateMode::Ntsc5994
+        } else {
+            RefreshRateMode::Integer60
+        };
+        Self {
+            width,
+            height,
+            fps,
+            refresh_rate_mode,
+        }
     }
 
-    pub fn virtual_hz(&self) -> u32 {
-        self.fps * 2
+    pub fn virtual_hz_string(&self) -> String {
+        match self.refresh_rate_mode {
+            RefreshRateMode::Integer60 => (self.fps * 2).to_string(),
+            RefreshRateMode::Ntsc5994 if self.fps == 60 => "119.88".to_string(),
+            RefreshRateMode::Ntsc5994 => format!("{:.2}", (self.fps as f32) * 1.998),
+        }
     }
 }
 
@@ -50,7 +76,15 @@ impl SunshineService {
             ("encoder".to_string(), self.defaults.encoder.clone()),
             ("av1_mode".to_string(), self.defaults.av1_mode.to_string()),
             ("hevc_mode".to_string(), self.defaults.hevc_mode.to_string()),
+            (
+                "minimum_fps_target".to_string(),
+                self.defaults.minimum_fps_target.to_string(),
+            ),
             ("capture".to_string(), detected_capture.to_string()),
+            (
+                "nvenc_latency_over_power".to_string(),
+                self.defaults.nvenc_latency_over_power.clone(),
+            ),
             (
                 "nvenc_preset".to_string(),
                 self.defaults.nvenc_preset.to_string(),
@@ -937,10 +971,10 @@ WantedBy=multi-user.target"#,
         let width = display.width;
         let height = display.height;
         let target_fps = display.fps;
-        let virtual_hz = display.virtual_hz();
+        let virtual_hz = display.virtual_hz_string();
 
         info!(
-            "Setting up virtual display for NVFBC: {}x{} @ {}Hz (target {} FPS = {} Hz virtual display)",
+            "Setting up virtual display for NVFBC/Xorg-only capture: {}x{} @ {}Hz (target {} FPS = {} Hz virtual display)",
             width, height, virtual_hz, target_fps, virtual_hz
         );
 
@@ -1680,6 +1714,9 @@ context.properties = {
     }
 
     async fn detect_capture_backend(&self, remote: &RemoteExec) -> AppResult<String> {
+        info!(
+            "Xorg-only Sunshine host policy enabled; skipping Wayland/XDG portal capture backends"
+        );
         // Check if Xorg is running first (required for NVFBC)
         let xorg_check = {
             let remote = remote.clone();

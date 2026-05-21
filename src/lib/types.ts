@@ -159,6 +159,7 @@ export interface ProvisionedServerState {
 export interface MoonlightPreferences {
   bitrate: number;
   fps: number;
+  refreshRateMode: string;
   width: number;
   height: number;
   hostaudio: number;
