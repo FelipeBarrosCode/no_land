@@ -32,10 +32,7 @@ use super::{
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
-    wireguard::{
-        reconnect_local_wireguard_client, WireGuardProvisionMode, WireGuardProvisionResult,
-        WireGuardService,
-    },
+    wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
 
 #[derive(Debug, Clone)]

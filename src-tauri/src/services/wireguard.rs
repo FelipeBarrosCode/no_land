@@ -1681,7 +1681,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
     if matches!(helper_generation, Some(MacosHelperGeneration::Legacy)) && config_mismatch {
         if can_attempt_macos_monitor_repair(false) {
             warn!(
-                "Legacy Noland WireGuard helper detected; background auto-repair is disabled until you run an explicit reconnect/setup to upgrade it (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                "Legacy Noland WireGuard helper detected. Noland no longer auto-manages local WireGuard; open the WireGuard app and manage the tunnel manually (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
                 runtime_before.peer_public_key == expected.peer_public_key,
                 runtime_before.allowed_ips == expected.allowed_ips,
                 !handshake_ok,
@@ -1696,7 +1696,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         if !hard_mismatch && failure_streak < MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD {
             if failure_streak == 1 || failure_streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
                 warn!(
-                    "WireGuard health monitor observed an unhealthy check but is deferring repair until failures are consecutive (streak={}/{}, peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                    "WireGuard health monitor observed an unhealthy check. Noland no longer auto-repairs the local tunnel; open the WireGuard app and manage the tunnel manually if needed (streak={}/{}, peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
                     failure_streak,
                     MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD,
                     runtime_before.peer_public_key == expected.peer_public_key,
@@ -1731,7 +1731,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
             if let Some(status) = helper_status.as_ref() {
                 match status.kind {
                     MacosHelperStatusKind::Error => warn!(
-                        "WireGuard health monitor cannot see local WireGuard runtime from app context and the installed helper last reported an error: {}",
+                        "WireGuard health monitor cannot see local WireGuard runtime from app context and the installed helper last reported an error. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually: {}",
                         if status.message.trim().is_empty() {
                             "WireGuard helper did not report a specific failure."
                         } else {
@@ -1739,62 +1739,33 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
                         }
                     ),
                     MacosHelperStatusKind::Invalid => warn!(
-                        "WireGuard health monitor cannot see local WireGuard runtime from app context, and the helper status file is invalid or incomplete."
+                        "WireGuard health monitor cannot see local WireGuard runtime from app context, and the helper status file is invalid or incomplete. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually."
                     ),
                     _ => {}
                 }
             }
             #[cfg(not(target_os = "macos"))]
             warn!(
-                "WireGuard health monitor cannot see any local WireGuard runtime yet; reapplying the saved config to recover visibility."
+                "WireGuard health monitor cannot see any local WireGuard runtime yet. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually."
             );
         }
 
-        #[cfg(target_os = "macos")]
-        if !can_attempt_macos_monitor_repair(hard_mismatch) {
-            return Ok(());
-        }
-
         warn!(
-            "WireGuard health monitor detected stale local tunnel state; reapplying the saved config without rotating keys (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+            "WireGuard health monitor detected stale local tunnel state, but Noland no longer auto-manages local WireGuard. Open the WireGuard app and manage the tunnel manually (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
             runtime_before.peer_public_key == expected.peer_public_key,
             runtime_before.allowed_ips == expected.allowed_ips,
             !handshake_ok,
             ping_ok
         );
-        #[cfg(target_os = "macos")]
-        {
-            if let Err(error) = request_macos_helper_repair(&config_path, "health-monitor") {
-                warn!(
-                    "WireGuard health monitor helper repair failed; leaving explicit reconnect/setup to recover tunnel: {error}"
-                );
-                return Ok(());
-            }
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if let Err(error) = reconnect_local_wireguard_client(&config_path) {
-                warn!(
-                    "WireGuard health monitor reconnect failed; leaving explicit reconnect/setup to recover tunnel: {error}"
-                );
-                return Ok(());
-            }
-        }
-    }
-
-    let runtime_after = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
-    #[cfg(target_os = "macos")]
-    if local_tunnel_runtime_matches_expected(&runtime_after, &expected) {
-        let _ = note_monitor_repair_health(true);
-        clear_macos_monitor_repair_cooldown();
+        return Ok(());
     }
 
     let _ = context
         .update_state(|state| {
             state.wireguard.config_path = config_path.display().to_string();
             apply_expected_tunnel_to_state(state, &expected);
-            if !runtime_after.interface_name.trim().is_empty() {
-                state.wireguard.last_runtime_interface = runtime_after.interface_name.clone();
+            if !runtime_before.interface_name.trim().is_empty() {
+                state.wireguard.last_runtime_interface = runtime_before.interface_name.clone();
             }
         })
         .await;
