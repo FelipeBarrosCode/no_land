@@ -10,7 +10,7 @@ use crate::errors::{AppError, AppResult};
 use super::{
     app_context::AppContext, remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
-    wireguard::reconnect_local_wireguard_client,
+    wireguard::{reconnect_local_wireguard_client, remove_local_wireguard_config},
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -213,6 +213,24 @@ impl InstanceLifecycleService {
             // Run backup first if shared storage is configured
             Self::maybe_run_backup_first(context, instance_id).await?;
 
+            let (wireguard_config_path, should_clear_active_wireguard_state) = {
+                let state = context.state.read().await;
+                let record_path = state
+                    .provisioned_servers
+                    .iter()
+                    .find(|record| record.instance_id == instance_id)
+                    .map(|record| record.wireguard_config_path.clone())
+                    .unwrap_or_default();
+                let active_path = state.wireguard.config_path.clone();
+                let path = if !record_path.trim().is_empty() {
+                    record_path
+                } else {
+                    active_path.clone()
+                };
+                let should_clear_active = !path.trim().is_empty() && path == active_path;
+                (path, should_clear_active)
+            };
+
             let api_key = {
                 let state = context.state.read().await;
                 state.credentials.vast_api_key.clone()
@@ -232,10 +250,18 @@ impl InstanceLifecycleService {
 
             vast.destroy_instance(instance_id).await?;
 
+            if !wireguard_config_path.trim().is_empty() {
+                remove_local_wireguard_config(std::path::Path::new(&wireguard_config_path))?;
+            }
+
             // Clean up local state references to the destroyed instance
             let _ = context
                 .update_state(|state| {
                     state.instance = crate::models::app_state::InstanceState::default();
+                    if should_clear_active_wireguard_state {
+                        state.wireguard = crate::models::app_state::WireGuardState::default();
+                        state.moonlight.host_address.clear();
+                    }
                     state
                         .provisioned_servers
                         .retain(|s| s.instance_id != instance_id);

@@ -1033,7 +1033,20 @@ pub async fn get_rented_instances(
 
     let list_result = vast.list_instances().await;
     let instances_source = match list_result {
-        Ok(instances) => instances,
+        Ok(instances) => {
+            if let Err(error) = InstanceLifecycleService::reconcile_owned_instances(
+                context.inner(),
+                &instances,
+            )
+            .await
+            {
+                warn!(
+                    "get_rented_instances local state reconciliation failed (continuing): {}",
+                    error
+                );
+            }
+            instances
+        }
         Err(error) => {
             info!(
                 "get_rented_instances list failed; returning empty list for resilience: {}",

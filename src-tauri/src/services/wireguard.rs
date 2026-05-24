@@ -1358,6 +1358,52 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
     }
 }
 
+pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
+    let repair_request_path = config_path.with_extension("repair.request");
+    let repair_status_path = config_path.with_extension("repair.status");
+
+    for path in [repair_request_path.as_path(), repair_status_path.as_path(), config_path] {
+        if !path.exists() {
+            continue;
+        }
+
+        std::fs::remove_file(path).map_err(|error| {
+            AppError::Command(format!(
+                "Failed removing WireGuard artifact {}: {error}",
+                path.display()
+            ))
+        })?;
+    }
+
+    let Some(parent) = config_path.parent() else {
+        return Ok(());
+    };
+
+    let parent_name = parent.file_name().and_then(|value| value.to_str()).unwrap_or("");
+    let is_instance_specific_dir = parent_name.chars().all(|c| c.is_ascii_digit());
+    if !is_instance_specific_dir {
+        return Ok(());
+    }
+
+    let mut entries = std::fs::read_dir(parent).map_err(|error| {
+        AppError::Command(format!(
+            "Failed reading WireGuard config directory {}: {error}",
+            parent.display()
+        ))
+    })?;
+
+    if entries.next().is_none() {
+        std::fs::remove_dir(parent).map_err(|error| {
+            AppError::Command(format!(
+                "Failed removing empty WireGuard config directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    Ok(())
+}
+
 pub fn read_local_wireguard_show_output() -> AppResult<String> {
     let os = OsDetection::new();
     if !os.command_exists("wg") {
