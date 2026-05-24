@@ -185,11 +185,11 @@ export function PairingModal({
           <Button
             disabled={busy || !wireguardReadyConfirmed}
             loading={busy && wireguardReadyConfirmed}
-            loadingText="Reconnecting..."
+            loadingText="Opening WireGuard..."
             onClick={() => onReconnectLocalWireguardClient()}
             variant="secondary"
           >
-            Reconnect WireGuard
+            Open WireGuard
           </Button>
 
           {wireguardReadyConfirmed && (

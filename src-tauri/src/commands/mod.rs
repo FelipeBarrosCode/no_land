@@ -1046,6 +1046,20 @@ pub async fn get_moonlight_download_url(
 }
 
 #[tauri::command]
+pub async fn get_wireguard_download_url(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let os = OsDetection::new();
+    if os.is_windows() {
+        Ok(context.config.wireguard_download_url_windows.clone())
+    } else if os.is_macos() {
+        Ok(context.config.wireguard_download_url_macos.clone())
+    } else {
+        Ok(context.config.wireguard_download_url_linux.clone())
+    }
+}
+
+#[tauri::command]
 pub async fn launch_moonlight_client() -> Result<(), FrontendError> {
     let moonlight = MoonlightService;
     moonlight.launch_native_client()?;
@@ -1697,12 +1711,11 @@ pub async fn reset_instance_sunshine_settings(
 
 #[tauri::command]
 pub async fn reconnect_instance_wireguard(
-    context: State<'_, AppContext>,
-    instance_id: u64,
+    _context: State<'_, AppContext>,
+    _instance_id: u64,
 ) -> Result<String, FrontendError> {
-    InstanceLifecycleService::reconnect_wireguard(context.inner(), instance_id)
-        .await
-        .map_err(Into::into)
+    open_wireguard_app().map_err(FrontendError::from)?;
+    Ok("Opened WireGuard app.".to_string())
 }
 
 #[tauri::command]

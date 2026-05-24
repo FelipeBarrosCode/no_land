@@ -142,6 +142,10 @@ export async function resolveMoonlightDownloadUrl(): Promise<string> {
   return invokeSafe<string>("get_moonlight_download_url");
 }
 
+export async function resolveWireguardDownloadUrl(): Promise<string> {
+  return invokeSafe<string>("get_wireguard_download_url");
+}
+
 export async function launchMoonlightClient(): Promise<void> {
   await invokeSafe<void>("launch_moonlight_client");
 }

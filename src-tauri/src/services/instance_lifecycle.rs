@@ -19,7 +19,7 @@ use super::{
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     vast_api::VastApiClient,
-    wireguard::{reconnect_local_wireguard_client, remove_local_wireguard_config},
+    wireguard::remove_local_wireguard_config,
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -205,35 +205,6 @@ impl InstanceLifecycleService {
     async fn release_lock(instance_id: u64) {
         let mut actions = get_lifecycle_actions().write().await;
         actions.remove(&instance_id);
-    }
-
-    /// Reconnect WireGuard for a provisioned instance.
-    pub async fn reconnect_wireguard(context: &AppContext, instance_id: u64) -> AppResult<String> {
-        Self::acquire_lock(instance_id, "reconnect").await?;
-
-        let result = async {
-            let config_path = {
-                let state = context.state.read().await;
-                state.wireguard.config_path.clone()
-            };
-
-            if config_path.trim().is_empty() {
-                return Err(AppError::InvalidInput(
-                    "WireGuard client config path is empty. Run provisioning first.".to_string(),
-                ));
-            }
-
-            let _wireguard_mutation_guard = context.begin_wireguard_mutation();
-            let message = reconnect_local_wireguard_client(std::path::Path::new(&config_path))?;
-
-            info!(instance_id = instance_id, "WireGuard reconnect completed");
-
-            Ok(message)
-        }
-        .await;
-
-        Self::release_lock(instance_id).await;
-        result
     }
 
     /// Pause a provisioned instance. Runs backup first if available.

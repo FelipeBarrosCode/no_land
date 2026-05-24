@@ -7,7 +7,6 @@ import {
   searchOffers,
   selectOffer,
   setManualLocation,
-  reconnectLocalWireguardClientQuick,
   setupWireguardClient,
   setupWireguardAppHandoff,
   startPlayExistingInstance,
@@ -783,10 +782,13 @@ export const useAppStore = create<AppStore>((set, get) => {
     return await runBusyTask(
       {
         key: "wireguard.local.reconnect",
-        label: "Reconnecting WireGuard",
-        detail: "Refreshing the local tunnel so Moonlight can reach the instance."
+        label: "Opening WireGuard",
+        detail: "Open the WireGuard app and manage the tunnel manually."
       },
-      async () => await reconnectLocalWireguardClientQuick(),
+      async () => {
+        await openWireguardApp();
+        return "Opened WireGuard app.";
+      },
       null
     );
   },
@@ -1212,8 +1214,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     return await runInstanceTask(
       {
         key: "instance.wireguard.reconnect",
-        label: "Reconnecting WireGuard",
-        detail: "Refreshing the remote WireGuard tunnel.",
+        label: "Opening WireGuard",
+        detail: "Open the WireGuard app and manage the tunnel manually.",
         blocking: true
       },
       async () => await reconnectInstanceWireguard(instanceId),

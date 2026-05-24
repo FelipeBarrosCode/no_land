@@ -8,7 +8,7 @@ import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { resolveMoonlightDownloadUrl } from "../../lib/backend";
+import { resolveMoonlightDownloadUrl, resolveWireguardDownloadUrl } from "../../lib/backend";
 import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
@@ -105,6 +105,15 @@ export function DashboardScreen({
 
   async function handleMoonlightDownload() {
     const downloadUrl = await resolveMoonlightDownloadUrl();
+    try {
+      await openUrl(downloadUrl);
+    } catch {
+      window.open(downloadUrl, "_blank", "noopener,noreferrer");
+    }
+  }
+
+  async function handleWireguardDownload() {
+    const downloadUrl = await resolveWireguardDownloadUrl();
     try {
       await openUrl(downloadUrl);
     } catch {
@@ -221,7 +230,7 @@ export function DashboardScreen({
           </div>
         </header>
 
-        <section className="grid gap-4 md:grid-cols-2">
+        <section className="grid gap-4 md:grid-cols-3">
           <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
@@ -234,9 +243,20 @@ export function DashboardScreen({
             </p>
           </Card>
 
-          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40">
+          <Card interactive onClick={handleWireguardDownload} className="pixel-frame min-h-40">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 2</p>
+              <SpriteIcon icon="settings" />
+            </div>
+            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Download WireGuard</h2>
+            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
+              Open the official WireGuard install guide for your OS, install the app, then manage the tunnel from there.
+            </p>
+          </Card>
+
+          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40">
+            <div className="flex items-center justify-between">
+              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 3</p>
               <SpriteIcon icon="server" />
             </div>
             <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Set Server</h2>

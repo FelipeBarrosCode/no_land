@@ -130,6 +130,7 @@ fn main() {
             stop_local_sleep_prevention,
             get_provisioning_logs,
             get_moonlight_download_url,
+            get_wireguard_download_url,
             launch_moonlight_client,
             configure_moonlight_client,
             restore_moonlight_backup,
