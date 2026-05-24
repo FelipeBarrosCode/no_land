@@ -15,10 +15,8 @@ use crate::{
 };
 
 use super::{
-    app_context::AppContext,
-    remote_exec::RemoteExec,
-    shared_storage::shared_storage_manager::SharedStorageManager,
-    vast_api::VastApiClient,
+    app_context::AppContext, remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
     wireguard::remove_local_wireguard_config,
 };
 
