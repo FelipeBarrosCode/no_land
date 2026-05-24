@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
-import type { PersistedAppState, SetupStage } from "../../lib/types";
+import type { OrchestrationState, PersistedAppState, SetupStage } from "../../lib/types";
 
 interface Props {
   open: boolean;
@@ -10,6 +10,7 @@ interface Props {
   onOpenWireguardApp: () => Promise<void>;
   onDownloadWireguardConfig: () => Promise<string | null>;
   onVerifyWireguard: () => Promise<unknown>;
+  onDetectMoonlight: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
   onSubmitMoonlightPin: (pin: string) => Promise<unknown>;
   onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
@@ -21,8 +22,6 @@ const wireguardStages = new Set<SetupStage>([
   "wireguard_waiting_for_import",
   "wireguard_waiting_for_activation",
   "wireguard_verifying",
-  "wireguard_connected",
-  "moonlight_sunshine_ready_to_setup",
   "failed"
 ]);
 
@@ -34,6 +33,7 @@ export function PostWireguardModal({
   onOpenWireguardApp,
   onDownloadWireguardConfig,
   onVerifyWireguard,
+  onDetectMoonlight,
   onSetupMoonlightSunshine,
   onSubmitMoonlightPin,
   onRetrySetupStage
@@ -42,12 +42,30 @@ export function PostWireguardModal({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
   const setup = appState.postWireguardSetup;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
-  const isWireguardPhase = wireguardStages.has(setup.stage) && !setup.setupComplete && !setup.paired;
-  const showPinInput =
+  const isWireguardPhase =
+    wireguardStages.has(setup.stage) &&
+    setup.wireguardSetupStatus !== "connected" &&
+    !setup.setupComplete &&
+    !setup.paired;
+  const showPinInput = setup.wireguardSetupStatus === "connected";
+  const stageShowsPinSubmission =
     setup.stage === "moonlight_pairing_started" ||
     setup.stage === "moonlight_pin_received" ||
     setup.stage === "sunshine_pin_submitting" ||
     setup.stage === "moonlight_sunshine_paired";
+  const orchestrationShowsPinSubmission = new Set<OrchestrationState>([
+    "MoonlightPairingStarted",
+    "MoonlightPinReceived",
+    "SunshinePinSubmitting",
+    "MoonlightSunshinePaired"
+  ]).has(appState.orchestrationState);
+  const moonlightChecked =
+    stageShowsPinSubmission ||
+    orchestrationShowsPinSubmission ||
+    setup.moonlightInstalled ||
+    !!setup.lastError?.code.includes("moonlight");
+  const pinRetryError =
+    setup.lastError?.stage === "moonlight_pin_received" || setup.lastError?.stage === "sunshine_pin_submitting";
 
   const instructions = useMemo(() => {
     if (isMacManual) {
@@ -145,9 +163,23 @@ export function PostWireguardModal({
               <Button onClick={() => void onSetupMoonlightSunshine()} disabled={busy || setup.stage === "setup_complete"}>
                 Setup Moonlight & Sunshine
               </Button>
+              <Button variant="secondary" onClick={() => void onDetectMoonlight()} disabled={busy}>
+                Check Moonlight
+              </Button>
               <Button variant="ghost" onClick={() => void onVerifyWireguard()} disabled={busy}>
                 Retry Tunnel Check
               </Button>
+            </div>
+
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">Moonlight Status</h4>
+              <p className="mt-2">
+                {moonlightChecked
+                  ? setup.moonlightInstalled
+                    ? "Moonlight was detected on this machine. You can launch guided setup, or use the manual PIN fallback below."
+                    : "Moonlight was not detected on this machine. Use the manual PIN fallback from another Moonlight client, or install Moonlight here and re-check."
+                  : "Check Moonlight before guided setup if you want Noland to confirm it is available first."}
+              </p>
             </div>
 
             {showPinInput && (
@@ -157,6 +189,7 @@ export function PostWireguardModal({
                   <li>Open Moonlight and add the PC at <span className="text-neon-cyan">10.77.0.1</span>.</li>
                   <li>Generate the PIN in Moonlight.</li>
                   <li>Paste that PIN below and Noland will submit it to Sunshine automatically.</li>
+                  <li>You can use this again anytime, even after setup says it is complete.</li>
                 </ol>
                 <input
                   value={pin}
@@ -168,7 +201,7 @@ export function PostWireguardModal({
                   <Button onClick={() => void onSubmitMoonlightPin(pin)} disabled={busy || pin.length < 4}>
                     Submit PIN to Sunshine
                   </Button>
-                  {setup.lastError?.retryable && (
+                  {setup.lastError?.retryable && !pinRetryError && (
                     <Button variant="ghost" onClick={() => void onRetrySetupStage(setup.lastError!.stage)} disabled={busy}>
                       Retry Current Step
                     </Button>
@@ -179,7 +212,7 @@ export function PostWireguardModal({
 
             {setup.setupComplete && (
               <div className="mt-4 border border-neon-lime bg-[#1f3223] p-4 text-[1.08rem] text-[#d9ffca]">
-                Setup complete. Your secure streaming connection is ready.
+                Setup complete. Your secure streaming connection is ready, and you can still submit a fresh PIN below at any time.
               </div>
             )}
           </>
@@ -190,13 +223,14 @@ export function PostWireguardModal({
             <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-[#ffc3cf]">{setup.lastError.code}</h4>
             <p className="mt-2">{setup.lastError.message}</p>
             {setup.lastError.details && <p className="mt-2 text-[#ffbdc7]">{setup.lastError.details}</p>}
-            {setup.lastError.retryable && (
+            {setup.lastError.retryable && !pinRetryError && (
               <div className="mt-3">
                 <Button variant="ghost" onClick={() => void onRetrySetupStage(setup.lastError!.stage)} disabled={busy}>
                   Retry Current Step
                 </Button>
               </div>
             )}
+            {pinRetryError && <p className="mt-3 text-[#ffbdc7]">Generate a fresh PIN in Moonlight and submit it again here.</p>}
           </div>
         )}
       </div>
