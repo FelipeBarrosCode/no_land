@@ -11,6 +11,7 @@ pub mod offer_selector;
 pub mod orchestration;
 pub mod os_detection;
 pub mod post_provision;
+pub mod post_wireguard_setup;
 pub mod reboot_helper;
 pub mod remote_exec;
 pub mod shared_storage;

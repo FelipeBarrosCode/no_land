@@ -5,8 +5,9 @@ import type { BlockingActionState } from "../../components/ui/BlockingLoaderOver
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { PROVISIONING_ORDER } from "../../lib/constants";
-import type { PersistedAppState, ProvisioningEvent } from "../../lib/types";
+import type { PersistedAppState, ProvisioningEvent, SetupStage } from "../../lib/types";
 import { PairingModal } from "./PairingModal";
+import { PostWireguardModal } from "./PostWireguardModal";
 
 interface Props {
   appState: PersistedAppState;
@@ -16,6 +17,14 @@ interface Props {
   onSkipPairing: () => Promise<void>;
   onSetupWireguardClient: () => Promise<void>;
   onReconnectLocalWireguardClient: () => Promise<string | null>;
+  onSetupWireguardAppHandoff: () => Promise<unknown>;
+  onOpenWireguardApp: () => Promise<void>;
+  onDownloadWireguardConfig: () => Promise<string | null>;
+  onVerifyWireguard: () => Promise<unknown>;
+  onDetectMoonlight: () => Promise<unknown>;
+  onSetupMoonlightSunshine: () => Promise<unknown>;
+  onSubmitMoonlightPin: (pin: string) => Promise<unknown>;
+  onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
   sleepPreventionActive: boolean;
   onStartSleepPrevention: () => Promise<string | null>;
   onStopSleepPrevention: () => Promise<string | null>;
@@ -38,6 +47,14 @@ export function ProvisioningScreen({
   onSkipPairing,
   onSetupWireguardClient,
   onReconnectLocalWireguardClient,
+  onSetupWireguardAppHandoff,
+  onOpenWireguardApp,
+  onDownloadWireguardConfig,
+  onVerifyWireguard,
+  onDetectMoonlight,
+  onSetupMoonlightSunshine,
+  onSubmitMoonlightPin,
+  onRetrySetupStage,
   sleepPreventionActive,
   onStartSleepPrevention,
   onStopSleepPrevention
@@ -173,6 +190,35 @@ export function ProvisioningScreen({
         onSetupWireguardClient={onSetupWireguardClient}
         onReconnectLocalWireguardClient={onReconnectLocalWireguardClient}
         onSkip={onSkipPairing}
+      />
+
+      <PostWireguardModal
+        open={
+          appState.orchestrationState === "WireGuardConfigGenerated" ||
+          appState.orchestrationState === "WireGuardAppHandoffStarted" ||
+          appState.orchestrationState === "WireGuardWaitingForImport" ||
+          appState.orchestrationState === "WireGuardWaitingForActivation" ||
+          appState.orchestrationState === "WireGuardVerifying" ||
+          appState.orchestrationState === "WireGuardConnected" ||
+          appState.orchestrationState === "MoonlightSunshineReadyToSetup" ||
+          appState.orchestrationState === "SunshineCredentialsConfiguring" ||
+          appState.orchestrationState === "SunshineVerifying" ||
+          appState.orchestrationState === "MoonlightDetecting" ||
+          appState.orchestrationState === "MoonlightPairingStarted" ||
+          appState.orchestrationState === "MoonlightPinReceived" ||
+          appState.orchestrationState === "SunshinePinSubmitting" ||
+          appState.orchestrationState === "MoonlightSunshinePaired"
+        }
+        appState={appState}
+        busy={busy}
+        onSetupWireguardAppHandoff={onSetupWireguardAppHandoff}
+        onOpenWireguardApp={onOpenWireguardApp}
+        onDownloadWireguardConfig={onDownloadWireguardConfig}
+        onVerifyWireguard={onVerifyWireguard}
+        onDetectMoonlight={onDetectMoonlight}
+        onSetupMoonlightSunshine={onSetupMoonlightSunshine}
+        onSubmitMoonlightPin={onSubmitMoonlightPin}
+        onRetrySetupStage={onRetrySetupStage}
       />
     </main>
   );

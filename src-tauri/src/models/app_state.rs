@@ -17,6 +17,8 @@ pub struct PersistedAppState {
     pub moonlight_preferences: MoonlightPreferences,
     pub shared_storage: SharedStorageState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
+    #[serde(default)]
+    pub post_wireguard_setup: PostWireGuardSetupState,
     pub orchestration_state: OrchestrationState,
     pub last_error: Option<String>,
 }
@@ -38,6 +40,7 @@ impl Default for PersistedAppState {
             moonlight_preferences: MoonlightPreferences::default(),
             shared_storage: SharedStorageState::default(),
             provisioned_servers: Vec::new(),
+            post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
             last_error: None,
         }
@@ -262,6 +265,108 @@ pub struct WireGuardState {
     pub last_runtime_interface: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SetupStage {
+    #[default]
+    PreWireguardExistingFlow,
+    WireguardConfigGenerated,
+    WireguardAppHandoffStarted,
+    WireguardWaitingForImport,
+    WireguardWaitingForActivation,
+    WireguardVerifying,
+    WireguardConnected,
+    MoonlightSunshineReadyToSetup,
+    SunshineCredentialsConfiguring,
+    SunshineVerifying,
+    MoonlightDetecting,
+    MoonlightPairingStarted,
+    MoonlightPinReceived,
+    SunshinePinSubmitting,
+    MoonlightSunshinePaired,
+    SetupComplete,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WireGuardSetupMode {
+    #[default]
+    WireguardAppWindows,
+    WireguardAppLinux,
+    WireguardAppMacosManual,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WireGuardSetupStatus {
+    #[default]
+    NotStarted,
+    ConfigGenerated,
+    AppHandoffStarted,
+    WaitingForUserImport,
+    WaitingForUserActivation,
+    Verifying,
+    Connected,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupErrorState {
+    pub code: String,
+    pub message: String,
+    pub stage: SetupStage,
+    pub retryable: bool,
+    pub details: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostWireGuardSetupState {
+    pub stage: SetupStage,
+    pub wireguard_setup_mode: WireGuardSetupMode,
+    pub wireguard_setup_status: WireGuardSetupStatus,
+    pub current_instance_id: Option<u64>,
+    pub wireguard_export_path: String,
+    pub wireguard_config: String,
+    pub wireguard_verified_host: String,
+    pub wireguard_reachable_ports: Vec<u16>,
+    pub sunshine_username: String,
+    pub moonlight_host: String,
+    pub moonlight_installed: bool,
+    pub paired: bool,
+    pub setup_complete: bool,
+    pub last_error: Option<SetupErrorState>,
+}
+
+impl Default for PostWireGuardSetupState {
+    fn default() -> Self {
+        Self {
+            stage: SetupStage::PreWireguardExistingFlow,
+            wireguard_setup_mode: if cfg!(target_os = "macos") {
+                WireGuardSetupMode::WireguardAppMacosManual
+            } else if cfg!(target_os = "windows") {
+                WireGuardSetupMode::WireguardAppWindows
+            } else {
+                WireGuardSetupMode::WireguardAppLinux
+            },
+            wireguard_setup_status: WireGuardSetupStatus::NotStarted,
+            current_instance_id: None,
+            wireguard_export_path: String::new(),
+            wireguard_config: String::new(),
+            wireguard_verified_host: "10.77.0.1".to_string(),
+            wireguard_reachable_ports: Vec::new(),
+            sunshine_username: String::new(),
+            moonlight_host: "10.77.0.1".to_string(),
+            moonlight_installed: false,
+            paired: false,
+            setup_complete: false,
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SunshineState {
@@ -462,6 +567,20 @@ pub enum OrchestrationState {
     ConfiguringWireGuard,
     ConfiguringSunshine,
     ConfiguringNvidiaHeadless,
+    WireGuardConfigGenerated,
+    WireGuardAppHandoffStarted,
+    WireGuardWaitingForImport,
+    WireGuardWaitingForActivation,
+    WireGuardVerifying,
+    WireGuardConnected,
+    MoonlightSunshineReadyToSetup,
+    SunshineCredentialsConfiguring,
+    SunshineVerifying,
+    MoonlightDetecting,
+    MoonlightPairingStarted,
+    MoonlightPinReceived,
+    SunshinePinSubmitting,
+    MoonlightSunshinePaired,
     ConfiguringMoonlight,
     AwaitingPairPin,
     Pairing,

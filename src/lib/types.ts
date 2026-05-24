@@ -15,11 +15,84 @@ export type OrchestrationState =
   | "ConfiguringWireGuard"
   | "ConfiguringSunshine"
   | "ConfiguringNvidiaHeadless"
+  | "WireGuardConfigGenerated"
+  | "WireGuardAppHandoffStarted"
+  | "WireGuardWaitingForImport"
+  | "WireGuardWaitingForActivation"
+  | "WireGuardVerifying"
+  | "WireGuardConnected"
+  | "MoonlightSunshineReadyToSetup"
+  | "SunshineCredentialsConfiguring"
+  | "SunshineVerifying"
+  | "MoonlightDetecting"
+  | "MoonlightPairingStarted"
+  | "MoonlightPinReceived"
+  | "SunshinePinSubmitting"
+  | "MoonlightSunshinePaired"
   | "ConfiguringMoonlight"
   | "AwaitingPairPin"
   | "Pairing"
   | "Ready"
   | "Error";
+
+export type SetupStage =
+  | "pre_wireguard_existing_flow"
+  | "wireguard_config_generated"
+  | "wireguard_app_handoff_started"
+  | "wireguard_waiting_for_import"
+  | "wireguard_waiting_for_activation"
+  | "wireguard_verifying"
+  | "wireguard_connected"
+  | "moonlight_sunshine_ready_to_setup"
+  | "sunshine_credentials_configuring"
+  | "sunshine_verifying"
+  | "moonlight_detecting"
+  | "moonlight_pairing_started"
+  | "moonlight_pin_received"
+  | "sunshine_pin_submitting"
+  | "moonlight_sunshine_paired"
+  | "setup_complete"
+  | "failed";
+
+export type WireGuardSetupMode =
+  | "wireguard_app_windows"
+  | "wireguard_app_linux"
+  | "wireguard_app_macos_manual";
+
+export type WireGuardSetupStatus =
+  | "not_started"
+  | "config_generated"
+  | "app_handoff_started"
+  | "waiting_for_user_import"
+  | "waiting_for_user_activation"
+  | "verifying"
+  | "connected"
+  | "failed";
+
+export interface SetupErrorState {
+  code: string;
+  message: string;
+  stage: SetupStage;
+  retryable: boolean;
+  details: string | null;
+}
+
+export interface PostWireGuardSetupState {
+  stage: SetupStage;
+  wireguardSetupMode: WireGuardSetupMode;
+  wireguardSetupStatus: WireGuardSetupStatus;
+  currentInstanceId: number | null;
+  wireguardExportPath: string;
+  wireguardConfig: string;
+  wireguardVerifiedHost: string;
+  wireguardReachablePorts: number[];
+  sunshineUsername: string;
+  moonlightHost: string;
+  moonlightInstalled: boolean;
+  paired: boolean;
+  setupComplete: boolean;
+  lastError: SetupErrorState | null;
+}
 
 export interface CredentialsState {
   appUsername: string;
@@ -232,6 +305,7 @@ export interface PersistedAppState {
   moonlightPreferences: MoonlightPreferences;
   sharedStorage: SharedStorageState;
   provisionedServers: ProvisionedServerState[];
+  postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;
   lastError: string | null;
 }
@@ -305,6 +379,29 @@ export interface MoonlightConfigureResult {
   warnings: string[];
   error: string | null;
   canLaunchAnyway: boolean;
+}
+
+export interface ReachabilityResult {
+  reachable: boolean;
+  host: string;
+  checkedPorts: number[];
+  reachablePorts: number[];
+  error?: string;
+}
+
+export interface MoonlightDetectionResult {
+  installed: boolean;
+  launchKind: "native_path" | "path_lookup" | "flatpak" | "unknown";
+  executablePath?: string;
+  error?: string;
+}
+
+export interface SunshineVerificationResult {
+  reachable: boolean;
+  authenticated: boolean;
+  host: string;
+  port: number;
+  error?: string;
 }
 
 export interface SharedStorageSettings {

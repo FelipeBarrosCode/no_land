@@ -1359,10 +1359,35 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
 }
 
 pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
+    let Some(parent) = config_path.parent() else {
+        return Ok(());
+    };
+
+    let parent_name = parent
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let is_instance_specific_dir = parent_name.chars().all(|c| c.is_ascii_digit());
+    if is_instance_specific_dir {
+        if parent.exists() {
+            std::fs::remove_dir_all(parent).map_err(|error| {
+                AppError::Command(format!(
+                    "Failed removing WireGuard config directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        return Ok(());
+    }
+
     let repair_request_path = config_path.with_extension("repair.request");
     let repair_status_path = config_path.with_extension("repair.status");
 
-    for path in [repair_request_path.as_path(), repair_status_path.as_path(), config_path] {
+    for path in [
+        repair_request_path.as_path(),
+        repair_status_path.as_path(),
+        config_path,
+    ] {
         if !path.exists() {
             continue;
         }
@@ -1371,32 +1396,6 @@ pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
             AppError::Command(format!(
                 "Failed removing WireGuard artifact {}: {error}",
                 path.display()
-            ))
-        })?;
-    }
-
-    let Some(parent) = config_path.parent() else {
-        return Ok(());
-    };
-
-    let parent_name = parent.file_name().and_then(|value| value.to_str()).unwrap_or("");
-    let is_instance_specific_dir = parent_name.chars().all(|c| c.is_ascii_digit());
-    if !is_instance_specific_dir {
-        return Ok(());
-    }
-
-    let mut entries = std::fs::read_dir(parent).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading WireGuard config directory {}: {error}",
-            parent.display()
-        ))
-    })?;
-
-    if entries.next().is_none() {
-        std::fs::remove_dir(parent).map_err(|error| {
-            AppError::Command(format!(
-                "Failed removing empty WireGuard config directory {}: {error}",
-                parent.display()
             ))
         })?;
     }
@@ -1934,30 +1933,17 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
     let mut in_peer_section = false;
     let mut in_interface_section = false;
     let mut replaced = false;
-    let mut saw_save_config = false;
     let mut normalized_lines = Vec::with_capacity(original.lines().count() + 2);
 
     for line in original.lines() {
         let trimmed = line.trim();
         let lower = trimmed.to_ascii_lowercase();
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            if in_interface_section && !saw_save_config {
-                normalized_lines.push("SaveConfig = false".to_string());
-            }
             in_peer_section = trimmed.eq_ignore_ascii_case("[Peer]");
             in_interface_section = trimmed.eq_ignore_ascii_case("[Interface]");
-            if in_interface_section {
-                saw_save_config = false;
-            }
         }
 
         if in_interface_section && lower.starts_with("dns") {
-            continue;
-        }
-
-        if in_interface_section && lower.starts_with("saveconfig") {
-            normalized_lines.push("SaveConfig = false".to_string());
-            saw_save_config = true;
             continue;
         }
 
@@ -1967,10 +1953,6 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
         } else {
             normalized_lines.push(line.to_string());
         }
-    }
-
-    if in_interface_section && !saw_save_config {
-        normalized_lines.push("SaveConfig = false".to_string());
     }
 
     if !replaced {

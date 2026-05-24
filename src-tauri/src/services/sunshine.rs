@@ -373,7 +373,15 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         remote: &RemoteExec,
         target_user: &str,
         display: DisplayProfile,
+        sunshine_username: &str,
+        sunshine_password: &str,
     ) -> AppResult<()> {
+        if sunshine_username.trim().is_empty() || sunshine_password.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Sunshine username and password are required before WireGuard handoff.".to_string(),
+            ));
+        }
+
         let target_home = self.resolve_user_home(remote, target_user).await?;
         let target_uid = self.resolve_user_uid(remote, target_user).await?;
         let _target_gid = self.resolve_user_gid(remote, target_user).await?;
@@ -872,10 +880,15 @@ WantedBy=multi-user.target"#,
             )));
         }
 
+        self.bootstrap_web_credentials(remote, target_user, sunshine_username, sunshine_password)
+            .await?;
+
         info!(
             "Sunshine Web UI available at https://<wireguard-ip>:47990 (use HTTPS, accept self-signed cert)"
         );
-        info!("IMPORTANT: Visit the Web UI above to create your login credentials before pairing.");
+        info!(
+            "Sunshine Web UI credentials provisioned for the configured platform user before WireGuard handoff."
+        );
 
         let apply_affinity = {
             let remote = remote.clone();
@@ -1354,6 +1367,64 @@ echo "=== Setup Complete ==="
             return Err(AppError::Provisioning(format!(
                 "Failed to create user config directories: {}",
                 output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn bootstrap_web_credentials(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        sunshine_username: &str,
+        sunshine_password: &str,
+    ) -> AppResult<()> {
+        let escaped_username = shell_single_quote_escape(sunshine_username);
+        let escaped_password = shell_single_quote_escape(sunshine_password);
+        let set_creds_command = format!(
+            "sudo -u {target_user} bash -lc 'sunshine --creds '\''{escaped_username}'\'' '\''{escaped_password}'\'''",
+            target_user = target_user,
+            escaped_username = escaped_username,
+            escaped_password = escaped_password,
+        );
+
+        let set_creds = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&set_creds_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if set_creds.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to provision Sunshine web credentials. stdout: {} | stderr: {}",
+                set_creds.stdout.trim(),
+                set_creds.stderr.trim()
+            )));
+        }
+
+        let verify_command = format!(
+            "curl -k -sS --connect-timeout 10 -u '\''{escaped_username}'\'':'\''{escaped_password}'\'' https://localhost:47990/api/config >/dev/null && echo CREDS_OK || echo CREDS_FAIL",
+            escaped_username = escaped_username,
+            escaped_password = escaped_password,
+        );
+        let verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&verify_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if verify.status_code != 0 || !verify.stdout.contains("CREDS_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine credentials were set, but API auth verification failed. stdout: {} | stderr: {}",
+                verify.stdout.trim(),
+                verify.stderr.trim()
             )));
         }
 

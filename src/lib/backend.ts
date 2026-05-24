@@ -26,7 +26,12 @@ import type {
   InstanceMicRuntimeStatus,
   MicSessionResponse,
   MicSettingsUpdate,
-  MicQualityProfile
+  MicQualityProfile,
+  MoonlightDetectionResult,
+  PostWireGuardSetupState,
+  ReachabilityResult,
+  SetupStage,
+  SunshineVerificationResult
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -79,6 +84,46 @@ export async function setupWireguardClient(): Promise<string> {
 
 export async function reconnectLocalWireguardClientQuick(): Promise<string> {
   return invokeSafe<string>("reconnect_local_wireguard_client_quick");
+}
+
+export async function setupWireguardAppHandoff(): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("setup_wireguard_app_handoff_command");
+}
+
+export async function verifyWireguard(): Promise<ReachabilityResult> {
+  return invokeSafe<ReachabilityResult>("verify_wireguard");
+}
+
+export async function openWireguardApp(): Promise<void> {
+  await invokeSafe<void>("open_wireguard_app_command");
+}
+
+export async function downloadWireguardConfig(): Promise<string> {
+  return invokeSafe<string>("download_wireguard_config_command");
+}
+
+export async function getSetupStatus(): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("get_setup_status_command");
+}
+
+export async function verifySunshine(): Promise<SunshineVerificationResult> {
+  return invokeSafe<SunshineVerificationResult>("verify_sunshine");
+}
+
+export async function detectMoonlight(): Promise<MoonlightDetectionResult> {
+  return invokeSafe<MoonlightDetectionResult>("detect_moonlight");
+}
+
+export async function setupMoonlightSunshine(): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("setup_moonlight_sunshine_command");
+}
+
+export async function submitMoonlightPinToSunshine(pin: string): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("submit_moonlight_pin_to_sunshine_command", { pin });
+}
+
+export async function retrySetupStage(stage: SetupStage): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("retry_setup_stage_command", { stage });
 }
 
 export async function startLocalSleepPrevention(): Promise<string> {

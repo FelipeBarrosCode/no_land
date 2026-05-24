@@ -9,11 +9,21 @@ import {
   setManualLocation,
   reconnectLocalWireguardClientQuick,
   setupWireguardClient,
+  setupWireguardAppHandoff,
   startPlayExistingInstance,
   startPlayFlow,
+  submitMoonlightPinToSunshine,
   submitPairingPin,
   skipPairingAndContinue,
   subscribeProvisioningEvents,
+  verifyWireguard,
+  openWireguardApp,
+  downloadWireguardConfig,
+  getSetupStatus,
+  verifySunshine,
+  detectMoonlight,
+  setupMoonlightSunshine,
+  retrySetupStage,
   updatePlatformCredentials,
   updateMoonlightPreferences,
   updateServerPreferences,
@@ -79,7 +89,12 @@ import type {
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
-  OrchestrationState
+  MoonlightDetectionResult,
+  OrchestrationState,
+  PostWireGuardSetupState,
+  ReachabilityResult,
+  SetupStage,
+  SunshineVerificationResult
 } from "../lib/types";
 
 interface AppStore {
@@ -119,6 +134,15 @@ interface AppStore {
   skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
   reconnectLocalWireguardClient: () => Promise<string | null>;
+  setupWireguardAppHandoff: () => Promise<PostWireGuardSetupState | null>;
+  verifyWireguardConnection: () => Promise<ReachabilityResult | null>;
+  openWireguardApp: () => Promise<void>;
+  downloadWireguardConfig: () => Promise<string | null>;
+  verifySunshine: () => Promise<SunshineVerificationResult | null>;
+  detectMoonlight: () => Promise<MoonlightDetectionResult | null>;
+  setupMoonlightSunshine: () => Promise<PostWireGuardSetupState | null>;
+  submitMoonlightPin: (pin: string) => Promise<PostWireGuardSetupState | null>;
+  retrySetupStage: (stage: SetupStage) => Promise<PostWireGuardSetupState | null>;
   sleepPreventionActive: boolean;
   startSleepPrevention: () => Promise<string | null>;
   stopSleepPrevention: () => Promise<string | null>;
@@ -195,11 +219,78 @@ interface AsyncActionOptions {
 }
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
+  "WireGuardConfigGenerated",
+  "WireGuardAppHandoffStarted",
+  "WireGuardWaitingForImport",
+  "WireGuardWaitingForActivation",
+  "WireGuardConnected",
+  "MoonlightSunshineReadyToSetup",
+  "MoonlightPairingStarted",
+  "MoonlightPinReceived",
+  "MoonlightSunshinePaired",
   "AwaitingPairPin",
   "Pairing",
   "Ready",
   "Error"
 ]);
+
+const POST_WIREGUARD_EVENT_STAGE_MAP: Partial<Record<OrchestrationState, SetupStage>> = {
+  WireGuardConfigGenerated: "wireguard_config_generated",
+  WireGuardAppHandoffStarted: "wireguard_app_handoff_started",
+  WireGuardWaitingForImport: "wireguard_waiting_for_import",
+  WireGuardWaitingForActivation: "wireguard_waiting_for_activation",
+  WireGuardVerifying: "wireguard_verifying",
+  WireGuardConnected: "wireguard_connected",
+  MoonlightSunshineReadyToSetup: "moonlight_sunshine_ready_to_setup",
+  SunshineCredentialsConfiguring: "sunshine_credentials_configuring",
+  SunshineVerifying: "sunshine_verifying",
+  MoonlightDetecting: "moonlight_detecting",
+  MoonlightPairingStarted: "moonlight_pairing_started",
+  MoonlightPinReceived: "moonlight_pin_received",
+  SunshinePinSubmitting: "sunshine_pin_submitting",
+  MoonlightSunshinePaired: "moonlight_sunshine_paired"
+};
+
+function applyPostWireguardEventState(
+  appState: PersistedAppState,
+  orchestrationState: OrchestrationState
+): PersistedAppState {
+  const stage = POST_WIREGUARD_EVENT_STAGE_MAP[orchestrationState];
+  if (!stage) {
+    return appState;
+  }
+
+  return {
+    ...appState,
+    postWireguardSetup: {
+      ...appState.postWireguardSetup,
+      stage,
+      wireguardSetupStatus:
+        orchestrationState === "WireGuardConnected" || orchestrationState === "MoonlightSunshineReadyToSetup"
+          ? "connected"
+          : appState.postWireguardSetup.wireguardSetupStatus,
+      setupComplete: orchestrationState === "Ready" ? true : appState.postWireguardSetup.setupComplete,
+      paired:
+        orchestrationState === "MoonlightSunshinePaired" || orchestrationState === "Ready"
+          ? true
+          : appState.postWireguardSetup.paired
+    }
+  };
+}
+
+async function refreshProvisioningState(set: (partial: Partial<AppStore>) => void): Promise<void> {
+  try {
+    const [appState, postWireguardSetup] = await Promise.all([getAppState(), getSetupStatus()]);
+    set({
+      appState: {
+        ...appState,
+        postWireguardSetup
+      }
+    });
+  } catch {
+    // Keep the original frontend error if the best-effort refresh fails.
+  }
+}
 
 const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   GeneratingSshKey: "Generating SSH key",
@@ -211,6 +302,20 @@ const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   ConfiguringSunshine: "Configuring Sunshine",
   ConfiguringWireGuard: "Configuring WireGuard",
   ConfiguringNvidiaHeadless: "Configuring NVIDIA headless mode",
+  WireGuardConfigGenerated: "WireGuard config generated",
+  WireGuardAppHandoffStarted: "Opening WireGuard app",
+  WireGuardWaitingForImport: "Waiting for WireGuard import",
+  WireGuardWaitingForActivation: "Waiting for WireGuard activation",
+  WireGuardVerifying: "Verifying secure tunnel",
+  WireGuardConnected: "Secure tunnel connected",
+  MoonlightSunshineReadyToSetup: "Ready to set up Moonlight and Sunshine",
+  SunshineCredentialsConfiguring: "Configuring Sunshine credentials",
+  SunshineVerifying: "Verifying Sunshine",
+  MoonlightDetecting: "Finding Moonlight",
+  MoonlightPairingStarted: "Starting Moonlight pairing",
+  MoonlightPinReceived: "Moonlight PIN received",
+  SunshinePinSubmitting: "Submitting PIN to Sunshine",
+  MoonlightSunshinePaired: "Moonlight and Sunshine paired",
   ConfiguringMoonlight: "Preparing Moonlight pairing",
   AwaitingPairPin: "Awaiting Moonlight PIN",
   Pairing: "Completing Moonlight pairing",
@@ -386,11 +491,14 @@ export const useAppStore = create<AppStore>((set, get) => {
       set((state) => {
         const nextLogs = [event, ...state.logs].slice(0, 500);
         const nextState = state.appState
-          ? {
-              ...state.appState,
-              orchestrationState: event.state,
-              lastError: event.isError ? event.message : state.appState.lastError
-            }
+          ? applyPostWireguardEventState(
+              {
+                ...state.appState,
+                orchestrationState: event.state,
+                lastError: event.isError ? event.message : state.appState.lastError
+              },
+              event.state
+            )
           : state.appState;
 
         const updates: Partial<AppStore> = {
@@ -679,6 +787,171 @@ export const useAppStore = create<AppStore>((set, get) => {
         detail: "Refreshing the local tunnel so Moonlight can reach the instance."
       },
       async () => await reconnectLocalWireguardClientQuick(),
+      null
+    );
+  },
+
+  setupWireguardAppHandoff: async () => {
+    return runBusyTask(
+      {
+        key: "wireguard.appHandoff",
+        label: "Opening WireGuard app",
+        detail: "Preparing your generated tunnel for the WireGuard app.",
+        blocking: true
+      },
+      async () => {
+        const setup = await setupWireguardAppHandoff();
+        const appState = await getAppState();
+        set({ appState });
+        return setup;
+      },
+      null
+    );
+  },
+
+  verifyWireguardConnection: async () => {
+    return runBusyTask(
+      {
+        key: "wireguard.verify",
+        label: "Verifying secure tunnel",
+        detail: "Checking 10.77.0.1 over the WireGuard tunnel.",
+        blocking: true
+      },
+      async () => {
+        const result = await verifyWireguard();
+        const appState = await getAppState();
+        set({ appState });
+        return result;
+      },
+      null
+    );
+  },
+
+  openWireguardApp: async () => {
+    await runBusyTask(
+      {
+        key: "wireguard.open",
+        label: "Opening WireGuard",
+        detail: "Launching the WireGuard app.",
+      },
+      async () => {
+        await openWireguardApp();
+      },
+      undefined
+    );
+  },
+
+  downloadWireguardConfig: async () => {
+    return runBusyTask(
+      {
+        key: "wireguard.download",
+        label: "Exporting WireGuard config",
+        detail: "Preparing a WireGuard config file you can import.",
+      },
+      async () => {
+        const path = await downloadWireguardConfig();
+        const appState = await getAppState();
+        set({ appState });
+        return path;
+      },
+      null
+    );
+  },
+
+  verifySunshine: async () => {
+    return runBusyTask(
+      {
+        key: "sunshine.verify",
+        label: "Verifying Sunshine",
+        detail: "Checking Sunshine over 10.77.0.1.",
+      },
+      async () => {
+        const result = await verifySunshine();
+        await refreshProvisioningState(set);
+        return result;
+      },
+      null
+    );
+  },
+
+  detectMoonlight: async () => {
+    return runBusyTask(
+      {
+        key: "moonlight.detect",
+        label: "Finding Moonlight",
+        detail: "Looking for Moonlight on this machine.",
+      },
+      async () => {
+        const result = await detectMoonlight();
+        await refreshProvisioningState(set);
+        return result;
+      },
+      null
+    );
+  },
+
+  setupMoonlightSunshine: async () => {
+    return runBusyTask(
+      {
+        key: "moonlightSunshine.setup",
+        label: "Setting up Moonlight and Sunshine",
+        detail: "Preparing Moonlight pairing over the secure tunnel.",
+        blocking: true
+      },
+      async () => {
+        try {
+          const setup = await setupMoonlightSunshine();
+          await refreshProvisioningState(set);
+          return setup;
+        } catch (error) {
+          await refreshProvisioningState(set);
+          throw error;
+        }
+      },
+      null
+    );
+  },
+
+  submitMoonlightPin: async (pin) => {
+    return runBusyTask(
+      {
+        key: "moonlightSunshine.pin",
+        label: "Submitting PIN to Sunshine",
+        detail: "Pairing Moonlight with Sunshine over the secure tunnel.",
+        blocking: true
+      },
+      async () => {
+        try {
+          const setup = await submitMoonlightPinToSunshine(pin);
+          await refreshProvisioningState(set);
+          return setup;
+        } catch (error) {
+          await refreshProvisioningState(set);
+          throw error;
+        }
+      },
+      null
+    );
+  },
+
+  retrySetupStage: async (stage) => {
+    return runBusyTask(
+      {
+        key: "postWireguard.retry",
+        label: "Retrying setup step",
+        detail: "Repeating only the failed post-WireGuard step.",
+        blocking: true
+      },
+      async () => {
+        try {
+          const setup = await retrySetupStage(stage);
+          await refreshProvisioningState(set);
+          return setup;
+        } catch (error) {
+          await refreshProvisioningState(set);
+          throw error;
+        }
+      },
       null
     );
   },

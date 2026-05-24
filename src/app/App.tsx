@@ -94,6 +94,14 @@ function ProvisioningRoute() {
   const skipPairing = useAppStore((state) => state.skipPairing);
   const setupLocalWireguardClient = useAppStore((state) => state.setupLocalWireguardClient);
   const reconnectLocalWireguardClient = useAppStore((state) => state.reconnectLocalWireguardClient);
+  const setupWireguardAppHandoff = useAppStore((state) => state.setupWireguardAppHandoff);
+  const openWireguardApp = useAppStore((state) => state.openWireguardApp);
+  const downloadWireguardConfig = useAppStore((state) => state.downloadWireguardConfig);
+  const verifyWireguardConnection = useAppStore((state) => state.verifyWireguardConnection);
+  const detectMoonlight = useAppStore((state) => state.detectMoonlight);
+  const setupMoonlightSunshine = useAppStore((state) => state.setupMoonlightSunshine);
+  const submitMoonlightPin = useAppStore((state) => state.submitMoonlightPin);
+  const retrySetupStage = useAppStore((state) => state.retrySetupStage);
   const sleepPreventionActive = useAppStore((state) => state.sleepPreventionActive);
   const startSleepPrevention = useAppStore((state) => state.startSleepPrevention);
   const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
@@ -111,6 +119,14 @@ function ProvisioningRoute() {
         onSkipPairing={skipPairing}
         onSetupWireguardClient={setupLocalWireguardClient}
         onReconnectLocalWireguardClient={reconnectLocalWireguardClient}
+        onSetupWireguardAppHandoff={setupWireguardAppHandoff}
+        onOpenWireguardApp={openWireguardApp}
+        onDownloadWireguardConfig={downloadWireguardConfig}
+        onVerifyWireguard={verifyWireguardConnection}
+        onDetectMoonlight={detectMoonlight}
+        onSetupMoonlightSunshine={setupMoonlightSunshine}
+        onSubmitMoonlightPin={submitMoonlightPin}
+        onRetrySetupStage={retrySetupStage}
         sleepPreventionActive={sleepPreventionActive}
         onStartSleepPrevention={startSleepPrevention}
         onStopSleepPrevention={stopSleepPrevention}

@@ -10,9 +10,10 @@ use crate::{
             BackupStatusResponse, BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus,
             LocationSource, ManualLocationInput, MicQualityProfile, MicSessionResponse,
             MicSettingsUpdate, MoonlightPreferences, OnboardingPayload, OrchestrationState,
-            PersistedAppState, RentedInstanceSummary, RestoreDryRunResult, RestoreJob,
-            RestoreRequest, ServerPreferencesUpdate, SharedStorageInstanceStatus,
-            SharedStorageSettingsResponse, SharedStorageSettingsUpdate,
+            PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary, RestoreDryRunResult,
+            RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
+            SharedStorageInstanceStatus, SharedStorageSettingsResponse,
+            SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
     },
@@ -28,6 +29,13 @@ use crate::{
         offer_selector::OfferSelector,
         orchestration::OrchestrationService,
         os_detection::OsDetection,
+        post_wireguard_setup::{
+            detect_moonlight_client, download_wireguard_config, get_setup_status,
+            open_wireguard_app, retry_setup_stage, setup_moonlight_sunshine,
+            setup_wireguard_app_handoff, submit_moonlight_pin_to_sunshine, verify_sunshine_api,
+            verify_wireguard_connection, MoonlightDetectionResult, ReachabilityResult,
+            SunshineVerificationResult,
+        },
         reboot_helper::RebootHelperService,
         remote_exec::RemoteExec,
         shared_storage::bundle_indexer::BundleIndexer,
@@ -665,6 +673,98 @@ pub async fn reconnect_local_wireguard_client_quick(
     Ok(message)
 }
 
+#[tauri::command]
+pub async fn setup_wireguard_app_handoff_command(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<PostWireGuardSetupState, FrontendError> {
+    setup_wireguard_app_handoff(&app, context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn verify_wireguard(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<ReachabilityResult, FrontendError> {
+    verify_wireguard_connection(&app, context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn open_wireguard_app_command() -> Result<(), FrontendError> {
+    open_wireguard_app().map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn download_wireguard_config_command(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    download_wireguard_config(context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_setup_status_command(
+    context: State<'_, AppContext>,
+) -> Result<PostWireGuardSetupState, FrontendError> {
+    Ok(get_setup_status(context.inner()).await)
+}
+
+#[tauri::command]
+pub async fn verify_sunshine(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<SunshineVerificationResult, FrontendError> {
+    verify_sunshine_api(&app, context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn detect_moonlight(
+    context: State<'_, AppContext>,
+) -> Result<MoonlightDetectionResult, FrontendError> {
+    detect_moonlight_client(context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn setup_moonlight_sunshine_command(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<PostWireGuardSetupState, FrontendError> {
+    setup_moonlight_sunshine(&app, context.inner())
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn submit_moonlight_pin_to_sunshine_command(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    pin: String,
+) -> Result<PostWireGuardSetupState, FrontendError> {
+    submit_moonlight_pin_to_sunshine(&app, context.inner(), pin)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn retry_setup_stage_command(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    stage: SetupStage,
+) -> Result<PostWireGuardSetupState, FrontendError> {
+    retry_setup_stage(&app, context.inner(), stage)
+        .await
+        .map_err(Into::into)
+}
+
 async fn validate_local_wireguard_tunnel(
     context: &AppContext,
     tunnel_server_ip: &str,
@@ -1034,11 +1134,9 @@ pub async fn get_rented_instances(
     let list_result = vast.list_instances().await;
     let instances_source = match list_result {
         Ok(instances) => {
-            if let Err(error) = InstanceLifecycleService::reconcile_owned_instances(
-                context.inner(),
-                &instances,
-            )
-            .await
+            if let Err(error) =
+                InstanceLifecycleService::reconcile_owned_instances(context.inner(), &instances)
+                    .await
             {
                 warn!(
                     "get_rented_instances local state reconciliation failed (continuing): {}",

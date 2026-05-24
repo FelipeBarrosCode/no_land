@@ -25,6 +25,7 @@ use super::{
     moonlight::MoonlightService,
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
+    post_wireguard_setup::initialize_post_wireguard_flow,
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     sleep_inhibit::SleepInhibitService,
@@ -1080,6 +1081,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         }
     }
     if should_install_sunshine {
+        let (sunshine_username, sunshine_password) = {
+            let state = context.state.read().await;
+            (
+                state.credentials.app_username.clone(),
+                state.credentials.app_password.clone(),
+            )
+        };
         let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
         let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
             moonlight_preferences.width,
@@ -1109,7 +1117,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         )
         .await;
         sunshine
-            .install_and_configure(&remote, &target_user, display_profile)
+            .install_and_configure(
+                &remote,
+                &target_user,
+                display_profile,
+                &sunshine_username,
+                &sunshine_password,
+            )
             .await?;
         mark_server_step_completed(
             &context,
@@ -1367,18 +1381,26 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             &app,
             &context,
             OrchestrationState::ConfiguringWireGuard,
-            "Applying local WireGuard tunnel",
+            "WireGuard config ready for app handoff",
             Some(
-                "Replacing any previous local tunnel interface with the newly provisioned config"
+                "Do not change provisioning logic before this point. New post-WireGuard setup flow starts here."
                     .to_string(),
             ),
             false,
         )
         .await;
-
-        reconnect_local_wireguard_client(&wireguard_result.client_config_path)?;
         ensure_not_cancelled(&context)?;
     }
+
+    initialize_post_wireguard_flow(
+        &app,
+        &context,
+        instance.id,
+        &wireguard_result.client_config_path,
+    )
+    .await?;
+
+    return Ok(());
 
     let moonlight = MoonlightService;
     let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
@@ -1974,6 +1996,13 @@ async fn run_existing_instance_orchestration(
         }
     }
     if should_install_sunshine {
+        let (sunshine_username, sunshine_password) = {
+            let state = context.state.read().await;
+            (
+                state.credentials.app_username.clone(),
+                state.credentials.app_password.clone(),
+            )
+        };
         let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
         let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
             moonlight_preferences.width,
@@ -2003,7 +2032,13 @@ async fn run_existing_instance_orchestration(
         )
         .await;
         sunshine
-            .install_and_configure(&remote, &target_user, display_profile)
+            .install_and_configure(
+                &remote,
+                &target_user,
+                display_profile,
+                &sunshine_username,
+                &sunshine_password,
+            )
             .await?;
         mark_server_step_completed(
             &context,
@@ -2261,18 +2296,26 @@ async fn run_existing_instance_orchestration(
             &app,
             &context,
             OrchestrationState::ConfiguringWireGuard,
-            "Applying local WireGuard tunnel",
+            "WireGuard config ready for app handoff",
             Some(
-                "Replacing any previous local tunnel interface with the newly provisioned config"
+                "Do not change provisioning logic before this point. New post-WireGuard setup flow starts here."
                     .to_string(),
             ),
             false,
         )
         .await;
-
-        reconnect_local_wireguard_client(&wireguard_result.client_config_path)?;
         ensure_not_cancelled(&context)?;
     }
+
+    initialize_post_wireguard_flow(
+        &app,
+        &context,
+        instance.id,
+        &wireguard_result.client_config_path,
+    )
+    .await?;
+
+    return Ok(());
 
     let moonlight = MoonlightService;
     let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };

@@ -1,15 +1,24 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
 use tracing::info;
 
-use crate::errors::{AppError, AppResult};
+use crate::{
+    errors::{AppError, AppResult},
+    models::{app_state::ProvisionedServerState, vast::VastInstance},
+};
 
 use super::{
-    app_context::AppContext, remote_exec::RemoteExec,
-    shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
+    app_context::AppContext,
+    remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager,
+    vast_api::VastApiClient,
     wireguard::{reconnect_local_wireguard_client, remove_local_wireguard_config},
 };
 
@@ -49,6 +58,63 @@ pub struct SunshineSettingsUpdatePayload {
 pub struct InstanceLifecycleService;
 
 impl InstanceLifecycleService {
+    pub async fn reconcile_owned_instances(
+        context: &AppContext,
+        owned_instances: &[VastInstance],
+    ) -> AppResult<()> {
+        let owned_instance_ids = owned_instances.iter().map(|instance| instance.id).collect();
+        Self::remove_local_instances_missing_from_owned_set(context, &owned_instance_ids).await
+    }
+
+    async fn remove_local_instances_missing_from_owned_set(
+        context: &AppContext,
+        owned_instance_ids: &HashSet<u64>,
+    ) -> AppResult<()> {
+        let (removed_records, should_clear_active_instance) = {
+            let state = context.state.read().await;
+            let removed = state
+                .provisioned_servers
+                .iter()
+                .filter(|record| !owned_instance_ids.contains(&record.instance_id))
+                .cloned()
+                .collect::<Vec<ProvisionedServerState>>();
+            let clear_active = state
+                .instance
+                .instance_id
+                .map(|instance_id| !owned_instance_ids.contains(&instance_id))
+                .unwrap_or(false);
+            (removed, clear_active)
+        };
+
+        for record in &removed_records {
+            if record.wireguard_config_path.trim().is_empty() {
+                continue;
+            }
+
+            remove_local_wireguard_config(Path::new(&record.wireguard_config_path))?;
+        }
+
+        if removed_records.is_empty() && !should_clear_active_instance {
+            return Ok(());
+        }
+
+        context
+            .update_state(|state| {
+                state
+                    .provisioned_servers
+                    .retain(|record| owned_instance_ids.contains(&record.instance_id));
+
+                if should_clear_active_instance {
+                    state.instance = crate::models::app_state::InstanceState::default();
+                    state.wireguard = crate::models::app_state::WireGuardState::default();
+                    state.moonlight.host_address.clear();
+                }
+            })
+            .await?;
+
+        Ok(())
+    }
+
     async fn fetch_sunshine_raw_config(
         sunshine_username: &str,
         sunshine_password: &str,
@@ -61,13 +127,13 @@ impl InstanceLifecycleService {
 
         let client = sunshine_api_client()?;
         let response = client
-            .get("http://10.77.0.1:47990/api/config")
+            .get("https://10.77.0.1:47990/api/config")
             .basic_auth(sunshine_username, Some(sunshine_password))
             .send()
             .await
             .map_err(|error| {
                 AppError::Provisioning(format!(
-                    "Failed to reach Sunshine config endpoint on 10.77.0.1:47990: {error}"
+                    "Failed to reach Sunshine config endpoint on https://10.77.0.1:47990: {error}"
                 ))
             })?;
 
@@ -100,7 +166,7 @@ impl InstanceLifecycleService {
 
         let client = sunshine_api_client()?;
         let response = client
-            .post("http://10.77.0.1:47990/api/config")
+            .post("https://10.77.0.1:47990/api/config")
             .basic_auth(sunshine_username, Some(sunshine_password))
             .header("Content-Type", "application/json")
             .body(json_body)
@@ -108,7 +174,7 @@ impl InstanceLifecycleService {
             .await
             .map_err(|error| {
                 AppError::Provisioning(format!(
-                    "Failed to reach Sunshine config update endpoint on 10.77.0.1:47990: {error}"
+                    "Failed to reach Sunshine config update endpoint on https://10.77.0.1:47990: {error}"
                 ))
             })?;
 
@@ -250,23 +316,35 @@ impl InstanceLifecycleService {
 
             vast.destroy_instance(instance_id).await?;
 
-            if !wireguard_config_path.trim().is_empty() {
-                remove_local_wireguard_config(std::path::Path::new(&wireguard_config_path))?;
-            }
+            match vast.list_instances().await {
+                Ok(owned_instances) => {
+                    Self::reconcile_owned_instances(context, &owned_instances).await?;
+                }
+                Err(error) => {
+                    info!(
+                        instance_id = instance_id,
+                        "Destroy succeeded but rented-instance refresh failed; falling back to targeted local cleanup: {}",
+                        error
+                    );
 
-            // Clean up local state references to the destroyed instance
-            let _ = context
-                .update_state(|state| {
-                    state.instance = crate::models::app_state::InstanceState::default();
-                    if should_clear_active_wireguard_state {
-                        state.wireguard = crate::models::app_state::WireGuardState::default();
-                        state.moonlight.host_address.clear();
+                    if !wireguard_config_path.trim().is_empty() {
+                        remove_local_wireguard_config(Path::new(&wireguard_config_path))?;
                     }
-                    state
-                        .provisioned_servers
-                        .retain(|s| s.instance_id != instance_id);
-                })
-                .await;
+
+                    let _ = context
+                        .update_state(|state| {
+                            state.instance = crate::models::app_state::InstanceState::default();
+                            if should_clear_active_wireguard_state {
+                                state.wireguard = crate::models::app_state::WireGuardState::default();
+                                state.moonlight.host_address.clear();
+                            }
+                            state
+                                .provisioned_servers
+                                .retain(|s| s.instance_id != instance_id);
+                        })
+                        .await;
+                }
+            }
 
             info!(instance_id = instance_id, "Instance destroyed successfully");
             Ok(())
