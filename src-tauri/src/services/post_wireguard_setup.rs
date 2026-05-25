@@ -22,8 +22,8 @@ use tokio::time::sleep;
 use tracing::{info, warn};
 
 use super::{
-    app_context::AppContext, moonlight::MoonlightService, os_detection::OsDetection,
-    remote_exec::RemoteExec, ssh_keys::SshKeyService,
+    app_context::AppContext, moonlight::MoonlightService, orchestration,
+    os_detection::OsDetection, remote_exec::RemoteExec, ssh_keys::SshKeyService,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -772,6 +772,11 @@ pub async fn submit_moonlight_pin_to_sunshine(
         return Err(AppError::Provisioning(error));
     }
 
+    {
+        let mut pin_memory = context.pairing_pin_in_memory.write().await;
+        *pin_memory = Some(pin.clone());
+    }
+
     let state = context
         .update_state(|state| {
             state.post_wireguard_setup.stage = SetupStage::SetupComplete;
@@ -781,6 +786,43 @@ pub async fn submit_moonlight_pin_to_sunshine(
             state.last_error = None;
         })
         .await?;
+
+    let (instance_id, offer_id, status, ssh_host, ssh_port) = {
+        let snapshot = context.state.read().await.clone();
+        let instance_id = snapshot
+            .post_wireguard_setup
+            .current_instance_id
+            .or(snapshot.instance.instance_id)
+            .ok_or_else(|| {
+                AppError::State(
+                    "Missing instance id for post-WireGuard completion bookkeeping.".to_string(),
+                )
+            })?;
+        (
+            instance_id,
+            snapshot.instance.offer_id,
+            snapshot.instance.status,
+            snapshot.instance.ssh_host,
+            snapshot.instance.ssh_port,
+        )
+    };
+
+    orchestration::mark_server_step_completed(
+        context,
+        instance_id,
+        orchestration::ProvisionStepMarker::PairingCompleted,
+        OrchestrationState::Ready,
+        &status,
+        &ssh_host,
+        ssh_port,
+        offer_id,
+    )
+    .await?;
+
+    let (remote, _) = sunshine_ssh_remote(context).await?;
+    if let Err(error) = orchestration::run_post_provision_step(app, context, &remote, instance_id, offer_id).await {
+        warn!("Post-provision setup failed (non-fatal): {error}");
+    }
 
     emit_post_wireguard_event(
         app,

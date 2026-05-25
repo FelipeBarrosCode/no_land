@@ -435,7 +435,7 @@ impl OrchestrationService {
     }
 }
 
-async fn run_post_provision_step(
+pub(crate) async fn run_post_provision_step(
     app: &AppHandle,
     context: &AppContext,
     remote: &RemoteExec,
@@ -3272,7 +3272,7 @@ async fn detect_sunshine_pairing_mode(remote: &RemoteExec) -> AppResult<Sunshine
 }
 
 #[derive(Clone, Copy)]
-enum ProvisionStepMarker {
+pub(crate) enum ProvisionStepMarker {
     SshKeyReady,
     SshKeyUploadedToVast,
     InstanceCreated,
@@ -3665,7 +3665,7 @@ async fn server_step_is_completed(
         .unwrap_or(false)
 }
 
-async fn mark_server_step_completed(
+pub(crate) async fn mark_server_step_completed(
     context: &AppContext,
     instance_id: u64,
     step: ProvisionStepMarker,
