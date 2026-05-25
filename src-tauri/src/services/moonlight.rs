@@ -20,7 +20,7 @@ use crate::{
 };
 
 #[cfg(target_os = "linux")]
-use super::os_detection::OsDetection;
+use crate::services::os_detection::OsDetection;
 
 #[derive(Debug, Clone)]
 pub struct MoonlightService;
