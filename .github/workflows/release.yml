@@ -6,6 +6,8 @@ env:
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -22,22 +24,22 @@ jobs:
             platform: macos
             arch: arm64
             target: aarch64-apple-darwin
+          - os: macos-13
+            platform: macos
+            arch: x64
+            target: x86_64-apple-darwin
           - os: ubuntu-22.04
             platform: linux
             arch: x64
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            platform: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
           - os: windows-latest
             platform: windows
             arch: x64
             target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
+          - os: windows-latest
             platform: windows
-            arch: arm64
-            target: aarch64-pc-windows-msvc
+            arch: x86
+            target: i686-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
 
@@ -99,9 +101,14 @@ jobs:
           if-no-files-found: error
 
       - name: Attach assets to GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main-latest' }}
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('main build {0}', github.sha) }}
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          target_commitish: ${{ github.sha }}
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
           files: |
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
             src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
