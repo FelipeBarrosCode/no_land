@@ -837,10 +837,20 @@ WantedBy=multi-user.target"#,
         // Give Sunshine time to initialize before checking
         tokio::time::sleep(Duration::from_secs(5)).await;
 
+        let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+            "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+        } else {
+            format!(
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                self.defaults.bind_address
+            )
+        };
+
         // Call 2: verify process is alive, running as correct user, and web UI responds
         let verify_cmd = format!(
-            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 ' && echo 'SUNSHINE_STARTED' || (journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED')",
+            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_STARTED'; else journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED'; fi",
             user = target_user,
+            web_probe_targets = web_probe_targets,
         );
 
         let verify = {
@@ -862,9 +872,12 @@ WantedBy=multi-user.target"#,
         // 6. Health check: verify web UI and protocol ports respond
         let health_check = {
             let remote = remote.clone();
+            let web_probe_targets = web_probe_targets.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && nc -z localhost 47989 2>/dev/null && ss -ltnp | grep -q ':48010 ' && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 10 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'HEALTH_OK'; else echo 'HEALTH_FAIL'; fi"
+                    ),
                     Duration::from_secs(30),
                 )
             })
@@ -2050,9 +2063,19 @@ context.properties = {
         // Check web UI responds
         let web_check = {
             let remote = remote.clone();
+            let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+            } else {
+                format!(
+                    "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                    self.defaults.bind_address
+                )
+            };
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ]; then echo 'WEB_OK'; else echo 'WEB_FAIL'; fi"
+                    ),
                     Duration::from_secs(15),
                 )
             })
@@ -2062,7 +2085,7 @@ context.properties = {
 
         if web_check.status_code != 0 || !web_check.stdout.contains("WEB_OK") {
             return Err(AppError::Provisioning(format!(
-                "Sunshine web UI validation failed (not responding on https://localhost:47990/pin). stdout: {} | stderr: {}",
+                "Sunshine web UI validation failed (not responding on expected HTTPS probe targets). stdout: {} | stderr: {}",
                 web_check.stdout.trim(),
                 web_check.stderr.trim()
             )));

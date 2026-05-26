@@ -588,7 +588,8 @@ exit 0"#
         }
 
         // Set up firewall rules only after ufw is guaranteed to be installed
-        self.setup_firewall_rules(remote, &primary_interface)
+        let allowed_client_ip = strip_cidr(&self.defaults.client_tunnel_ip);
+        self.setup_firewall_rules(remote, &primary_interface, &allowed_client_ip)
             .await?;
 
         let bring_up = {
@@ -872,6 +873,7 @@ WantedBy=multi-user.target
         &self,
         remote: &RemoteExec,
         primary_interface: &str,
+        allowed_client_ip: &str,
     ) -> AppResult<()> {
         let firewall_setup = format!(
             r#"#!/bin/bash
@@ -899,9 +901,23 @@ iptables -C INPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptabl
 iptables -C OUTPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-request -j ACCEPT
 iptables -C OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
 
-# Sunshine ports via WireGuard only
-ufw status | grep -q "47984,47989,47990,47991,48010/tcp" || ufw allow in on {} to any port 47984,47989,47990,47991,48010 proto tcp comment 'Sunshine TCP over WireGuard'
-ufw status | grep -q "47998,47999,48000,48002/udp" || ufw allow in on {} to any port 47998,47999,48000,48002 proto udp comment 'Sunshine UDP over WireGuard'
+# Remove legacy broad Sunshine allow rules (best effort)
+ufw --force delete allow in on {} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
+ufw --force delete allow in on {} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
+for port in 47984 47989 47990 47991 48010; do
+  ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
+done
+for port in 47998 47999 48000 48002; do
+  ufw --force delete allow "$port/udp" >/dev/null 2>&1 || true
+done
+
+# Sunshine ports restricted to the configured WireGuard client only
+ufw status | grep -q "from {}/32 to any port 47984,47989,47990,47991,48010 proto tcp" || ufw allow in on {} from {}/32 to any port 47984,47989,47990,47991,48010 proto tcp comment 'Sunshine TCP over WireGuard (single client)'
+ufw status | grep -q "from {}/32 to any port 47998,47999,48000,48002 proto udp" || ufw allow in on {} from {}/32 to any port 47998,47999,48000,48002 proto udp comment 'Sunshine UDP over WireGuard (single client)'
+
+# Deny all other Sunshine access paths (best effort; source rule above stays higher priority)
+ufw status | grep -q "deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp" || ufw deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
+ufw status | grep -q "deny in on {} to any port 47998,47999,48000,48002 proto udp" || ufw deny in on {} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
 "#,
             self.defaults.listen_port,
             self.defaults.listen_port,
@@ -910,6 +926,16 @@ ufw status | grep -q "47998,47999,48000,48002/udp" || ufw allow in on {} to any 
             self.defaults.server_interface_name,
             primary_interface,
             primary_interface,
+            self.defaults.server_interface_name,
+            self.defaults.server_interface_name,
+            self.defaults.server_interface_name,
+            allowed_client_ip,
+            self.defaults.server_interface_name,
+            allowed_client_ip,
+            allowed_client_ip,
+            self.defaults.server_interface_name,
+            allowed_client_ip,
+            self.defaults.server_interface_name,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name
