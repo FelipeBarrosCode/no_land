@@ -6,8 +6,8 @@ use crate::errors::{AppError, AppResult};
 
 use super::{app_config::SunshineDefaults, remote_exec::RemoteExec};
 
-const HEADLESS_EDID_2560X1440_60_BASE64: &str =
-    "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBVl4AoKCgKVAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QA4TB5TEQAKICAgICAgAIU=";
+const HEADLESS_EDID_2560X1664_60_BASE64: &str =
+    "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBtmwAoKCAKWAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QBFTB5TEQAKICAgICAgACs=";
 
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayProfile {
@@ -1335,7 +1335,7 @@ echo "=== Setup Complete ==="
             uid = _uid,
             xorg_config = xorg_config,
             xorg_config_without_connected = xorg_config_without_connected,
-            headless_edid = HEADLESS_EDID_2560X1440_60_BASE64,
+            headless_edid = HEADLESS_EDID_2560X1664_60_BASE64,
             vhz = virtual_hz,
         );
 

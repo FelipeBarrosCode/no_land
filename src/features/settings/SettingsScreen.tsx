@@ -16,7 +16,27 @@ import type {
 } from "../../lib/types";
 
 type SettingsSection = "profile" | "server" | "client" | "storage";
-type ClientForm = Record<keyof MoonlightPreferences, string>;
+type ClientForm = {
+  bitrate: string;
+  fps: string;
+  refreshRateMode: string;
+  width: string;
+  height: string;
+  displayOutput: string;
+  aspectRatio: string;
+  hostaudio: string;
+  showperfoverlay: string;
+  keepawake: string;
+  framepacing: string;
+  vsync: string;
+  hdr: string;
+  videocfg: string;
+  videodec: string;
+  yuv444: string;
+  gameopts: string;
+  gamepadmouse: string;
+  detectnetblocking: string;
+};
 
 interface Props {
   appState: PersistedAppState;
@@ -41,7 +61,7 @@ function toNumber(value: string, fallback: number): number {
   return parsed;
 }
 
-const clientNumericFields: Array<Exclude<keyof MoonlightPreferences, "refreshRateMode">> = [
+const clientNumericFields: Array<keyof Omit<ClientForm, "refreshRateMode" | "displayOutput" | "aspectRatio">> = [
   "bitrate",
   "fps",
   "width",
@@ -96,6 +116,8 @@ export function SettingsScreen({
     refreshRateMode: appState.moonlightPreferences.refreshRateMode,
     width: appState.moonlightPreferences.width.toString(),
     height: appState.moonlightPreferences.height.toString(),
+    displayOutput: appState.moonlightPreferences.displayOutput ?? "",
+    aspectRatio: appState.moonlightPreferences.aspectRatio ?? "",
     hostaudio: appState.moonlightPreferences.hostaudio.toString(),
     showperfoverlay: appState.moonlightPreferences.showperfoverlay.toString(),
     keepawake: appState.moonlightPreferences.keepawake.toString(),
@@ -127,6 +149,8 @@ export function SettingsScreen({
       refreshRateMode: appState.moonlightPreferences.refreshRateMode,
       width: appState.moonlightPreferences.width.toString(),
       height: appState.moonlightPreferences.height.toString(),
+      displayOutput: appState.moonlightPreferences.displayOutput ?? "",
+      aspectRatio: appState.moonlightPreferences.aspectRatio ?? "",
       hostaudio: appState.moonlightPreferences.hostaudio.toString(),
       showperfoverlay: appState.moonlightPreferences.showperfoverlay.toString(),
       keepawake: appState.moonlightPreferences.keepawake.toString(),
@@ -308,6 +332,27 @@ export function SettingsScreen({
             <option value="59.94">59.94 Hz</option>
           </select>
         </div>
+        <InputField
+          label="Display Output"
+          value={clientForm.displayOutput}
+          onChange={(event) => setClientForm((prev) => ({ ...prev, displayOutput: event.target.value }))}
+        />
+        <div className="space-y-2">
+          <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
+            Aspect Ratio
+          </label>
+          <select
+            value={clientForm.aspectRatio}
+            onChange={(event) => setClientForm((prev) => ({ ...prev, aspectRatio: event.target.value }))}
+            className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+          >
+            <option value="">Auto (use width/height)</option>
+            <option value="16:9">16:9</option>
+            <option value="16:10">16:10</option>
+            <option value="21:9">21:9</option>
+            <option value="4:3">4:3</option>
+          </select>
+        </div>
       </div>
       <div className="mt-4">
         <Button
@@ -319,6 +364,8 @@ export function SettingsScreen({
               refreshRateMode: clientForm.refreshRateMode === "59.94" ? "59.94" : "60",
               width: Math.max(1280, Math.round(toNumber(clientForm.width, appState.moonlightPreferences.width))),
               height: Math.max(720, Math.round(toNumber(clientForm.height, appState.moonlightPreferences.height))),
+              displayOutput: clientForm.displayOutput.trim() ? clientForm.displayOutput.trim() : null,
+              aspectRatio: clientForm.aspectRatio.trim() ? clientForm.aspectRatio.trim() : null,
               hostaudio: Math.round(toNumber(clientForm.hostaudio, appState.moonlightPreferences.hostaudio)),
               showperfoverlay: Math.round(toNumber(clientForm.showperfoverlay, appState.moonlightPreferences.showperfoverlay)),
               keepawake: Math.round(toNumber(clientForm.keepawake, appState.moonlightPreferences.keepawake)),

@@ -235,6 +235,8 @@ export interface MoonlightPreferences {
   refreshRateMode: string;
   width: number;
   height: number;
+  displayOutput: string | null;
+  aspectRatio: string | null;
   hostaudio: number;
   showperfoverlay: number;
   keepawake: number;

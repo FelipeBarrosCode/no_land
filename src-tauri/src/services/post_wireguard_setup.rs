@@ -98,13 +98,14 @@ pub async fn initialize_post_wireguard_flow(
     instance_id: u64,
     config_path: &Path,
 ) -> AppResult<()> {
+    let previous_instance_id = { context.state.read().await.post_wireguard_setup.current_instance_id };
     let config_text = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading generated WireGuard config {}: {error}",
             config_path.display()
         ))
     })?;
-    let export_path = ensure_wireguard_import_copy(context, config_path)?;
+    let export_path = ensure_wireguard_import_copy(context, config_path, instance_id)?;
     let export_path_text = export_path.display().to_string();
     let mode = platform_wireguard_mode();
 
@@ -144,6 +145,21 @@ pub async fn initialize_post_wireguard_flow(
     )
     .await;
 
+    if previous_instance_id != Some(instance_id) {
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::WireGuardConfigGenerated,
+            "New instance detected",
+            Some(
+                "This is a different instance. WireGuard app setup and verification are required again before Sunshine/Moonlight setup."
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+    }
+
     Ok(())
 }
 
@@ -152,7 +168,9 @@ pub async fn setup_wireguard_app_handoff(
     context: &AppContext,
 ) -> AppResult<PostWireGuardSetupState> {
     let config_path = active_wireguard_config_path(context).await?;
-    let export_path = ensure_wireguard_import_copy(context, &config_path)?;
+    let instance_id = active_instance_id(context).await?;
+    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
+    let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
     let export_path_text = export_path.display().to_string();
     open_wireguard_app()?;
 
@@ -317,7 +335,9 @@ pub async fn verify_wireguard_connection(
 
 pub async fn download_wireguard_config(context: &AppContext) -> AppResult<String> {
     let config_path = active_wireguard_config_path(context).await?;
-    let export_path = ensure_wireguard_import_copy(context, &config_path)?;
+    let instance_id = active_instance_id(context).await?;
+    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
+    let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
     let export_text = export_path.display().to_string();
     context
         .update_state(|state| {
@@ -419,7 +439,7 @@ pub async fn verify_sunshine_api(
     let client = sunshine_http_client()?;
     let response = sunshine_config_response(&client, &username, &password).await;
 
-    let mut result = match response {
+    let result = match response {
         Ok(response) if response.status.is_success() => SunshineVerificationResult {
             reachable: true,
             authenticated: true,
@@ -471,27 +491,6 @@ pub async fn verify_sunshine_api(
             error: Some(error.to_string()),
         },
     };
-
-    if result.reachable && !result.authenticated {
-        if let Err(error) =
-            repair_sunshine_auth_state(app, context, &username, &password, true).await
-        {
-            warn!("best-effort Sunshine auth repair failed: {}", error);
-        } else {
-            let retry = sunshine_config_response(&client, &username, &password).await;
-            if let Ok(retry) = retry {
-                if retry.status.is_success() {
-                    result = SunshineVerificationResult {
-                        reachable: true,
-                        authenticated: true,
-                        host: TUNNEL_HOST.to_string(),
-                        port: SUNSHINE_API_PORT,
-                        error: None,
-                    };
-                }
-            }
-        }
-    }
 
     if !result.reachable || !result.authenticated {
         set_setup_failure(
@@ -548,27 +547,37 @@ pub async fn setup_moonlight_sunshine(
     app: &AppHandle,
     context: &AppContext,
 ) -> AppResult<PostWireGuardSetupState> {
-    let reachability = tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
-    if !reachability.reachable {
+    let (active_instance_id, setup_instance_id) = {
+        let state = context.state.read().await;
+        (
+            state.instance.instance_id,
+            state.post_wireguard_setup.current_instance_id,
+        )
+    };
+
+    if setup_instance_id.is_none() || active_instance_id != setup_instance_id {
+        let error = "WireGuard setup context is for a different instance. Run WireGuard app setup again for this new provisioned instance.".to_string();
         set_setup_failure(
             context,
-            SetupStage::WireguardConnected,
-            OrchestrationState::WireGuardConnected,
-            "wireguard_recheck_failed",
-            "WireGuard is not reachable anymore. Reconnect the tunnel and retry.",
-            reachability.error.clone(),
+            SetupStage::WireguardConfigGenerated,
+            OrchestrationState::WireGuardConfigGenerated,
+            "wireguard_setup_required_for_new_instance",
+            &error,
+            Some(
+                "The active instance changed, so previous WireGuard setup state cannot be reused."
+                    .to_string(),
+            ),
             true,
         )
         .await?;
-        return Err(AppError::Provisioning(
-            "WireGuard is not reachable anymore. Reconnect the tunnel and retry.".to_string(),
-        ));
+        return Err(AppError::Provisioning(error));
     }
 
     context
         .update_state(|state| {
             state.post_wireguard_setup.stage = SetupStage::SunshineCredentialsConfiguring;
             state.orchestration_state = OrchestrationState::SunshineCredentialsConfiguring;
+            state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Connected;
             state.post_wireguard_setup.sunshine_username = state.credentials.app_username.clone();
             state.post_wireguard_setup.last_error = None;
         })
@@ -910,6 +919,32 @@ pub async fn submit_moonlight_pin_to_sunshine(
 }
 
 pub async fn get_setup_status(context: &AppContext) -> PostWireGuardSetupState {
+    if let Ok(instance_id) = active_instance_id(context).await {
+        if let Ok(config_path) = active_wireguard_config_path(context).await {
+            if let Err(error) = sync_wireguard_config_snapshot(context, instance_id, &config_path).await {
+                let message = format!("Failed syncing active WireGuard config snapshot: {error}");
+                let _ = context
+                    .update_state(|state| {
+                        state.post_wireguard_setup.wireguard_config.clear();
+                        state.post_wireguard_setup.last_error = Some(SetupErrorState {
+                            code: "wireguard_config_sync_failed".to_string(),
+                            message: message.clone(),
+                            stage: state.post_wireguard_setup.stage,
+                            retryable: true,
+                            details: None,
+                        });
+                    })
+                    .await;
+            }
+        } else {
+            let _ = context
+                .update_state(|state| {
+                    state.post_wireguard_setup.wireguard_config.clear();
+                })
+                .await;
+        }
+    }
+
     context.state.read().await.post_wireguard_setup.clone()
 }
 
@@ -926,7 +961,6 @@ pub async fn retry_setup_stage(
         | SetupStage::WireguardVerifying
         | SetupStage::WireguardConnected => {
             let _ = setup_wireguard_app_handoff(app, context).await?;
-            let _ = verify_wireguard_connection(app, context).await?;
         }
         SetupStage::MoonlightSunshineReadyToSetup
         | SetupStage::SunshineCredentialsConfiguring
@@ -957,24 +991,64 @@ fn platform_wireguard_mode() -> WireGuardSetupMode {
     }
 }
 
+async fn active_instance_id(context: &AppContext) -> AppResult<u64> {
+    let state = context.state.read().await;
+    state
+        .instance
+        .instance_id
+        .or(state.post_wireguard_setup.current_instance_id)
+        .ok_or_else(|| AppError::State("Missing active instance id for WireGuard flow".to_string()))
+}
+
+async fn sync_wireguard_config_snapshot(
+    context: &AppContext,
+    instance_id: u64,
+    config_path: &Path,
+) -> AppResult<()> {
+    let config_text = std::fs::read_to_string(config_path).map_err(|error| {
+        AppError::Command(format!(
+            "Failed reading generated WireGuard config {}: {error}",
+            config_path.display()
+        ))
+    })?;
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.current_instance_id = Some(instance_id);
+            state.post_wireguard_setup.wireguard_config = config_text.clone();
+        })
+        .await?;
+
+    Ok(())
+}
+
 async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf> {
     let state = context.state.read().await;
-    let mut candidate = PathBuf::from(state.wireguard.config_path.clone());
-    if let Some(instance_id) = state
-        .post_wireguard_setup
-        .current_instance_id
-        .or(state.instance.instance_id)
+    let active_instance_id = state
+        .instance
+        .instance_id
+        .or(state.post_wireguard_setup.current_instance_id)
+        .ok_or_else(|| {
+            AppError::State(
+                "Missing active instance id for WireGuard config selection. Re-run provisioning."
+                    .to_string(),
+            )
+        })?;
+
+    let candidate = if let Some(path) = state
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == active_instance_id)
+        .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
+        .filter(|path| path.exists())
     {
-        if let Some(path) = state
-            .provisioned_servers
-            .iter()
-            .find(|record| record.instance_id == instance_id)
-            .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
-            .filter(|path| path.exists())
-        {
-            candidate = path;
-        }
-    }
+        path
+    } else {
+        return Err(AppError::NotFound(format!(
+            "WireGuard config for active instance {} was not found. Regenerate WireGuard for this instance.",
+            active_instance_id
+        )));
+    };
 
     if candidate.as_os_str().is_empty() || !candidate.exists() {
         return Err(AppError::NotFound(
@@ -983,14 +1057,29 @@ async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf
         ));
     }
 
+    let instance_segment = format!("/{}/", active_instance_id);
+    let normalized_candidate = candidate.to_string_lossy().replace('\\', "/");
+    if !normalized_candidate.contains(&instance_segment) {
+        return Err(AppError::Provisioning(format!(
+            "WireGuard config {} does not belong to active instance {}. Regenerate WireGuard for this instance.",
+            candidate.display(),
+            active_instance_id
+        )));
+    }
+
     Ok(candidate)
 }
 
-fn ensure_wireguard_import_copy(_context: &AppContext, config_path: &Path) -> AppResult<PathBuf> {
+fn ensure_wireguard_import_copy(
+    _context: &AppContext,
+    config_path: &Path,
+    instance_id: u64,
+) -> AppResult<PathBuf> {
     let app_data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.noland.connect")
-        .join("wireguard");
+        .join("wireguard")
+        .join(instance_id.to_string());
     std::fs::create_dir_all(&app_data_dir).map_err(|error| {
         AppError::Io(format!(
             "Failed creating WireGuard export directory {}: {error}",

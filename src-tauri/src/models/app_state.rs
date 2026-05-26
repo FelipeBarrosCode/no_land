@@ -404,6 +404,10 @@ pub struct MoonlightPreferences {
     pub refresh_rate_mode: String,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub display_output: Option<String>,
+    #[serde(default)]
+    pub aspect_ratio: Option<String>,
     pub hostaudio: u8,
     pub showperfoverlay: u8,
     pub keepawake: u8,
@@ -426,6 +430,8 @@ impl Default for MoonlightPreferences {
             refresh_rate_mode: default_refresh_rate_mode(),
             width: 1920,
             height: 1080,
+            display_output: None,
+            aspect_ratio: None,
             hostaudio: 1,
             showperfoverlay: 1,
             keepawake: 1,

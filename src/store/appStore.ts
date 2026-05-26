@@ -265,7 +265,7 @@ function applyPostWireguardEventState(
       ...appState.postWireguardSetup,
       stage,
       wireguardSetupStatus:
-        orchestrationState === "WireGuardConnected" || orchestrationState === "MoonlightSunshineReadyToSetup"
+        orchestrationState === "WireGuardConnected"
           ? "connected"
           : appState.postWireguardSetup.wireguardSetupStatus,
       setupComplete: orchestrationState === "Ready" ? true : appState.postWireguardSetup.setupComplete,
