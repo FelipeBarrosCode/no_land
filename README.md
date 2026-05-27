@@ -2,6 +2,18 @@
 
 Noland Connect is a Tauri 2 desktop setup assistant for Sunshine + Moonlight game streaming on Vast.ai GPU servers.
 
+## Documentation index
+
+Project-level docs are in `docs/`:
+
+- `docs/README.md` (entry point)
+- `docs/architecture.md`
+- `docs/flows.md`
+- `docs/schemas.md`
+- `docs/api-reference.md`
+- `docs/configuration.md`
+- `docs/operations.md`
+
 This phase implements a full vertical slice:
 
 - onboarding with local credentials + Vast API key
@@ -86,8 +98,9 @@ npm run tauri:build
 
 This repo is configured to publish direct-download desktop binaries (no app stores).
 
-- GitHub Actions workflow: `.github/workflows/release.yml`
-- Trigger automatically on tags like `v0.1.1`
+- Shared GitHub Actions workflow: `.github/workflows/release.yml`
+- Dedicated macOS Intel workflow: `.github/workflows/release-macos-intel.yml`
+- Triggers automatically on pushes to `main` and tags like `v0.1.1`
 - Builds on macOS, Linux, and Windows runners
 - Uploads artifacts to the workflow run and attaches installers to the GitHub Release
 
@@ -101,6 +114,10 @@ Use **Actions -> Build Desktop Binaries -> Run workflow**.
 git tag v0.1.1
 git push origin v0.1.1
 ```
+
+### Main branch rolling prerelease
+
+- Every push to `main` updates prerelease tag `main-latest` with fresh build artifacts.
 
 ### Downloadable artifacts produced
 

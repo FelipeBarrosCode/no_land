@@ -12,8 +12,10 @@ use commands::*;
 use services::{
     app_config::AppConfig,
     app_context::AppContext,
+    moonlight::detect_client_display_for_provisioning,
     orchestration::OrchestrationService,
     ssh_keys::normalize_ssh_state_from_disk,
+    sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
     state_store::{JsonStateStore, StateStore},
     wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
 };
@@ -69,6 +71,43 @@ fn main() {
             if normalize_wireguard_state_from_disk(&mut initial_state, &app_data_dir)
                 .map_err(|error| format!("Failed normalizing WireGuard state from disk: {error}"))?
             {
+                state_changed = true;
+            }
+
+            initial_state.sunshine.edid_refresh_rate_hz = initial_state
+                .sunshine
+                .edid_refresh_rate_hz
+                .clamp(EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ);
+            if initial_state.sunshine.headless_edid_base64.trim().is_empty() {
+                let (width, height, refresh_hz, source_label) = match initial_state.sunshine.edid_mode {
+                    crate::models::app_state::EdidMode::Manual => (
+                        initial_state.moonlight_preferences.width,
+                        initial_state.moonlight_preferences.height,
+                        initial_state.sunshine.edid_refresh_rate_hz,
+                        "Manual".to_string(),
+                    ),
+                    crate::models::app_state::EdidMode::AutoDetect => {
+                        if let Some((detected_width, detected_height, detected_refresh)) =
+                            detect_client_display_for_provisioning()
+                        {
+                            (
+                                detected_width,
+                                detected_height,
+                                detected_refresh,
+                                "Auto-Detected".to_string(),
+                            )
+                        } else {
+                            (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+                        }
+                    }
+                };
+                initial_state.sunshine.headless_edid_base64 = generate_headless_edid_base64(
+                    width,
+                    height,
+                    refresh_hz,
+                )
+                .map_err(|error| format!("Failed generating default EDID: {error}"))?;
+                initial_state.sunshine.edid_source_label = source_label;
                 state_changed = true;
             }
 
@@ -139,6 +178,7 @@ fn main() {
             update_platform_credentials,
             update_server_preferences,
             update_moonlight_preferences,
+            regenerate_edid,
             update_ssh_credentials,
             get_shared_storage_settings,
             save_shared_storage_settings,

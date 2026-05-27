@@ -189,6 +189,10 @@ export interface WireGuardState {
 
 export interface SunshineState {
   configured: boolean;
+  headlessEdidBase64: string;
+  edidMode: "auto_detect" | "manual";
+  edidRefreshRateHz: number;
+  edidSourceLabel: string;
 }
 
 export interface MoonlightState {
@@ -235,6 +239,8 @@ export interface MoonlightPreferences {
   refreshRateMode: string;
   width: number;
   height: number;
+  displayOutput: string | null;
+  aspectRatio: string | null;
   hostaudio: number;
   showperfoverlay: number;
   keepawake: number;

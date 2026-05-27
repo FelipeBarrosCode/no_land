@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -323,7 +324,9 @@ impl VastInstance {
 
     pub fn wireguard_endpoint_host(&self) -> String {
         if let Some(host) = normalize_host_ip(&self.wireguard_host_ip) {
-            return host;
+            if is_routable_host_ip(&host) {
+                return host;
+            }
         }
 
         if let Some(host) = normalize_host_ip(&self.public_ip) {
@@ -331,6 +334,29 @@ impl VastInstance {
         }
 
         self.ssh_host.trim().to_string()
+    }
+}
+
+fn is_routable_host_ip(host: &str) -> bool {
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return true;
+    };
+
+    match ip {
+        IpAddr::V4(v4) => {
+            !v4.is_private()
+                && !v4.is_loopback()
+                && !v4.is_link_local()
+                && !v4.is_unspecified()
+                && !v4.is_multicast()
+        }
+        IpAddr::V6(v6) => {
+            !v6.is_loopback()
+                && !v6.is_unspecified()
+                && !v6.is_multicast()
+                && !v6.is_unicast_link_local()
+                && !v6.is_unique_local()
+        }
     }
 }
 

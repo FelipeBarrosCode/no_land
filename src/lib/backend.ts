@@ -202,6 +202,13 @@ export async function updateMoonlightPreferences(
   return invokeSafe<PersistedAppState>("update_moonlight_preferences", { payload });
 }
 
+export async function regenerateEdid(payload: {
+  mode: "auto_detect" | "manual";
+  refreshRateHz: number;
+}): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("regenerate_edid", { payload });
+}
+
 export async function updateSshCredentials(
   payload: SshCredentialsUpdate
 ): Promise<PersistedAppState> {

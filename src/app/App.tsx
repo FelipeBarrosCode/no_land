@@ -166,6 +166,7 @@ export function App() {
   const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
   const saveMoonlightPreferences = useAppStore((state) => state.saveMoonlightPreferences);
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
+  const regenerateEdid = useAppStore((state) => state.regenerateEdid);
   const sharedStorageSettings = useAppStore((state) => state.sharedStorageSettings);
   const saveSharedStorageSettings = useAppStore((state) => state.saveSharedStorageSettings);
   const testSharedStorageConfig = useAppStore((state) => state.testSharedStorageConfig);
@@ -216,6 +217,7 @@ export function App() {
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
+                  onRegenerateEdid={regenerateEdid}
                   onSaveSharedStorageSettings={saveSharedStorageSettings}
                   onTestSharedStorageConfig={testSharedStorageConfig}
                   onLoadSharedStorageSettings={loadSharedStorageSettings}

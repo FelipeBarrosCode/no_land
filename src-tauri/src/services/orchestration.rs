@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::Duration,
@@ -12,7 +13,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            OrchestrationState, PairingContext, ProvisionedServerState, ProvisionedServerSteps,
+            EdidMode, MoonlightPreferences, OrchestrationState, PairingContext,
+            ProvisionedServerState, ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
     },
@@ -22,7 +24,7 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
-    moonlight::MoonlightService,
+    moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
     post_wireguard_setup::initialize_post_wireguard_flow,
@@ -37,6 +39,77 @@ use super::{
 
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
+
+fn build_display_profile(preferences: &MoonlightPreferences) -> crate::services::sunshine::DisplayProfile {
+    crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
+        preferences.width,
+        preferences.height,
+        preferences.fps,
+        &preferences.refresh_rate_mode,
+    )
+}
+
+fn resolve_edid_profile(
+    moonlight_preferences: &MoonlightPreferences,
+    edid_mode: EdidMode,
+    edid_refresh_rate_hz: u32,
+) -> crate::services::sunshine::ResolvedEdidProfile {
+    match edid_mode {
+        EdidMode::Manual => crate::services::sunshine::ResolvedEdidProfile {
+            width: moonlight_preferences.width,
+            height: moonlight_preferences.height,
+            refresh_hz: edid_refresh_rate_hz,
+            source_label: "Manual".to_string(),
+        },
+        EdidMode::AutoDetect => {
+            if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width,
+                    height,
+                    refresh_hz,
+                    source_label: "Auto-Detected".to_string(),
+                }
+            } else {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                    source_label: "Fallback 1920x1080@60".to_string(),
+                }
+            }
+        }
+    }
+}
+
+fn parse_wireguard_endpoint_from_config(config_path: &Path) -> Option<(String, u16)> {
+    let content = fs::read_to_string(config_path).ok()?;
+    let endpoint_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_ascii_lowercase().starts_with("endpoint ="))?;
+    let endpoint = endpoint_line.split_once('=')?.1.trim();
+
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some((host, port)) = rest.split_once("]:") {
+            return Some((host.trim().to_string(), port.trim().parse::<u16>().ok()?));
+        }
+    }
+
+    let (host, port) = endpoint.rsplit_once(':')?;
+    Some((host.trim().to_string(), port.trim().parse::<u16>().ok()?))
+}
+
+fn cached_wireguard_endpoint_matches(
+    cached_config_path: &Path,
+    expected_host: &str,
+    expected_port: u16,
+) -> bool {
+    let Some((host, port)) = parse_wireguard_endpoint_from_config(cached_config_path) else {
+        return false;
+    };
+
+    host.trim() == expected_host.trim() && port == expected_port
+}
 
 impl OrchestrationService {
     pub async fn start_play_flow(app: AppHandle, context: AppContext) -> AppResult<()> {
@@ -533,8 +606,6 @@ pub(crate) async fn run_post_provision_step(
 }
 
 async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()> {
-    ensure_not_cancelled(&context)?;
-
     let initial_state = context.state.read().await.clone();
 
     let offer = initial_state.selected_offer.clone().ok_or_else(|| {
@@ -557,8 +628,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         context.config.vast_base_url.clone(),
         api_key,
     );
-
-    ensure_not_cancelled(&context)?;
 
     match vast.list_instances().await {
         Ok(existing_instances) => {
@@ -1085,13 +1154,38 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 state.credentials.app_password.clone(),
             )
         };
-        let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
-        let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
-            moonlight_preferences.width,
-            moonlight_preferences.height,
-            moonlight_preferences.fps,
-            &moonlight_preferences.refresh_rate_mode,
+        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+            let state = context.state.read().await;
+            (
+                state.moonlight_preferences.clone(),
+                state.sunshine.edid_mode,
+                state.sunshine.edid_refresh_rate_hz,
+                state.sunshine.headless_edid_base64.clone(),
+            )
+        };
+        let display_profile = build_display_profile(&moonlight_preferences);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
         );
+        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+            crate::services::sunshine::generate_headless_edid_base64(
+                resolved_edid.width,
+                resolved_edid.height,
+                resolved_edid.refresh_hz,
+            )?
+        } else {
+            headless_edid_base64
+        };
+        let generated_edid_for_save = effective_edid_base64.clone();
+        let edid_source_for_save = resolved_edid.source_label.clone();
+        context
+            .update_state(|state| {
+                state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                state.sunshine.edid_source_label = edid_source_for_save;
+            })
+            .await?;
         info!(
             "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -1118,6 +1212,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 &remote,
                 &target_user,
                 display_profile,
+                &effective_edid_base64,
                 &sunshine_username,
                 &sunshine_password,
             )
@@ -1198,9 +1293,10 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             instance.public_ip = refreshed_instance.public_ip;
             instance.ssh_host = refreshed_instance.ssh_host;
             instance.wireguard_port = refreshed_instance.wireguard_port;
+            instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
             info!(
-                "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_port={}",
-                instance.public_ip, instance.ssh_host, instance.wireguard_port
+                "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={}",
+                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port
             );
         }
         Err(error) => {
@@ -1217,10 +1313,10 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
-    if endpoint_port == 0 {
+    if endpoint_host.trim().is_empty() || endpoint_port == 0 {
         return Err(AppError::Provisioning(format!(
-            "Instance {} does not expose 51820/udp on Vast. Pick a VM-enabled offer with direct UDP ports.",
-            instance.id
+            "Instance {} does not expose a valid WireGuard endpoint on Vast (host='{}' port={}). Pick a VM-enabled offer with direct UDP ports.",
+            instance.id, endpoint_host, endpoint_port
         )));
     }
 
@@ -1232,8 +1328,60 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
+            if !cached_wireguard_endpoint_matches(
+                cached.client_config_path.as_path(),
+                &endpoint_host,
+                endpoint_port,
+            ) {
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "WireGuard endpoint changed. Regenerating tunnel config.",
+                    Some(format!(
+                        "Expected endpoint {}:{}, cached config endpoint mismatched",
+                        endpoint_host, endpoint_port
+                    )),
+                    false,
+                )
+                .await;
+
+                clear_server_steps(
+                    &context,
+                    instance.id,
+                    &[
+                        ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MoonlightConfigured,
+                        ProvisionStepMarker::AwaitingPairPin,
+                        ProvisionStepMarker::PairingCompleted,
+                    ],
+                )
+                .await?;
+
+                let result = wireguard
+                    .configure(
+                        &remote,
+                        app_data_dir,
+                        instance.id,
+                        &endpoint_host,
+                        endpoint_port,
+                        WireGuardProvisionMode::FreshProvision,
+                    )
+                    .await?;
+                mark_server_step_completed(
+                    &context,
+                    instance.id,
+                    ProvisionStepMarker::WireguardConfigured,
+                    OrchestrationState::ConfiguringWireGuard,
+                    &instance.status,
+                    &instance.ssh_host,
+                    instance.ssh_port,
+                    Some(offer.id),
+                )
+                .await?;
+                result
+            } else {
             emit_step_skipped(
                 &app,
                 &context,
@@ -1255,6 +1403,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 .await?;
 
             cached
+            }
         } else {
             emit_transition(
                 &app,
@@ -1371,6 +1520,29 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
         result
     };
+    if !cached_wireguard_endpoint_matches(
+        wireguard_result.client_config_path.as_path(),
+        &endpoint_host,
+        endpoint_port,
+    ) {
+        return Err(AppError::Provisioning(format!(
+            "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
+            endpoint_host,
+            endpoint_port,
+            wireguard_result.client_config_path.display()
+        )));
+    }
+    persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
+    context
+        .update_state(|state| {
+            state.wireguard.server_ip = wireguard_result.server_ip.clone();
+            state.wireguard.client_ip = wireguard_result.client_ip.clone();
+            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
+            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
+            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
+            state.sunshine.configured = true;
+        })
+        .await?;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -2000,13 +2172,38 @@ async fn run_existing_instance_orchestration(
                 state.credentials.app_password.clone(),
             )
         };
-        let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
-        let display_profile = crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
-            moonlight_preferences.width,
-            moonlight_preferences.height,
-            moonlight_preferences.fps,
-            &moonlight_preferences.refresh_rate_mode,
+        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+            let state = context.state.read().await;
+            (
+                state.moonlight_preferences.clone(),
+                state.sunshine.edid_mode,
+                state.sunshine.edid_refresh_rate_hz,
+                state.sunshine.headless_edid_base64.clone(),
+            )
+        };
+        let display_profile = build_display_profile(&moonlight_preferences);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
         );
+        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+            crate::services::sunshine::generate_headless_edid_base64(
+                resolved_edid.width,
+                resolved_edid.height,
+                resolved_edid.refresh_hz,
+            )?
+        } else {
+            headless_edid_base64
+        };
+        let generated_edid_for_save = effective_edid_base64.clone();
+        let edid_source_for_save = resolved_edid.source_label.clone();
+        context
+            .update_state(|state| {
+                state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                state.sunshine.edid_source_label = edid_source_for_save;
+            })
+            .await?;
         info!(
             "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -2033,6 +2230,7 @@ async fn run_existing_instance_orchestration(
                 &remote,
                 &target_user,
                 display_profile,
+                &effective_edid_base64,
                 &sunshine_username,
                 &sunshine_password,
             )
@@ -2113,9 +2311,10 @@ async fn run_existing_instance_orchestration(
             instance.public_ip = refreshed_instance.public_ip;
             instance.ssh_host = refreshed_instance.ssh_host;
             instance.wireguard_port = refreshed_instance.wireguard_port;
+            instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
             info!(
-                "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_port={}",
-                instance.public_ip, instance.ssh_host, instance.wireguard_port
+                "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={}",
+                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port
             );
         }
         Err(error) => {
@@ -2132,10 +2331,10 @@ async fn run_existing_instance_orchestration(
     let _wireguard_mutation_guard = context.begin_wireguard_mutation();
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
-    if endpoint_port == 0 {
+    if endpoint_host.trim().is_empty() || endpoint_port == 0 {
         return Err(AppError::Provisioning(format!(
-            "Instance {} does not expose 51820/udp on Vast. Pick a VM-enabled offer with direct UDP ports.",
-            instance.id
+            "Instance {} does not expose a valid WireGuard endpoint on Vast (host='{}' port={}). Pick a VM-enabled offer with direct UDP ports.",
+            instance.id, endpoint_host, endpoint_port
         )));
     }
 
@@ -2147,8 +2346,60 @@ async fn run_existing_instance_orchestration(
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
+            if !cached_wireguard_endpoint_matches(
+                cached.client_config_path.as_path(),
+                &endpoint_host,
+                endpoint_port,
+            ) {
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "WireGuard endpoint changed. Regenerating tunnel config.",
+                    Some(format!(
+                        "Expected endpoint {}:{}, cached config endpoint mismatched",
+                        endpoint_host, endpoint_port
+                    )),
+                    false,
+                )
+                .await;
+
+                clear_server_steps(
+                    &context,
+                    instance.id,
+                    &[
+                        ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MoonlightConfigured,
+                        ProvisionStepMarker::AwaitingPairPin,
+                        ProvisionStepMarker::PairingCompleted,
+                    ],
+                )
+                .await?;
+
+                let result = wireguard
+                    .configure(
+                        &remote,
+                        app_data_dir,
+                        instance.id,
+                        &endpoint_host,
+                        endpoint_port,
+                        WireGuardProvisionMode::ReinitializeExisting,
+                    )
+                    .await?;
+                mark_server_step_completed(
+                    &context,
+                    instance.id,
+                    ProvisionStepMarker::WireguardConfigured,
+                    OrchestrationState::ConfiguringWireGuard,
+                    &instance.status,
+                    &instance.ssh_host,
+                    instance.ssh_port,
+                    offer_id,
+                )
+                .await?;
+                result
+            } else {
             emit_step_skipped(
                 &app,
                 &context,
@@ -2170,6 +2421,7 @@ async fn run_existing_instance_orchestration(
                 .await?;
 
             cached
+            }
         } else {
             emit_transition(
                 &app,
@@ -2286,6 +2538,29 @@ async fn run_existing_instance_orchestration(
 
         result
     };
+    if !cached_wireguard_endpoint_matches(
+        wireguard_result.client_config_path.as_path(),
+        &endpoint_host,
+        endpoint_port,
+    ) {
+        return Err(AppError::Provisioning(format!(
+            "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
+            endpoint_host,
+            endpoint_port,
+            wireguard_result.client_config_path.display()
+        )));
+    }
+    persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
+    context
+        .update_state(|state| {
+            state.wireguard.server_ip = wireguard_result.server_ip.clone();
+            state.wireguard.client_ip = wireguard_result.client_ip.clone();
+            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
+            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
+            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
+            state.sunshine.configured = true;
+        })
+        .await?;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {

@@ -895,6 +895,11 @@ fn detect_display_impl() -> Option<DisplayDetection> {
     None
 }
 
+pub(crate) fn detect_client_display_for_provisioning() -> Option<(u32, u32, u32)> {
+    let detected = detect_display_impl()?;
+    Some((detected.width, detected.height, detected.refresh_rate_hz))
+}
+
 fn normalize_fps(value: u32) -> u32 {
     match value {
         1..=75 => 60,

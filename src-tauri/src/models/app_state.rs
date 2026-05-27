@@ -371,12 +371,45 @@ impl Default for PostWireGuardSetupState {
 #[serde(rename_all = "camelCase")]
 pub struct SunshineState {
     pub configured: bool,
+    #[serde(default)]
+    pub headless_edid_base64: String,
+    #[serde(default = "default_edid_mode")]
+    pub edid_mode: EdidMode,
+    #[serde(default = "default_edid_refresh_rate_hz")]
+    pub edid_refresh_rate_hz: u32,
+    #[serde(default = "default_edid_source_label")]
+    pub edid_source_label: String,
 }
 
 impl Default for SunshineState {
     fn default() -> Self {
-        Self { configured: false }
+        Self {
+            configured: false,
+            headless_edid_base64: String::new(),
+            edid_mode: default_edid_mode(),
+            edid_refresh_rate_hz: default_edid_refresh_rate_hz(),
+            edid_source_label: default_edid_source_label(),
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EdidMode {
+    AutoDetect,
+    Manual,
+}
+
+fn default_edid_mode() -> EdidMode {
+    EdidMode::AutoDetect
+}
+
+fn default_edid_refresh_rate_hz() -> u32 {
+    60
+}
+
+fn default_edid_source_label() -> String {
+    "Auto-Detected".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -404,6 +437,10 @@ pub struct MoonlightPreferences {
     pub refresh_rate_mode: String,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub display_output: Option<String>,
+    #[serde(default)]
+    pub aspect_ratio: Option<String>,
     pub hostaudio: u8,
     pub showperfoverlay: u8,
     pub keepawake: u8,
@@ -426,6 +463,8 @@ impl Default for MoonlightPreferences {
             refresh_rate_mode: default_refresh_rate_mode(),
             width: 1920,
             height: 1080,
+            display_output: None,
+            aspect_ratio: None,
             hostaudio: 1,
             showperfoverlay: 1,
             keepawake: 1,

@@ -16,7 +16,27 @@ import type {
 } from "../../lib/types";
 
 type SettingsSection = "profile" | "server" | "client" | "storage";
-type ClientForm = Record<keyof MoonlightPreferences, string>;
+type ClientForm = {
+  bitrate: string;
+  fps: string;
+  refreshRateMode: string;
+  width: string;
+  height: string;
+  displayOutput: string;
+  aspectRatio: string;
+  hostaudio: string;
+  showperfoverlay: string;
+  keepawake: string;
+  framepacing: string;
+  vsync: string;
+  hdr: string;
+  videocfg: string;
+  videodec: string;
+  yuv444: string;
+  gameopts: string;
+  gamepadmouse: string;
+  detectnetblocking: string;
+};
 
 interface Props {
   appState: PersistedAppState;
@@ -27,6 +47,7 @@ interface Props {
   onSaveServerPreferences: (payload: Partial<ServerPreferencesUpdate>) => Promise<void>;
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  onRegenerateEdid: (payload: { mode: "auto_detect" | "manual"; refreshRateHz: number }) => Promise<void>;
   onSaveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
   onTestSharedStorageConfig: () => Promise<string | null>;
   onLoadSharedStorageSettings: () => Promise<void>;
@@ -41,7 +62,7 @@ function toNumber(value: string, fallback: number): number {
   return parsed;
 }
 
-const clientNumericFields: Array<Exclude<keyof MoonlightPreferences, "refreshRateMode">> = [
+const clientNumericFields: Array<keyof Omit<ClientForm, "refreshRateMode" | "displayOutput" | "aspectRatio">> = [
   "bitrate",
   "fps",
   "width",
@@ -69,6 +90,7 @@ export function SettingsScreen({
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
+  onRegenerateEdid,
   onSaveSharedStorageSettings,
   onTestSharedStorageConfig,
   onLoadSharedStorageSettings
@@ -83,6 +105,10 @@ export function SettingsScreen({
   const [sshPassword, setSshPassword] = useState(
     appState.ssh.sshPassword || appState.credentials.appPassword
   );
+  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(appState.sunshine.edidMode);
+  const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
+    appState.sunshine.edidRefreshRateHz.toString()
+  );
 
   const [serverForm, setServerForm] = useState({
     minReliability: appState.serverPreferences.minReliability.toString(),
@@ -96,6 +122,8 @@ export function SettingsScreen({
     refreshRateMode: appState.moonlightPreferences.refreshRateMode,
     width: appState.moonlightPreferences.width.toString(),
     height: appState.moonlightPreferences.height.toString(),
+    displayOutput: appState.moonlightPreferences.displayOutput ?? "",
+    aspectRatio: appState.moonlightPreferences.aspectRatio ?? "",
     hostaudio: appState.moonlightPreferences.hostaudio.toString(),
     showperfoverlay: appState.moonlightPreferences.showperfoverlay.toString(),
     keepawake: appState.moonlightPreferences.keepawake.toString(),
@@ -116,6 +144,8 @@ export function SettingsScreen({
     setPlatformPassword(appState.credentials.appPassword);
     setSshUsername(appState.ssh.sshUsername || appState.credentials.appUsername);
     setSshPassword(appState.ssh.sshPassword || appState.credentials.appPassword);
+    setEdidMode(appState.sunshine.edidMode);
+    setEdidRefreshRateHz(appState.sunshine.edidRefreshRateHz.toString());
     setServerForm({
       minReliability: appState.serverPreferences.minReliability.toString(),
       storageGb: appState.serverPreferences.storageGb.toString(),
@@ -127,6 +157,8 @@ export function SettingsScreen({
       refreshRateMode: appState.moonlightPreferences.refreshRateMode,
       width: appState.moonlightPreferences.width.toString(),
       height: appState.moonlightPreferences.height.toString(),
+      displayOutput: appState.moonlightPreferences.displayOutput ?? "",
+      aspectRatio: appState.moonlightPreferences.aspectRatio ?? "",
       hostaudio: appState.moonlightPreferences.hostaudio.toString(),
       showperfoverlay: appState.moonlightPreferences.showperfoverlay.toString(),
       keepawake: appState.moonlightPreferences.keepawake.toString(),
@@ -225,6 +257,47 @@ export function SettingsScreen({
           </Button>
         </div>
       </div>
+      <div className="mt-4 border-t border-[#3b4067] pt-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Headless EDID</h3>
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
+          Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
+        </p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">EDID Mode</label>
+            <select
+              value={edidMode}
+              onChange={(event) => setEdidMode(event.target.value as "auto_detect" | "manual")}
+              className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+            >
+              <option value="auto_detect">Auto Detect</option>
+              <option value="manual">Manual (use Moonlight width/height)</option>
+            </select>
+          </div>
+          <InputField
+            label="EDID Refresh Rate (30-240 Hz)"
+            value={edidRefreshRateHz}
+            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+          />
+        </div>
+        <div className="mt-3">
+          <Button
+            disabled={
+              busy ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
+            }
+            onClick={() =>
+              onRegenerateEdid({
+                mode: edidMode,
+                refreshRateHz: Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz))
+              })
+            }
+          >
+            Regenerate EDID
+          </Button>
+        </div>
+      </div>
     </Card>
   );
 
@@ -308,6 +381,27 @@ export function SettingsScreen({
             <option value="59.94">59.94 Hz</option>
           </select>
         </div>
+        <InputField
+          label="Display Output"
+          value={clientForm.displayOutput}
+          onChange={(event) => setClientForm((prev) => ({ ...prev, displayOutput: event.target.value }))}
+        />
+        <div className="space-y-2">
+          <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
+            Aspect Ratio
+          </label>
+          <select
+            value={clientForm.aspectRatio}
+            onChange={(event) => setClientForm((prev) => ({ ...prev, aspectRatio: event.target.value }))}
+            className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+          >
+            <option value="">Auto (use width/height)</option>
+            <option value="16:9">16:9</option>
+            <option value="16:10">16:10</option>
+            <option value="21:9">21:9</option>
+            <option value="4:3">4:3</option>
+          </select>
+        </div>
       </div>
       <div className="mt-4">
         <Button
@@ -319,6 +413,8 @@ export function SettingsScreen({
               refreshRateMode: clientForm.refreshRateMode === "59.94" ? "59.94" : "60",
               width: Math.max(1280, Math.round(toNumber(clientForm.width, appState.moonlightPreferences.width))),
               height: Math.max(720, Math.round(toNumber(clientForm.height, appState.moonlightPreferences.height))),
+              displayOutput: clientForm.displayOutput.trim() ? clientForm.displayOutput.trim() : null,
+              aspectRatio: clientForm.aspectRatio.trim() ? clientForm.aspectRatio.trim() : null,
               hostaudio: Math.round(toNumber(clientForm.hostaudio, appState.moonlightPreferences.hostaudio)),
               showperfoverlay: Math.round(toNumber(clientForm.showperfoverlay, appState.moonlightPreferences.showperfoverlay)),
               keepawake: Math.round(toNumber(clientForm.keepawake, appState.moonlightPreferences.keepawake)),

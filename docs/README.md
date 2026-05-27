@@ -1,0 +1,21 @@
+# Noland Connect Documentation
+
+This folder is the source of truth for how Noland Connect works end-to-end.
+
+## Start Here
+
+- `docs/architecture.md`: system layout, module boundaries, and runtime model
+- `docs/flows.md`: onboarding, provisioning, post-WireGuard setup, reboot, lifecycle, backup, mic
+- `docs/schemas.md`: persisted state schema, event schema, and key data contracts
+- `docs/api-reference.md`: frontend/backend command surface and grouping
+- `docs/configuration.md`: environment variables, defaults, and tuning knobs
+- `docs/operations.md`: build/release workflows, release artifacts, and operational runbook
+- `docs/noland-connect-system.md`: full production-grade deep system documentation
+
+## Existing focused docs
+
+- `docs/moonlight-settings.md`
+- `docs/microphone-passthrough.md`
+- `PROVISIONING_STEPS.md`
+
+If a behavior changes in code, update the relevant file in this folder in the same PR.

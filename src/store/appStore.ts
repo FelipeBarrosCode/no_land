@@ -25,6 +25,7 @@ import {
   retrySetupStage,
   updatePlatformCredentials,
   updateMoonlightPreferences,
+  regenerateEdid,
   updateServerPreferences,
   updateSshCredentials,
   updateVastApiKey,
@@ -129,6 +130,7 @@ interface AppStore {
   saveServerPreferences: (payload: Partial<ServerPreferencesUpdate>) => Promise<void>;
   saveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   saveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  regenerateEdid: (payload: { mode: "auto_detect" | "manual"; refreshRateHz: number }) => Promise<void>;
   submitPin: (pin: string) => Promise<void>;
   skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
@@ -265,7 +267,7 @@ function applyPostWireguardEventState(
       ...appState.postWireguardSetup,
       stage,
       wireguardSetupStatus:
-        orchestrationState === "WireGuardConnected" || orchestrationState === "MoonlightSunshineReadyToSetup"
+        orchestrationState === "WireGuardConnected"
           ? "connected"
           : appState.postWireguardSetup.wireguardSetupStatus,
       setupComplete: orchestrationState === "Ready" ? true : appState.postWireguardSetup.setupComplete,
@@ -738,6 +740,16 @@ export const useAppStore = create<AppStore>((set, get) => {
     set({ busy: true, error: null });
     try {
       const appState = await updateSshCredentials(payload);
+      set({ appState, busy: false });
+    } catch (error) {
+      set({ busy: false, error: mapError(error) });
+    }
+  },
+
+  regenerateEdid: async (payload) => {
+    set({ busy: true, error: null });
+    try {
+      const appState = await regenerateEdid(payload);
       set({ appState, busy: false });
     } catch (error) {
       set({ busy: false, error: mapError(error) });
