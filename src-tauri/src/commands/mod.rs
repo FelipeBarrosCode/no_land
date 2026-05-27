@@ -7,11 +7,11 @@ use crate::{
     errors::{AppError, FrontendError},
     models::{
         app_state::{
-            BackupStatusResponse, BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus,
-            EdidMode, LocationSource, ManualLocationInput, MicQualityProfile, MicSessionResponse,
-            MicSettingsUpdate, MoonlightPreferences, OnboardingPayload, OrchestrationState,
-            PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary, RestoreDryRunResult,
-            RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
+            BackupStatusResponse, BundleIndex, EdidMode, InstanceMicConfig,
+            InstanceMicRuntimeStatus, LocationSource, ManualLocationInput, MicQualityProfile,
+            MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OnboardingPayload,
+            OrchestrationState, PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary,
+            RestoreDryRunResult, RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
             SharedStorageInstanceStatus, SharedStorageSettingsResponse,
             SharedStorageSettingsUpdate,
         },
@@ -23,8 +23,9 @@ use crate::{
         location::LocationService,
         mic_passthrough::MicPassthroughService,
         moonlight::{
-            MoonlightCodecPreference, MoonlightConfigureOptions, MoonlightConfigureResult,
-            MoonlightNetworkPreference, MoonlightService, detect_client_display_for_provisioning,
+            detect_client_display_for_provisioning, MoonlightCodecPreference,
+            MoonlightConfigureOptions, MoonlightConfigureResult, MoonlightNetworkPreference,
+            MoonlightService,
         },
         offer_selector::OfferSelector,
         orchestration::OrchestrationService,
@@ -43,7 +44,7 @@ use crate::{
         shared_storage::shared_storage_manager::SharedStorageManager,
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
-        sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
+        sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
         wireguard::{
             read_local_wireguard_show_output, reconnect_local_wireguard_client,

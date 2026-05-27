@@ -345,6 +345,18 @@ function createBlockingAction(
   };
 }
 
+function shouldClearBlockingAction(
+  current: BlockingActionState | null,
+  completedKey: string,
+  isBlockingTask: boolean | undefined
+): boolean {
+  if (!isBlockingTask || !current) {
+    return false;
+  }
+
+  return current.key === completedKey || current.key === "provisioning.flow";
+}
+
 export const useAppStore = create<AppStore>((set, get) => {
   const runBusyTask = async <T,>(
     options: AsyncActionOptions,
@@ -374,7 +386,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     } finally {
       set((state) => ({
         busy: false,
-        ...(options.blocking && state.blockingAction?.key === options.key
+        ...(shouldClearBlockingAction(state.blockingAction, options.key, options.blocking)
           ? { blockingAction: null, isBlocking: false }
           : {})
       }));
@@ -409,7 +421,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     } finally {
       set((state) => ({
         instanceActionRunning: false,
-        ...(options.blocking && state.blockingAction?.key === options.key
+        ...(shouldClearBlockingAction(state.blockingAction, options.key, options.blocking)
           ? { blockingAction: null, isBlocking: false }
           : {})
       }));
