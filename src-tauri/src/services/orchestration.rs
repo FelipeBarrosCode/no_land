@@ -40,9 +40,7 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
 
-fn build_display_profile(
-    preferences: &MoonlightPreferences,
-) -> crate::services::sunshine::DisplayProfile {
+fn build_display_profile(preferences: &MoonlightPreferences) -> crate::services::sunshine::DisplayProfile {
     crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
         preferences.width,
         preferences.height,
@@ -1166,8 +1164,11 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             )
         };
         let display_profile = build_display_profile(&moonlight_preferences);
-        let resolved_edid =
-            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
+        );
         let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
             crate::services::sunshine::generate_headless_edid_base64(
                 resolved_edid.width,
@@ -1327,8 +1328,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
             if !cached_wireguard_endpoint_matches(
                 cached.client_config_path.as_path(),
                 &endpoint_host,
@@ -2183,8 +2183,11 @@ async fn run_existing_instance_orchestration(
             )
         };
         let display_profile = build_display_profile(&moonlight_preferences);
-        let resolved_edid =
-            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
+        );
         let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
             crate::services::sunshine::generate_headless_edid_base64(
                 resolved_edid.width,
@@ -2344,8 +2347,7 @@ async fn run_existing_instance_orchestration(
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
             if !cached_wireguard_endpoint_matches(
                 cached.client_config_path.as_path(),
                 &endpoint_host,

@@ -44,7 +44,7 @@ use crate::{
         shared_storage::shared_storage_manager::SharedStorageManager,
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
-        sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
+        sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
         vast_api::VastApiClient,
         wireguard::{
             read_local_wireguard_show_output, reconnect_local_wireguard_client,

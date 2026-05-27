@@ -99,14 +99,7 @@ pub async fn initialize_post_wireguard_flow(
     instance_id: u64,
     config_path: &Path,
 ) -> AppResult<()> {
-    let previous_instance_id = {
-        context
-            .state
-            .read()
-            .await
-            .post_wireguard_setup
-            .current_instance_id
-    };
+    let previous_instance_id = { context.state.read().await.post_wireguard_setup.current_instance_id };
     let config_text = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading generated WireGuard config {}: {error}",
@@ -962,9 +955,7 @@ pub async fn submit_moonlight_pin_to_sunshine(
 pub async fn get_setup_status(context: &AppContext) -> PostWireGuardSetupState {
     if let Ok(instance_id) = active_instance_id(context).await {
         if let Ok(config_path) = active_wireguard_config_path(context).await {
-            if let Err(error) =
-                sync_wireguard_config_snapshot(context, instance_id, &config_path).await
-            {
+            if let Err(error) = sync_wireguard_config_snapshot(context, instance_id, &config_path).await {
                 let message = format!("Failed syncing active WireGuard config snapshot: {error}");
                 let _ = context
                     .update_state(|state| {
