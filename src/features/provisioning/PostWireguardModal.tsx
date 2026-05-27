@@ -61,6 +61,9 @@ export function PostWireguardModal({
   const setup = appState.postWireguardSetup;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase = wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
+  const hasStartedManualSetup =
+    setup.stage !== "wireguard_config_generated" &&
+    setup.stage !== "pre_wireguard_existing_flow";
   const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
   const stageShowsPinSubmission = pinStages.has(setup.stage);
   const showPinInput = stageShowsPinSubmission;
@@ -120,7 +123,9 @@ export function PostWireguardModal({
           <>
             <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
               {isMacManual
-                ? "To finish the secure connection setup, import this tunnel into the WireGuard app."
+                ? hasStartedManualSetup
+                  ? "To finish the secure connection setup, import this tunnel into the WireGuard app."
+                  : "Click Start Manual Setup to load the current tunnel config for this instance, then import it into the WireGuard app."
                 : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then continue."}
             </p>
 
@@ -130,7 +135,7 @@ export function PostWireguardModal({
               ))}
             </ol>
 
-            {isMacManual && (
+            {isMacManual && hasStartedManualSetup && (
               <textarea
                 readOnly
                 value={setup.wireguardConfig}
@@ -139,12 +144,16 @@ export function PostWireguardModal({
             )}
 
             <div className="mt-4 flex flex-wrap gap-2">
-              {isMacManual && (
+              {isMacManual && hasStartedManualSetup && (
                 <Button variant="ghost" onClick={() => void copyConfig()}>
                   Copy Config
                 </Button>
               )}
-              <Button variant="secondary" onClick={() => void onDownloadWireguardConfig()} disabled={busy}>
+              <Button
+                variant="secondary"
+                onClick={() => void onDownloadWireguardConfig()}
+                disabled={busy || (isMacManual && !hasStartedManualSetup)}
+              >
                 Download .conf
               </Button>
               <Button variant="secondary" onClick={() => void onOpenWireguardApp()} disabled={busy}>
@@ -160,7 +169,7 @@ export function PostWireguardModal({
 
             {copyState === "copied" && <p className="mt-2 text-[1rem] text-neon-lime">Config copied to clipboard.</p>}
             {copyState === "failed" && <p className="mt-2 text-[1rem] text-[#ffb2bf]">Clipboard copy failed. Use Download .conf instead.</p>}
-            {!!setup.wireguardExportPath && (
+            {!!setup.wireguardExportPath && (!isMacManual || hasStartedManualSetup) && (
               <p className="mt-2 text-[1rem] text-[#9ab0cc]">Export path: {setup.wireguardExportPath}</p>
             )}
           </>

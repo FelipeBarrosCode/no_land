@@ -21,7 +21,11 @@ pub struct ResolvedEdidProfile {
     pub source_label: String,
 }
 
-pub fn generate_headless_edid_base64(width: u32, height: u32, refresh_hz: u32) -> AppResult<String> {
+pub fn generate_headless_edid_base64(
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+) -> AppResult<String> {
     if !(EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&refresh_hz) {
         return Err(AppError::InvalidInput(format!(
             "EDID refresh rate must be between {} and {} Hz",

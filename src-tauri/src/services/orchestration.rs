@@ -1382,27 +1382,28 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 .await?;
                 result
             } else {
-            emit_step_skipped(
-                &app,
-                &context,
-                OrchestrationState::ConfiguringWireGuard,
-                "Skipping WireGuard setup",
-                instance.id,
-            )
-            .await;
+                emit_step_skipped(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "Skipping WireGuard setup",
+                    instance.id,
+                )
+                .await;
 
-            context
-                .update_state(|state| {
-                    state.wireguard.server_ip = cached.server_ip.clone();
-                    state.wireguard.client_ip = cached.client_ip.clone();
-                    state.wireguard.server_public_key = cached.server_public_key.clone();
-                    state.wireguard.client_public_key = cached.client_public_key.clone();
-                    state.wireguard.config_path = cached.client_config_path.display().to_string();
-                    state.sunshine.configured = true;
-                })
-                .await?;
+                context
+                    .update_state(|state| {
+                        state.wireguard.server_ip = cached.server_ip.clone();
+                        state.wireguard.client_ip = cached.client_ip.clone();
+                        state.wireguard.server_public_key = cached.server_public_key.clone();
+                        state.wireguard.client_public_key = cached.client_public_key.clone();
+                        state.wireguard.config_path =
+                            cached.client_config_path.display().to_string();
+                        state.sunshine.configured = true;
+                    })
+                    .await?;
 
-            cached
+                cached
             }
         } else {
             emit_transition(
@@ -2400,27 +2401,28 @@ async fn run_existing_instance_orchestration(
                 .await?;
                 result
             } else {
-            emit_step_skipped(
-                &app,
-                &context,
-                OrchestrationState::ConfiguringWireGuard,
-                "Skipping WireGuard setup",
-                instance.id,
-            )
-            .await;
+                emit_step_skipped(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "Skipping WireGuard setup",
+                    instance.id,
+                )
+                .await;
 
-            context
-                .update_state(|state| {
-                    state.wireguard.server_ip = cached.server_ip.clone();
-                    state.wireguard.client_ip = cached.client_ip.clone();
-                    state.wireguard.server_public_key = cached.server_public_key.clone();
-                    state.wireguard.client_public_key = cached.client_public_key.clone();
-                    state.wireguard.config_path = cached.client_config_path.display().to_string();
-                    state.sunshine.configured = true;
-                })
-                .await?;
+                context
+                    .update_state(|state| {
+                        state.wireguard.server_ip = cached.server_ip.clone();
+                        state.wireguard.client_ip = cached.client_ip.clone();
+                        state.wireguard.server_public_key = cached.server_public_key.clone();
+                        state.wireguard.client_public_key = cached.client_public_key.clone();
+                        state.wireguard.config_path =
+                            cached.client_config_path.display().to_string();
+                        state.sunshine.configured = true;
+                    })
+                    .await?;
 
-            cached
+                cached
             }
         } else {
             emit_transition(

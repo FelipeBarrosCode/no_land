@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 use serde_json::Value;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

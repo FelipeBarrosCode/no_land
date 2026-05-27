@@ -18,7 +18,7 @@ use crate::{
 };
 use serde::Serialize;
 use tauri::AppHandle;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
 use super::{
@@ -33,6 +33,7 @@ const IMPORT_FILENAME: &str = "wireguard-app-import.conf";
 const SUNSHINE_API_READY_RETRIES: usize = 15;
 const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
+const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn sunshine_http_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
@@ -614,52 +615,85 @@ pub async fn setup_moonlight_sunshine(
     )
     .await;
 
-    repair_sunshine_auth_state(app, context, &username, &password, false).await?;
+    let sunshine = match timeout(SUNSHINE_PRE_PIN_VERIFY_TIMEOUT, async {
+        repair_sunshine_auth_state(app, context, &username, &password, false).await?;
 
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::SunshineVerifying,
-        "Checking Sunshine TLS certificate",
-        Some(
-            "Generating or rotating certificate only if missing or expiring soon (30 days)."
-                .to_string(),
-        ),
-        false,
-    )
-    .await;
-
-    let tls_action = ensure_sunshine_tls_certificate_over_ssh(context).await?;
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::SunshineVerifying,
-        "Sunshine TLS certificate status",
-        Some(tls_action.clone()),
-        false,
-    )
-    .await;
-
-    let tls_cert_changed = !tls_action.contains("TLS_ACTION=skipped");
-    let tls_config_changed = tls_action.contains("TLS_CONFIG_CHANGED=1");
-    if tls_cert_changed || tls_config_changed {
         emit_post_wireguard_event(
             app,
             context,
             OrchestrationState::SunshineVerifying,
-            "Restarting Sunshine after TLS update",
-            Some(if tls_cert_changed {
-                "Applying new/rotated TLS certificate before pairing.".to_string()
-            } else {
-                "Applying Sunshine TLS config changes before pairing.".to_string()
-            }),
+            "Checking Sunshine TLS certificate",
+            Some(
+                "Generating or rotating certificate only if missing or expiring soon (30 days)."
+                    .to_string(),
+            ),
             false,
         )
         .await;
-        restart_sunshine_service_over_ssh(context).await?;
-    }
 
-    let sunshine = verify_sunshine_api(app, context).await?;
+        let tls_action = ensure_sunshine_tls_certificate_over_ssh(context).await?;
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::SunshineVerifying,
+            "Sunshine TLS certificate status",
+            Some(tls_action.clone()),
+            false,
+        )
+        .await;
+
+        let tls_cert_changed = !tls_action.contains("TLS_ACTION=skipped");
+        let tls_config_changed = tls_action.contains("TLS_CONFIG_CHANGED=1");
+        if tls_cert_changed || tls_config_changed {
+            emit_post_wireguard_event(
+                app,
+                context,
+                OrchestrationState::SunshineVerifying,
+                "Restarting Sunshine after TLS update",
+                Some(if tls_cert_changed {
+                    "Applying new/rotated TLS certificate before pairing.".to_string()
+                } else {
+                    "Applying Sunshine TLS config changes before pairing.".to_string()
+                }),
+                false,
+            )
+            .await;
+            restart_sunshine_service_over_ssh(context).await?;
+        }
+
+        verify_sunshine_api(app, context).await
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let error = format!(
+                "Sunshine verification took longer than {} seconds. Re-import the current WireGuard config and try again.",
+                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs()
+            );
+            reset_to_wireguard_recovery_step(
+                context,
+                "sunshine_verify_timeout",
+                &error,
+                Some(
+                    "The secure tunnel or Sunshine API did not become ready in time before Moonlight PIN setup."
+                        .to_string(),
+                ),
+            )
+            .await?;
+            emit_post_wireguard_event(
+                app,
+                context,
+                recovery_orchestration_state(context).await,
+                "Sunshine verification timed out",
+                Some(error.clone()),
+                true,
+            )
+            .await;
+            return Err(AppError::Provisioning(error));
+        }
+    };
+
     if !sunshine.reachable || !sunshine.authenticated {
         return Err(AppError::Provisioning(
             sunshine
@@ -1432,6 +1466,75 @@ fn sanitize_ssh_user(value: &str) -> String {
 
 fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\\''")
+}
+
+fn recovery_stage_for_mode(mode: WireGuardSetupMode) -> SetupStage {
+    match mode {
+        WireGuardSetupMode::WireguardAppMacosManual => SetupStage::WireguardWaitingForImport,
+        WireGuardSetupMode::WireguardAppWindows | WireGuardSetupMode::WireguardAppLinux => {
+            SetupStage::WireguardWaitingForActivation
+        }
+    }
+}
+
+fn recovery_status_for_stage(stage: SetupStage) -> WireGuardSetupStatus {
+    match stage {
+        SetupStage::WireguardWaitingForImport => WireGuardSetupStatus::WaitingForUserImport,
+        SetupStage::WireguardWaitingForActivation => WireGuardSetupStatus::WaitingForUserActivation,
+        _ => WireGuardSetupStatus::AppHandoffStarted,
+    }
+}
+
+fn recovery_orchestration_state_for_stage(stage: SetupStage) -> OrchestrationState {
+    match stage {
+        SetupStage::WireguardWaitingForImport => OrchestrationState::WireGuardWaitingForImport,
+        SetupStage::WireguardWaitingForActivation => {
+            OrchestrationState::WireGuardWaitingForActivation
+        }
+        _ => OrchestrationState::WireGuardAppHandoffStarted,
+    }
+}
+
+async fn recovery_orchestration_state(context: &AppContext) -> OrchestrationState {
+    let mode = context
+        .state
+        .read()
+        .await
+        .post_wireguard_setup
+        .wireguard_setup_mode;
+    recovery_orchestration_state_for_stage(recovery_stage_for_mode(mode))
+}
+
+async fn reset_to_wireguard_recovery_step(
+    context: &AppContext,
+    code: &str,
+    message: &str,
+    details: Option<String>,
+) -> AppResult<()> {
+    let error = SetupErrorState {
+        code: code.to_string(),
+        message: message.to_string(),
+        stage: SetupStage::SunshineVerifying,
+        retryable: true,
+        details: details.clone(),
+    };
+
+    context
+        .update_state(|state| {
+            let recovery_stage =
+                recovery_stage_for_mode(state.post_wireguard_setup.wireguard_setup_mode);
+            state.post_wireguard_setup.stage = recovery_stage;
+            state.post_wireguard_setup.wireguard_setup_status =
+                recovery_status_for_stage(recovery_stage);
+            state.post_wireguard_setup.last_error = Some(error.clone());
+            state.post_wireguard_setup.setup_complete = false;
+            state.post_wireguard_setup.paired = false;
+            state.orchestration_state = recovery_orchestration_state_for_stage(recovery_stage);
+            state.last_error = Some(message.to_string());
+        })
+        .await?;
+
+    Ok(())
 }
 
 async fn set_setup_failure(
