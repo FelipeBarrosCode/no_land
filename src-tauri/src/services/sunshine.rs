@@ -1,13 +1,58 @@
 use std::{collections::BTreeMap, time::Duration};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
 use super::{app_config::SunshineDefaults, remote_exec::RemoteExec};
 
-const HEADLESS_EDID_2560X1440_60_BASE64: &str =
-    "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBVl4AoKCgKVAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QA4TB5TEQAKICAgICAgAIU=";
+const HEADLESS_EDID_TEMPLATE_BASE64: &str =
+    "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBtmwAoKCAKWAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QBFTB5TEQAKICAgICAgACs=";
+
+pub const EDID_MIN_REFRESH_HZ: u32 = 30;
+pub const EDID_MAX_REFRESH_HZ: u32 = 240;
+
+#[derive(Debug, Clone)]
+pub struct ResolvedEdidProfile {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+    pub source_label: String,
+}
+
+pub fn generate_headless_edid_base64(width: u32, height: u32, refresh_hz: u32) -> AppResult<String> {
+    if !(EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&refresh_hz) {
+        return Err(AppError::InvalidInput(format!(
+            "EDID refresh rate must be between {} and {} Hz",
+            EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ
+        )));
+    }
+
+    let mut bytes = STANDARD
+        .decode(HEADLESS_EDID_TEMPLATE_BASE64)
+        .map_err(|error| AppError::Serialization(format!("Failed to decode EDID template: {error}")))?;
+
+    if bytes.len() < 128 {
+        return Err(AppError::Serialization(
+            "EDID template is shorter than 128 bytes".to_string(),
+        ));
+    }
+
+    let serial_seed = width
+        .wrapping_mul(31)
+        .wrapping_add(height.wrapping_mul(17))
+        .wrapping_add(refresh_hz.wrapping_mul(13));
+    bytes[12] = (serial_seed & 0xFF) as u8;
+    bytes[13] = ((serial_seed >> 8) & 0xFF) as u8;
+    bytes[14] = ((serial_seed >> 16) & 0xFF) as u8;
+    bytes[15] = ((serial_seed >> 24) & 0xFF) as u8;
+
+    let checksum: u8 = (256u16 - (bytes[..127].iter().map(|b| *b as u16).sum::<u16>() % 256)) as u8;
+    bytes[127] = checksum;
+
+    Ok(STANDARD.encode(bytes))
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayProfile {
@@ -373,12 +418,18 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         remote: &RemoteExec,
         target_user: &str,
         display: DisplayProfile,
+        headless_edid_base64: &str,
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<()> {
         if sunshine_username.trim().is_empty() || sunshine_password.trim().is_empty() {
             return Err(AppError::InvalidInput(
                 "Sunshine username and password are required before WireGuard handoff.".to_string(),
+            ));
+        }
+        if headless_edid_base64.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Headless EDID is missing. Regenerate EDID from Settings before provisioning.".to_string(),
             ));
         }
 
@@ -468,7 +519,7 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         self.assert_rtsp_port_available(remote, target_user, &target_home)
             .await?;
 
-        self.setup_headless_display(remote, target_user, display)
+        self.setup_headless_display(remote, target_user, display, headless_edid_base64)
             .await?;
 
         // Verify Xorg is running before proceeding
@@ -837,10 +888,20 @@ WantedBy=multi-user.target"#,
         // Give Sunshine time to initialize before checking
         tokio::time::sleep(Duration::from_secs(5)).await;
 
+        let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+            "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+        } else {
+            format!(
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                self.defaults.bind_address
+            )
+        };
+
         // Call 2: verify process is alive, running as correct user, and web UI responds
         let verify_cmd = format!(
-            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && ss -ltnp | grep -q ':48010 ' && echo 'SUNSHINE_STARTED' || (journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED')",
+            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_STARTED'; else journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED'; fi",
             user = target_user,
+            web_probe_targets = web_probe_targets,
         );
 
         let verify = {
@@ -862,9 +923,12 @@ WantedBy=multi-user.target"#,
         // 6. Health check: verify web UI and protocol ports respond
         let health_check = {
             let remote = remote.clone();
+            let web_probe_targets = web_probe_targets.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 10 https://localhost:47990/pin >/dev/null 2>&1 && nc -z localhost 47989 2>/dev/null && ss -ltnp | grep -q ':48010 ' && echo 'HEALTH_OK' || echo 'HEALTH_FAIL'",
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 10 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'HEALTH_OK'; else echo 'HEALTH_FAIL'; fi"
+                    ),
                     Duration::from_secs(30),
                 )
             })
@@ -920,6 +984,7 @@ WantedBy=multi-user.target"#,
         remote: &RemoteExec,
         target_user: &str,
         display: DisplayProfile,
+        headless_edid_base64: &str,
     ) -> AppResult<()> {
         let target_home = self.resolve_user_home(remote, target_user).await?;
         let target_user_owned = target_user.to_string();
@@ -1103,7 +1168,7 @@ sudo usermod -aG video "$TARGET_USER" 2>/dev/null || true
 sudo usermod -aG audio "$TARGET_USER" 2>/dev/null || true
 sudo usermod -aG render "$TARGET_USER" 2>/dev/null || true
 
-# 2. Install NVIDIA xorg config (TwinView approach - no EDID needed!)
+# 2. Install NVIDIA xorg config with persisted synthetic EDID
 echo "Installing NVIDIA Xorg virtual display config + synthetic EDID..."
 sudo mkdir -p /etc/X11
 sudo bash -lc 'base64 -d > /etc/X11/edid.bin <<'"'"'EDIDEOF'"'"'
@@ -1263,7 +1328,12 @@ sudo systemctl unmask lightdm 2>/dev/null || true
 # 7. Wait for display to be ready
 echo "Waiting for display..."
 for i in $(seq 1 30); do
-    if DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
+            echo "Display ready after $i seconds"
+            break
+        fi
+    elif env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
         echo "Display ready after $i seconds"
         break
     fi
@@ -1275,18 +1345,41 @@ done
 
 # 7.1 Force target mode for Sunshine/Moonlight consistency
 echo "Enforcing target display mode ${{VIRT_W}}x${{VIRT_H}} @ {vhz}Hz..."
-ACTIVE_OUTPUT=$(DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | awk '/ connected/{{print $1; exit}}' || true)
+if command -v timeout >/dev/null 2>&1; then
+    ACTIVE_OUTPUT=$(timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | awk '/ connected/{{print $1; exit}}' || true)
+else
+    ACTIVE_OUTPUT=$(DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | awk '/ connected/{{print $1; exit}}' || true)
+fi
 if [ -n "$ACTIVE_OUTPUT" ]; then
-    if ! DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+    HAS_MODE=1
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+            HAS_MODE=0
+        fi
+    elif env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+        HAS_MODE=0
+    fi
+    if [ "$HAS_MODE" -ne 0 ]; then
         MODELINE=$(cvt -r "$VIRT_W" "$VIRT_H" {vhz} 2>/dev/null | sed -n '2p' || true)
         MODE_NAME=$(echo "$MODELINE" | awk '{{print $2}}' || true)
+        MODELINE_NO_PREFIX=$(echo "$MODELINE" | sed 's/^Modeline //')
         if [ -n "$MODELINE" ] && [ -n "$MODE_NAME" ]; then
-            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --newmode ${{MODELINE#Modeline }} 2>/dev/null || true
-            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
-            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 8s sh -c 'env DISPLAY=:0 XAUTHORITY="$1" xrandr --newmode $2 2>/dev/null || true' _ "$SHARED_XAUTH" "$MODELINE_NO_PREFIX"
+                timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
+                timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            else
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --newmode ${{MODELINE#Modeline }} 2>/dev/null || true
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            fi
         fi
     else
-        DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        else
+            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        fi
     fi
 fi
 
@@ -1304,11 +1397,25 @@ sudo chown $TARGET_USER:$TARGET_GROUP /home/$TARGET_USER/.Xauthority 2>/dev/null
 echo "=== Verification ==="
 echo "Xorg: $(pgrep -a Xorg | head -1 || echo 'NOT RUNNING')"
 echo "Xrandr monitors:"
-DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+if command -v timeout >/dev/null 2>&1; then
+    timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+else
+    DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+fi
 echo "Xrandr full output:"
-DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
+if command -v timeout >/dev/null 2>&1; then
+    timeout 8s sh -c 'env DISPLAY=:0 XAUTHORITY="$1" xrandr 2>/dev/null | head -20' _ "$SHARED_XAUTH" || echo "xrandr FAILED"
+else
+    DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
+fi
 echo "Testing user display access..."
-if sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
+if command -v timeout >/dev/null 2>&1; then
+    if timeout 8s sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
+        echo "USER_DISPLAY_ACCESS=OK"
+    else
+        echo "USER_DISPLAY_ACCESS=FAIL"
+    fi
+elif sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
     echo "USER_DISPLAY_ACCESS=OK"
 else
     echo "USER_DISPLAY_ACCESS=FAIL"
@@ -1322,7 +1429,7 @@ echo "=== Setup Complete ==="
             uid = _uid,
             xorg_config = xorg_config,
             xorg_config_without_connected = xorg_config_without_connected,
-            headless_edid = HEADLESS_EDID_2560X1440_60_BASE64,
+            headless_edid = headless_edid_base64,
             vhz = virtual_hz,
         );
 
@@ -2050,9 +2157,19 @@ context.properties = {
         // Check web UI responds
         let web_check = {
             let remote = remote.clone();
+            let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+            } else {
+                format!(
+                    "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                    self.defaults.bind_address
+                )
+            };
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 && echo 'WEB_OK' || echo 'WEB_FAIL'",
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ]; then echo 'WEB_OK'; else echo 'WEB_FAIL'; fi"
+                    ),
                     Duration::from_secs(15),
                 )
             })
@@ -2062,7 +2179,7 @@ context.properties = {
 
         if web_check.status_code != 0 || !web_check.stdout.contains("WEB_OK") {
             return Err(AppError::Provisioning(format!(
-                "Sunshine web UI validation failed (not responding on https://localhost:47990/pin). stdout: {} | stderr: {}",
+                "Sunshine web UI validation failed (not responding on expected HTTPS probe targets). stdout: {} | stderr: {}",
                 web_check.stdout.trim(),
                 web_check.stderr.trim()
             )));

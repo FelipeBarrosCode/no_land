@@ -22,7 +22,23 @@ const wireguardStages = new Set<SetupStage>([
   "wireguard_waiting_for_import",
   "wireguard_waiting_for_activation",
   "wireguard_verifying",
+  "wireguard_connected",
   "failed"
+]);
+
+const streamingPrepStages = new Set<SetupStage>([
+  "moonlight_sunshine_ready_to_setup",
+  "sunshine_credentials_configuring",
+  "sunshine_verifying",
+  "moonlight_detecting"
+]);
+
+const pinStages = new Set<SetupStage>([
+  "moonlight_pairing_started",
+  "moonlight_pin_received",
+  "sunshine_pin_submitting",
+  "moonlight_sunshine_paired",
+  "setup_complete"
 ]);
 
 export function PostWireguardModal({
@@ -40,19 +56,14 @@ export function PostWireguardModal({
 }: Props) {
   const [pin, setPin] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  void onVerifyWireguard;
+  void onDetectMoonlight;
   const setup = appState.postWireguardSetup;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
-  const isWireguardPhase =
-    wireguardStages.has(setup.stage) &&
-    setup.wireguardSetupStatus !== "connected" &&
-    !setup.setupComplete &&
-    !setup.paired;
-  const showPinInput = setup.wireguardSetupStatus === "connected";
-  const stageShowsPinSubmission =
-    setup.stage === "moonlight_pairing_started" ||
-    setup.stage === "moonlight_pin_received" ||
-    setup.stage === "sunshine_pin_submitting" ||
-    setup.stage === "moonlight_sunshine_paired";
+  const isWireguardPhase = wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
+  const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
+  const stageShowsPinSubmission = pinStages.has(setup.stage);
+  const showPinInput = stageShowsPinSubmission;
   const orchestrationShowsPinSubmission = new Set<OrchestrationState>([
     "MoonlightPairingStarted",
     "MoonlightPinReceived",
@@ -73,7 +84,7 @@ export function PostWireguardModal({
         "Open the WireGuard app.",
         "Import the downloaded .conf file, or create a tunnel and paste the config.",
         "Activate the tunnel in the WireGuard app.",
-        "Return here and click Done / Verify connection."
+        "Return here and click Done to continue."
       ];
     }
 
@@ -81,7 +92,7 @@ export function PostWireguardModal({
       "Open the WireGuard app.",
       "Import the generated tunnel if prompted.",
       "Activate the tunnel in WireGuard.",
-      "Return here and verify the secure connection."
+      "Return here and click Done to continue."
     ];
   }, [isMacManual]);
 
@@ -110,7 +121,7 @@ export function PostWireguardModal({
             <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
               {isMacManual
                 ? "To finish the secure connection setup, import this tunnel into the WireGuard app."
-                : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then verify reachability to 10.77.0.1."}
+                : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then continue."}
             </p>
 
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-[1.08rem] leading-snug text-[#cfe7ff]">
@@ -142,8 +153,8 @@ export function PostWireguardModal({
               <Button onClick={() => void onSetupWireguardAppHandoff()} disabled={busy}>
                 {isMacManual ? "Start Manual Setup" : "Open WireGuard & Import"}
               </Button>
-              <Button variant="ghost" onClick={() => void onVerifyWireguard()} disabled={busy}>
-                {isMacManual ? "Done" : "Verify Connection"}
+              <Button variant="ghost" onClick={() => void onSetupMoonlightSunshine()} disabled={busy}>
+                Done
               </Button>
             </div>
 
@@ -155,32 +166,29 @@ export function PostWireguardModal({
           </>
         ) : (
           <>
-            <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
-              Secure tunnel connected. Next, set up game streaming through Sunshine and Moonlight on <span className="text-neon-cyan">10.77.0.1</span>.
-            </p>
-
-            <div className="mt-4 flex flex-wrap gap-2">
-              <Button onClick={() => void onSetupMoonlightSunshine()} disabled={busy || setup.stage === "setup_complete"}>
-                Setup Moonlight & Sunshine
-              </Button>
-              <Button variant="secondary" onClick={() => void onDetectMoonlight()} disabled={busy}>
-                Check Moonlight
-              </Button>
-              <Button variant="ghost" onClick={() => void onVerifyWireguard()} disabled={busy}>
-                Retry Tunnel Check
-              </Button>
-            </div>
-
-            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
-              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">Moonlight Status</h4>
-              <p className="mt-2">
-                {moonlightChecked
-                  ? setup.moonlightInstalled
-                    ? "Moonlight was detected on this machine. You can launch guided setup, or use the manual PIN fallback below."
-                    : "Moonlight was not detected on this machine. Use the manual PIN fallback from another Moonlight client, or install Moonlight here and re-check."
-                  : "Check Moonlight before guided setup if you want Noland to confirm it is available first."}
-              </p>
-            </div>
+            {isStreamingPrepPhase ? (
+              <>
+                <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
+                  Finishing Sunshine and Moonlight setup on <span className="text-neon-cyan">10.77.0.1</span>. PIN entry unlocks when this preparation is done.
+                </p>
+              </>
+            ) : (
+              <>
+                <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
+                  Sunshine and Moonlight are ready. Generate a PIN in Moonlight and submit it below.
+                </p>
+                <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">Moonlight Status</h4>
+                  <p className="mt-2">
+                    {moonlightChecked
+                      ? setup.moonlightInstalled
+                        ? "Moonlight was detected on this machine. Use the manual PIN fallback below."
+                        : "Moonlight was not detected on this machine. Use the manual PIN fallback from another Moonlight client, or install Moonlight here and retry setup."
+                      : "Moonlight setup is still in progress."}
+                  </p>
+                </div>
+              </>
+            )}
 
             {showPinInput && (
               <div className="mt-5 border border-[#3d426f] bg-[#10152f] p-4">

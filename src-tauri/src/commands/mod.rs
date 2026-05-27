@@ -8,7 +8,7 @@ use crate::{
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, InstanceMicConfig, InstanceMicRuntimeStatus,
-            LocationSource, ManualLocationInput, MicQualityProfile, MicSessionResponse,
+            EdidMode, LocationSource, ManualLocationInput, MicQualityProfile, MicSessionResponse,
             MicSettingsUpdate, MoonlightPreferences, OnboardingPayload, OrchestrationState,
             PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary, RestoreDryRunResult,
             RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
@@ -24,7 +24,7 @@ use crate::{
         mic_passthrough::MicPassthroughService,
         moonlight::{
             MoonlightCodecPreference, MoonlightConfigureOptions, MoonlightConfigureResult,
-            MoonlightNetworkPreference, MoonlightService,
+            MoonlightNetworkPreference, MoonlightService, detect_client_display_for_provisioning,
         },
         offer_selector::OfferSelector,
         orchestration::OrchestrationService,
@@ -43,6 +43,7 @@ use crate::{
         shared_storage::shared_storage_manager::SharedStorageManager,
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
+        sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
         vast_api::VastApiClient,
         wireguard::{
             read_local_wireguard_show_output, reconnect_local_wireguard_client,
@@ -202,6 +203,26 @@ pub async fn complete_onboarding(
     let uploaded = ssh_service
         .upload_public_key_if_missing(&vast, &key_paths.public_key_path)
         .await?;
+    let current_state = context.load_state().await;
+    let existing_edid = current_state.sunshine.headless_edid_base64.clone();
+    let edid_mode = current_state.sunshine.edid_mode;
+    let edid_refresh = current_state
+        .sunshine
+        .edid_refresh_rate_hz
+        .clamp(EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ);
+    let (edid_width, edid_height, edid_refresh_hz, edid_source_label) =
+        resolve_effective_edid_profile(
+            edid_mode,
+            current_state.moonlight_preferences.width,
+            current_state.moonlight_preferences.height,
+            edid_refresh,
+        );
+    let generated_edid = if existing_edid.trim().is_empty() {
+        generate_headless_edid_base64(edid_width, edid_height, edid_refresh_hz)?
+    } else {
+        existing_edid
+    };
+
     let next_state = context
         .update_state(|state| {
             state.onboarding_completed = true;
@@ -215,6 +236,9 @@ pub async fn complete_onboarding(
             state.ssh.ssh_username = "root".to_string();
             state.ssh.ssh_password = "user".to_string();
             state.orchestration_state = OrchestrationState::Idle;
+            state.sunshine.edid_refresh_rate_hz = edid_refresh;
+            state.sunshine.headless_edid_base64 = generated_edid.clone();
+            state.sunshine.edid_source_label = edid_source_label.clone();
             state.last_error = None;
         })
         .await?;
@@ -1346,6 +1370,48 @@ pub async fn update_moonlight_preferences(
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct EdidSettingsUpdate {
+    pub mode: EdidMode,
+    pub refresh_rate_hz: u32,
+}
+
+#[tauri::command]
+pub async fn regenerate_edid(
+    payload: EdidSettingsUpdate,
+    context: State<'_, AppContext>,
+) -> Result<PersistedAppState, FrontendError> {
+    if !(EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&payload.refresh_rate_hz) {
+        return Err(AppError::InvalidInput(format!(
+            "EDID refresh rate must be between {} and {} Hz",
+            EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ
+        ))
+        .into());
+    }
+
+    let snapshot = context.load_state().await;
+    let (width, height, refresh_hz, source_label) = resolve_effective_edid_profile(
+        payload.mode,
+        snapshot.moonlight_preferences.width,
+        snapshot.moonlight_preferences.height,
+        payload.refresh_rate_hz,
+    );
+    let generated_edid = generate_headless_edid_base64(width, height, refresh_hz)?;
+
+    let next_state = context
+        .update_state(|state| {
+            state.sunshine.edid_mode = payload.mode;
+            state.sunshine.edid_refresh_rate_hz = payload.refresh_rate_hz;
+            state.sunshine.headless_edid_base64 = generated_edid.clone();
+            state.sunshine.edid_source_label = source_label.clone();
+            state.last_error = None;
+        })
+        .await?;
+
+    Ok(next_state)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SshCredentialsUpdate {
     pub ssh_username: String,
     pub ssh_password: String,
@@ -1395,6 +1461,31 @@ fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), Fronte
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
     Ok(())
+}
+
+fn resolve_effective_edid_profile(
+    mode: EdidMode,
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+) -> (u32, u32, u32, String) {
+    match mode {
+        EdidMode::Manual => (width, height, refresh_hz, "Manual".to_string()),
+        EdidMode::AutoDetect => {
+            if let Some((detected_width, detected_height, detected_refresh)) =
+                detect_client_display_for_provisioning()
+            {
+                (
+                    detected_width,
+                    detected_height,
+                    detected_refresh,
+                    "Auto-Detected".to_string(),
+                )
+            } else {
+                (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+            }
+        }
+    }
 }
 
 fn sanitize_ssh_username(value: &str) -> String {
