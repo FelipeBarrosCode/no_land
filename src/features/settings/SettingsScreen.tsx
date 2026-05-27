@@ -47,6 +47,7 @@ interface Props {
   onSaveServerPreferences: (payload: Partial<ServerPreferencesUpdate>) => Promise<void>;
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  onRegenerateEdid: (payload: { mode: "auto_detect" | "manual"; refreshRateHz: number }) => Promise<void>;
   onSaveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
   onTestSharedStorageConfig: () => Promise<string | null>;
   onLoadSharedStorageSettings: () => Promise<void>;
@@ -89,6 +90,7 @@ export function SettingsScreen({
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
+  onRegenerateEdid,
   onSaveSharedStorageSettings,
   onTestSharedStorageConfig,
   onLoadSharedStorageSettings
@@ -102,6 +104,10 @@ export function SettingsScreen({
   );
   const [sshPassword, setSshPassword] = useState(
     appState.ssh.sshPassword || appState.credentials.appPassword
+  );
+  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(appState.sunshine.edidMode);
+  const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
+    appState.sunshine.edidRefreshRateHz.toString()
   );
 
   const [serverForm, setServerForm] = useState({
@@ -138,6 +144,8 @@ export function SettingsScreen({
     setPlatformPassword(appState.credentials.appPassword);
     setSshUsername(appState.ssh.sshUsername || appState.credentials.appUsername);
     setSshPassword(appState.ssh.sshPassword || appState.credentials.appPassword);
+    setEdidMode(appState.sunshine.edidMode);
+    setEdidRefreshRateHz(appState.sunshine.edidRefreshRateHz.toString());
     setServerForm({
       minReliability: appState.serverPreferences.minReliability.toString(),
       storageGb: appState.serverPreferences.storageGb.toString(),
@@ -246,6 +254,47 @@ export function SettingsScreen({
             onClick={() => onSaveApiKey(apiKey.trim())}
           >
             Save API Key
+          </Button>
+        </div>
+      </div>
+      <div className="mt-4 border-t border-[#3b4067] pt-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Headless EDID</h3>
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
+          Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
+        </p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">EDID Mode</label>
+            <select
+              value={edidMode}
+              onChange={(event) => setEdidMode(event.target.value as "auto_detect" | "manual")}
+              className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+            >
+              <option value="auto_detect">Auto Detect</option>
+              <option value="manual">Manual (use Moonlight width/height)</option>
+            </select>
+          </div>
+          <InputField
+            label="EDID Refresh Rate (30-240 Hz)"
+            value={edidRefreshRateHz}
+            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+          />
+        </div>
+        <div className="mt-3">
+          <Button
+            disabled={
+              busy ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
+            }
+            onClick={() =>
+              onRegenerateEdid({
+                mode: edidMode,
+                refreshRateHz: Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz))
+              })
+            }
+          >
+            Regenerate EDID
           </Button>
         </div>
       </div>

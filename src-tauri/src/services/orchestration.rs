@@ -13,8 +13,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            MoonlightPreferences, OrchestrationState, PairingContext, ProvisionedServerState,
-            ProvisionedServerSteps,
+            EdidMode, MoonlightPreferences, OrchestrationState, PairingContext,
+            ProvisionedServerState, ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
     },
@@ -24,7 +24,7 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
-    moonlight::MoonlightService,
+    moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
     post_wireguard_setup::initialize_post_wireguard_flow,
@@ -47,6 +47,38 @@ fn build_display_profile(preferences: &MoonlightPreferences) -> crate::services:
         preferences.fps,
         &preferences.refresh_rate_mode,
     )
+}
+
+fn resolve_edid_profile(
+    moonlight_preferences: &MoonlightPreferences,
+    edid_mode: EdidMode,
+    edid_refresh_rate_hz: u32,
+) -> crate::services::sunshine::ResolvedEdidProfile {
+    match edid_mode {
+        EdidMode::Manual => crate::services::sunshine::ResolvedEdidProfile {
+            width: moonlight_preferences.width,
+            height: moonlight_preferences.height,
+            refresh_hz: edid_refresh_rate_hz,
+            source_label: "Manual".to_string(),
+        },
+        EdidMode::AutoDetect => {
+            if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width,
+                    height,
+                    refresh_hz,
+                    source_label: "Auto-Detected".to_string(),
+                }
+            } else {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                    source_label: "Fallback 1920x1080@60".to_string(),
+                }
+            }
+        }
+    }
 }
 
 fn parse_wireguard_endpoint_from_config(config_path: &Path) -> Option<(String, u16)> {
@@ -1122,8 +1154,38 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 state.credentials.app_password.clone(),
             )
         };
-        let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
+        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+            let state = context.state.read().await;
+            (
+                state.moonlight_preferences.clone(),
+                state.sunshine.edid_mode,
+                state.sunshine.edid_refresh_rate_hz,
+                state.sunshine.headless_edid_base64.clone(),
+            )
+        };
         let display_profile = build_display_profile(&moonlight_preferences);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
+        );
+        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+            crate::services::sunshine::generate_headless_edid_base64(
+                resolved_edid.width,
+                resolved_edid.height,
+                resolved_edid.refresh_hz,
+            )?
+        } else {
+            headless_edid_base64
+        };
+        let generated_edid_for_save = effective_edid_base64.clone();
+        let edid_source_for_save = resolved_edid.source_label.clone();
+        context
+            .update_state(|state| {
+                state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                state.sunshine.edid_source_label = edid_source_for_save;
+            })
+            .await?;
         info!(
             "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -1150,6 +1212,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 &remote,
                 &target_user,
                 display_profile,
+                &effective_edid_base64,
                 &sunshine_username,
                 &sunshine_password,
             )
@@ -2109,8 +2172,38 @@ async fn run_existing_instance_orchestration(
                 state.credentials.app_password.clone(),
             )
         };
-        let moonlight_preferences = { context.state.read().await.moonlight_preferences.clone() };
+        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+            let state = context.state.read().await;
+            (
+                state.moonlight_preferences.clone(),
+                state.sunshine.edid_mode,
+                state.sunshine.edid_refresh_rate_hz,
+                state.sunshine.headless_edid_base64.clone(),
+            )
+        };
         let display_profile = build_display_profile(&moonlight_preferences);
+        let resolved_edid = resolve_edid_profile(
+            &moonlight_preferences,
+            edid_mode,
+            edid_refresh_rate_hz,
+        );
+        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+            crate::services::sunshine::generate_headless_edid_base64(
+                resolved_edid.width,
+                resolved_edid.height,
+                resolved_edid.refresh_hz,
+            )?
+        } else {
+            headless_edid_base64
+        };
+        let generated_edid_for_save = effective_edid_base64.clone();
+        let edid_source_for_save = resolved_edid.source_label.clone();
+        context
+            .update_state(|state| {
+                state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                state.sunshine.edid_source_label = edid_source_for_save;
+            })
+            .await?;
         info!(
             "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -2137,6 +2230,7 @@ async fn run_existing_instance_orchestration(
                 &remote,
                 &target_user,
                 display_profile,
+                &effective_edid_base64,
                 &sunshine_username,
                 &sunshine_password,
             )
