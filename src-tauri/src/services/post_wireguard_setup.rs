@@ -741,7 +741,7 @@ pub async fn setup_moonlight_sunshine(
     moonlight
         .patch_local_config(TUNNEL_HOST, SUNSHINE_API_PORT, &preferences)
         .await?;
-    let _ = moonlight.launch_native_client();
+    let _ = moonlight.pair_host(TUNNEL_HOST);
 
     let state = context
         .update_state(|state| {
@@ -759,7 +759,7 @@ pub async fn setup_moonlight_sunshine(
         OrchestrationState::MoonlightPairingStarted,
         "Starting Moonlight pairing",
         Some(
-            "Open Moonlight, add 10.77.0.1 if needed, and enter the PIN shown there below."
+            "Moonlight pairing was started for 10.77.0.1. Enter the PIN shown there below."
                 .to_string(),
         ),
         false,
