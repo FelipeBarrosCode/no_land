@@ -91,9 +91,6 @@ function ProvisioningRoute() {
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
   const blockingAction = useAppStore((state) => state.blockingAction);
-  const skipPairing = useAppStore((state) => state.skipPairing);
-  const setupLocalWireguardClient = useAppStore((state) => state.setupLocalWireguardClient);
-  const reconnectLocalWireguardClient = useAppStore((state) => state.reconnectLocalWireguardClient);
   const setupWireguardAppHandoff = useAppStore((state) => state.setupWireguardAppHandoff);
   const openWireguardApp = useAppStore((state) => state.openWireguardApp);
   const downloadWireguardConfig = useAppStore((state) => state.downloadWireguardConfig);
@@ -116,9 +113,6 @@ function ProvisioningRoute() {
         logs={logs}
         busy={busy}
         blockingAction={blockingAction}
-        onSkipPairing={skipPairing}
-        onSetupWireguardClient={setupLocalWireguardClient}
-        onReconnectLocalWireguardClient={reconnectLocalWireguardClient}
         onSetupWireguardAppHandoff={setupWireguardAppHandoff}
         onOpenWireguardApp={openWireguardApp}
         onDownloadWireguardConfig={downloadWireguardConfig}
