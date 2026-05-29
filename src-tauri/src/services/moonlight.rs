@@ -491,6 +491,81 @@ impl MoonlightService {
         ))
     }
 
+    pub fn pair_host(&self, host: &str) -> AppResult<()> {
+        #[cfg(target_os = "macos")]
+        {
+            if let Some(executable) = find_macos_moonlight_executable() {
+                Command::new(executable)
+                    .arg("pair")
+                    .arg(host)
+                    .spawn()
+                    .map_err(|error| {
+                        AppError::Command(format!(
+                            "Failed to start Moonlight pairing from the detected macOS executable: {error}"
+                        ))
+                    })?;
+                return Ok(());
+            }
+
+            Command::new("moonlight")
+                .arg("pair")
+                .arg(host)
+                .spawn()
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to start Moonlight pairing via moonlight CLI: {error}"
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(executable) = find_windows_moonlight_executable() {
+                Command::new(executable)
+                    .arg("pair")
+                    .arg(host)
+                    .spawn()
+                    .map_err(|error| {
+                        AppError::Command(format!(
+                            "Failed to start Moonlight pairing from the detected Windows executable: {error}"
+                        ))
+                    })?;
+                return Ok(());
+            }
+
+            Command::new("moonlight")
+                .arg("pair")
+                .arg(host)
+                .spawn()
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to start Moonlight pairing via moonlight CLI: {error}"
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            Command::new("moonlight")
+                .arg("pair")
+                .arg(host)
+                .spawn()
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed to start Moonlight pairing via moonlight CLI: {error}"
+                    ))
+                })?;
+            return Ok(());
+        }
+
+        #[allow(unreachable_code)]
+        Err(AppError::Command(
+            "Moonlight pairing is not supported on this platform".to_string(),
+        ))
+    }
+
     pub async fn patch_local_config(
         &self,
         host_address: &str,
@@ -556,6 +631,11 @@ fn find_macos_moonlight_app() -> Option<PathBuf> {
     }
 
     candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(target_os = "macos")]
+fn find_macos_moonlight_executable() -> Option<PathBuf> {
+    find_macos_moonlight_app().map(|app| app.join("Contents").join("MacOS").join("Moonlight"))
 }
 
 #[cfg(target_os = "windows")]
