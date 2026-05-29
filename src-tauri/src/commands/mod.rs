@@ -46,10 +46,7 @@ use crate::{
         ssh_keys::SshKeyService,
         sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
         vast_api::VastApiClient,
-        wireguard::{
-            read_local_wireguard_show_output, reconnect_local_wireguard_client,
-            setup_local_wireguard_client,
-        },
+        wireguard::read_local_wireguard_show_output,
     },
     utils::redact::redact_secret,
 };
@@ -103,8 +100,6 @@ fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
         build_check("ssh", "remote commands and provisioning"),
         build_check("ssh-keygen", "SSH key generation"),
         build_check("ssh-add", "SSH agent key loading"),
-        build_check("wg", "WireGuard status and diagnostics"),
-        build_check("wg-quick", "WireGuard tunnel up/down"),
     ];
 
     if os.is_windows() {
@@ -598,30 +593,17 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
-    let message = setup_local_wireguard_client(Path::new(&config_path))?;
-    let tunnel_server_ip = {
-        let state = context.state.read().await;
-        state.wireguard.server_ip.clone()
-    };
-
-    validate_local_wireguard_tunnel(context.inner(), &tunnel_server_ip, false).await?;
-
-    if !tunnel_server_ip.trim().is_empty() {
-        validate_wireguard_ping(&tunnel_server_ip)?;
+    if !Path::new(&config_path).exists() {
+        return Err(AppError::NotFound(format!(
+            "WireGuard client config not found at {}",
+            config_path
+        ))
+        .into());
     }
 
-    if let Err(error) = sync_server_wireguard_keys(context.inner()).await {
-        warn!("best-effort server WireGuard key sync failed: {}", error);
-    }
+    open_wireguard_app()?;
 
-    let refreshed_state = context.state.read().await;
-    Ok(format!(
-        "{} | client_pub={} | server_pub={}",
-        message,
-        refreshed_state.wireguard.client_public_key,
-        refreshed_state.wireguard.server_public_key
-    ))
+    Ok("WireGuard app opened. Import and activate the generated tunnel there.".to_string())
 }
 
 #[tauri::command]
@@ -669,33 +651,17 @@ pub async fn reconnect_local_wireguard_client_quick(
         .into());
     }
 
-    let tunnel_server_ip = {
-        let state = context.state.read().await;
-        state.wireguard.server_ip.clone()
-    };
-
-    if let Ok(local_stdout) = read_local_wireguard_show_output() {
-        if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
-            if local_snapshot.allowed_ips.contains("10.77.0.1/32")
-                && !local_snapshot
-                    .latest_handshake
-                    .to_ascii_lowercase()
-                    .contains("never")
-            {
-                let platform_name = OsDetection::new().platform_display_name();
-                sync_local_wireguard_keys(context.inner(), &local_snapshot).await;
-                return Ok(format!(
-                    "WireGuard tunnel is already active and healthy on this {}",
-                    platform_name
-                ));
-            }
-        }
+    if !Path::new(&config_path).exists() {
+        return Err(AppError::NotFound(format!(
+            "WireGuard client config not found at {}",
+            config_path
+        ))
+        .into());
     }
 
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
-    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
-    validate_local_wireguard_tunnel(context.inner(), &tunnel_server_ip, true).await?;
-    Ok(message)
+    open_wireguard_app()?;
+
+    Ok("WireGuard app opened. Use it to reconnect or toggle the tunnel.".to_string())
 }
 
 #[tauri::command]

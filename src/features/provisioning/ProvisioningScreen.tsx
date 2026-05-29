@@ -6,7 +6,6 @@ import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { PROVISIONING_ORDER } from "../../lib/constants";
 import type { PersistedAppState, ProvisioningEvent, SetupStage } from "../../lib/types";
-import { PairingModal } from "./PairingModal";
 import { PostWireguardModal } from "./PostWireguardModal";
 
 interface Props {
@@ -14,9 +13,6 @@ interface Props {
   logs: ProvisioningEvent[];
   busy: boolean;
   blockingAction: BlockingActionState | null;
-  onSkipPairing: () => Promise<void>;
-  onSetupWireguardClient: () => Promise<void>;
-  onReconnectLocalWireguardClient: () => Promise<string | null>;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
   onOpenWireguardApp: () => Promise<void>;
   onDownloadWireguardConfig: () => Promise<string | null>;
@@ -44,9 +40,6 @@ export function ProvisioningScreen({
   logs,
   busy,
   blockingAction,
-  onSkipPairing,
-  onSetupWireguardClient,
-  onReconnectLocalWireguardClient,
   onSetupWireguardAppHandoff,
   onOpenWireguardApp,
   onDownloadWireguardConfig,
@@ -182,15 +175,6 @@ export function ProvisioningScreen({
           </Card>
         </section>
       </div>
-
-      <PairingModal
-        open={appState.orchestrationState === "AwaitingPairPin" || appState.orchestrationState === "Pairing"}
-        busy={busy}
-        wireguardConfigPath={appState.wireguard.configPath}
-        onSetupWireguardClient={onSetupWireguardClient}
-        onReconnectLocalWireguardClient={onReconnectLocalWireguardClient}
-        onSkip={onSkipPairing}
-      />
 
       <PostWireguardModal
         open={

@@ -1806,40 +1806,10 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         return Ok(());
     }
 
-    if !os.command_exists("brew") {
-        return Err(AppError::Command(
-            "WireGuard tools are missing (wg/wg-quick). Install Homebrew and run `brew install wireguard-tools`, then retry."
-                .to_string(),
-        ));
-    }
-
-    let install = Command::new("bash")
-        .arg("-lc")
-        .arg("brew install wireguard-tools")
-        .output()
-        .map_err(|error| {
-            AppError::Command(format!(
-                "Failed to run Homebrew install for wireguard-tools: {error}"
-            ))
-        })?;
-
-    if !install.status.success() {
-        return Err(AppError::Command(format!(
-            "Failed to auto-install wireguard-tools with Homebrew (exit {}): stdout: {} | stderr: {}",
-            install.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&install.stdout).trim(),
-            String::from_utf8_lossy(&install.stderr).trim()
-        )));
-    }
-
-    if !os.command_exists("wg") || !os.command_exists("wg-quick") {
-        return Err(AppError::Command(
-            "wireguard-tools installation completed, but wg/wg-quick are still unavailable in PATH. Open a new terminal session and retry."
-                .to_string(),
-        ));
-    }
-
-    Ok(())
+    Err(AppError::Command(
+        "WireGuard tools are missing (wg/wg-quick). Please install wireguard-tools manually, then retry."
+            .to_string(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1849,52 +1819,10 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
         return Ok(());
     }
 
-    let (manager, install_cmd) = if os.command_exists("apt-get") {
-        (
-            "apt-get",
-            "DEBIAN_FRONTEND=noninteractive apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools",
-        )
-    } else if os.command_exists("dnf") {
-        ("dnf", "dnf install -y wireguard-tools")
-    } else if os.command_exists("yum") {
-        ("yum", "yum install -y wireguard-tools")
-    } else if os.command_exists("pacman") {
-        ("pacman", "pacman -Sy --noconfirm wireguard-tools")
-    } else if os.command_exists("zypper") {
-        ("zypper", "zypper --non-interactive install wireguard-tools")
-    } else {
-        return Err(AppError::Command(
-            "WireGuard tools are missing (wg/wg-quick), and no supported Linux package manager was detected. Install `wireguard-tools` manually and retry."
-                .to_string(),
-        ));
-    };
-
-    let install = Command::new("sudo")
-        .args(["sh", "-lc", install_cmd])
-        .output()
-        .map_err(|error| {
-            AppError::Command(format!(
-                "Failed to run {manager} install for WireGuard tools: {error}"
-            ))
-        })?;
-
-    if !install.status.success() {
-        return Err(AppError::Command(format!(
-            "Failed to auto-install WireGuard tools with {manager} (exit {}): stdout: {} | stderr: {}",
-            install.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&install.stdout).trim(),
-            String::from_utf8_lossy(&install.stderr).trim()
-        )));
-    }
-
-    if !os.command_exists("wg") || !os.command_exists("wg-quick") {
-        return Err(AppError::Command(
-            "WireGuard packages installed, but wg/wg-quick are still unavailable in PATH. Open a new terminal session and retry."
-                .to_string(),
-        ));
-    }
-
-    Ok(())
+    Err(AppError::Command(
+        "WireGuard tools are missing (wg/wg-quick). Please install wireguard-tools manually, then retry."
+            .to_string(),
+    ))
 }
 
 #[cfg(target_os = "windows")]
