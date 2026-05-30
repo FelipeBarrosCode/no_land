@@ -139,6 +139,26 @@ impl DetectedNetworkType {
 }
 
 impl MoonlightService {
+    pub fn detected_executable_path(&self) -> Option<PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            return find_macos_moonlight_executable();
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            return find_windows_moonlight_executable();
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            return find_linux_moonlight_command().map(|_| PathBuf::from("moonlight"));
+        }
+
+        #[allow(unreachable_code)]
+        None
+    }
+
     pub fn is_installed(&self) -> bool {
         #[cfg(target_os = "macos")]
         {
@@ -147,7 +167,7 @@ impl MoonlightService {
 
         #[cfg(target_os = "windows")]
         {
-            return find_windows_moonlight_executable().is_some() || can_launch_windows_protocol();
+            return self.detected_executable_path().is_some();
         }
 
         #[cfg(target_os = "linux")]
@@ -427,24 +447,8 @@ impl MoonlightService {
                 return Ok(());
             }
 
-            let status = Command::new("cmd")
-                .arg("/C")
-                .arg("start")
-                .arg("")
-                .arg("moonlight://")
-                .status()
-                .map_err(|error| {
-                    AppError::Command(format!(
-                        "Failed to launch Moonlight via protocol handler: {error}"
-                    ))
-                })?;
-
-            if status.success() {
-                return Ok(());
-            }
-
-            return Err(AppError::Command(
-                "Moonlight protocol launch returned non-zero status".to_string(),
+            return Err(AppError::NotFound(
+                "Moonlight desktop app not found. Install Moonlight from the official download and try again.".to_string(),
             ));
         }
 
@@ -640,6 +644,22 @@ fn find_macos_moonlight_executable() -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn find_windows_moonlight_executable() -> Option<PathBuf> {
+    if let Some(path) = resolve_windows_executable_from_path("Moonlight.exe") {
+        return Some(path);
+    }
+
+    if let Some(path) = resolve_windows_app_path_registry("moonlight.exe") {
+        return Some(path);
+    }
+
+    if let Some(path) = resolve_windows_uninstall_install_location() {
+        return Some(path);
+    }
+
+    if let Some(path) = resolve_windows_public_desktop_moonlight() {
+        return Some(path);
+    }
+
     let mut candidates = Vec::new();
 
     for key in ["LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)"] {
@@ -654,10 +674,183 @@ fn find_windows_moonlight_executable() -> Option<PathBuf> {
                     .join("Moonlight Game Streaming Project")
                     .join("Moonlight.exe"),
             );
+            candidates.push(base.join("Moonlight").join("Moonlight.exe"));
         }
     }
 
     candidates.into_iter().find(|path| path.exists())
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_executable_from_path(exe_name: &str) -> Option<PathBuf> {
+    let output = Command::new("where").arg(exe_name).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|path| path.exists())
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_app_path_registry(exe_name: &str) -> Option<PathBuf> {
+    let key = format!(
+        r"HKLM\Software\Microsoft\Windows\CurrentVersion\App Paths\{}",
+        exe_name
+    );
+    read_reg_default_value(&key).and_then(|value| {
+        let path = PathBuf::from(value);
+        if path.exists() {
+            Some(path)
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_uninstall_install_location() -> Option<PathBuf> {
+    let keys = [
+        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+
+    for key in keys {
+        let output = Command::new("reg")
+            .args(["query", key, "/s", "/f", "Moonlight", "/d"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("HKEY_") {
+                if let Some(location) = read_reg_named_value(trimmed, "InstallLocation") {
+                    let candidate = PathBuf::from(location).join("Moonlight.exe");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+                if let Some(display_icon) = read_reg_named_value(trimmed, "DisplayIcon") {
+                    let cleaned = display_icon.trim_matches('"').to_string();
+                    let path = PathBuf::from(cleaned);
+                    if path.exists() {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_public_desktop_moonlight() -> Option<PathBuf> {
+    if let Ok(public_dir) = env::var("PUBLIC") {
+        let desktop = PathBuf::from(public_dir).join("Desktop");
+        let direct_exe = desktop.join("Moonlight.exe");
+        if direct_exe.exists() {
+            return Some(direct_exe);
+        }
+
+        let shortcut = desktop.join("Moonlight.lnk");
+        if shortcut.exists() {
+            if let Some(target) = resolve_windows_shortcut_target(&shortcut) {
+                if target.exists() {
+                    return Some(target);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_windows_shortcut_target(shortcut: &std::path::Path) -> Option<PathBuf> {
+    let shortcut_text = shortcut.to_string_lossy().replace('"', "\"\"");
+    let script = format!(
+        "$w = New-Object -ComObject WScript.Shell; $s = $w.CreateShortcut(\"{}\"); [Console]::WriteLine($s.TargetPath)",
+        shortcut_text
+    );
+
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let target = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if target.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(target))
+}
+
+#[cfg(target_os = "windows")]
+fn read_reg_default_value(key: &str) -> Option<String> {
+    let output = Command::new("reg")
+        .args(["query", key, "/ve"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_reg_query_value(&String::from_utf8_lossy(&output.stdout), "(Default)")
+}
+
+#[cfg(target_os = "windows")]
+fn read_reg_named_value(key: &str, value_name: &str) -> Option<String> {
+    let output = Command::new("reg")
+        .args(["query", key, "/v", value_name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    parse_reg_query_value(&String::from_utf8_lossy(&output.stdout), value_name)
+}
+
+#[cfg(target_os = "windows")]
+fn parse_reg_query_value(output: &str, value_name: &str) -> Option<String> {
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(value_name) {
+            continue;
+        }
+
+        let mut parts = trimmed.split_whitespace();
+        let first = parts.next()?;
+        if first != value_name {
+            continue;
+        }
+        let _value_type = parts.next()?;
+        let remaining = parts.collect::<Vec<_>>().join(" ").trim().to_string();
+        if remaining.is_empty() {
+            continue;
+        }
+        return Some(remaining.trim_matches('"').to_string());
+    }
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -692,18 +885,6 @@ fn resolve_command_in_path(command: &str) -> Option<PathBuf> {
     env::split_paths(&path_var)
         .map(|dir| dir.join(command))
         .find(|candidate| candidate.exists())
-}
-
-#[cfg(target_os = "windows")]
-fn can_launch_windows_protocol() -> bool {
-    Command::new("cmd")
-        .arg("/C")
-        .arg("start")
-        .arg("")
-        .arg("moonlight://")
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
 }
 
 fn current_platform_label() -> &'static str {

@@ -22,8 +22,12 @@ use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
 use super::{
-    app_context::AppContext, moonlight::MoonlightService, orchestration, os_detection::OsDetection,
-    remote_exec::RemoteExec, ssh_keys::SshKeyService,
+    app_context::AppContext,
+    moonlight::{MoonlightConfigureOptions, MoonlightService},
+    orchestration,
+    os_detection::OsDetection,
+    remote_exec::RemoteExec,
+    ssh_keys::SshKeyService,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -99,7 +103,14 @@ pub async fn initialize_post_wireguard_flow(
     instance_id: u64,
     config_path: &Path,
 ) -> AppResult<()> {
-    let previous_instance_id = { context.state.read().await.post_wireguard_setup.current_instance_id };
+    let previous_instance_id = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .current_instance_id
+    };
     let config_text = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading generated WireGuard config {}: {error}",
@@ -168,17 +179,8 @@ pub async fn setup_wireguard_app_handoff(
     app: &AppHandle,
     context: &AppContext,
 ) -> AppResult<PostWireGuardSetupState> {
-    let config_path = active_wireguard_config_path(context).await?;
-    let instance_id = active_instance_id(context).await?;
-    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
-    let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
-    let export_path_text = export_path.display().to_string();
-    open_wireguard_app()?;
-
     let os = OsDetection::new();
-    if os.is_windows() || os.is_linux() {
-        let _ = open_path_with_system(&export_path);
-    }
+    open_wireguard_app()?;
 
     let next_state = if os.is_macos() {
         OrchestrationState::WireGuardWaitingForImport
@@ -201,7 +203,6 @@ pub async fn setup_wireguard_app_handoff(
             state.post_wireguard_setup.stage = SetupStage::WireguardAppHandoffStarted;
             state.post_wireguard_setup.wireguard_setup_status =
                 WireGuardSetupStatus::AppHandoffStarted;
-            state.post_wireguard_setup.wireguard_export_path = export_path_text.clone();
             state.orchestration_state = OrchestrationState::WireGuardAppHandoffStarted;
             state.post_wireguard_setup.last_error = None;
             state.last_error = None;
@@ -213,10 +214,7 @@ pub async fn setup_wireguard_app_handoff(
         context,
         OrchestrationState::WireGuardAppHandoffStarted,
         "Opening WireGuard app",
-        Some(format!(
-            "WireGuard config exported to {}",
-            export_path.display()
-        )),
+        None,
         false,
     )
     .await;
@@ -340,6 +338,7 @@ pub async fn download_wireguard_config(context: &AppContext) -> AppResult<String
     sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
     let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
     let export_text = export_path.display().to_string();
+    sync_wireguard_config_snapshot(context, instance_id, &export_path).await?;
     context
         .update_state(|state| {
             state.post_wireguard_setup.wireguard_export_path = export_text.clone();
@@ -515,7 +514,10 @@ pub async fn verify_sunshine_api(
 
 pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<MoonlightDetectionResult> {
     let moonlight = MoonlightService;
-    let installed = moonlight.is_installed();
+    let executable_path = moonlight
+        .detected_executable_path()
+        .map(|path| path.display().to_string());
+    let installed = executable_path.is_some();
     let os = OsDetection::new();
     let launch_kind = if !installed {
         "unknown"
@@ -527,11 +529,11 @@ pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<Moonligh
     let result = MoonlightDetectionResult {
         installed,
         launch_kind: launch_kind.to_string(),
-        executable_path: None,
+        executable_path,
         error: if installed {
             None
         } else {
-            Some("Moonlight is not installed on this machine.".to_string())
+            Some("Moonlight is not installed on this machine. Install the desktop app from the official website and ensure Moonlight.exe is in PATH or registered in App Paths.".to_string())
         },
     };
 
@@ -741,7 +743,35 @@ pub async fn setup_moonlight_sunshine(
     moonlight
         .patch_local_config(TUNNEL_HOST, SUNSHINE_API_PORT, &preferences)
         .await?;
-    let _ = moonlight.pair_host(TUNNEL_HOST);
+    let config_result = moonlight
+        .configure_client(MoonlightConfigureOptions {
+            apply: true,
+            ..Default::default()
+        })
+        .await;
+    if !config_result.success {
+        warn!(
+            "moonlight auto-config apply returned non-success before pairing: {:?}",
+            config_result.error
+        );
+    }
+
+    let os = OsDetection::new();
+    if os.is_windows() {
+        if let Err(error) = moonlight.launch_native_client() {
+            warn!(
+                "windows moonlight auto-launch failed before pairing attempt: {}",
+                error
+            );
+        }
+
+        if let Err(error) = moonlight.pair_host(TUNNEL_HOST) {
+            warn!(
+                "windows moonlight auto-pair command failed for {}: {}",
+                TUNNEL_HOST, error
+            );
+        }
+    }
 
     let state = context
         .update_state(|state| {
@@ -953,32 +983,6 @@ pub async fn submit_moonlight_pin_to_sunshine(
 }
 
 pub async fn get_setup_status(context: &AppContext) -> PostWireGuardSetupState {
-    if let Ok(instance_id) = active_instance_id(context).await {
-        if let Ok(config_path) = active_wireguard_config_path(context).await {
-            if let Err(error) = sync_wireguard_config_snapshot(context, instance_id, &config_path).await {
-                let message = format!("Failed syncing active WireGuard config snapshot: {error}");
-                let _ = context
-                    .update_state(|state| {
-                        state.post_wireguard_setup.wireguard_config.clear();
-                        state.post_wireguard_setup.last_error = Some(SetupErrorState {
-                            code: "wireguard_config_sync_failed".to_string(),
-                            message: message.clone(),
-                            stage: state.post_wireguard_setup.stage,
-                            retryable: true,
-                            details: None,
-                        });
-                    })
-                    .await;
-            }
-        } else {
-            let _ = context
-                .update_state(|state| {
-                    state.post_wireguard_setup.wireguard_config.clear();
-                })
-                .await;
-        }
-    }
-
     context.state.read().await.post_wireguard_setup.clone()
 }
 
