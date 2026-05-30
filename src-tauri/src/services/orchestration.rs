@@ -32,7 +32,7 @@ use super::{
     shared_storage::shared_storage_manager::SharedStorageManager,
     sleep_inhibit::SleepInhibitService,
     ssh_keys::SshKeyService,
-    sunshine::SunshineService,
+    sunshine::{SunshineService, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
     vast_api::VastApiClient,
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
@@ -40,7 +40,9 @@ use super::{
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
 
-fn build_display_profile(preferences: &MoonlightPreferences) -> crate::services::sunshine::DisplayProfile {
+fn build_display_profile(
+    preferences: &MoonlightPreferences,
+) -> crate::services::sunshine::DisplayProfile {
     crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
         preferences.width,
         preferences.height,
@@ -62,6 +64,19 @@ fn resolve_edid_profile(
             source_label: "Manual".to_string(),
         },
         EdidMode::AutoDetect => {
+            if cfg!(target_os = "windows")
+                && moonlight_preferences.width > 0
+                && moonlight_preferences.height > 0
+                && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&edid_refresh_rate_hz)
+            {
+                return crate::services::sunshine::ResolvedEdidProfile {
+                    width: moonlight_preferences.width,
+                    height: moonlight_preferences.height,
+                    refresh_hz: edid_refresh_rate_hz,
+                    source_label: "State Preferences".to_string(),
+                };
+            }
+
             if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
                 crate::services::sunshine::ResolvedEdidProfile {
                     width,
@@ -1164,12 +1179,10 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             )
         };
         let display_profile = build_display_profile(&moonlight_preferences);
-        let resolved_edid = resolve_edid_profile(
-            &moonlight_preferences,
-            edid_mode,
-            edid_refresh_rate_hz,
-        );
-        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+        let resolved_edid =
+            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+        let should_generate_edid = headless_edid_base64.trim().is_empty();
+        let effective_edid_base64 = if should_generate_edid {
             crate::services::sunshine::generate_headless_edid_base64(
                 resolved_edid.width,
                 resolved_edid.height,
@@ -1186,6 +1199,15 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 state.sunshine.edid_source_label = edid_source_for_save;
             })
             .await?;
+        info!(
+            "EDID selection (new instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (windows_priority=state->autodetect->fallback)",
+            edid_mode,
+            resolved_edid.source_label,
+            resolved_edid.width,
+            resolved_edid.height,
+            resolved_edid.refresh_hz,
+            should_generate_edid
+        );
         info!(
             "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -1328,7 +1350,8 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
+        {
             if !cached_wireguard_endpoint_matches(
                 cached.client_config_path.as_path(),
                 &endpoint_host,
@@ -2004,12 +2027,10 @@ async fn run_existing_instance_orchestration(
             )
         };
         let display_profile = build_display_profile(&moonlight_preferences);
-        let resolved_edid = resolve_edid_profile(
-            &moonlight_preferences,
-            edid_mode,
-            edid_refresh_rate_hz,
-        );
-        let effective_edid_base64 = if headless_edid_base64.trim().is_empty() {
+        let resolved_edid =
+            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+        let should_generate_edid = headless_edid_base64.trim().is_empty();
+        let effective_edid_base64 = if should_generate_edid {
             crate::services::sunshine::generate_headless_edid_base64(
                 resolved_edid.width,
                 resolved_edid.height,
@@ -2026,6 +2047,15 @@ async fn run_existing_instance_orchestration(
                 state.sunshine.edid_source_label = edid_source_for_save;
             })
             .await?;
+        info!(
+            "EDID selection (existing instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (windows_priority=state->autodetect->fallback)",
+            edid_mode,
+            resolved_edid.source_label,
+            resolved_edid.width,
+            resolved_edid.height,
+            resolved_edid.refresh_hz,
+            should_generate_edid
+        );
         info!(
             "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
             display_profile.width,
@@ -2168,7 +2198,8 @@ async fn run_existing_instance_orchestration(
     .await;
 
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await {
+        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
+        {
             if !cached_wireguard_endpoint_matches(
                 cached.client_config_path.as_path(),
                 &endpoint_host,
@@ -2422,6 +2453,10 @@ async fn wait_for_ssh_acceptance(
 ) -> AppResult<()> {
     ensure_private_key_path_exists(Path::new(&remote.private_key_path))?;
 
+    let app_data_dir = context.state_store.path().parent().ok_or_else(|| {
+        AppError::State("Could not resolve app data directory from state file path".to_string())
+    })?;
+
     let passphrase = {
         let state = context.state.read().await;
         state.credentials.app_password.clone()
@@ -2437,6 +2472,8 @@ async fn wait_for_ssh_acceptance(
     ssh_service
         .load_key_into_agent(Path::new(&remote.private_key_path), &passphrase)
         .await?;
+
+    let mut regenerated_after_auth_failure = false;
 
     for attempt in 1..=context.config.ssh_connect_probe_attempts {
         if context.cancel_requested.load(Ordering::SeqCst) {
@@ -2454,6 +2491,57 @@ async fn wait_for_ssh_acceptance(
 
         if probe.status_code == 0 {
             return Ok(());
+        }
+
+        if looks_like_ssh_auth_failure(&probe.stderr) {
+            if !regenerated_after_auth_failure {
+                emit_transition(
+                    app,
+                    context,
+                    OrchestrationState::UploadingSshKeyToVast,
+                    "SSH auth failed; regenerating and re-syncing key",
+                    Some(format!(
+                        "Attempt {attempt}/{}; detected auth failure, rotating key once",
+                        context.config.ssh_connect_probe_attempts
+                    )),
+                    false,
+                )
+                .await;
+
+                let (new_key_paths, uploaded) = ssh_service
+                    .regenerate_and_upload_public_key(app_data_dir, vast)
+                    .await?;
+
+                context
+                    .update_state(|state| {
+                        state.ssh.private_key_path =
+                            new_key_paths.private_key_path.display().to_string();
+                        state.ssh.public_key_path =
+                            new_key_paths.public_key_path.display().to_string();
+                        state.ssh.uploaded_to_vast = uploaded || state.ssh.uploaded_to_vast;
+                        state.last_error = None;
+                    })
+                    .await?;
+
+                ssh_service
+                    .load_key_into_agent(new_key_paths.private_key_path.as_path(), &passphrase)
+                    .await?;
+
+                regenerated_after_auth_failure = true;
+
+                if attempt < context.config.ssh_connect_probe_attempts {
+                    sleep(context.config.ssh_connect_probe_interval).await;
+                    continue;
+                }
+            }
+
+            return Err(AppError::Provisioning(format!(
+                "SSH authentication failed for {}@{}:{} after key re-sync. Retrying will not help until credentials/instance SSH key state is fixed. stderr: {}",
+                remote.ssh_user,
+                remote.ssh_host,
+                remote.ssh_port,
+                probe.stderr.trim()
+            )));
         }
 
         let mut reservation_suffix = String::new();
@@ -2773,6 +2861,17 @@ fn looks_like_ssh_connectivity_refusal(stderr: &str) -> bool {
         || normalized.contains("connection reset")
         || normalized.contains("connection timed out")
         || normalized.contains("no route to host")
+}
+
+fn looks_like_ssh_auth_failure(stderr: &str) -> bool {
+    let normalized = stderr.to_ascii_lowercase();
+    normalized.contains("permission denied (publickey)")
+        || normalized.contains("permission denied")
+        || normalized.contains("publickey")
+        || normalized.contains("too many authentication failures")
+        || normalized.contains("sign_and_send_pubkey")
+        || normalized.contains("agent refused operation")
+        || normalized.contains("no supported authentication methods available")
 }
 
 fn is_inactive_instance_status(status: &str) -> bool {

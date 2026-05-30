@@ -84,29 +84,43 @@ fn main() {
                 .trim()
                 .is_empty()
             {
-                let (width, height, refresh_hz, source_label) =
-                    match initial_state.sunshine.edid_mode {
-                        crate::models::app_state::EdidMode::Manual => (
-                            initial_state.moonlight_preferences.width,
-                            initial_state.moonlight_preferences.height,
-                            initial_state.sunshine.edid_refresh_rate_hz,
-                            "Manual".to_string(),
-                        ),
-                        crate::models::app_state::EdidMode::AutoDetect => {
-                            if let Some((detected_width, detected_height, detected_refresh)) =
-                                detect_client_display_for_provisioning()
-                            {
-                                (
-                                    detected_width,
-                                    detected_height,
-                                    detected_refresh,
-                                    "Auto-Detected".to_string(),
-                                )
-                            } else {
-                                (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
-                            }
+                let (width, height, refresh_hz, source_label) = match initial_state
+                    .sunshine
+                    .edid_mode
+                {
+                    crate::models::app_state::EdidMode::Manual => (
+                        initial_state.moonlight_preferences.width,
+                        initial_state.moonlight_preferences.height,
+                        initial_state.sunshine.edid_refresh_rate_hz,
+                        "Manual".to_string(),
+                    ),
+                    crate::models::app_state::EdidMode::AutoDetect => {
+                        if cfg!(target_os = "windows")
+                            && initial_state.moonlight_preferences.width > 0
+                            && initial_state.moonlight_preferences.height > 0
+                            && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ)
+                                .contains(&initial_state.sunshine.edid_refresh_rate_hz)
+                        {
+                            (
+                                initial_state.moonlight_preferences.width,
+                                initial_state.moonlight_preferences.height,
+                                initial_state.sunshine.edid_refresh_rate_hz,
+                                "State Preferences".to_string(),
+                            )
+                        } else if let Some((detected_width, detected_height, detected_refresh)) =
+                            detect_client_display_for_provisioning()
+                        {
+                            (
+                                detected_width,
+                                detected_height,
+                                detected_refresh,
+                                "Auto-Detected".to_string(),
+                            )
+                        } else {
+                            (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
                         }
-                    };
+                    }
+                };
                 initial_state.sunshine.headless_edid_base64 =
                     generate_headless_edid_base64(width, height, refresh_hz)
                         .map_err(|error| format!("Failed generating default EDID: {error}"))?;

@@ -33,6 +33,20 @@ pub fn generate_headless_edid_base64(
         )));
     }
 
+    if width == 0 || height == 0 {
+        return Err(AppError::InvalidInput(
+            "EDID width and height must be non-zero".to_string(),
+        ));
+    }
+
+    // EDID detailed timing fields encode active/blanking as 12-bit values.
+    if width > 4095 || height > 4095 {
+        return Err(AppError::InvalidInput(format!(
+            "EDID DTD only supports dimensions up to 4095x4095 (got {}x{})",
+            width, height
+        )));
+    }
+
     let mut bytes = STANDARD
         .decode(HEADLESS_EDID_TEMPLATE_BASE64)
         .map_err(|error| AppError::Serialization(format!("Failed to decode EDID template: {error}")))?;
@@ -41,6 +55,87 @@ pub fn generate_headless_edid_base64(
         return Err(AppError::Serialization(
             "EDID template is shorter than 128 bytes".to_string(),
         ));
+    }
+
+    // Build a real detailed timing descriptor (DTD) in descriptor slot #1.
+    // We use conservative LCD-friendly blanking/sync defaults and derive pixel clock from WxH@Hz.
+    let h_blanking: u32 = 160;
+    let v_blanking: u32 = 28;
+    let h_sync_offset: u32 = 48;
+    let h_sync_width: u32 = 32;
+    let v_sync_offset: u32 = 3;
+    let v_sync_width: u32 = 5;
+
+    if h_sync_offset + h_sync_width > h_blanking {
+        return Err(AppError::Serialization(
+            "Invalid horizontal sync/blanking relationship for EDID timing".to_string(),
+        ));
+    }
+
+    if v_sync_offset + v_sync_width > v_blanking {
+        return Err(AppError::Serialization(
+            "Invalid vertical sync/blanking relationship for EDID timing".to_string(),
+        ));
+    }
+
+    let h_total = width + h_blanking;
+    let v_total = height + v_blanking;
+
+    let pixel_clock_hz = (h_total as u64)
+        .saturating_mul(v_total as u64)
+        .saturating_mul(refresh_hz as u64);
+    let pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
+
+    if pixel_clock_10khz == 0 || pixel_clock_10khz > u16::MAX as u32 {
+        return Err(AppError::InvalidInput(format!(
+            "Computed pixel clock is out of EDID DTD range: {} (10 kHz units)",
+            pixel_clock_10khz
+        )));
+    }
+
+    let dtd = 54usize;
+    let pclk = pixel_clock_10khz as u16;
+    bytes[dtd] = (pclk & 0x00FF) as u8;
+    bytes[dtd + 1] = ((pclk >> 8) & 0x00FF) as u8;
+
+    bytes[dtd + 2] = (width & 0xFF) as u8;
+    bytes[dtd + 3] = (h_blanking & 0xFF) as u8;
+    bytes[dtd + 4] = (((width >> 8) & 0x0F) as u8) << 4 | ((h_blanking >> 8) & 0x0F) as u8;
+
+    bytes[dtd + 5] = (height & 0xFF) as u8;
+    bytes[dtd + 6] = (v_blanking & 0xFF) as u8;
+    bytes[dtd + 7] = (((height >> 8) & 0x0F) as u8) << 4 | ((v_blanking >> 8) & 0x0F) as u8;
+
+    bytes[dtd + 8] = (h_sync_offset & 0xFF) as u8;
+    bytes[dtd + 9] = (h_sync_width & 0xFF) as u8;
+    bytes[dtd + 10] = (((v_sync_offset & 0x0F) as u8) << 4) | ((v_sync_width & 0x0F) as u8);
+    bytes[dtd + 11] = ((((h_sync_offset >> 8) & 0x03) as u8) << 6)
+        | ((((h_sync_width >> 8) & 0x03) as u8) << 4)
+        | ((((v_sync_offset >> 4) & 0x03) as u8) << 2)
+        | (((v_sync_width >> 4) & 0x03) as u8);
+
+    // Keep image size / border bytes from template (physical size and border) for compatibility.
+    // Preserve descriptor flags byte as-is as well.
+
+    // Update range limits descriptor so requested refresh is within advertised range.
+    // Descriptor starts at byte 108: 00 00 00 FD 00 [min_v][max_v][min_h][max_h][max_pclk_10mhz] ...
+    let range = 108usize;
+    if bytes[range] == 0x00 && bytes[range + 1] == 0x00 && bytes[range + 2] == 0x00 && bytes[range + 3] == 0xFD {
+        let min_v = EDID_MIN_REFRESH_HZ.min(refresh_hz).max(1);
+        let max_v = refresh_hz.max(60).min(255);
+        let min_h = 15u32;
+        let max_h = ((refresh_hz as u64)
+            .saturating_mul(v_total as u64)
+            .saturating_add(500)
+            / 1000)
+            .clamp(min_h as u64, 255) as u32;
+        let max_pclk_10mhz = ((pixel_clock_10khz + 999) / 1000).clamp(1, 255);
+
+        bytes[range + 5] = min_v as u8;
+        bytes[range + 6] = max_v as u8;
+        bytes[range + 7] = min_h as u8;
+        bytes[range + 8] = max_h as u8;
+        bytes[range + 9] = max_pclk_10mhz as u8;
     }
 
     let serial_seed = width

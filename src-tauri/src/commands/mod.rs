@@ -44,7 +44,7 @@ use crate::{
         shared_storage::shared_storage_manager::SharedStorageManager,
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
-        sunshine::{EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ, generate_headless_edid_base64},
+        sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
         wireguard::read_local_wireguard_show_output,
     },
@@ -1347,6 +1347,10 @@ pub async fn regenerate_edid(
     payload: EdidSettingsUpdate,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
+    info!(
+        "regenerate_edid requested: mode={:?} refresh_hz={}",
+        payload.mode, payload.refresh_rate_hz
+    );
     if !(EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&payload.refresh_rate_hz) {
         return Err(AppError::InvalidInput(format!(
             "EDID refresh rate must be between {} and {} Hz",
@@ -1362,6 +1366,10 @@ pub async fn regenerate_edid(
         snapshot.moonlight_preferences.height,
         payload.refresh_rate_hz,
     );
+    info!(
+        "regenerate_edid resolved profile: width={} height={} refresh_hz={} source='{}'",
+        width, height, refresh_hz, source_label
+    );
     let generated_edid = generate_headless_edid_base64(width, height, refresh_hz)?;
 
     let next_state = context
@@ -1373,6 +1381,14 @@ pub async fn regenerate_edid(
             state.last_error = None;
         })
         .await?;
+
+    info!(
+        "regenerate_edid persisted: mode={:?} refresh_hz={} source='{}' edid_len={}",
+        payload.mode,
+        payload.refresh_rate_hz,
+        source_label,
+        generated_edid.len()
+    );
 
     Ok(next_state)
 }
@@ -1439,7 +1455,13 @@ fn resolve_effective_edid_profile(
     match mode {
         EdidMode::Manual => (width, height, refresh_hz, "Manual".to_string()),
         EdidMode::AutoDetect => {
-            if let Some((detected_width, detected_height, detected_refresh)) =
+            if cfg!(target_os = "windows")
+                && width > 0
+                && height > 0
+                && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&refresh_hz)
+            {
+                (width, height, refresh_hz, "State Preferences".to_string())
+            } else if let Some((detected_width, detected_height, detected_refresh)) =
                 detect_client_display_for_provisioning()
             {
                 (
