@@ -65,13 +65,19 @@ export function PostWireguardModal({
   void onVerifyWireguard;
   void onDetectMoonlight;
   const setup = appState.postWireguardSetup;
+  const activeInstanceId = appState.instance.instanceId;
+  const configMatchesActiveInstance =
+    activeInstanceId !== null &&
+    activeInstanceId !== undefined &&
+    setup.currentInstanceId === activeInstanceId;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase =
     wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
   const hasStartedManualSetup =
     setup.stage !== "wireguard_config_generated" &&
     setup.stage !== "pre_wireguard_existing_flow";
-  const canShowWireguardConfig = setup.wireguardConfig.trim().length > 0;
+  const canShowWireguardConfig =
+    configMatchesActiveInstance && setup.wireguardConfig.trim().length > 0;
   const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
   const stageShowsPinSubmission = pinStages.has(setup.stage);
   const showPinInput = stageShowsPinSubmission;
@@ -148,6 +154,13 @@ export function PostWireguardModal({
                 <li key={instruction}>{instruction}</li>
               ))}
             </ol>
+
+            {!configMatchesActiveInstance && (
+              <p className="mt-4 text-[1rem] text-[#9ab0cc]">
+                Loading the current WireGuard config for this instance. If this
+                does not update, click Start Manual Setup.
+              </p>
+            )}
 
             {canShowWireguardConfig && (
               <textarea
