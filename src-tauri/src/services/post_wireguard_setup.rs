@@ -34,10 +34,10 @@ const TUNNEL_HOST: &str = "10.77.0.1";
 const SUNSHINE_API_PORT: u16 = 47990;
 const REACHABILITY_PORTS: [u16; 3] = [47990, 47989, 47984];
 const IMPORT_FILENAME: &str = "wireguard-app-import.conf";
-const SUNSHINE_API_READY_RETRIES: usize = 15;
-const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SUNSHINE_API_READY_RETRIES: usize = 60;
+const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
-const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
+const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(180);
 
 fn sunshine_http_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
@@ -513,6 +513,22 @@ pub async fn verify_sunshine_api(
 }
 
 pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<MoonlightDetectionResult> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let result = MoonlightDetectionResult {
+            installed: true,
+            launch_kind: "mobile_skip".to_string(),
+            executable_path: None,
+            error: None,
+        };
+        context
+            .update_state(|state| {
+                state.post_wireguard_setup.moonlight_installed = true;
+            })
+            .await?;
+        return Ok(result);
+    }
+
     let moonlight = MoonlightService;
     let executable_path = moonlight
         .detected_executable_path()
@@ -704,6 +720,10 @@ pub async fn setup_moonlight_sunshine(
         ));
     }
 
+    if let Err(error) = ensure_remote_virtual_keyboard(context).await {
+        warn!("failed to ensure remote virtual keyboard: {}", error);
+    }
+
     context
         .update_state(|state| {
             state.post_wireguard_setup.stage = SetupStage::MoonlightDetecting;
@@ -738,38 +758,41 @@ pub async fn setup_moonlight_sunshine(
         ));
     }
 
-    let moonlight = MoonlightService;
-    let preferences = { context.state.read().await.moonlight_preferences.clone() };
-    moonlight
-        .patch_local_config(TUNNEL_HOST, SUNSHINE_API_PORT, &preferences)
-        .await?;
-    let config_result = moonlight
-        .configure_client(MoonlightConfigureOptions {
-            apply: true,
-            ..Default::default()
-        })
-        .await;
-    if !config_result.success {
-        warn!(
-            "moonlight auto-config apply returned non-success before pairing: {:?}",
-            config_result.error
-        );
-    }
-
-    let os = OsDetection::new();
-    if os.is_windows() {
-        if let Err(error) = moonlight.launch_native_client() {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    {
+        let moonlight = MoonlightService;
+        let preferences = { context.state.read().await.moonlight_preferences.clone() };
+        moonlight
+            .patch_local_config(TUNNEL_HOST, SUNSHINE_API_PORT, &preferences)
+            .await?;
+        let config_result = moonlight
+            .configure_client(MoonlightConfigureOptions {
+                apply: true,
+                ..Default::default()
+            })
+            .await;
+        if !config_result.success {
             warn!(
-                "windows moonlight auto-launch failed before pairing attempt: {}",
-                error
+                "moonlight auto-config apply returned non-success before pairing: {:?}",
+                config_result.error
             );
         }
 
-        if let Err(error) = moonlight.pair_host(TUNNEL_HOST) {
-            warn!(
-                "windows moonlight auto-pair command failed for {}: {}",
-                TUNNEL_HOST, error
-            );
+        let os = OsDetection::new();
+        if os.is_windows() {
+            if let Err(error) = moonlight.launch_native_client() {
+                warn!(
+                    "windows moonlight auto-launch failed before pairing attempt: {}",
+                    error
+                );
+            }
+
+            if let Err(error) = moonlight.pair_host(TUNNEL_HOST) {
+                warn!(
+                    "windows moonlight auto-pair command failed for {}: {}",
+                    TUNNEL_HOST, error
+                );
+            }
         }
     }
 
@@ -1452,6 +1475,33 @@ async fn bootstrap_sunshine_credentials_over_ssh(
     if output.status_code != 0 {
         return Err(AppError::Provisioning(format!(
             "Failed to set Sunshine credentials over SSH: stdout: {} | stderr: {}",
+            output.stdout.trim(),
+            output.stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+async fn ensure_remote_virtual_keyboard(context: &AppContext) -> AppResult<()> {
+    let (remote, sunshine_user) = sunshine_ssh_remote(context).await?;
+    let escaped_user = shell_single_quote_escape(&sunshine_user);
+    let command = format!(
+        "sudo bash -lc 'set -euo pipefail; U='\''{user}'\''; H=$(eval echo \"~$U\"); export DEBIAN_FRONTEND=noninteractive; if command -v apt-get >/dev/null 2>&1; then apt-get update -y >/dev/null 2>&1 || true; apt-get install -y onboard >/dev/null 2>&1 || true; fi; mkdir -p \"$H/.config/autostart\" \"$H/Desktop\"; if [ -f /usr/share/applications/onboard.desktop ]; then cp /usr/share/applications/onboard.desktop \"$H/.config/autostart/onboard.desktop\"; fi; cat > \"$H/Desktop/Keyboard.desktop\" <<EOF\n[Desktop Entry]\nType=Application\nName=Keyboard\nExec=onboard\nTerminal=false\nEOF\nchown -R $U:$U \"$H/.config\" \"$H/Desktop/Keyboard.desktop\" 2>/dev/null || true; chmod +x \"$H/Desktop/Keyboard.desktop\" 2>/dev/null || true'",
+        user = escaped_user,
+    );
+
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(90)))
+        .await
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed to join remote virtual keyboard setup task: {error}"
+            ))
+        })??;
+
+    if output.status_code != 0 {
+        return Err(AppError::Provisioning(format!(
+            "Remote virtual keyboard setup failed: stdout: {} | stderr: {}",
             output.stdout.trim(),
             output.stderr.trim()
         )));

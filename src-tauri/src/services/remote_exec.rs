@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use ssh2::Session;
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
@@ -40,16 +42,31 @@ impl RemoteExec {
     }
 
     pub fn ssh(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return self.ssh_with_libssh2(remote_command, Some(timeout));
+        }
+
         ensure_command_available("ssh")?;
         self.ssh_with_key(remote_command, timeout)
     }
 
     pub fn ssh_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return self.ssh_with_libssh2(remote_command, None);
+        }
+
         ensure_command_available("ssh")?;
         self.ssh_with_key_until_complete(remote_command)
     }
 
     fn ssh_with_key(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return self.ssh_with_libssh2(remote_command, Some(timeout));
+        }
+
         let os = OsDetection::new();
         let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
         let port_str = self.ssh_port.to_string();
@@ -91,6 +108,11 @@ impl RemoteExec {
     }
 
     fn ssh_with_key_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return self.ssh_with_libssh2(remote_command, None);
+        }
+
         let os = OsDetection::new();
         let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
         let port_str = self.ssh_port.to_string();
@@ -138,6 +160,11 @@ impl RemoteExec {
         remote_path: &str,
         timeout: Duration,
     ) -> AppResult<ExecOutput> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return self.scp_with_libssh2(local_path, remote_path, timeout);
+        }
+
         ensure_command_available("scp")?;
         let os = OsDetection::new();
         let mut command = Command::new("scp");
@@ -175,6 +202,183 @@ fn ensure_command_available(command: &str) -> AppResult<()> {
         "`{command}` is not available in PATH. {}",
         os.install_hint_for_tool(command)
     )))
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+impl RemoteExec {
+    fn ssh_with_libssh2(
+        &self,
+        remote_command: &str,
+        timeout: Option<Duration>,
+    ) -> AppResult<ExecOutput> {
+        let started = Instant::now();
+        let endpoint = format!("{}:{}", self.ssh_host, self.ssh_port);
+        let mut stream = std::net::TcpStream::connect(&endpoint).map_err(|error| {
+            AppError::Command(format!("Failed to connect to SSH endpoint {endpoint}: {error}"))
+        })?;
+        stream
+            .set_nodelay(true)
+            .map_err(|error| AppError::Command(format!("Failed to set TCP_NODELAY: {error}")))?;
+        if let Some(value) = timeout {
+            stream.set_read_timeout(Some(value)).map_err(|error| {
+                AppError::Command(format!("Failed setting read timeout: {error}"))
+            })?;
+            stream.set_write_timeout(Some(value)).map_err(|error| {
+                AppError::Command(format!("Failed setting write timeout: {error}"))
+            })?;
+        }
+
+        let mut session = Session::new()
+            .map_err(|error| AppError::Command(format!("Failed to create SSH session: {error}")))?;
+        session.set_tcp_stream(stream);
+        session
+            .handshake()
+            .map_err(|error| AppError::Command(format!("SSH handshake failed: {error}")))?;
+
+        let key_path = Path::new(&self.private_key_path);
+        session
+            .userauth_pubkey_file(&self.ssh_user, None, key_path, None)
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "SSH public key auth failed for {}@{} with key {}: {error}",
+                    self.ssh_user,
+                    self.ssh_host,
+                    key_path.display()
+                ))
+            })?;
+
+        if !session.authenticated() {
+            return Err(AppError::Command("SSH authentication did not complete".to_string()));
+        }
+
+        let mut channel = session
+            .channel_session()
+            .map_err(|error| AppError::Command(format!("Failed to create SSH channel: {error}")))?;
+        channel.exec(remote_command).map_err(|error| {
+            AppError::Command(format!("Failed executing SSH command `{remote_command}`: {error}"))
+        })?;
+
+        let mut stdout = String::new();
+        channel.read_to_string(&mut stdout).map_err(|error| {
+            AppError::Command(format!("Failed reading SSH stdout for `{remote_command}`: {error}"))
+        })?;
+
+        let mut stderr = String::new();
+        channel
+            .stderr()
+            .read_to_string(&mut stderr)
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "Failed reading SSH stderr for `{remote_command}`: {error}"
+                ))
+            })?;
+
+        channel
+            .wait_close()
+            .map_err(|error| AppError::Command(format!("SSH channel close failed: {error}")))?;
+        let status_code = channel.exit_status().unwrap_or(255);
+        let duration_ms = started.elapsed().as_millis();
+
+        Ok(ExecOutput {
+            command: format!("ssh {}@{}:{} {}", self.ssh_user, self.ssh_host, self.ssh_port, remote_command),
+            status_code,
+            stdout,
+            stderr,
+            duration_ms,
+        })
+    }
+
+    fn scp_with_libssh2(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        timeout: Duration,
+    ) -> AppResult<ExecOutput> {
+        let started = Instant::now();
+        let endpoint = format!("{}:{}", self.ssh_host, self.ssh_port);
+        let stream = std::net::TcpStream::connect(&endpoint).map_err(|error| {
+            AppError::Command(format!("Failed to connect to SSH endpoint {endpoint}: {error}"))
+        })?;
+        stream
+            .set_nodelay(true)
+            .map_err(|error| AppError::Command(format!("Failed to set TCP_NODELAY: {error}")))?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| AppError::Command(format!("Failed setting read timeout: {error}")))?;
+        stream
+            .set_write_timeout(Some(timeout))
+            .map_err(|error| AppError::Command(format!("Failed setting write timeout: {error}")))?;
+
+        let mut session = Session::new()
+            .map_err(|error| AppError::Command(format!("Failed to create SSH session: {error}")))?;
+        session.set_tcp_stream(stream);
+        session
+            .handshake()
+            .map_err(|error| AppError::Command(format!("SSH handshake failed: {error}")))?;
+
+        let key_path = Path::new(&self.private_key_path);
+        session
+            .userauth_pubkey_file(&self.ssh_user, None, key_path, None)
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "SSH public key auth failed for {}@{} with key {}: {error}",
+                    self.ssh_user,
+                    self.ssh_host,
+                    key_path.display()
+                ))
+            })?;
+
+        if !session.authenticated() {
+            return Err(AppError::Command("SSH authentication did not complete".to_string()));
+        }
+
+        let mut local_file = std::fs::File::open(local_path).map_err(|error| {
+            AppError::Command(format!(
+                "Failed to open local file for SCP {}: {error}",
+                local_path.display()
+            ))
+        })?;
+        let metadata = local_file.metadata().map_err(|error| {
+            AppError::Command(format!(
+                "Failed to read local file metadata {}: {error}",
+                local_path.display()
+            ))
+        })?;
+        let mode = 0o644;
+        let mut remote = session
+            .scp_send(Path::new(remote_path), mode, metadata.len(), None)
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "Failed opening remote SCP target {}: {error}",
+                    remote_path
+                ))
+            })?;
+        std::io::copy(&mut local_file, &mut remote).map_err(|error| {
+            AppError::Command(format!(
+                "Failed streaming local file {} to remote {}: {error}",
+                local_path.display(),
+                remote_path
+            ))
+        })?;
+        remote.send_eof().ok();
+        remote.wait_eof().ok();
+        remote.close().ok();
+        remote.wait_close().ok();
+
+        Ok(ExecOutput {
+            command: format!(
+                "scp {} {}@{}:{}",
+                local_path.display(),
+                self.ssh_user,
+                self.ssh_host,
+                remote_path
+            ),
+            status_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            duration_ms: started.elapsed().as_millis(),
+        })
+    }
 }
 
 fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {

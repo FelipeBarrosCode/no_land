@@ -557,6 +557,8 @@ pub struct ProvisionedServerSteps {
     pub ssh_connected: bool,
     pub nvidia_headless_configured: bool,
     #[serde(default)]
+    pub post_nvidia_reboot_started: bool,
+    #[serde(default)]
     pub post_nvidia_reboot_completed: bool,
     pub sunshine_configured: bool,
     pub low_latency_audio_configured: bool,

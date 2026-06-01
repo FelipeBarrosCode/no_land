@@ -9,7 +9,13 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:ios:init": "tauri ios init --ci",
+    "tauri:ios:dev": "tauri ios dev --config src-tauri/tauri.mobile.conf.json",
+    "tauri:ios:build": "tauri ios build --config src-tauri/tauri.mobile.conf.json",
+    "tauri:android:init": "tauri android init --ci",
+    "tauri:android:dev": "tauri android dev --config src-tauri/tauri.mobile.conf.json",
+    "tauri:android:build": "tauri android build --config src-tauri/tauri.mobile.conf.json"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

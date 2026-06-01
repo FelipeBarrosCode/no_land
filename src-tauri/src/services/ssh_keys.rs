@@ -7,6 +7,9 @@ use std::{
 };
 
 use tokio::fs;
+use rand_core::OsRng;
+use ssh_key::{LineEnding, private::PrivateKey};
+use tracing::warn;
 
 use crate::errors::{AppError, AppResult};
 
@@ -31,14 +34,6 @@ impl SshKeyService {
     }
 
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
-        let os = OsDetection::new();
-        if !os.command_exists("ssh-keygen") {
-            return Err(AppError::Command(format!(
-                "`ssh-keygen` is not available in PATH. {}",
-                os.install_hint_for_tool("ssh-keygen")
-            )));
-        }
-
         let keys_dir = root_dir.join("keys");
         fs::create_dir_all(&keys_dir).await?;
 
@@ -52,6 +47,21 @@ impl SshKeyService {
             });
         }
 
+        let os = OsDetection::new();
+        if os.command_exists("ssh-keygen") {
+            self.generate_with_ssh_keygen(&private_key_path).await?;
+        } else {
+            self.generate_with_internal_rust(&private_key_path, &public_key_path)
+                .await?;
+        }
+
+        Ok(SshKeyPaths {
+            private_key_path,
+            public_key_path,
+        })
+    }
+
+    async fn generate_with_ssh_keygen(&self, private_key_path: &Path) -> AppResult<()> {
         let private_path_string = private_key_path.display().to_string();
         tokio::task::spawn_blocking(move || {
             let output = Command::new("ssh-keygen")
@@ -79,10 +89,62 @@ impl SshKeyService {
         .await
         .map_err(|error| AppError::Command(format!("ssh-keygen task join failure: {error}")))??;
 
-        Ok(SshKeyPaths {
-            private_key_path,
-            public_key_path,
+        Ok(())
+    }
+
+    async fn generate_with_internal_rust(
+        &self,
+        private_key_path: &Path,
+        public_key_path: &Path,
+    ) -> AppResult<()> {
+        let private_key_path = private_key_path.to_path_buf();
+        let public_key_path = public_key_path.to_path_buf();
+
+        tokio::task::spawn_blocking(move || {
+            let mut rng = OsRng;
+            let mut private_key = PrivateKey::random(&mut rng, ssh_key::Algorithm::Ed25519)
+                .map_err(|error| AppError::Command(format!("internal ssh keygen failed: {error}")))?;
+            private_key.set_comment("noland-connect");
+
+            let private_pem = private_key
+                .to_openssh(LineEnding::LF)
+                .map_err(|error| AppError::Command(format!("failed encoding private key: {error}")))?;
+            let public_key = private_key.public_key().to_openssh().map_err(|error| {
+                AppError::Command(format!("failed encoding public key: {error}"))
+            })?;
+
+            std::fs::write(&private_key_path, private_pem.as_bytes()).map_err(|error| {
+                AppError::Command(format!(
+                    "failed writing private key {}: {error}",
+                    private_key_path.display()
+                ))
+            })?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&private_key_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(|error| {
+                    AppError::Command(format!(
+                        "failed setting private key permissions {}: {error}",
+                        private_key_path.display()
+                    ))
+                })?;
+            }
+
+            std::fs::write(&public_key_path, format!("{}\n", public_key)).map_err(|error| {
+                AppError::Command(format!(
+                    "failed writing public key {}: {error}",
+                    public_key_path.display()
+                ))
+            })?;
+
+            Ok::<(), AppError>(())
         })
+        .await
+        .map_err(|error| AppError::Command(format!("internal ssh keygen task join failure: {error}")))??;
+
+        Ok(())
     }
 
     pub async fn regenerate_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
@@ -123,10 +185,11 @@ impl SshKeyService {
     pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
         let os = OsDetection::new();
         if !os.command_exists("ssh-add") {
-            return Err(AppError::Command(format!(
-                "`ssh-add` is not available in PATH. {}",
-                os.install_hint_for_tool("ssh-add")
-            )));
+            warn!(
+                "ssh-add is unavailable; continuing without agent key loading (key_path={})",
+                key_path.display()
+            );
+            return Ok(());
         }
 
         let (auth_sock, agent_pid) = self.start_or_get_ssh_agent().await?;

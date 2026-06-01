@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { invokeSafe } from "./tauri";
+import { invokeSafe as tauriInvokeSafe, isRunningInTauri } from "./tauri";
 import type {
   ManualLocationInput,
   MoonlightPreferences,
@@ -33,6 +33,101 @@ import type {
   SetupStage,
   SunshineVerificationResult
 } from "./types";
+
+const apiBase = (import.meta.env.VITE_NOLAND_API_BASE as string | undefined)?.replace(/\/$/, "") ?? "http://127.0.0.1:8787";
+
+async function httpInvoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const request = mapCommandToHttp(command, args ?? {});
+  const response = await fetch(`${apiBase}${request.path}`, {
+    method: request.method,
+    headers: request.body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: request.body === undefined ? undefined : JSON.stringify(request.body)
+  });
+  const isJson = response.headers.get("content-type")?.includes("application/json");
+  const data = isJson ? await response.json() : null;
+  if (!response.ok) {
+    const message = (data && (data.message as string | undefined)) ?? `${response.status} ${response.statusText}`;
+    throw new Error(message);
+  }
+  return data as T;
+}
+
+function mapCommandToHttp(command: string, args: Record<string, unknown>): { method: string; path: string; body?: unknown } {
+  switch (command) {
+    case "get_app_state": return { method: "GET", path: "/api/v1/state" };
+    case "complete_onboarding": return { method: "POST", path: "/api/v1/onboarding/complete", body: { payload: args.payload } };
+    case "refresh_ip_location": return { method: "POST", path: "/api/v1/location/ip/refresh" };
+    case "set_manual_location": return { method: "PUT", path: "/api/v1/location/manual", body: { payload: args.payload } };
+    case "set_os_location": return { method: "PUT", path: "/api/v1/location/os", body: { payload: args.payload } };
+    case "search_offers": return { method: "GET", path: `/api/v1/offers?page=${args.page ?? 1}&pageSize=${args.pageSize ?? 24}` };
+    case "select_offer": return { method: "PUT", path: "/api/v1/offers/selected", body: { offerId: args.offerId, storageGb: args.storageGb } };
+    case "start_play_flow": return { method: "POST", path: "/api/v1/orchestration/play/start" };
+    case "start_play_existing_instance": return { method: "POST", path: "/api/v1/orchestration/play/start-existing", body: { instanceId: args.instanceId } };
+    case "submit_pairing_pin": return { method: "POST", path: "/api/v1/orchestration/pairing/pin", body: { pin: args.pin } };
+    case "skip_pairing_and_continue": return { method: "POST", path: "/api/v1/orchestration/pairing/skip" };
+    case "setup_wireguard_client": return { method: "POST", path: "/api/v1/wireguard/local/setup" };
+    case "reconnect_local_wireguard_client_quick": return { method: "POST", path: "/api/v1/wireguard/local/reconnect" };
+    case "setup_wireguard_app_handoff_command": return { method: "POST", path: "/api/v1/wireguard/handoff/start" };
+    case "verify_wireguard": return { method: "POST", path: "/api/v1/wireguard/verify" };
+    case "open_wireguard_app_command": return { method: "POST", path: "/api/v1/wireguard/app/open" };
+    case "download_wireguard_config_command": return { method: "GET", path: "/api/v1/wireguard/config/download" };
+    case "get_setup_status_command": return { method: "GET", path: "/api/v1/wireguard/setup-status" };
+    case "verify_sunshine": return { method: "POST", path: "/api/v1/sunshine/verify" };
+    case "detect_moonlight": return { method: "GET", path: "/api/v1/moonlight/detect" };
+    case "setup_moonlight_sunshine_command": return { method: "POST", path: "/api/v1/moonlight-sunshine/setup" };
+    case "submit_moonlight_pin_to_sunshine_command": return { method: "POST", path: "/api/v1/moonlight-sunshine/pin", body: { pin: args.pin } };
+    case "retry_setup_stage_command": return { method: "POST", path: "/api/v1/orchestration/retry-stage", body: { stage: args.stage } };
+    case "get_provisioning_logs": return { method: "GET", path: "/api/v1/orchestration/logs" };
+    case "get_moonlight_download_url": return { method: "GET", path: "/api/v1/moonlight/download-url" };
+    case "get_wireguard_download_url": return { method: "GET", path: "/api/v1/wireguard/download-url" };
+    case "launch_moonlight_client": return { method: "POST", path: "/api/v1/moonlight/launch" };
+    case "configure_moonlight_client": return { method: "POST", path: "/api/v1/moonlight/configure", body: {
+      apply: args.apply, forceClose: args.forceClose, native: args.native, network: args.network, preferCodec: args.preferCodec, maxBitrate: args.maxBitrate, fps: args.fps, resolution: args.resolution
+    } };
+    case "restore_moonlight_backup": return { method: "POST", path: "/api/v1/moonlight/restore-backup", body: { backupFile: args.backupFile } };
+    case "get_rented_instances": return { method: "GET", path: "/api/v1/instances/rented" };
+    case "update_vast_api_key": return { method: "PUT", path: "/api/v1/settings/vast-api-key", body: { apiKey: args.apiKey } };
+    case "update_platform_credentials": return { method: "PUT", path: "/api/v1/settings/platform-credentials", body: { payload: args.payload } };
+    case "update_server_preferences": return { method: "PUT", path: "/api/v1/settings/server-preferences", body: { payload: args.payload } };
+    case "update_moonlight_preferences": return { method: "PUT", path: "/api/v1/settings/moonlight-preferences", body: { payload: args.payload } };
+    case "regenerate_edid": return { method: "POST", path: "/api/v1/settings/edid/regenerate", body: { payload: args.payload } };
+    case "update_ssh_credentials": return { method: "PUT", path: "/api/v1/settings/ssh-credentials", body: { payload: args.payload } };
+    case "get_shared_storage_settings": return { method: "GET", path: "/api/v1/shared-storage/settings" };
+    case "save_shared_storage_settings": return { method: "PUT", path: "/api/v1/shared-storage/settings", body: { payload: args.payload } };
+    case "test_shared_storage_config": return { method: "POST", path: "/api/v1/shared-storage/settings/test" };
+    case "trigger_instance_backup": return { method: "POST", path: "/api/v1/shared-storage/backup/trigger" };
+    case "trigger_instance_backup_for": return { method: "POST", path: `/api/v1/shared-storage/backup/trigger/${args.instanceId}` };
+    case "sync_instance_from_shared_storage": return { method: "POST", path: `/api/v1/shared-storage/sync/${args.instanceId}` };
+    case "list_instance_shared_storage_objects": return { method: "GET", path: `/api/v1/shared-storage/objects/${args.instanceId}` };
+    case "sync_instance_from_shared_storage_selected": return { method: "POST", path: `/api/v1/shared-storage/sync/${args.instanceId}/selected`, body: { payload: args.payload } };
+    case "list_instance_exportable_storage_objects": return { method: "GET", path: `/api/v1/shared-storage/exportable-objects/${args.instanceId}` };
+    case "save_instance_to_shared_storage_selected": return { method: "POST", path: `/api/v1/shared-storage/save/${args.instanceId}/selected`, body: { payload: args.payload } };
+    case "get_instance_backup_status": return { method: "GET", path: "/api/v1/shared-storage/backup/status" };
+    case "setup_instance_backup_schedule": return { method: "POST", path: "/api/v1/shared-storage/backup/schedule/setup" };
+    case "remove_instance_backup_schedule": return { method: "POST", path: "/api/v1/shared-storage/backup/schedule/remove" };
+    case "get_instance_sunshine_settings": return { method: "POST", path: `/api/v1/instances/${args.instanceId}/sunshine-settings/get`, body: { sunshineUsername: args.sunshineUsername, sunshinePassword: args.sunshinePassword } };
+    case "update_instance_sunshine_settings": return { method: "PUT", path: `/api/v1/instances/${args.instanceId}/sunshine-settings`, body: { settings: args.settings, sunshineUsername: args.sunshineUsername, sunshinePassword: args.sunshinePassword } };
+    case "reset_instance_sunshine_settings": return { method: "POST", path: `/api/v1/instances/${args.instanceId}/sunshine-settings/reset`, body: { sunshineUsername: args.sunshineUsername, sunshinePassword: args.sunshinePassword } };
+    case "reconnect_instance_wireguard": return { method: "POST", path: `/api/v1/instances/${args.instanceId}/wireguard/reconnect` };
+    case "reboot_instance_services": return { method: "POST", path: `/api/v1/instances/${args.instanceId}/services/reboot` };
+    case "pause_instance": return { method: "POST", path: `/api/v1/instances/${args.instanceId}/pause` };
+    case "destroy_instance": return { method: "DELETE", path: `/api/v1/instances/${args.instanceId}` };
+    case "generate_bundle_index": return { method: "POST", path: "/api/v1/restore/bundles/index/generate" };
+    case "get_instance_restore_bundles": return { method: "GET", path: `/api/v1/restore/bundles/${args.instanceId}` };
+    case "dry_run_restore": return { method: "POST", path: `/api/v1/restore/${args.instanceId}/dry-run`, body: { payload: args.payload } };
+    case "restore_bundle": return { method: "POST", path: `/api/v1/restore/${args.instanceId}/run`, body: { payload: args.payload } };
+    case "get_restore_job": return { method: "GET", path: `/api/v1/restore/jobs/${args.jobId}` };
+    default:
+      throw new Error(`No HTTP mapping for command: ${command}`);
+  }
+}
+
+async function invokeSafe<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  if (isRunningInTauri()) {
+    return tauriInvokeSafe<T>(command, args);
+  }
+  return httpInvoke<T>(command, args);
+}
 
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
@@ -218,6 +313,36 @@ export async function updateSshCredentials(
 export async function subscribeProvisioningEvents(
   callback: (event: ProvisioningEvent) => void
 ): Promise<() => void> {
+  if (!isRunningInTauri()) {
+    let active = true;
+    let seen = new Set<string>();
+    const poll = async () => {
+      while (active) {
+        try {
+          const logs = await getProvisioningLogs();
+          for (const event of logs.slice().reverse()) {
+            const key = `${event.timestamp}-${event.message}-${event.state}`;
+            if (seen.has(key)) {
+              continue;
+            }
+            seen.add(key);
+            callback(event);
+          }
+          if (seen.size > 2000) {
+            seen = new Set(Array.from(seen).slice(-1000));
+          }
+        } catch {
+          // best-effort polling
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      }
+    };
+    void poll();
+    return () => {
+      active = false;
+    };
+  }
+
   const unlisten = await listen<ProvisioningEvent>("orchestration:progress", ({ payload }) => {
     callback(payload);
   });

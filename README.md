@@ -94,6 +94,34 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
+## Mobile app (separate target)
+
+This repository now supports a separate mobile target (`Noland Connect Mobile`) with on-device Rust via Tauri Mobile.
+
+- Mobile config file: `src-tauri/tauri.mobile.conf.json`
+- iOS scaffold path: `src-tauri/gen/apple/`
+
+### iOS
+
+```bash
+npm run tauri:ios:init
+npm run tauri:ios:dev
+```
+
+### Android
+
+```bash
+npm run tauri:android:init
+npm run tauri:android:dev
+```
+
+Android requires SDK/NDK configured first:
+
+- `ANDROID_HOME`
+- `NDK_HOME`
+
+If those are not configured, `tauri android init` fails before scaffolding.
+
 ## Beta desktop releases (direct download)
 
 This repo is configured to publish direct-download desktop binaries (no app stores).

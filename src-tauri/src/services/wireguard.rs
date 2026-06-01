@@ -7,9 +7,13 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use rand_core::OsRng;
 use serde::Serialize;
 use tokio::fs;
 use tracing::{info, warn};
+#[cfg(any(target_os = "ios", target_os = "android"))]
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::errors::{AppError, AppResult};
 
@@ -80,9 +84,9 @@ struct LocalWireGuardPeerState {
 }
 
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
-const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
-const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
-const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 180;
+const APT_UPDATE_TIMEOUT_SECS: u64 = 360;
+const APT_INSTALL_TIMEOUT_SECS: u64 = 600;
+const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 360;
 #[cfg(target_os = "macos")]
 const MACOS_HELPER_SUCCESS_GRACE_SECS: u64 = 300;
 const MACOS_LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
@@ -470,6 +474,7 @@ exit 0"#
         endpoint_port: u16,
         mode: WireGuardProvisionMode,
     ) -> AppResult<WireGuardProvisionResult> {
+        #[cfg(not(any(target_os = "ios", target_os = "android")))]
         ensure_local_wireguard_tools()?;
 
         let local_config_path = instance_local_config_path(local_app_data_dir, instance_id);
@@ -747,61 +752,87 @@ exit 0"#
         }
 
         // wait_for_dpkg_lock_with_message handles all cleanup internally (Option C)
-        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 120).await?;
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 300).await?;
         if !lock_acquired {
             return Err(AppError::Provisioning(
                 "Package manager is locked by another process (likely unattended-upgrades). \
-                Waiting timed out after 60 seconds. Please try again in a few minutes when \
+                Waiting timed out after 300 seconds. Please try again in a few minutes when \
                 system updates have finished. Alternatively, you can SSH into the instance and \
                 run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
                     .to_string(),
             ));
         }
 
-        let update = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 update",
-                    Duration::from_secs(APT_UPDATE_TIMEOUT_SECS),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
+        let mut last_update_error = String::new();
+        let mut update_ok = false;
+        for attempt in 1..=4 {
+            let update = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 -o Acquire::Retries=8 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update",
+                        Duration::from_secs(APT_UPDATE_TIMEOUT_SECS),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
 
-        if update.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Failed apt-get update for WireGuard dependencies (exit {}): stdout: {} | stderr: {}",
+            if update.status_code == 0 {
+                update_ok = true;
+                break;
+            }
+
+            last_update_error = format!(
+                "attempt {attempt}/4 failed (exit {}): stdout: {} | stderr: {}",
                 update.status_code,
                 update.stdout.trim(),
                 update.stderr.trim()
+            );
+            warn!("apt-get update retry: {last_update_error}");
+            tokio::time::sleep(Duration::from_secs(5 * attempt as u64)).await;
+        }
+        if !update_ok {
+            return Err(AppError::Provisioning(format!(
+                "Failed apt-get update for WireGuard dependencies after retries: {last_update_error}"
             )));
         }
 
         let install_command = format!(
-            "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y {}",
+            "sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 -o Acquire::Retries=8 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 install -y {}",
             packages_needed.join(" ")
         );
 
-        let install = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    &install_command,
-                    Duration::from_secs(APT_INSTALL_TIMEOUT_SECS),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
+        let mut last_install_error = String::new();
+        let mut install_ok = false;
+        for attempt in 1..=4 {
+            let install = {
+                let remote = remote.clone();
+                let install_command = install_command.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(&install_command, Duration::from_secs(APT_INSTALL_TIMEOUT_SECS))
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
 
-        if install.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Failed installing WireGuard dependencies (exit {}): stdout: {} | stderr: {}",
+            if install.status_code == 0 {
+                install_ok = true;
+                break;
+            }
+
+            last_install_error = format!(
+                "attempt {attempt}/4 failed (exit {}): stdout: {} | stderr: {}",
                 install.status_code,
                 install.stdout.trim(),
                 install.stderr.trim()
+            );
+            warn!("apt-get install retry: {last_install_error}");
+            tokio::time::sleep(Duration::from_secs(8 * attempt as u64)).await;
+        }
+        if !install_ok {
+            return Err(AppError::Provisioning(format!(
+                "Failed installing WireGuard dependencies after retries: {last_install_error}"
             )));
         }
 
@@ -1354,6 +1385,14 @@ pub fn setup_local_wireguard_client(config_path: &Path) -> AppResult<String> {
     {
         setup_local_wireguard_client_windows(config_path)
     }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = config_path;
+        Err(AppError::Command(
+            "Local WireGuard client setup is not supported on mobile targets.".to_string(),
+        ))
+    }
 }
 
 pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String> {
@@ -1381,6 +1420,14 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
     #[cfg(target_os = "windows")]
     {
         reconnect_local_wireguard_client_windows(config_path)
+    }
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = config_path;
+        Err(AppError::Command(
+            "Local WireGuard client reconnect is not supported on mobile targets.".to_string(),
+        ))
     }
 }
 
@@ -1842,6 +1889,13 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
     Err(AppError::Command(
         "WireGuard tools are not installed on Windows. Please install WireGuard from https://wireguard.com/install and retry."
             .to_string(),
+    ))
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+fn ensure_local_wireguard_tools() -> AppResult<()> {
+    Err(AppError::Command(
+        "Local WireGuard tool management is not supported on mobile targets.".to_string(),
     ))
 }
 
@@ -2606,6 +2660,15 @@ fn parse_default_route_dev(line: &str) -> Option<String> {
 }
 
 fn generate_keypair() -> AppResult<(String, String)> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let secret = StaticSecret::random_from_rng(OsRng);
+        let public = X25519PublicKey::from(&secret);
+        let private_b64 = BASE64_STANDARD.encode(secret.to_bytes());
+        let public_b64 = BASE64_STANDARD.encode(public.as_bytes());
+        return Ok((private_b64, public_b64));
+    }
+
     let private_output = resolved_command_output("wg", &["genkey"])?;
     if !private_output.status.success() {
         return Err(AppError::Command(format!(
@@ -2651,6 +2714,19 @@ fn generate_keypair() -> AppResult<(String, String)> {
 }
 
 fn derive_public_key(private_key: &str) -> AppResult<String> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let private_raw = BASE64_STANDARD.decode(private_key.trim()).map_err(|error| {
+            AppError::Command(format!("Failed decoding WireGuard private key: {error}"))
+        })?;
+        let key_bytes: [u8; 32] = private_raw.try_into().map_err(|_| {
+            AppError::Command("WireGuard private key must be exactly 32 bytes".to_string())
+        })?;
+        let secret = StaticSecret::from(key_bytes);
+        let public = X25519PublicKey::from(&secret);
+        return Ok(BASE64_STANDARD.encode(public.as_bytes()));
+    }
+
     let mut child = resolved_command("wg")?
         .arg("pubkey")
         .stdin(Stdio::piped())

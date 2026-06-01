@@ -389,6 +389,11 @@ impl MoonlightService {
     }
 
     pub fn launch_native_client(&self) -> AppResult<()> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            return Ok(());
+        }
+
         #[cfg(target_os = "macos")]
         {
             if let Some(app_path) = find_macos_moonlight_app() {
@@ -496,6 +501,12 @@ impl MoonlightService {
     }
 
     pub fn pair_host(&self, host: &str) -> AppResult<()> {
+        #[cfg(any(target_os = "ios", target_os = "android"))]
+        {
+            let _ = host;
+            return Ok(());
+        }
+
         #[cfg(target_os = "macos")]
         {
             if let Some(executable) = find_macos_moonlight_executable() {

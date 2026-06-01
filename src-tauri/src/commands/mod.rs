@@ -75,6 +75,24 @@ pub struct LocalEnvironmentCheck {
 
 fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
     let os = OsDetection::new();
+
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let arch = match os.arch() {
+            crate::services::os_detection::ArchKind::X64 => "x64",
+            crate::services::os_detection::ArchKind::Arm64 => "arm64",
+            crate::services::os_detection::ArchKind::Unknown => "unknown",
+        }
+        .to_string();
+
+        return LocalEnvironmentCheck {
+            os: os.platform_display_name().to_string(),
+            arch,
+            ok: true,
+            checks: Vec::new(),
+        };
+    }
+
     let build_check = |tool: &str, required_for: &str| {
         let mut install_attempted = false;
         let mut install_error = None;
@@ -1791,11 +1809,29 @@ pub async fn reset_instance_sunshine_settings(
 
 #[tauri::command]
 pub async fn reconnect_instance_wireguard(
-    _context: State<'_, AppContext>,
-    _instance_id: u64,
+    context: State<'_, AppContext>,
+    instance_id: u64,
 ) -> Result<String, FrontendError> {
-    open_wireguard_app().map_err(FrontendError::from)?;
-    Ok("Opened WireGuard app.".to_string())
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    let desktop_user = context.config.audio_target_user.clone();
+    let escaped_user = desktop_user.replace('\'', "'\\''");
+    let command = format!(
+        "sudo bash -lc 'set -euo pipefail; U='\''{user}'\''; UIDN=$(id -u \"$U\" 2>/dev/null || true); if ! command -v onboard >/dev/null 2>&1; then if command -v apt-get >/dev/null 2>&1; then export DEBIAN_FRONTEND=noninteractive; apt-get update -y >/dev/null 2>&1 || true; apt-get install -y onboard >/dev/null 2>&1 || true; fi; fi; if pgrep -u \"$U\" -x onboard >/dev/null 2>&1; then pkill -u \"$U\" -x onboard || true; echo KEYBOARD_TOGGLED=closed; exit 0; fi; if [ -n \"$UIDN\" ] && [ -S \"/run/user/$UIDN/bus\" ]; then sudo -u \"$U\" env XDG_RUNTIME_DIR=\"/run/user/$UIDN\" DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/$UIDN/bus\" nohup onboard >/dev/null 2>&1 & else sudo -u \"$U\" nohup onboard >/dev/null 2>&1 & fi; echo KEYBOARD_TOGGLED=opened'",
+        user = escaped_user
+    );
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(45)))
+        .await
+        .map_err(|error| FrontendError::from(AppError::Command(format!("Failed to launch remote keyboard task: {error}"))))??;
+    if output.status_code != 0 {
+        return Err(FrontendError::from(AppError::Provisioning(format!(
+            "Failed to open remote keyboard: {}",
+            output.stderr
+        ))));
+    }
+    if output.stdout.contains("KEYBOARD_TOGGLED=closed") {
+        return Ok("Keyboard closed on remote desktop.".to_string());
+    }
+    Ok("Keyboard opened on remote desktop.".to_string())
 }
 
 #[tauri::command]

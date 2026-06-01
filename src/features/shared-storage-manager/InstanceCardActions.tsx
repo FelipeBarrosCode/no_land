@@ -100,10 +100,10 @@ export function InstanceCardActions({
           className="w-full text-xs"
           disabled={actionDisabled}
           loading={loadingKey === "instance.wireguard.reconnect"}
-          loadingText="Opening..."
+          loadingText="Opening keyboard..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open WireGuard
+          Keyboard
         </Button>
       </div>
 

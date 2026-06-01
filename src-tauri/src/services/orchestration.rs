@@ -13,7 +13,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            EdidMode, MoonlightPreferences, OrchestrationState, ProvisionedServerState,
+            EdidMode, MoonlightPreferences, OrchestrationState, PersistedAppState,
+            ProvisionedServerState,
             ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
@@ -2632,6 +2633,9 @@ async fn ensure_post_nvidia_reboot(
     remote: &mut RemoteExec,
     offer_id: Option<u64>,
 ) -> AppResult<()> {
+    let reboot_started =
+        server_step_is_completed(context, instance.id, ProvisionStepMarker::PostNvidiaRebootStarted)
+            .await;
     if server_step_is_completed(
         context,
         instance.id,
@@ -2650,37 +2654,61 @@ async fn ensure_post_nvidia_reboot(
         return Ok(());
     }
 
-    emit_transition(
-        app,
-        context,
-        OrchestrationState::ConnectingSsh,
-        "Rebooting instance to finalize NVIDIA/Xorg setup",
-        Some("Instance will disconnect briefly, then auto-reconnect".to_string()),
-        false,
-    )
-    .await;
+    if !reboot_started {
+        mark_server_step_completed(
+            context,
+            instance.id,
+            ProvisionStepMarker::PostNvidiaRebootStarted,
+            OrchestrationState::ConnectingSsh,
+            &instance.status,
+            &instance.ssh_host,
+            instance.ssh_port,
+            offer_id,
+        )
+        .await?;
 
-    let reboot_output = {
-        let remote = remote.clone();
-        tokio::task::spawn_blocking(move || {
-            remote.ssh(
-                "sudo bash -lc 'nohup sh -c \"sleep 2; reboot\" >/dev/null 2>&1 &'",
-                Duration::from_secs(20),
-            )
-        })
-        .await
-        .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-    };
+        emit_transition(
+            app,
+            context,
+            OrchestrationState::ConnectingSsh,
+            "Rebooting instance to finalize NVIDIA/Xorg setup",
+            Some("Instance will disconnect briefly, then auto-reconnect".to_string()),
+            false,
+        )
+        .await;
 
-    if reboot_output.status_code != 0 {
-        warn!(
-            "Reboot command returned non-zero (continuing): stdout: {} | stderr: {}",
-            reboot_output.stdout.trim(),
-            reboot_output.stderr.trim()
-        );
+        let reboot_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo bash -lc 'nohup sh -c \"sleep 2; reboot\" >/dev/null 2>&1 &'",
+                    Duration::from_secs(20),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if reboot_output.status_code != 0 {
+            warn!(
+                "Reboot command returned non-zero (continuing): stdout: {} | stderr: {}",
+                reboot_output.stdout.trim(),
+                reboot_output.stderr.trim()
+            );
+        }
+
+        sleep(Duration::from_secs(8)).await;
+    } else {
+        emit_transition(
+            app,
+            context,
+            OrchestrationState::ConnectingSsh,
+            "Reboot already started previously; resuming reconnect checks",
+            Some("Continuing reboot polling without issuing another reboot command.".to_string()),
+            false,
+        )
+        .await;
     }
-
-    sleep(Duration::from_secs(8)).await;
 
     const REBOOT_RECONNECT_ATTEMPTS: usize = 36;
     const REBOOT_RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
@@ -2712,7 +2740,7 @@ async fn ensure_post_nvidia_reboot(
                 };
                 remote.ssh_port = instance.ssh_port;
 
-                let probe = {
+                let probe_result = {
                     let remote = remote.clone();
                     tokio::task::spawn_blocking(move || {
                         remote.ssh("echo reboot-online", Duration::from_secs(15))
@@ -2720,7 +2748,48 @@ async fn ensure_post_nvidia_reboot(
                     .await
                     .map_err(|error| {
                         AppError::Command(format!("reboot probe join failure: {error}"))
-                    })??
+                    })?
+                };
+
+                let probe = match probe_result {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        let error_text = error.to_string();
+                        let normalized = error_text.to_ascii_lowercase();
+                        let retryable = normalized.contains("connection reset")
+                            || normalized.contains("connection refused")
+                            || normalized.contains("connection timed out")
+                            || normalized.contains("connection closed")
+                            || normalized.contains("failed to get banner")
+                            || normalized.contains("no route to host")
+                            || normalized.contains("network is unreachable")
+                            || normalized.contains("operation timed out");
+
+                        if retryable {
+                            emit_transition(
+                                app,
+                                context,
+                                OrchestrationState::ConnectingSsh,
+                                "Waiting for SSH after reboot",
+                                Some(format!(
+                                    "Attempt {}/{} | ssh={}:{} | transient error={}",
+                                    attempt,
+                                    REBOOT_RECONNECT_ATTEMPTS,
+                                    remote.ssh_host,
+                                    remote.ssh_port,
+                                    error_text
+                                )),
+                                false,
+                            )
+                            .await;
+                            if attempt < REBOOT_RECONNECT_ATTEMPTS {
+                                sleep(REBOOT_RECONNECT_INTERVAL).await;
+                            }
+                            continue;
+                        }
+
+                        return Err(error);
+                    }
                 };
 
                 if probe.status_code == 0 {
@@ -2860,6 +2929,8 @@ fn looks_like_ssh_connectivity_refusal(stderr: &str) -> bool {
     normalized.contains("connection refused")
         || normalized.contains("connection reset")
         || normalized.contains("connection timed out")
+        || normalized.contains("connection closed")
+        || normalized.contains("failed to get banner")
         || normalized.contains("no route to host")
 }
 
@@ -3297,6 +3368,7 @@ pub(crate) enum ProvisionStepMarker {
     InstanceReady,
     SshConnected,
     NvidiaHeadlessConfigured,
+    PostNvidiaRebootStarted,
     PostNvidiaRebootCompleted,
     SunshineConfigured,
     LowLatencyAudioConfigured,
@@ -3315,6 +3387,7 @@ fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> 
         ProvisionStepMarker::InstanceReady => steps.instance_ready,
         ProvisionStepMarker::SshConnected => steps.ssh_connected,
         ProvisionStepMarker::NvidiaHeadlessConfigured => steps.nvidia_headless_configured,
+        ProvisionStepMarker::PostNvidiaRebootStarted => steps.post_nvidia_reboot_started,
         ProvisionStepMarker::PostNvidiaRebootCompleted => steps.post_nvidia_reboot_completed,
         ProvisionStepMarker::SunshineConfigured => steps.sunshine_configured,
         ProvisionStepMarker::LowLatencyAudioConfigured => steps.low_latency_audio_configured,
@@ -3334,6 +3407,7 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::InstanceReady => steps.instance_ready = value,
         ProvisionStepMarker::SshConnected => steps.ssh_connected = value,
         ProvisionStepMarker::NvidiaHeadlessConfigured => steps.nvidia_headless_configured = value,
+        ProvisionStepMarker::PostNvidiaRebootStarted => steps.post_nvidia_reboot_started = value,
         ProvisionStepMarker::PostNvidiaRebootCompleted => {
             steps.post_nvidia_reboot_completed = value
         }
@@ -3347,6 +3421,73 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::PairingCompleted => steps.pairing_completed = value,
         ProvisionStepMarker::PostProvisionCompleted => steps.post_provision_completed = value,
     }
+}
+
+fn step_completion_score(steps: &ProvisionedServerSteps) -> u32 {
+    let mut score = 0u32;
+    score += steps.ssh_key_ready as u32;
+    score += steps.ssh_key_uploaded_to_vast as u32;
+    score += steps.instance_created as u32;
+    score += steps.instance_ready as u32;
+    score += steps.ssh_connected as u32;
+    score += steps.nvidia_headless_configured as u32;
+    score += steps.post_nvidia_reboot_started as u32;
+    score += steps.post_nvidia_reboot_completed as u32;
+    score += steps.sunshine_configured as u32;
+    score += steps.low_latency_audio_configured as u32;
+    score += steps.wireguard_configured as u32;
+    score += steps.moonlight_configured as u32;
+    score += steps.awaiting_pair_pin as u32;
+    score += steps.pairing_completed as u32;
+    score += steps.post_provision_completed as u32;
+    score
+}
+
+fn metadata_score(record: &ProvisionedServerState) -> u32 {
+    let mut score = 0u32;
+    score += (!record.ssh_host.trim().is_empty()) as u32;
+    score += (record.ssh_port > 0) as u32;
+    score += (!record.ssh_command.trim().is_empty()) as u32;
+    score += (!record.status.trim().is_empty()) as u32;
+    score += (!record.wireguard_server_ip.trim().is_empty()) as u32;
+    score += (!record.wireguard_client_ip.trim().is_empty()) as u32;
+    score += (!record.wireguard_server_public_key.trim().is_empty()) as u32;
+    score += (!record.wireguard_client_public_key.trim().is_empty()) as u32;
+    score += (!record.wireguard_config_path.trim().is_empty()) as u32;
+    score += (!record.moonlight_host_address.trim().is_empty()) as u32;
+    score
+}
+
+fn dedupe_provisioned_servers_by_instance_id(app_state: &mut PersistedAppState) {
+    use std::collections::HashMap;
+
+    let mut winners: HashMap<u64, ProvisionedServerState> = HashMap::new();
+    for record in app_state.provisioned_servers.drain(..) {
+        let instance_id = record.instance_id;
+        match winners.get_mut(&instance_id) {
+            None => {
+                winners.insert(instance_id, record);
+            }
+            Some(current) => {
+                let candidate_steps = step_completion_score(&record.steps);
+                let current_steps = step_completion_score(&current.steps);
+                let should_replace = if candidate_steps > current_steps {
+                    true
+                } else if candidate_steps < current_steps {
+                    false
+                } else {
+                    metadata_score(&record) > metadata_score(current)
+                };
+                if should_replace {
+                    *current = record;
+                }
+            }
+        }
+    }
+
+    let mut deduped = winners.into_values().collect::<Vec<_>>();
+    deduped.sort_by(|left, right| right.instance_id.cmp(&left.instance_id));
+    app_state.provisioned_servers = deduped;
 }
 
 /// Determines the resume step for an existing instance based on saved progress
@@ -3559,6 +3700,8 @@ async fn persist_wireguard_result_for_server(
             record.wireguard_server_public_key = server_public_key.clone();
             record.wireguard_client_public_key = client_public_key.clone();
             record.wireguard_config_path = config_path.clone();
+
+            dedupe_provisioned_servers_by_instance_id(app_state);
         })
         .await?;
 
@@ -3586,6 +3729,8 @@ async fn persist_moonlight_host_for_server(
                 });
             let record = &mut app_state.provisioned_servers[index];
             record.moonlight_host_address = host_address.clone();
+
+            dedupe_provisioned_servers_by_instance_id(app_state);
         })
         .await?;
 
@@ -3663,6 +3808,8 @@ async fn ensure_server_record(
             }
             record.last_state = state;
             record.last_error = None;
+
+            dedupe_provisioned_servers_by_instance_id(app_state);
         })
         .await?;
 
@@ -3723,6 +3870,8 @@ pub(crate) async fn mark_server_step_completed(
             record.last_state = state;
             record.last_error = None;
             set_step_completed(&mut record.steps, step, true);
+
+            dedupe_provisioned_servers_by_instance_id(app_state);
         })
         .await?;
 
