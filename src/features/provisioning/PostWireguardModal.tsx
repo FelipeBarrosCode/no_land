@@ -304,8 +304,21 @@ export function PostWireguardModal({
 
             {setup.setupComplete && (
               <div className="mt-4 border border-neon-lime bg-[#1f3223] p-4 text-[1.08rem] text-[#d9ffca]">
-                Setup complete. Your secure streaming connection is ready, and
-                you can still submit a fresh PIN below at any time.
+                <p>
+                  Setup complete. Your secure streaming connection is ready, and
+                  you can still submit a fresh PIN below at any time.
+                </p>
+                <div className="mt-3 border border-[#4f6a4e] bg-[#152316] p-3 text-[1rem] text-[#e6ffd7]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+                    Sunshine Login
+                  </h4>
+                  <p className="mt-2">
+                    Username: <span className="text-white">user</span>
+                  </p>
+                  <p>
+                    Password: <span className="text-white">password</span>
+                  </p>
+                </div>
               </div>
             )}
           </>
