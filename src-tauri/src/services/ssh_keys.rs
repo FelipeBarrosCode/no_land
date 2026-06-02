@@ -1,6 +1,9 @@
 use std::{
+    io::ErrorKind,
     path::{Path, PathBuf},
     process::Command,
+    thread,
+    time::Duration,
 };
 
 use tokio::fs;
@@ -80,6 +83,41 @@ impl SshKeyService {
             private_key_path,
             public_key_path,
         })
+    }
+
+    pub async fn regenerate_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
+        let keys_dir = root_dir.join("keys");
+        fs::create_dir_all(&keys_dir).await?;
+
+        let private_key_path = keys_dir.join(&self.key_name);
+        let public_key_path = keys_dir.join(format!("{}.pub", &self.key_name));
+
+        if let Err(error) = fs::remove_file(&private_key_path).await {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(AppError::from(error));
+            }
+        }
+
+        if let Err(error) = fs::remove_file(&public_key_path).await {
+            if error.kind() != ErrorKind::NotFound {
+                return Err(AppError::from(error));
+            }
+        }
+
+        self.ensure_keypair(root_dir).await
+    }
+
+    pub async fn regenerate_and_upload_public_key(
+        &self,
+        root_dir: &Path,
+        vast_api: &VastApiClient,
+    ) -> AppResult<(SshKeyPaths, bool)> {
+        let key_paths = self.regenerate_keypair(root_dir).await?;
+        let uploaded = self
+            .upload_public_key_if_missing(vast_api, &key_paths.public_key_path)
+            .await?;
+
+        Ok((key_paths, uploaded))
     }
 
     pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
@@ -181,15 +219,47 @@ impl SshKeyService {
             }
 
             if os.is_windows() {
-                let _ = Command::new("powershell")
+                let ensure_agent_running = Command::new("powershell")
                     .args([
                         "-NoProfile",
                         "-ExecutionPolicy",
                         "Bypass",
                         "-Command",
-                        "if (Get-Service ssh-agent -ErrorAction SilentlyContinue) { Start-Service ssh-agent -ErrorAction SilentlyContinue }",
+                        "$svc = Get-Service ssh-agent -ErrorAction SilentlyContinue; if (-not $svc) { Write-Error 'OpenSSH Authentication Agent service (ssh-agent) not found'; exit 2 }; if ($svc.Status -ne 'Running') { Start-Service ssh-agent -ErrorAction Stop; Start-Sleep -Milliseconds 300; $svc = Get-Service ssh-agent -ErrorAction Stop }; if ($svc.Status -ne 'Running') { Write-Error 'OpenSSH Authentication Agent service is not running'; exit 3 }; Write-Output 'running'",
                     ])
-                    .output();
+                    .output()
+                    .map_err(|error| AppError::Command(format!(
+                        "Failed to verify/start Windows ssh-agent service: {error}"
+                    )))?;
+
+                if !ensure_agent_running.status.success() {
+                    return Err(AppError::Command(format!(
+                        "Windows OpenSSH Agent service is unavailable or could not be started. Run Noland Connect as administrator once, or manually set OpenSSH Authentication Agent to Automatic and start it. Details: {}",
+                        String::from_utf8_lossy(&ensure_agent_running.stderr).trim()
+                    )));
+                }
+
+                let mut ready = false;
+                for _ in 0..6 {
+                    let probe = Command::new("ssh-add").arg("-l").output();
+                    if let Ok(output) = probe {
+                        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+                        if output.status.success()
+                            || stderr.contains("the agent has no identities")
+                            || stderr.contains("no identities")
+                        {
+                            ready = true;
+                            break;
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+
+                if !ready {
+                    return Err(AppError::Command(
+                        "Windows OpenSSH Agent service started but is not ready to accept ssh-add requests. Please restart the ssh-agent service or Windows and retry.".to_string(),
+                    ));
+                }
 
                 return Ok((None, None));
             }
