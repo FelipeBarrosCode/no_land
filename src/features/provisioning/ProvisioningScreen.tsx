@@ -56,6 +56,10 @@ export function ProvisioningScreen({
     const index = PROVISIONING_ORDER.indexOf(appState.orchestrationState as (typeof PROVISIONING_ORDER)[number]);
     return index === -1 ? 0 : index;
   }, [appState.orchestrationState]);
+  const sunshineCredentials = {
+    username: "user",
+    password: "password",
+  };
 
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
@@ -133,6 +137,17 @@ export function ProvisioningScreen({
                 );
               })}
             </ul>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+                Sunshine Credentials
+              </h3>
+              <p className="mt-2">
+                Username: <span className="text-neon-lime">{sunshineCredentials.username}</span>
+              </p>
+              <p>
+                Password: <span className="text-neon-lime">{sunshineCredentials.password}</span>
+              </p>
+            </div>
           </Card>
 
           <Card className="pixel-frame">
@@ -191,7 +206,8 @@ export function ProvisioningScreen({
           appState.orchestrationState === "MoonlightPairingStarted" ||
           appState.orchestrationState === "MoonlightPinReceived" ||
           appState.orchestrationState === "SunshinePinSubmitting" ||
-          appState.orchestrationState === "MoonlightSunshinePaired"
+          appState.orchestrationState === "MoonlightSunshinePaired" ||
+          appState.orchestrationState === "Ready"
         }
         appState={appState}
         busy={busy}

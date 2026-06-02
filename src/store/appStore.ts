@@ -350,6 +350,67 @@ async function refreshProvisioningState(
   }
 }
 
+async function applyProvisioningEventState(
+  event: ProvisioningEvent,
+  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+): Promise<void> {
+  let latestPostWireguardSetup: PostWireGuardSetupState | null = null;
+  if (PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
+    try {
+      latestPostWireguardSetup = await getSetupStatus();
+    } catch {
+      latestPostWireguardSetup = null;
+    }
+  }
+
+  set((state) => {
+    const nextLogs = [event, ...state.logs].slice(0, 500);
+    const nextBaseState = state.appState
+      ? {
+          ...state.appState,
+          orchestrationState: event.state,
+          lastError: event.isError ? event.message : state.appState.lastError,
+          ...(latestPostWireguardSetup
+            ? { postWireguardSetup: latestPostWireguardSetup }
+            : {}),
+        }
+      : state.appState;
+    const nextState = nextBaseState
+      ? applyPostWireguardEventState(nextBaseState, event.state)
+      : nextBaseState;
+
+    const updates: Partial<AppStore> = {
+      logs: nextLogs,
+      appState: nextState,
+      error: event.isError ? event.message : state.error,
+    };
+
+    if (event.isError || PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
+      updates.busy = false;
+      if (state.blockingAction?.key === "provisioning.flow") {
+        updates.blockingAction = null;
+        updates.isBlocking = false;
+      }
+      return updates;
+    }
+
+    updates.busy = true;
+    updates.isBlocking = true;
+    updates.blockingAction = createBlockingAction(state, {
+      key: "provisioning.flow",
+      label: "Provisioning session",
+      detail:
+        event.message ||
+        PROVISIONING_STEP_LABELS[event.state] ||
+        "Preparing your instance",
+      progress: getProvisioningProgress(event.state),
+      mode: "determinate",
+    });
+
+    return updates;
+  });
+}
+
 const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   GeneratingSshKey: "Generating SSH key",
   UploadingSshKeyToVast: "Uploading SSH key to Vast.ai",
@@ -555,9 +616,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const [appState, logs] = await Promise.all([
+        const [appState, logs, postWireguardSetup] = await Promise.all([
           getAppState(),
           getProvisioningLogs(),
+          getSetupStatus(),
         ]);
         let rentedInstances: RentedInstanceSummary[] = [];
         if (
@@ -567,7 +629,15 @@ export const useAppStore = create<AppStore>((set, get) => {
           rentedInstances = await getRentedInstances();
         }
 
-        set({ appState, logs, rentedInstances, loading: false });
+        set({
+          appState: {
+            ...appState,
+            postWireguardSetup,
+          },
+          logs,
+          rentedInstances,
+          loading: false,
+        });
       } catch (error) {
         set({ loading: false, error: mapError(error) });
       }
@@ -579,54 +649,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
 
       await subscribeProvisioningEvents((event) => {
-        set((state) => {
-          const nextLogs = [event, ...state.logs].slice(0, 500);
-          const nextState = state.appState
-            ? applyPostWireguardEventState(
-                {
-                  ...state.appState,
-                  orchestrationState: event.state,
-                  lastError: event.isError
-                    ? event.message
-                    : state.appState.lastError,
-                },
-                event.state,
-              )
-            : state.appState;
-
-          const updates: Partial<AppStore> = {
-            logs: nextLogs,
-            appState: nextState,
-            error: event.isError ? event.message : state.error,
-          };
-
-          if (
-            event.isError ||
-            PROVISIONING_INTERACTIVE_STATES.has(event.state)
-          ) {
-            updates.busy = false;
-            if (state.blockingAction?.key === "provisioning.flow") {
-              updates.blockingAction = null;
-              updates.isBlocking = false;
-            }
-            return updates;
-          }
-
-          updates.busy = true;
-          updates.isBlocking = true;
-          updates.blockingAction = createBlockingAction(state, {
-            key: "provisioning.flow",
-            label: "Provisioning session",
-            detail:
-              event.message ||
-              PROVISIONING_STEP_LABELS[event.state] ||
-              "Preparing your instance",
-            progress: getProvisioningProgress(event.state),
-            mode: "determinate",
-          });
-
-          return updates;
-        });
+        void applyProvisioningEventState(event, set);
       });
 
       set({ _eventsBound: true });

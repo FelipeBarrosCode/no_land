@@ -257,47 +257,6 @@ export function SettingsScreen({
           </Button>
         </div>
       </div>
-      <div className="mt-4 border-t border-[#3b4067] pt-4">
-        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Headless EDID</h3>
-        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
-        </p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">EDID Mode</label>
-            <select
-              value={edidMode}
-              onChange={(event) => setEdidMode(event.target.value as "auto_detect" | "manual")}
-              className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
-            >
-              <option value="auto_detect">Auto Detect</option>
-              <option value="manual">Manual (use Moonlight width/height)</option>
-            </select>
-          </div>
-          <InputField
-            label="EDID Refresh Rate (30-240 Hz)"
-            value={edidRefreshRateHz}
-            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
-          />
-        </div>
-        <div className="mt-3">
-          <Button
-            disabled={
-              busy ||
-              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
-              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
-            }
-            onClick={() =>
-              onRegenerateEdid({
-                mode: edidMode,
-                refreshRateHz: Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz))
-              })
-            }
-          >
-            Regenerate EDID
-          </Button>
-        </div>
-      </div>
     </Card>
   );
 
@@ -359,6 +318,47 @@ export function SettingsScreen({
   const clientPanel = (
     <Card className="pixel-frame">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Client (Moonlight)</h2>
+      <div className="mt-4 border border-[#3b4067] bg-[#10152f] p-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Headless EDID</h3>
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
+          Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
+        </p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="space-y-2">
+            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">EDID Mode</label>
+            <select
+              value={edidMode}
+              onChange={(event) => setEdidMode(event.target.value as "auto_detect" | "manual")}
+              className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
+            >
+              <option value="auto_detect">Auto Detect</option>
+              <option value="manual">Manual (use Moonlight width/height)</option>
+            </select>
+          </div>
+          <InputField
+            label="EDID Refresh Rate (30-240 Hz)"
+            value={edidRefreshRateHz}
+            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+          />
+        </div>
+        <div className="mt-3">
+          <Button
+            disabled={
+              busy ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
+              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
+            }
+            onClick={() =>
+              onRegenerateEdid({
+                mode: edidMode,
+                refreshRateHz: Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz))
+              })
+            }
+          >
+            Regenerate EDID
+          </Button>
+        </div>
+      </div>
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         {clientNumericFields.map((key) => (
           <InputField

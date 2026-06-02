@@ -65,13 +65,19 @@ export function PostWireguardModal({
   void onVerifyWireguard;
   void onDetectMoonlight;
   const setup = appState.postWireguardSetup;
+  const activeInstanceId = appState.instance.instanceId;
+  const configMatchesActiveInstance =
+    activeInstanceId !== null &&
+    activeInstanceId !== undefined &&
+    setup.currentInstanceId === activeInstanceId;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase =
     wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
   const hasStartedManualSetup =
     setup.stage !== "wireguard_config_generated" &&
     setup.stage !== "pre_wireguard_existing_flow";
-  const canShowWireguardConfig = setup.wireguardConfig.trim().length > 0;
+  const canShowWireguardConfig =
+    configMatchesActiveInstance && setup.wireguardConfig.trim().length > 0;
   const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
   const stageShowsPinSubmission = pinStages.has(setup.stage);
   const showPinInput = stageShowsPinSubmission;
@@ -148,6 +154,13 @@ export function PostWireguardModal({
                 <li key={instruction}>{instruction}</li>
               ))}
             </ol>
+
+            {!configMatchesActiveInstance && (
+              <p className="mt-4 text-[1rem] text-[#9ab0cc]">
+                Loading the current WireGuard config for this instance. If this
+                does not update, click Start Manual Setup.
+              </p>
+            )}
 
             {canShowWireguardConfig && (
               <textarea
@@ -291,8 +304,21 @@ export function PostWireguardModal({
 
             {setup.setupComplete && (
               <div className="mt-4 border border-neon-lime bg-[#1f3223] p-4 text-[1.08rem] text-[#d9ffca]">
-                Setup complete. Your secure streaming connection is ready, and
-                you can still submit a fresh PIN below at any time.
+                <p>
+                  Setup complete. Your secure streaming connection is ready, and
+                  you can still submit a fresh PIN below at any time.
+                </p>
+                <div className="mt-3 border border-[#4f6a4e] bg-[#152316] p-3 text-[1rem] text-[#e6ffd7]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+                    Sunshine Login
+                  </h4>
+                  <p className="mt-2">
+                    Username: <span className="text-white">user</span>
+                  </p>
+                  <p>
+                    Password: <span className="text-white">password</span>
+                  </p>
+                </div>
               </div>
             )}
           </>
