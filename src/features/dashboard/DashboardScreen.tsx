@@ -15,6 +15,8 @@ import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorag
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
+import { TutorialModal } from "../onboarding/TutorialModal";
+import { tutorialSteps } from "../onboarding/tutorialSteps";
 
 interface Props {
   appState: PersistedAppState;
@@ -99,6 +101,8 @@ export function DashboardScreen({
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -205,6 +209,24 @@ export function DashboardScreen({
     setExportInstanceId(null);
   }
 
+  function openTutorial() {
+    setTutorialStep(0);
+    setTutorialOpen(true);
+  }
+
+  function goToPreviousTutorialStep() {
+    setTutorialStep((current) => Math.max(0, current - 1));
+  }
+
+  function goToNextTutorialStep() {
+    if (tutorialStep === tutorialSteps.length - 1) {
+      setTutorialOpen(false);
+      return;
+    }
+
+    setTutorialStep((current) => current + 1);
+  }
+
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
@@ -222,6 +244,7 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={openTutorial}>Help</Button>
             <Button variant="ghost" onClick={() => navigate("/settings")}>Settings</Button>
             <Button variant="secondary" onClick={() => setPickerOpen(true)}>
               Select Server
@@ -276,6 +299,16 @@ export function DashboardScreen({
             </Card>
           ))}
         </section>
+
+        <TutorialModal
+          open={tutorialOpen}
+          stepIndex={tutorialStep}
+          steps={tutorialSteps}
+          closable
+          onBack={goToPreviousTutorialStep}
+          onNext={goToNextTutorialStep}
+          onClose={() => setTutorialOpen(false)}
+        />
 
         <section>
           <Card className="pixel-frame">

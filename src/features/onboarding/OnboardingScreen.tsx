@@ -5,6 +5,8 @@ import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { VAST_API_KEY_URL } from "../../lib/constants";
 import type { OnboardingPayload } from "../../lib/types";
+import { TutorialModal } from "./TutorialModal";
+import { tutorialSteps } from "./tutorialSteps";
 
 interface Props {
   busy: boolean;
@@ -18,6 +20,9 @@ interface FormState {
 }
 
 export function OnboardingScreen({ busy, onSubmit }: Props) {
+  const [tutorialOpen, setTutorialOpen] = useState(true);
+  const [tutorialCompleted, setTutorialCompleted] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
   const [form, setForm] = useState<FormState>({
     appUsername: "",
     appPassword: "",
@@ -60,24 +65,49 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     }
   }
 
+  function openTutorial() {
+    setTutorialStep(0);
+    setTutorialOpen(true);
+  }
+
+  function goToPreviousTutorialStep() {
+    setTutorialStep((current) => Math.max(0, current - 1));
+  }
+
+  function goToNextTutorialStep() {
+    if (tutorialStep === tutorialSteps.length - 1) {
+      setTutorialCompleted(true);
+      setTutorialOpen(false);
+      return;
+    }
+
+    setTutorialStep((current) => current + 1);
+  }
+
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-6 py-8">
       <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-6xl items-center justify-center">
         <Card className="pixel-frame w-full max-w-xl animate-fade-in p-8">
-          <div className="space-y-2">
-            <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-              01. Boot Sequence
-            </p>
-            <h1
-              className="pixel-heading glitch-title font-display text-xl text-white md:text-2xl"
-              data-text="Noland Connect Terminal"
-            >
-              Noland Connect Terminal
-            </h1>
-            <p className="text-[1.4rem] leading-[1.15] text-[#b4c8de]">
-              Add your local credentials and Vast.ai API key. We will generate an SSH key pair and
-              connect your account automatically.
-            </p>
+          <div className="flex items-start justify-between gap-4">
+            <div className="space-y-2">
+              <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
+                01. Boot Sequence
+              </p>
+              <h1
+                className="pixel-heading glitch-title font-display text-xl text-white md:text-2xl"
+                data-text="Noland Connect Terminal"
+              >
+                Noland Connect Terminal
+              </h1>
+              <p className="text-[1.4rem] leading-[1.15] text-[#b4c8de]">
+                Add your local credentials and Vast.ai API key. We will generate an SSH key pair and
+                connect your account automatically.
+              </p>
+            </div>
+
+            <Button variant="ghost" onClick={openTutorial}>
+              Help
+            </Button>
           </div>
 
           <div className="mt-8 grid gap-4">
@@ -97,6 +127,9 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               onBlur={() => setTouched((prev) => ({ ...prev, appPassword: true }))}
               error={touched.appPassword ? errors.appPassword : undefined}
             />
+            <p className="-mt-2 text-[1.1rem] text-[#8fb4d4]">
+              New here? The tutorial explains the full setup flow, and the remote computer password is <span className="text-neon-lime">password</span>.
+            </p>
             <InputField
               label="Vast.ai API Key"
               type="password"
@@ -122,6 +155,16 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
           </div>
         </Card>
       </div>
+
+      <TutorialModal
+        open={tutorialOpen}
+        stepIndex={tutorialStep}
+        steps={tutorialSteps}
+        closable={tutorialCompleted}
+        onBack={goToPreviousTutorialStep}
+        onNext={goToNextTutorialStep}
+        onClose={() => setTutorialOpen(false)}
+      />
     </main>
   );
 }
