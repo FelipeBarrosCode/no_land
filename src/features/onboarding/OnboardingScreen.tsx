@@ -100,8 +100,16 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 Noland Connect Terminal
               </h1>
               <p className="text-[1.4rem] leading-[1.15] text-[#b4c8de]">
-                Add your local credentials and Vast.ai API key. We will generate an SSH key pair and
-                connect your account automatically.
+                Add your local credentials and{" "}
+                <a
+                  className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
+                  href={VAST_API_KEY_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Vast.ai API key
+                </a>
+                . We will generate an SSH key pair and connect your account automatically.
               </p>
             </div>
 
@@ -131,7 +139,19 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               New here? The tutorial explains the full setup flow, and the remote computer password is <span className="text-neon-lime">password</span>.
             </p>
             <InputField
-              label="Vast.ai API Key"
+              label={(
+                <span>
+                  <a
+                    className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
+                    href={VAST_API_KEY_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Vast.ai
+                  </a>{" "}
+                  API Key
+                </span>
+              )}
               type="password"
               placeholder="vast_xxxxx"
               value={form.vastApiKey}

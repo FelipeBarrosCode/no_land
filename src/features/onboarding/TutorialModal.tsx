@@ -50,6 +50,17 @@ export function TutorialModal({
 
         <p className="mt-4 text-[1.35rem] leading-[1.15] text-[#c5d8ec]">{step.description}</p>
 
+        {step.linkLabel && step.linkUrl ? (
+          <a
+            className="mt-4 inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#2f5f86,0_0_20px_rgba(68,214,255,0.25)] transition duration-100 hover:bg-[#22466e] hover:text-white"
+            href={step.linkUrl}
+            target="_blank"
+            rel="noreferrer"
+          >
+            {step.linkLabel}
+          </a>
+        ) : null}
+
         <div className="mt-6 flex items-center justify-between gap-3">
           <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#8fb4d4]">
             {stepIndex + 1} / {steps.length}

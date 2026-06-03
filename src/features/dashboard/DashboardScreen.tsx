@@ -9,6 +9,7 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl, resolveWireguardDownloadUrl } from "../../lib/backend";
+import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL } from "../../lib/constants";
 import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
@@ -259,10 +260,18 @@ export function DashboardScreen({
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
               <SpriteIcon icon="moonlight" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Download Moonlight</h2>
+            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
+              <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Download Moonlight
+              </a>
+            </h2>
             <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
               Open the official installer for your OS and complete setup. Noland Connect updates
-              Moonlight settings after provisioning.
+              {" "}
+              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Moonlight
+              </a>{" "}
+              settings after provisioning.
             </p>
           </Card>
 
@@ -271,9 +280,17 @@ export function DashboardScreen({
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 2</p>
               <SpriteIcon icon="settings" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Download WireGuard</h2>
+            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
+              <a href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Download WireGuard
+              </a>
+            </h2>
             <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official WireGuard install guide for your OS, install the app, then manage the tunnel from there.
+              Open the official{" "}
+              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                WireGuard
+              </a>{" "}
+              install guide for your OS, install the app, then manage the tunnel from there.
             </p>
           </Card>
 
