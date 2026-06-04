@@ -24,7 +24,10 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `skip_pairing_and_continue`
 - `get_provisioning_logs`
 
-## Post-WireGuard guided flow
+## WireGuard setup and guided handoff
+
+- `setup_wireguard_client`
+- `reconnect_local_wireguard_client_quick`
 
 - `setup_wireguard_app_handoff_command`
 - `verify_wireguard`
@@ -60,6 +63,7 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `update_platform_credentials`
 - `update_server_preferences`
 - `update_moonlight_preferences`
+- `regenerate_edid`
 - `update_ssh_credentials`
 
 ## Shared storage and backups
@@ -111,5 +115,6 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 
 ## Notes
 
+- Commands are local Tauri IPC calls, not remote HTTP endpoints.
 - For every command that mutates setup state, frontend should refresh `get_app_state` or `get_setup_status` to avoid stale UI.
 - Long-running steps stream progress through `orchestration:progress` events.

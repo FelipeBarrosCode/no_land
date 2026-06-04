@@ -49,6 +49,7 @@ Noland Connect automates these steps, preserves checkpoints, and exposes recover
 - **WireGuardService**: remote tunnel provisioning and local tunnel monitor/normalization.
 - **SunshineService**: Sunshine install/config/health checks and credential bootstrap.
 - **MoonlightService**: local Moonlight detect/launch/config patching.
+- **SleepInhibitService**: local machine sleep prevention during active sessions.
 - **PostProvisionService**: executes packaged post-provision shell script.
 - **InstanceLifecycleService**: reboot/pause/destroy/settings actions for existing instances.
 - **RebootHelperService**: reboot and post-reboot recovery pipeline.
@@ -84,7 +85,7 @@ Noland Connect automates these steps, preserves checkpoints, and exposes recover
 - `src/app/App.tsx`: app shell and route wiring
 - `src/store/appStore.ts`: state/actions/event handling
 - `src/lib/backend.ts`: typed wrappers for Tauri commands
-- Feature modules: onboarding, dashboard, provisioning, servers, settings, shared storage, restore
+- Feature modules: onboarding, dashboard, provisioning, servers, settings, shared storage manager, and restore
 
 #### Backend
 
@@ -500,7 +501,7 @@ Release behavior:
 2. **Long shell command fragility**
    - Nested quoting and distro differences can break recovery scripts.
 3. **Runner availability bottlenecks**
-   - macOS Intel runners may queue/hang; now split to dedicated workflow.
+   - macOS Intel artifacts are currently produced by both the shared workflow and the dedicated Intel workflow, which can create duplicate-release complexity.
 4. **Cloud variability**
    - Vast instance startup times and host configs vary widely.
 5. **Manual WireGuard control divergence**
@@ -512,7 +513,7 @@ Mitigations:
 
 - strict checkpointing and recoverable setup states
 - explicit diagnostics and evented status
-- workflow separation for problematic runners
+- workflow separation for problematic runners, though the current release setup still has overlapping Intel macOS coverage
 - additive schema evolution via defaults
 
 ---
