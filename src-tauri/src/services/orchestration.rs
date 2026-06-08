@@ -32,7 +32,7 @@ use super::{
     shared_storage::shared_storage_manager::SharedStorageManager,
     sleep_inhibit::SleepInhibitService,
     ssh_keys::SshKeyService,
-    sunshine::{SunshineService, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
+    sunshine::SunshineService,
     vast_api::VastApiClient,
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
@@ -64,19 +64,6 @@ fn resolve_edid_profile(
             source_label: "Manual".to_string(),
         },
         EdidMode::AutoDetect => {
-            if cfg!(target_os = "windows")
-                && moonlight_preferences.width > 0
-                && moonlight_preferences.height > 0
-                && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&edid_refresh_rate_hz)
-            {
-                return crate::services::sunshine::ResolvedEdidProfile {
-                    width: moonlight_preferences.width,
-                    height: moonlight_preferences.height,
-                    refresh_hz: edid_refresh_rate_hz,
-                    source_label: "State Preferences".to_string(),
-                };
-            }
-
             if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
                 crate::services::sunshine::ResolvedEdidProfile {
                     width,
@@ -1200,7 +1187,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             })
             .await?;
         info!(
-            "EDID selection (new instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (windows_priority=state->autodetect->fallback)",
+            "EDID selection (new instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (priority=autodetect->fallback)",
             edid_mode,
             resolved_edid.source_label,
             resolved_edid.width,
@@ -2048,7 +2035,7 @@ async fn run_existing_instance_orchestration(
             })
             .await?;
         info!(
-            "EDID selection (existing instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (windows_priority=state->autodetect->fallback)",
+            "EDID selection (existing instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (priority=autodetect->fallback)",
             edid_mode,
             resolved_edid.source_label,
             resolved_edid.width,

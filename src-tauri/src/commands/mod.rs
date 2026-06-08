@@ -1455,13 +1455,7 @@ fn resolve_effective_edid_profile(
     match mode {
         EdidMode::Manual => (width, height, refresh_hz, "Manual".to_string()),
         EdidMode::AutoDetect => {
-            if cfg!(target_os = "windows")
-                && width > 0
-                && height > 0
-                && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&refresh_hz)
-            {
-                (width, height, refresh_hz, "State Preferences".to_string())
-            } else if let Some((detected_width, detected_height, detected_refresh)) =
+            if let Some((detected_width, detected_height, detected_refresh)) =
                 detect_client_display_for_provisioning()
             {
                 (

@@ -95,19 +95,7 @@ fn main() {
                         "Manual".to_string(),
                     ),
                     crate::models::app_state::EdidMode::AutoDetect => {
-                        if cfg!(target_os = "windows")
-                            && initial_state.moonlight_preferences.width > 0
-                            && initial_state.moonlight_preferences.height > 0
-                            && (EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ)
-                                .contains(&initial_state.sunshine.edid_refresh_rate_hz)
-                        {
-                            (
-                                initial_state.moonlight_preferences.width,
-                                initial_state.moonlight_preferences.height,
-                                initial_state.sunshine.edid_refresh_rate_hz,
-                                "State Preferences".to_string(),
-                            )
-                        } else if let Some((detected_width, detected_height, detected_refresh)) =
+                        if let Some((detected_width, detected_height, detected_refresh)) =
                             detect_client_display_for_provisioning()
                         {
                             (
