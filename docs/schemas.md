@@ -28,15 +28,23 @@ Top-level fields:
 
 Storage file path is managed by `JsonStateStore` and defaults to app data `state.json`.
 
+Notable nested sections:
+
+- `instance.sshCommand`: prebuilt SSH command string for manual reuse
+- `wireguard.*Fingerprint` and `wireguard.endpoint*`: persisted key metadata and endpoint details
+- `sunshine.headlessEdidBase64`, `sunshine.edidMode`, `sunshine.edidRefreshRateHz`, `sunshine.edidSourceLabel`
+- `sharedStorage.settings.cryptPassword`: stored in persisted state but not returned by the frontend-safe response shape
+
 ## 2) Orchestration state machine
 
 Enum: `OrchestrationState`
 
 Main values:
 
-- setup/provisioning: `GeneratingSshKey`, `UploadingSshKeyToVast`, `CreatingInstance`, `WaitingForInstance`, `ConnectingSsh`, `ConfiguringNvidiaHeadless`, `ConfiguringSunshine`, `ConfiguringWireGuard`
+- setup/provisioning: `Onboarding`, `SelectingServer`, `ServerSelected`, `GeneratingSshKey`, `UploadingSshKeyToVast`, `CreatingInstance`, `WaitingForInstance`, `VerifyingReservation`, `ConnectingSsh`, `ConfiguringRemote`, `ConfiguringNvidiaHeadless`, `ConfiguringSunshine`, `ConfiguringWireGuard`, `ConfiguringMoonlight`
 - post-WireGuard guided flow: `WireGuardConfigGenerated`, `WireGuardAppHandoffStarted`, `WireGuardWaitingForImport`, `WireGuardWaitingForActivation`, `WireGuardVerifying`, `WireGuardConnected`, `MoonlightSunshineReadyToSetup`, `SunshineCredentialsConfiguring`, `SunshineVerifying`, `MoonlightDetecting`, `MoonlightPairingStarted`, `MoonlightPinReceived`, `SunshinePinSubmitting`, `MoonlightSunshinePaired`
-- terminal-ish: `Ready`, `Error`
+- pairing/resume states: `AwaitingPairPin`, `Pairing`
+- terminal-ish: `Idle`, `Ready`, `Error`
 
 ## 3) Post-WireGuard setup schema
 
@@ -65,6 +73,7 @@ Tracks whether each provisioning checkpoint has completed for a given instance:
 - instance created/ready
 - SSH connected
 - NVIDIA headless configured
+- post-NVIDIA reboot completed
 - Sunshine configured
 - low-latency audio configured
 - WireGuard configured
@@ -100,6 +109,11 @@ Key types:
 - `RestoreRequest`, `RestoreDryRunResult`, `RestoreJob`
 
 These cover backup configuration, bundle discovery, dry-run planning, and restore execution status.
+
+Important distinction:
+
+- `SharedStorageSettings` is the persisted secret-bearing shape
+- `SharedStorageSettingsResponse` is the frontend-safe shape that reports whether a crypt password is set without returning it
 
 ## 7) Microphone passthrough schemas
 

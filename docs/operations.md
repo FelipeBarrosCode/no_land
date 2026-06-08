@@ -21,15 +21,16 @@ Triggers:
 Targets in shared matrix:
 
 - macOS Apple Silicon (`aarch64-apple-darwin`)
+- macOS Intel (`x86_64-apple-darwin`)
 - Ubuntu x64 (`x86_64-unknown-linux-gnu`)
+- Ubuntu ARM64 (`aarch64-unknown-linux-gnu`)
 - Windows x64 (`x86_64-pc-windows-msvc`)
-- Windows x86 32-bit (`i686-pc-windows-msvc`)
 
 ### Dedicated macOS Intel build
 
 Workflow: `.github/workflows/release-macos-intel.yml`
 
-Trigger parity with main workflow but isolated on `macos-13` runner so queue issues do not block shared matrix builds.
+This workflow also builds `x86_64-apple-darwin` on `macos-13`. At the moment, Intel macOS artifacts are produced both here and in the shared matrix workflow.
 
 Target:
 
@@ -59,6 +60,7 @@ Tauri bundle outputs are uploaded from target release bundle folders and include
 
 - Backend uses `tracing` logs
 - UI shows timeline and recent logs through `get_provisioning_logs`
+- Persistent state lives in the app data directory as `state.json`
 
 ## Recovery and troubleshooting checklist
 
@@ -84,3 +86,4 @@ Noland no longer auto-repairs the local WireGuard tunnel during health-monitor d
 - Credentials are persisted in JSON state for current phase requirements.
 - Sensitive values are redacted in logs where applicable.
 - SSH actions run via explicit command wrappers and timeouts.
+- Release workflows in this repo do not document code signing or notarization.

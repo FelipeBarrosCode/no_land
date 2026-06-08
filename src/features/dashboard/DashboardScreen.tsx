@@ -9,12 +9,15 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl, resolveWireguardDownloadUrl } from "../../lib/backend";
+import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL } from "../../lib/constants";
 import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
+import { TutorialModal } from "../onboarding/TutorialModal";
+import { tutorialSteps } from "../onboarding/tutorialSteps";
 
 interface Props {
   appState: PersistedAppState;
@@ -99,6 +102,8 @@ export function DashboardScreen({
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [tutorialStep, setTutorialStep] = useState(0);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -205,6 +210,24 @@ export function DashboardScreen({
     setExportInstanceId(null);
   }
 
+  function openTutorial() {
+    setTutorialStep(0);
+    setTutorialOpen(true);
+  }
+
+  function goToPreviousTutorialStep() {
+    setTutorialStep((current) => Math.max(0, current - 1));
+  }
+
+  function goToNextTutorialStep() {
+    if (tutorialStep === tutorialSteps.length - 1) {
+      setTutorialOpen(false);
+      return;
+    }
+
+    setTutorialStep((current) => current + 1);
+  }
+
   return (
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
@@ -222,6 +245,7 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={openTutorial}>Help</Button>
             <Button variant="ghost" onClick={() => navigate("/settings")}>Settings</Button>
             <Button variant="secondary" onClick={() => setPickerOpen(true)}>
               Select Server
@@ -236,10 +260,18 @@ export function DashboardScreen({
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
               <SpriteIcon icon="moonlight" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Download Moonlight</h2>
+            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
+              <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Download Moonlight
+              </a>
+            </h2>
             <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
               Open the official installer for your OS and complete setup. Noland Connect updates
-              Moonlight settings after provisioning.
+              {" "}
+              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Moonlight
+              </a>{" "}
+              settings after provisioning.
             </p>
           </Card>
 
@@ -248,9 +280,17 @@ export function DashboardScreen({
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 2</p>
               <SpriteIcon icon="settings" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Download WireGuard</h2>
+            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
+              <a href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                Download WireGuard
+              </a>
+            </h2>
             <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official WireGuard install guide for your OS, install the app, then manage the tunnel from there.
+              Open the official{" "}
+              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
+                WireGuard
+              </a>{" "}
+              install guide for your OS, install the app, then manage the tunnel from there.
             </p>
           </Card>
 
@@ -276,6 +316,16 @@ export function DashboardScreen({
             </Card>
           ))}
         </section>
+
+        <TutorialModal
+          open={tutorialOpen}
+          stepIndex={tutorialStep}
+          steps={tutorialSteps}
+          closable
+          onBack={goToPreviousTutorialStep}
+          onNext={goToNextTutorialStep}
+          onClose={() => setTutorialOpen(false)}
+        />
 
         <section>
           <Card className="pixel-frame">

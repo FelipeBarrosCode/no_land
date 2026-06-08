@@ -12,10 +12,10 @@ This folder is the source of truth for how Noland Connect works end-to-end.
 - `docs/operations.md`: build/release workflows, release artifacts, and operational runbook
 - `docs/noland-connect-system.md`: full production-grade deep system documentation
 
-## Existing focused docs
+## Related project docs outside this folder
 
-- `docs/moonlight-settings.md`
-- `docs/microphone-passthrough.md`
-- `PROVISIONING_STEPS.md`
+- `README.md`: repo setup, stack, and top-level project overview
+- `PROVISIONING_STEPS.md`: provisioning checklist notes
+- `KVM_GOLDEN_IMAGE_SETUP.md`: VM image preparation notes
 
 If a behavior changes in code, update the relevant file in this folder in the same PR.

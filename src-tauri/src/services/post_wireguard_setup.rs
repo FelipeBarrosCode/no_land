@@ -1113,10 +1113,15 @@ fn ensure_wireguard_import_copy(
     config_path: &Path,
     instance_id: u64,
 ) -> AppResult<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let wireguard_dir_name = "wireguard-local";
+    #[cfg(not(target_os = "macos"))]
+    let wireguard_dir_name = "wireguard";
+
     let app_data_dir = dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("com.noland.connect")
-        .join("wireguard")
+        .join(wireguard_dir_name)
         .join(instance_id.to_string());
     std::fs::create_dir_all(&app_data_dir).map_err(|error| {
         AppError::Io(format!(

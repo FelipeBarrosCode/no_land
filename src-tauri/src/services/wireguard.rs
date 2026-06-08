@@ -129,9 +129,17 @@ struct MacosHelperStatus {
 }
 
 fn legacy_local_config_path(app_data_dir: &Path) -> PathBuf {
-    app_data_dir
-        .join("wireguard")
-        .join(LEGACY_LOCAL_CONFIG_NAME)
+    wireguard_local_root_dir(app_data_dir).join(LEGACY_LOCAL_CONFIG_NAME)
+}
+
+#[cfg(target_os = "macos")]
+fn wireguard_local_root_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("wireguard-local")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wireguard_local_root_dir(app_data_dir: &Path) -> PathBuf {
+    app_data_dir.join("wireguard")
 }
 
 fn monitor_mismatch_streak() -> &'static Mutex<u32> {
@@ -170,8 +178,7 @@ fn note_monitor_repair_health(healthy: bool) -> u32 {
 }
 
 fn instance_local_config_path(app_data_dir: &Path, instance_id: u64) -> PathBuf {
-    app_data_dir
-        .join("wireguard")
+    wireguard_local_root_dir(app_data_dir)
         .join(instance_id.to_string())
         .join(LEGACY_LOCAL_CONFIG_NAME)
 }
@@ -281,6 +288,37 @@ fn cleanup_stale_wireguard_artifacts(active_config_path: &Path) {
         let _ = std::fs::remove_file(request_path);
         let _ = std::fs::remove_file(status_path);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn repair_stale_local_wireguard_root(app_data_dir: &Path) -> AppResult<bool> {
+    let wireguard_root = wireguard_local_root_dir(app_data_dir);
+    if !wireguard_root.exists() {
+        return Ok(false);
+    }
+
+    let timestamp = current_unix_timestamp()?;
+    let backup_root = app_data_dir.join(format!("wireguard.stale-root-{timestamp}"));
+    std::fs::rename(&wireguard_root, &backup_root).map_err(|error| {
+        AppError::Io(format!(
+            "Failed moving stale WireGuard directory {} aside to {}: {error}",
+            wireguard_root.display(),
+            backup_root.display()
+        ))
+    })?;
+    std::fs::create_dir_all(&wireguard_root).map_err(|error| {
+        AppError::Io(format!(
+            "Failed recreating WireGuard directory {} after repair: {error}",
+            wireguard_root.display()
+        ))
+    })?;
+
+    warn!(
+        "Repaired stale local WireGuard directory by moving {} to {} and recreating the root",
+        wireguard_root.display(),
+        backup_root.display()
+    );
+    Ok(true)
 }
 
 #[cfg(target_os = "macos")]
@@ -474,7 +512,19 @@ exit 0"#
 
         let local_config_path = instance_local_config_path(local_app_data_dir, instance_id);
         let local_config_dir = local_config_path.parent().unwrap_or(local_app_data_dir);
-        fs::create_dir_all(&local_config_dir).await?;
+        if let Err(error) = fs::create_dir_all(&local_config_dir).await {
+            #[cfg(target_os = "macos")]
+            if error.kind() == std::io::ErrorKind::PermissionDenied
+                && repair_stale_local_wireguard_root(local_app_data_dir)?
+            {
+                fs::create_dir_all(&local_config_dir).await?;
+            } else {
+                return Err(error.into());
+            }
+
+            #[cfg(not(target_os = "macos"))]
+            return Err(error.into());
+        }
         let legacy_config_path = legacy_local_config_path(local_app_data_dir);
 
         let existing_remote_identity = self.load_existing_remote_identity(remote).await?;
@@ -2009,13 +2059,25 @@ EXPECTED_ALLOWED_IPS="{expected_allowed_ips}"
 EXPECTED_SERVER_IP="{expected_server_ip}"
 EXPECTED_ENDPOINT_HOST="{expected_endpoint_host}"
 EXPECTED_ENDPOINT_PORT="{expected_endpoint_port}"
+APP_OWNER=$(stat -f '%Su' "$SOURCE_CONF_PATH" 2>/dev/null || true)
+APP_GROUP=$(stat -f '%Sg' "$SOURCE_CONF_PATH" 2>/dev/null || true)
+
+fix_app_data_ownership() {{
+  target_path="$1"
+  [ -n "$APP_OWNER" ] || return 0
+  [ -n "$APP_GROUP" ] || return 0
+  [ -e "$target_path" ] || return 0
+  chown "$APP_OWNER:$APP_GROUP" "$target_path" 2>/dev/null || true
+}}
 
 write_status() {{
   status="$1"
   message="$2"
   mkdir -p "$(dirname "$STATUS_PATH")"
+  fix_app_data_ownership "$(dirname "$STATUS_PATH")"
   printf 'status=%s\ntimestamp=%s\nmessage=%s\n' "$status" "$(date +%s)" "$message" > "$STATUS_PATH"
   chmod 644 "$STATUS_PATH" 2>/dev/null || true
+  fix_app_data_ownership "$STATUS_PATH"
 }}
 
 compact_output() {{
@@ -2074,6 +2136,7 @@ tunnel_freshness_status() {{
 }}
 
 mkdir -p "$(dirname "$REQUEST_PATH")"
+fix_app_data_ownership "$(dirname "$REQUEST_PATH")"
 if [ ! -f "$SOURCE_CONF_PATH" ]; then
   write_status "error" "Missing source WireGuard config at $SOURCE_CONF_PATH"
   exit 1
@@ -2174,7 +2237,7 @@ exit 1
 "#
     );
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec \"$(dirname \"{request_path}\")\"; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; wg show"
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; wg show"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",

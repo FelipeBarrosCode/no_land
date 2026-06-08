@@ -78,7 +78,16 @@ Completion actions after successful PIN submit:
 - post-provision script executed (`post_provision.sh`)
 - `PostProvisionCompleted` step marked (on success)
 
-## 6) Post-provision installs flow
+## 6) Local WireGuard utility flow
+
+Commands:
+
+- `setup_wireguard_client`
+- `reconnect_local_wireguard_client_quick`
+
+Purpose: support direct local WireGuard setup/reconnect outside the guided app handoff flow.
+
+## 7) Post-provision installs flow
 
 Service: `PostProvisionService::run`
 
@@ -89,7 +98,7 @@ Service: `PostProvisionService::run`
 
 This is used from both classic pairing completion paths and the post-WireGuard completion path.
 
-## 7) Reboot and service recovery flow
+## 8) Reboot and service recovery flow
 
 Service: `RebootHelperService::reboot_and_reinitialize`
 
@@ -102,7 +111,7 @@ Sequence:
 5. post-reboot audio readiness check/recovery
 6. Sunshine post-reboot recovery and health verification
 
-## 8) Instance lifecycle operations
+## 9) Instance lifecycle operations
 
 Service: `InstanceLifecycleService`
 
@@ -112,9 +121,10 @@ Main actions:
 - pause instance
 - destroy instance
 - Sunshine settings read/update/reset
+- manual WireGuard reconnect for an instance
 - backup/restore triggers and shared storage sync
 
-## 9) Shared storage backup and restore flow
+## 10) Shared storage backup and restore flow
 
 Services:
 
@@ -125,11 +135,12 @@ Services:
 Capabilities:
 
 - one-click or selected-path backup
+- backup schedule install/remove
 - restore bundle discovery
 - dry-run restore planning
 - restore job execution and polling
 
-## 10) Microphone passthrough flow
+## 11) Microphone passthrough flow
 
 Service: `MicPassthroughService`
 
@@ -138,10 +149,20 @@ Service: `MicPassthroughService`
 3. notify VM agent (best effort)
 4. track runtime status and reconnect/disable operations
 
-## 11) Progress events and UI updates
+## 12) Progress events and UI updates
 
 Event schema: `ProvisioningEvent`
 
 - emitted via `orchestration:progress`
 - consumed by frontend store (`subscribeProvisioningEvents`)
 - used to drive timeline, status text, and recoverable error states
+
+## 13) Local settings and preference updates
+
+Settings commands update persisted state directly and then refresh the frontend snapshot:
+
+- Vast credentials and platform credentials
+- server preference filters and template/storage selection defaults
+- Moonlight preferences
+- SSH credentials
+- Sunshine EDID regeneration (`regenerate_edid`)

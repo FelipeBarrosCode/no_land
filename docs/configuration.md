@@ -36,9 +36,21 @@ Backend config is defined in `src-tauri/src/services/app_config.rs` and reads en
 
 ## Important defaults
 
+### Core runtime defaults
+
+- state schema version: `1`
+- Vast base URL: `https://console.vast.ai`
+- offer search hard cap: `500`
+- instance poll interval: `60s`
+- instance readiness max attempts: `120`
+- SSH probe attempts: `60`
+- SSH probe interval: `30s`
+- default SSH user: `root`
+
 ### Sunshine defaults
 
 - encoder: `nvenc`
+- cpu_affinity: `2-5`
 - capture: auto-detected and persisted
 - av1_mode: `1`
 - hevc_mode: `0`
@@ -53,14 +65,33 @@ Backend config is defined in `src-tauri/src/services/app_config.rs` and reads en
 
 - tunnel: `10.77.0.1/24` server, `10.77.0.2/32` client
 - interface: `wg0`
+- server listen port: `51820`
+- client listen port: `51821`
 - keepalive: `25`
 - MTU: `1280`
 - QoS mode: `cake`
+- QoS diffserv profile: `diffserv4`
+- DSCP enabled by default unless `NOLAND_WIREGUARD_DSCP_ENABLED` is explicitly set falsey
+
+### Moonlight defaults
+
+- bitrate: `20000`
+- fps: `60`
+- resolution: `1920x1080`
+- refresh rate mode: `60`
+- host audio / keep awake / frame pacing / vsync enabled
+- HDR disabled by default
+
+### EDID defaults
+
+- mode: `auto_detect`
+- refresh rate: `60Hz`
+- fallback generation profile: `1920x1080 @ 60Hz`
 
 ## Download URL defaults
 
-- Moonlight: `https://github.com/moonlight-stream/moonlight-qt/releases`
-- WireGuard: `https://www.wireguard.com/install/`
+- Moonlight (all OSes): `https://github.com/moonlight-stream/moonlight-qt/releases`
+- WireGuard (all OSes): `https://www.wireguard.com/install/`
 
 ## Local tool prerequisites (client side)
 
@@ -69,10 +100,10 @@ Checked by `local_environment_preflight`:
 - `ssh`
 - `ssh-keygen`
 - `ssh-add`
-- `wg`
-- `wg-quick`
 - Windows additionally: `wireguard.exe`
 - Linux additionally: `xdg-open`
+
+Other local capabilities are used elsewhere, but the preflight command currently validates only the tools listed above.
 
 ## State schema versioning
 

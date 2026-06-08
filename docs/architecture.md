@@ -17,7 +17,13 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `src/app/App.tsx`: app shell and route composition
 - `src/store/appStore.ts`: client-side state, long-running action orchestration, event subscription
 - `src/lib/backend.ts`: typed command wrappers over Tauri `invoke`
-- `src/features/*`: domain UI modules
+- `src/features/onboarding/*`: onboarding form and tutorial modal
+- `src/features/dashboard/*`: primary server dashboard and instance actions
+- `src/features/provisioning/*`: provisioning timeline and post-WireGuard modal
+- `src/features/settings/*`: settings and shared storage entrypoint
+- `src/features/shared-storage-manager/*`: backup, sync, export, and Sunshine settings UI
+- `src/features/restore/*`: bundle restore UI
+- `src/features/servers/*`: rented server picker
 
 ### Backend
 
@@ -34,6 +40,7 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `wireguard.rs`: remote tunnel provisioning and local tunnel monitoring/normalization
 - `sunshine.rs`: Sunshine install/config/health and credentials bootstrap
 - `moonlight.rs`: Moonlight client detection, launch, config patching
+- `sleep_inhibit.rs`: local system sleep prevention during active sessions
 - `instance_lifecycle.rs`: actions on existing instances (pause, reboot, destroy, settings)
 - `reboot_helper.rs`: reboot/reconnect/service re-init pipeline
 - `post_provision.rs`: executes packaged `scripts/post_provision.sh`
@@ -47,6 +54,7 @@ Persistent state is stored in `state.json` and loaded into `PersistedAppState`.
 - Primary schema: `src-tauri/src/models/app_state.rs`
 - Frontend mirror types: `src/lib/types.ts`
 - Access path: `AppContext` + `StateStore` (`JsonStateStore` default)
+- Storage location: app data directory + `state.json`
 
 ## Execution model
 
@@ -69,3 +77,4 @@ Persistent state is stored in `state.json` and loaded into `PersistedAppState`.
 - Local client support includes macOS, Windows, and Linux branches for tool detection and WireGuard/Moonlight handoff.
 - Provisioning uses checkpoint markers so repeated runs can skip already-completed steps safely.
 - Post-WireGuard setup is intentionally split from earlier automatic local tunnel control.
+- Frontend state is a cache over backend state; authoritative writes happen in Rust through `AppContext::update_state(...)`.
