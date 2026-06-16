@@ -7,15 +7,20 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
-use super::{
+use crate::services::{
     app_config::WireGuardDefaults, app_context::AppContext, os_detection::OsDetection,
     remote_exec::RemoteExec,
+};
+
+use super::core::{
+    config::{parse_tunnel_session_from_file, render_client_config_text, render_server_config_text},
+    session::TunnelSession,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -26,6 +31,9 @@ pub struct WireGuardProvisionResult {
     pub server_public_key: String,
     pub client_public_key: String,
     pub client_config_path: PathBuf,
+    pub client_config_text: String,
+    #[serde(skip_serializing, skip_deserializing, default)]
+    pub tunnel_session: Option<TunnelSession>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +55,12 @@ struct ExistingRemoteIdentity {
 
 #[derive(Debug, Clone)]
 struct ExistingLocalIdentity {
+    client_private_key: String,
+    server_public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedLocalIdentity {
     client_private_key: String,
     server_public_key: String,
 }
@@ -181,6 +195,16 @@ fn instance_local_config_path(app_data_dir: &Path, instance_id: u64) -> PathBuf 
     wireguard_local_root_dir(app_data_dir)
         .join(instance_id.to_string())
         .join(LEGACY_LOCAL_CONFIG_NAME)
+}
+
+fn legacy_local_identity_path(app_data_dir: &Path) -> PathBuf {
+    wireguard_local_root_dir(app_data_dir).join("local-identity.json")
+}
+
+fn instance_local_identity_path(app_data_dir: &Path, instance_id: u64) -> PathBuf {
+    wireguard_local_root_dir(app_data_dir)
+        .join(instance_id.to_string())
+        .join("local-identity.json")
 }
 
 fn wireguard_root_from_config_path(config_path: &Path) -> Option<PathBuf> {
@@ -511,7 +535,8 @@ exit 0"#
         ensure_local_wireguard_tools()?;
 
         let local_config_path = instance_local_config_path(local_app_data_dir, instance_id);
-        let local_config_dir = local_config_path.parent().unwrap_or(local_app_data_dir);
+        let local_identity_path = instance_local_identity_path(local_app_data_dir, instance_id);
+        let local_config_dir = local_identity_path.parent().unwrap_or(local_app_data_dir);
         if let Err(error) = fs::create_dir_all(&local_config_dir).await {
             #[cfg(target_os = "macos")]
             if error.kind() == std::io::ErrorKind::PermissionDenied
@@ -526,15 +551,24 @@ exit 0"#
             return Err(error.into());
         }
         let legacy_config_path = legacy_local_config_path(local_app_data_dir);
+        let legacy_identity_path = legacy_local_identity_path(local_app_data_dir);
 
         let existing_remote_identity = self.load_existing_remote_identity(remote).await?;
-        let existing_local_identity = match load_existing_local_identity(&local_config_path).await?
+        let existing_local_identity = match load_existing_local_identity(&local_identity_path).await?
         {
             Some(identity) => Some(identity),
-            None if legacy_config_path != local_config_path => {
-                load_existing_local_identity(&legacy_config_path).await?
+            None if legacy_identity_path != local_identity_path => {
+                load_existing_local_identity(&legacy_identity_path)
+                    .await?
+                    .or_else(|| {
+                        if legacy_config_path != local_config_path {
+                            load_existing_local_identity_from_config(&legacy_config_path)
+                        } else {
+                            None
+                        }
+                    })
             }
-            None => None,
+            None => load_existing_local_identity_from_config(&local_config_path),
         };
         let generate_fresh_identity = || -> AppResult<(String, String, String, String)> {
             let (server_private, server_public) = generate_keypair()?;
@@ -590,14 +624,25 @@ exit 0"#
         self.setup_cpu_governor(remote).await?;
         self.wait_for_package_manager_ready(remote).await?;
         let primary_interface = self.detect_primary_interface(remote).await?;
-        let server_config = self.render_server_config(&server_private, &client_public);
+        let server_config = render_server_config_text(
+            &self.defaults.server_tunnel_ip,
+            self.defaults.listen_port,
+            &server_private,
+            self.defaults.tunnel_mtu,
+            &client_public,
+            &self.defaults.client_tunnel_ip,
+        );
         let server_tunnel_host = strip_cidr(&self.defaults.server_tunnel_ip);
-        let client_config = self.render_client_config(
+        let client_config = render_client_config_text(
+            &self.defaults.client_tunnel_ip,
             &client_private,
+            self.defaults.client_listen_port,
+            self.defaults.tunnel_mtu,
             &server_public,
             endpoint_host,
             endpoint_port,
             &format!("{server_tunnel_host}/32"),
+            self.defaults.persistent_keepalive_secs,
         );
 
         self.setup_queue_management_persistent(remote).await?;
@@ -672,7 +717,24 @@ exit 0"#
         self.validate_network_tuning(remote, &primary_interface)
             .await?;
 
-        fs::write(&local_config_path, client_config).await?;
+        store_local_identity(
+            &local_identity_path,
+            &PersistedLocalIdentity {
+                client_private_key: client_private.clone(),
+                server_public_key: server_public.clone(),
+            },
+        )
+        .await?;
+
+        let tunnel_session = super::core::config::parse_tunnel_session(
+            &client_config,
+            &local_config_path,
+            Some(instance_id),
+            "wg0client",
+            &strip_cidr(&self.defaults.server_tunnel_ip),
+            47990,
+        )
+        .ok();
 
         Ok(WireGuardProvisionResult {
             server_ip: strip_cidr(&self.defaults.server_tunnel_ip),
@@ -680,6 +742,8 @@ exit 0"#
             server_public_key: server_public,
             client_public_key: client_public,
             client_config_path: local_config_path,
+            client_config_text: client_config,
+            tunnel_session,
         })
     }
 
@@ -2771,33 +2835,64 @@ fn resolved_command_status(tool: &str, args: &[&str]) -> AppResult<std::process:
 }
 
 async fn load_existing_local_identity(
-    config_path: &Path,
+    identity_path: &Path,
 ) -> AppResult<Option<ExistingLocalIdentity>> {
-    let content = match fs::read_to_string(config_path).await {
+    let content = match fs::read_to_string(identity_path).await {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(AppError::Command(format!(
-                "Failed reading local WireGuard config {}: {error}",
-                config_path.display()
+                "Failed reading local WireGuard identity {}: {error}",
+                identity_path.display()
             )))
         }
     };
 
+    let parsed: PersistedLocalIdentity = serde_json::from_str(&content).map_err(|error| {
+        AppError::Command(format!(
+            "Failed parsing local WireGuard identity {}: {error}",
+            identity_path.display()
+        ))
+    })?;
+
+    Ok(Some(ExistingLocalIdentity {
+        client_private_key: parsed.client_private_key,
+        server_public_key: parsed.server_public_key,
+    }))
+}
+
+fn load_existing_local_identity_from_config(config_path: &Path) -> Option<ExistingLocalIdentity> {
+    let content = std::fs::read_to_string(config_path).ok()?;
+
     let client_private_key = match parse_wireguard_config_value(&content, "Interface", "PrivateKey")
     {
         Some(value) => value,
-        None => return Ok(None),
+        None => return None,
     };
     let server_public_key = match parse_wireguard_config_value(&content, "Peer", "PublicKey") {
         Some(value) => value,
-        None => return Ok(None),
+        None => return None,
     };
 
-    Ok(Some(ExistingLocalIdentity {
+    Some(ExistingLocalIdentity {
         client_private_key,
         server_public_key,
-    }))
+    })
+}
+
+async fn store_local_identity(
+    identity_path: &Path,
+    identity: &PersistedLocalIdentity,
+) -> AppResult<()> {
+    let serialized = serde_json::to_string(identity).map_err(|error| {
+        AppError::Command(format!("Failed serializing local WireGuard identity: {error}"))
+    })?;
+    fs::write(identity_path, serialized).await.map_err(|error| {
+        AppError::Command(format!(
+            "Failed writing local WireGuard identity {}: {error}",
+            identity_path.display()
+        ))
+    })
 }
 
 fn load_expected_local_tunnel(config_path: &Path) -> AppResult<ExpectedLocalTunnel> {

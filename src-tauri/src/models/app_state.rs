@@ -252,6 +252,8 @@ pub struct WireGuardState {
     pub client_public_key: String,
     pub config_path: String,
     #[serde(default)]
+    pub config_text: String,
+    #[serde(default)]
     pub client_private_key_fingerprint: String,
     #[serde(default)]
     pub client_public_key_fingerprint: String,
@@ -263,6 +265,26 @@ pub struct WireGuardState {
     pub endpoint_port: u16,
     #[serde(default)]
     pub last_runtime_interface: String,
+    #[serde(default)]
+    pub driver_kind: String,
+    #[serde(default)]
+    pub runtime_state: String,
+    #[serde(default)]
+    pub health_status: String,
+    #[serde(default)]
+    pub allowed_ips: String,
+    #[serde(default)]
+    pub mtu: u16,
+    #[serde(default)]
+    pub keepalive_secs: u16,
+    #[serde(default)]
+    pub sunshine_host: String,
+    #[serde(default)]
+    pub sunshine_port: u16,
+    #[serde(default)]
+    pub sunshine_reachable: bool,
+    #[serde(default)]
+    pub last_handshake_at: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -541,6 +563,8 @@ pub struct ProvisionedServerState {
     #[serde(default)]
     pub wireguard_config_path: String,
     #[serde(default)]
+    pub wireguard_config_text: String,
+    #[serde(default)]
     pub moonlight_host_address: String,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
@@ -582,6 +606,7 @@ impl ProvisionedServerState {
             wireguard_server_public_key: String::new(),
             wireguard_client_public_key: String::new(),
             wireguard_config_path: String::new(),
+            wireguard_config_text: String::new(),
             moonlight_host_address: String::new(),
             last_state: OrchestrationState::Idle,
             last_error: None,

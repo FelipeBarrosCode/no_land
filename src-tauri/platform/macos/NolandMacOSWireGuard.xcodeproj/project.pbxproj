@@ -1,0 +1,424 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0FC60AC48A320D5B6BBE65A4 /* TunnelBridgeError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C54C139D97CF7A08B6574B3 /* TunnelBridgeError.swift */; };
+		1039ED3C779F3179F2ECD992 /* TunnelStatusPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD080F5E54F9180EEA905465 /* TunnelStatusPayload.swift */; };
+		22F1412E50DF04120740E85F /* TunnelStatusPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD080F5E54F9180EEA905465 /* TunnelStatusPayload.swift */; };
+		4D576E22D7F02D5C4C323C99 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2C078DB41A4E5F6DF7F36D30 /* main.swift */; };
+		53C4E3C084F4E1D4E1B12515 /* WireGuardRuntimeAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B78583490920CE3A57031AEB /* WireGuardRuntimeAdapter.swift */; };
+		66DBD83D455C8F8582E12145 /* TunnelSessionPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 458194FD7843DF83DCBFA787 /* TunnelSessionPayload.swift */; };
+		7DF3CF14BE681284C794008A /* TunnelSessionPayload.swift in Sources */ = {isa = PBXBuildFile; fileRef = 458194FD7843DF83DCBFA787 /* TunnelSessionPayload.swift */; };
+		7F0A65E1635A55357632C202 /* AppGroupStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64904C30BD8A674F30FAB514 /* AppGroupStore.swift */; };
+		C2DA6000A25DEAC07D1B720D /* TunnelController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42DAFFDB702A28744F6EB165 /* TunnelController.swift */; };
+		CA3B0CCC10E73869F20E9284 /* TunnelBridgeError.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C54C139D97CF7A08B6574B3 /* TunnelBridgeError.swift */; };
+		CE7FEECE44E7F741DFC93020 /* PacketTunnelProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8865AAC1F207890AE6B43960 /* PacketTunnelProvider.swift */; };
+		E393C58A47C912468B142348 /* AppGroupStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64904C30BD8A674F30FAB514 /* AppGroupStore.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		2C078DB41A4E5F6DF7F36D30 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		42DAFFDB702A28744F6EB165 /* TunnelController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelController.swift; sourceTree = "<group>"; };
+		458194FD7843DF83DCBFA787 /* TunnelSessionPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelSessionPayload.swift; sourceTree = "<group>"; };
+		64904C30BD8A674F30FAB514 /* AppGroupStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupStore.swift; sourceTree = "<group>"; };
+		64DE502D52D73838039E9C1F /* NolandPacketTunnel.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = NolandPacketTunnel.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		7C54C139D97CF7A08B6574B3 /* TunnelBridgeError.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelBridgeError.swift; sourceTree = "<group>"; };
+		8865AAC1F207890AE6B43960 /* PacketTunnelProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketTunnelProvider.swift; sourceTree = "<group>"; };
+		AD080F5E54F9180EEA905465 /* TunnelStatusPayload.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TunnelStatusPayload.swift; sourceTree = "<group>"; };
+		B78583490920CE3A57031AEB /* WireGuardRuntimeAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WireGuardRuntimeAdapter.swift; sourceTree = "<group>"; };
+		F1A4D35C45C407E4D84FC1D6 /* NolandTunnelBridge */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = NolandTunnelBridge; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		05F9B8E494C7FE717998A431 = {
+			isa = PBXGroup;
+			children = (
+				0AE54D5F05B17CCCD7DD7AA0 /* NolandPacketTunnel */,
+				9F748BC0B67D6AA939D6D920 /* NolandTunnelBridge */,
+				D18601B3080A31B4CC8F714F /* Shared */,
+				8F225C6525F32C460D742E78 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		0AE54D5F05B17CCCD7DD7AA0 /* NolandPacketTunnel */ = {
+			isa = PBXGroup;
+			children = (
+				8865AAC1F207890AE6B43960 /* PacketTunnelProvider.swift */,
+				B78583490920CE3A57031AEB /* WireGuardRuntimeAdapter.swift */,
+			);
+			path = NolandPacketTunnel;
+			sourceTree = "<group>";
+		};
+		8F225C6525F32C460D742E78 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				64DE502D52D73838039E9C1F /* NolandPacketTunnel.appex */,
+				F1A4D35C45C407E4D84FC1D6 /* NolandTunnelBridge */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		9F748BC0B67D6AA939D6D920 /* NolandTunnelBridge */ = {
+			isa = PBXGroup;
+			children = (
+				2C078DB41A4E5F6DF7F36D30 /* main.swift */,
+				42DAFFDB702A28744F6EB165 /* TunnelController.swift */,
+			);
+			path = NolandTunnelBridge;
+			sourceTree = "<group>";
+		};
+		D18601B3080A31B4CC8F714F /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				64904C30BD8A674F30FAB514 /* AppGroupStore.swift */,
+				7C54C139D97CF7A08B6574B3 /* TunnelBridgeError.swift */,
+				458194FD7843DF83DCBFA787 /* TunnelSessionPayload.swift */,
+				AD080F5E54F9180EEA905465 /* TunnelStatusPayload.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		4DC05EEE0E3EC7E7FBF95ACF /* NolandTunnelBridge */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D7342A9FCBAA8BD41CFFD16B /* Build configuration list for PBXNativeTarget "NolandTunnelBridge" */;
+			buildPhases = (
+				BDD6C87FF8AD8D6BE8F7E2E1 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NolandTunnelBridge;
+			packageProductDependencies = (
+			);
+			productName = NolandTunnelBridge;
+			productReference = F1A4D35C45C407E4D84FC1D6 /* NolandTunnelBridge */;
+			productType = "com.apple.product-type.tool";
+		};
+		63A0C884EF366015E2821B72 /* NolandPacketTunnel */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 3300EA81EFA8946192287F84 /* Build configuration list for PBXNativeTarget "NolandPacketTunnel" */;
+			buildPhases = (
+				93DF861D213C173F22716012 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = NolandPacketTunnel;
+			packageProductDependencies = (
+			);
+			productName = NolandPacketTunnel;
+			productReference = 64DE502D52D73838039E9C1F /* NolandPacketTunnel.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		CB072001AEB48F8914EA0499 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					4DC05EEE0E3EC7E7FBF95ACF = {
+						ProvisioningStyle = Automatic;
+					};
+					63A0C884EF366015E2821B72 = {
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = A69D059C26B966B7258E1E21 /* Build configuration list for PBXProject "NolandMacOSWireGuard" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 05F9B8E494C7FE717998A431;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 8F225C6525F32C460D742E78 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				63A0C884EF366015E2821B72 /* NolandPacketTunnel */,
+				4DC05EEE0E3EC7E7FBF95ACF /* NolandTunnelBridge */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		93DF861D213C173F22716012 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				E393C58A47C912468B142348 /* AppGroupStore.swift in Sources */,
+				CE7FEECE44E7F741DFC93020 /* PacketTunnelProvider.swift in Sources */,
+				CA3B0CCC10E73869F20E9284 /* TunnelBridgeError.swift in Sources */,
+				66DBD83D455C8F8582E12145 /* TunnelSessionPayload.swift in Sources */,
+				22F1412E50DF04120740E85F /* TunnelStatusPayload.swift in Sources */,
+				53C4E3C084F4E1D4E1B12515 /* WireGuardRuntimeAdapter.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		BDD6C87FF8AD8D6BE8F7E2E1 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				7F0A65E1635A55357632C202 /* AppGroupStore.swift in Sources */,
+				0FC60AC48A320D5B6BBE65A4 /* TunnelBridgeError.swift in Sources */,
+				C2DA6000A25DEAC07D1B720D /* TunnelController.swift in Sources */,
+				7DF3CF14BE681284C794008A /* TunnelSessionPayload.swift in Sources */,
+				1039ED3C779F3179F2ECD992 /* TunnelStatusPayload.swift in Sources */,
+				4D576E22D7F02D5C4C323C99 /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		0BC861BBFF5CF6D6D366A840 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Debug;
+		};
+		5CF37A70F5A03303247C5A1E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Entitlements/NolandPacketTunnel.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = U66WLT4SP6;
+				INFOPLIST_FILE = "Info/NolandPacketTunnel-Info.plist";
+				INFOPLIST_KEY_NSExtensionPointIdentifier = "com.apple.networkextension.packet-tunnel";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect.tunnel;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		86FD9249BA02A1A394E6033E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Entitlements/NolandTunnelBridge.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = U66WLT4SP6;
+				INFOPLIST_FILE = "Info/NolandTunnelBridge-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect.bridge;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		A8E6DDFE3C266B69FE0C8185 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Entitlements/NolandPacketTunnel.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = U66WLT4SP6;
+				INFOPLIST_FILE = "Info/NolandPacketTunnel-Info.plist";
+				INFOPLIST_KEY_NSExtensionPointIdentifier = "com.apple.networkextension.packet-tunnel";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../../Frameworks",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect.tunnel;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		BBC99F4CEE2EAC1E2493392D /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.9;
+			};
+			name = Release;
+		};
+		BC4AA71AF3D91C04FFB475FF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = Entitlements/NolandTunnelBridge.entitlements;
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
+				COMBINE_HIDPI_IMAGES = YES;
+				DEVELOPMENT_TEAM = U66WLT4SP6;
+				INFOPLIST_FILE = "Info/NolandTunnelBridge-Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.noland.connect.bridge;
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		3300EA81EFA8946192287F84 /* Build configuration list for PBXNativeTarget "NolandPacketTunnel" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				5CF37A70F5A03303247C5A1E /* Debug */,
+				A8E6DDFE3C266B69FE0C8185 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A69D059C26B966B7258E1E21 /* Build configuration list for PBXProject "NolandMacOSWireGuard" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0BC861BBFF5CF6D6D366A840 /* Debug */,
+				BBC99F4CEE2EAC1E2493392D /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		D7342A9FCBAA8BD41CFFD16B /* Build configuration list for PBXNativeTarget "NolandTunnelBridge" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				86FD9249BA02A1A394E6033E /* Debug */,
+				BC4AA71AF3D91C04FFB475FF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = CB072001AEB48F8914EA0499 /* Project object */;
+}

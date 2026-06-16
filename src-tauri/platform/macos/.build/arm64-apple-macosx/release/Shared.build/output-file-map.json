@@ -1,0 +1,31 @@
+{
+  "": {
+    "dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/Shared.d",
+    "object": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/Shared.o",
+    "swift-dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/master.swiftdeps"
+  },
+  "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/Shared/AppGroupStore.swift": {
+    "object": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/AppGroupStore.swift.o",
+    "swiftmodule": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/AppGroupStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/AppGroupStore.swiftdeps",
+    "diagnostics": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/AppGroupStore.dia"
+  },
+  "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/Shared/TunnelBridgeError.swift": {
+    "object": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelBridgeError.swift.o",
+    "swiftmodule": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelBridgeError~partial.swiftmodule",
+    "swift-dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelBridgeError.swiftdeps",
+    "diagnostics": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelBridgeError.dia"
+  },
+  "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/Shared/TunnelSessionPayload.swift": {
+    "object": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelSessionPayload.swift.o",
+    "swiftmodule": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelSessionPayload~partial.swiftmodule",
+    "swift-dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelSessionPayload.swiftdeps",
+    "diagnostics": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelSessionPayload.dia"
+  },
+  "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/Shared/TunnelStatusPayload.swift": {
+    "object": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelStatusPayload.swift.o",
+    "swiftmodule": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelStatusPayload~partial.swiftmodule",
+    "swift-dependencies": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelStatusPayload.swiftdeps",
+    "diagnostics": "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/TunnelStatusPayload.dia"
+  }
+}

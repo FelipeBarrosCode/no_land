@@ -1,0 +1,3 @@
+module Shared {
+    header "/Users/felipebarros/Documents/CodingProjects/noland/src-tauri/platform/macos/.build/arm64-apple-macosx/release/Shared.build/include/Shared-Swift.h"
+}

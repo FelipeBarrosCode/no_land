@@ -101,7 +101,7 @@ pub async fn initialize_post_wireguard_flow(
     app: &AppHandle,
     context: &AppContext,
     instance_id: u64,
-    config_path: &Path,
+    config_text: &str,
 ) -> AppResult<()> {
     let previous_instance_id = {
         context
@@ -111,14 +111,6 @@ pub async fn initialize_post_wireguard_flow(
             .post_wireguard_setup
             .current_instance_id
     };
-    let config_text = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading generated WireGuard config {}: {error}",
-            config_path.display()
-        ))
-    })?;
-    let export_path = ensure_wireguard_import_copy(context, config_path, instance_id)?;
-    let export_path_text = export_path.display().to_string();
     let mode = platform_wireguard_mode();
 
     context
@@ -128,8 +120,8 @@ pub async fn initialize_post_wireguard_flow(
                 wireguard_setup_mode: mode,
                 wireguard_setup_status: WireGuardSetupStatus::ConfigGenerated,
                 current_instance_id: Some(instance_id),
-                wireguard_export_path: export_path_text.clone(),
-                wireguard_config: config_text.clone(),
+                wireguard_export_path: String::new(),
+                wireguard_config: config_text.to_string(),
                 wireguard_verified_host: TUNNEL_HOST.to_string(),
                 wireguard_reachable_ports: Vec::new(),
                 sunshine_username: state.credentials.app_username.clone(),
@@ -149,10 +141,7 @@ pub async fn initialize_post_wireguard_flow(
         context,
         OrchestrationState::WireGuardConfigGenerated,
         "WireGuard config generated",
-        Some(format!(
-            "Do not change provisioning logic before this point. New post-WireGuard setup flow starts here. Config saved at {}",
-            export_path.display()
-        )),
+        Some("Managed tunnel session is ready for verification and fallback export if needed.".to_string()),
         false,
     )
     .await;
@@ -333,14 +322,27 @@ pub async fn verify_wireguard_connection(
 }
 
 pub async fn download_wireguard_config(context: &AppContext) -> AppResult<String> {
-    let config_path = active_wireguard_config_path(context).await?;
     let instance_id = active_instance_id(context).await?;
-    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
-    let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
+    let config_text = {
+        let state = context.state.read().await;
+        let config_text = state.post_wireguard_setup.wireguard_config.clone();
+        if config_text.trim().is_empty() {
+            state.wireguard.config_text.clone()
+        } else {
+            config_text
+        }
+    };
+    if config_text.trim().is_empty() {
+        return Err(AppError::NotFound(
+            "WireGuard config export is unavailable for the active instance.".to_string(),
+        ));
+    }
+    let export_path = ensure_wireguard_import_copy(context, &config_text, instance_id)?;
     let export_text = export_path.display().to_string();
-    sync_wireguard_config_snapshot(context, instance_id, &export_path).await?;
     context
         .update_state(|state| {
+            state.post_wireguard_setup.current_instance_id = Some(instance_id);
+            state.post_wireguard_setup.wireguard_config = config_text.clone();
             state.post_wireguard_setup.wireguard_export_path = export_text.clone();
         })
         .await?;
@@ -1038,79 +1040,9 @@ async fn active_instance_id(context: &AppContext) -> AppResult<u64> {
         .ok_or_else(|| AppError::State("Missing active instance id for WireGuard flow".to_string()))
 }
 
-async fn sync_wireguard_config_snapshot(
-    context: &AppContext,
-    instance_id: u64,
-    config_path: &Path,
-) -> AppResult<()> {
-    let config_text = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading generated WireGuard config {}: {error}",
-            config_path.display()
-        ))
-    })?;
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.current_instance_id = Some(instance_id);
-            state.post_wireguard_setup.wireguard_config = config_text.clone();
-        })
-        .await?;
-
-    Ok(())
-}
-
-async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf> {
-    let state = context.state.read().await;
-    let active_instance_id = state
-        .instance
-        .instance_id
-        .or(state.post_wireguard_setup.current_instance_id)
-        .ok_or_else(|| {
-            AppError::State(
-                "Missing active instance id for WireGuard config selection. Re-run provisioning."
-                    .to_string(),
-            )
-        })?;
-
-    let candidate = if let Some(path) = state
-        .provisioned_servers
-        .iter()
-        .find(|record| record.instance_id == active_instance_id)
-        .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
-        .filter(|path| path.exists())
-    {
-        path
-    } else {
-        return Err(AppError::NotFound(format!(
-            "WireGuard config for active instance {} was not found. Regenerate WireGuard for this instance.",
-            active_instance_id
-        )));
-    };
-
-    if candidate.as_os_str().is_empty() || !candidate.exists() {
-        return Err(AppError::NotFound(
-            "Generated WireGuard config not found. Re-run provisioning from the WireGuard stage."
-                .to_string(),
-        ));
-    }
-
-    let instance_segment = format!("/{}/", active_instance_id);
-    let normalized_candidate = candidate.to_string_lossy().replace('\\', "/");
-    if !normalized_candidate.contains(&instance_segment) {
-        return Err(AppError::Provisioning(format!(
-            "WireGuard config {} does not belong to active instance {}. Regenerate WireGuard for this instance.",
-            candidate.display(),
-            active_instance_id
-        )));
-    }
-
-    Ok(candidate)
-}
-
 fn ensure_wireguard_import_copy(
     _context: &AppContext,
-    config_path: &Path,
+    config_text: &str,
     instance_id: u64,
 ) -> AppResult<PathBuf> {
     #[cfg(target_os = "macos")]
@@ -1130,7 +1062,7 @@ fn ensure_wireguard_import_copy(
         ))
     })?;
     let export_path = app_data_dir.join(IMPORT_FILENAME);
-    std::fs::copy(config_path, &export_path).map_err(|error| {
+    std::fs::write(&export_path, config_text).map_err(|error| {
         AppError::Io(format!(
             "Failed exporting WireGuard config to {}: {error}",
             export_path.display()

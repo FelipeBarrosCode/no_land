@@ -125,7 +125,7 @@ git push origin v0.1.1
 - Windows: `.msi` / `.exe`
 - Linux: `.AppImage` and distro packages when supported by runner tooling
 
-Note: this beta flow does not enforce code signing/notarization. End users may see OS security warnings.
+Note: this beta flow does not enforce code signing/notarization by default. If you set `APPLE_CERT_P12`, `APPLE_CERT_PASSWORD`, and `APPLE_TEAM_ID`, `npm run tauri:build` will sign macOS builds before bundling. If you also set `APPLE_API_ISSUER`, `APPLE_API_KEY`, and either `APPLE_API_KEY_PATH` (local) or `APPLE_API_KEY_CONTENT` (CI secret content), the same build flow can notarize the app as well.
 
 ## State persistence
 

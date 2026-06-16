@@ -185,6 +185,23 @@ export interface WireGuardState {
   serverPublicKey: string;
   clientPublicKey: string;
   configPath: string;
+  configText: string;
+  clientPrivateKeyFingerprint: string;
+  clientPublicKeyFingerprint: string;
+  serverPublicKeyFingerprint: string;
+  endpointHost: string;
+  endpointPort: number;
+  lastRuntimeInterface: string;
+  driverKind: string;
+  runtimeState: string;
+  healthStatus: string;
+  allowedIps: string;
+  mtu: number;
+  keepaliveSecs: number;
+  sunshineHost: string;
+  sunshinePort: number;
+  sunshineReachable: boolean;
+  lastHandshakeAt: string;
 }
 
 export interface SunshineState {
@@ -227,6 +244,7 @@ export interface ProvisionedServerState {
   wireguardServerPublicKey: string;
   wireguardClientPublicKey: string;
   wireguardConfigPath: string;
+  wireguardConfigText: string;
   moonlightHostAddress: string;
   lastState: OrchestrationState;
   lastError: string | null;

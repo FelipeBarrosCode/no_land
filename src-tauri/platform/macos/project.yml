@@ -1,0 +1,57 @@
+name: NolandMacOSWireGuard
+options:
+  minimumXcodeGenVersion: 2.38.0
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    PRODUCT_BUNDLE_IDENTIFIER: com.noland.connect
+    DEVELOPMENT_TEAM: ""
+    SWIFT_VERSION: 5.9
+    CODE_SIGN_STYLE: Automatic
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: 0.1.0
+targets:
+  NolandTunnelBridge:
+    type: tool
+    platform: macOS
+    sources:
+      - path: NolandTunnelBridge
+      - path: Shared
+    info:
+      path: Info/NolandTunnelBridge-Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.noland.connect.bridge
+        CODE_SIGN_ENTITLEMENTS: Entitlements/NolandTunnelBridge.entitlements
+        SKIP_INSTALL: YES
+    dependencies: []
+    preBuildScripts: []
+  NolandPacketTunnel:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: NolandPacketTunnel
+      - path: Shared
+    info:
+      path: Info/NolandPacketTunnel-Info.plist
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.noland.connect.tunnel
+        CODE_SIGN_ENTITLEMENTS: Entitlements/NolandPacketTunnel.entitlements
+        INFOPLIST_KEY_NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../../Frameworks"
+          - "@executable_path/../Frameworks"
+    dependencies: []
+schemes:
+  NolandTunnelBridge:
+    build:
+      targets:
+        NolandTunnelBridge: all
+  NolandPacketTunnel:
+    build:
+      targets:
+        NolandPacketTunnel: all

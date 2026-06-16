@@ -27,14 +27,20 @@ use super::{
     moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
-    post_wireguard_setup::initialize_post_wireguard_flow,
+    post_wireguard_setup::{
+        initialize_post_wireguard_flow, setup_moonlight_sunshine, verify_wireguard_connection,
+    },
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     sleep_inhibit::SleepInhibitService,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
-    wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
+    wireguard::{
+        core::session::TunnelSession,
+        runtime::manager::TunnelManager,
+        WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService,
+    },
 };
 
 #[derive(Debug, Clone)]
@@ -83,8 +89,7 @@ fn resolve_edid_profile(
     }
 }
 
-fn parse_wireguard_endpoint_from_config(config_path: &Path) -> Option<(String, u16)> {
-    let content = fs::read_to_string(config_path).ok()?;
+fn parse_wireguard_endpoint_from_config_text(content: &str) -> Option<(String, u16)> {
     let endpoint_line = content
         .lines()
         .map(str::trim)
@@ -101,12 +106,17 @@ fn parse_wireguard_endpoint_from_config(config_path: &Path) -> Option<(String, u
     Some((host.trim().to_string(), port.trim().parse::<u16>().ok()?))
 }
 
-fn cached_wireguard_endpoint_matches(
-    cached_config_path: &Path,
+fn wireguard_result_endpoint_matches(
+    result: &WireGuardProvisionResult,
     expected_host: &str,
     expected_port: u16,
 ) -> bool {
-    let Some((host, port)) = parse_wireguard_endpoint_from_config(cached_config_path) else {
+    let resolved = result
+        .tunnel_session
+        .as_ref()
+        .map(|session| (session.endpoint_host.clone(), session.endpoint_port))
+        .or_else(|| parse_wireguard_endpoint_from_config_text(&result.client_config_text));
+    let Some((host, port)) = resolved else {
         return false;
     };
 
@@ -1339,11 +1349,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
         if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
         {
-            if !cached_wireguard_endpoint_matches(
-                cached.client_config_path.as_path(),
-                &endpoint_host,
-                endpoint_port,
-            ) {
+            if !wireguard_result_endpoint_matches(&cached, &endpoint_host, endpoint_port) {
                 emit_transition(
                     &app,
                     &context,
@@ -1403,12 +1409,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
                 context
                     .update_state(|state| {
-                        state.wireguard.server_ip = cached.server_ip.clone();
-                        state.wireguard.client_ip = cached.client_ip.clone();
-                        state.wireguard.server_public_key = cached.server_public_key.clone();
-                        state.wireguard.client_public_key = cached.client_public_key.clone();
-                        state.wireguard.config_path =
-                            cached.client_config_path.display().to_string();
+                        apply_wireguard_result_to_state(&mut state.wireguard, &cached);
                         state.sunshine.configured = true;
                     })
                     .await?;
@@ -1473,11 +1474,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
             context
                 .update_state(|state| {
-                    state.wireguard.server_ip = result.server_ip.clone();
-                    state.wireguard.client_ip = result.client_ip.clone();
-                    state.wireguard.server_public_key = result.server_public_key.clone();
-                    state.wireguard.client_public_key = result.client_public_key.clone();
-                    state.wireguard.config_path = result.client_config_path.display().to_string();
+                    apply_wireguard_result_to_state(&mut state.wireguard, &result);
                     state.sunshine.configured = true;
                 })
                 .await?;
@@ -1531,11 +1528,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
         result
     };
-    if !cached_wireguard_endpoint_matches(
-        wireguard_result.client_config_path.as_path(),
-        &endpoint_host,
-        endpoint_port,
-    ) {
+    if !wireguard_result_endpoint_matches(&wireguard_result, &endpoint_host, endpoint_port) {
         return Err(AppError::Provisioning(format!(
             "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
             endpoint_host,
@@ -1546,11 +1539,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
     context
         .update_state(|state| {
-            state.wireguard.server_ip = wireguard_result.server_ip.clone();
-            state.wireguard.client_ip = wireguard_result.client_ip.clone();
-            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
-            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
-            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
+            apply_wireguard_result_to_state(&mut state.wireguard, &wireguard_result);
             state.sunshine.configured = true;
         })
         .await?;
@@ -1572,13 +1561,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         ensure_not_cancelled(&context)?;
     }
 
-    initialize_post_wireguard_flow(
-        &app,
-        &context,
-        instance.id,
-        &wireguard_result.client_config_path,
-    )
-    .await?;
+    continue_after_wireguard_provisioning(&app, &context, instance.id, &wireguard_result).await?;
 
     Ok(())
 }
@@ -2187,11 +2170,7 @@ async fn run_existing_instance_orchestration(
     let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
         if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
         {
-            if !cached_wireguard_endpoint_matches(
-                cached.client_config_path.as_path(),
-                &endpoint_host,
-                endpoint_port,
-            ) {
+            if !wireguard_result_endpoint_matches(&cached, &endpoint_host, endpoint_port) {
                 emit_transition(
                     &app,
                     &context,
@@ -2251,12 +2230,7 @@ async fn run_existing_instance_orchestration(
 
                 context
                     .update_state(|state| {
-                        state.wireguard.server_ip = cached.server_ip.clone();
-                        state.wireguard.client_ip = cached.client_ip.clone();
-                        state.wireguard.server_public_key = cached.server_public_key.clone();
-                        state.wireguard.client_public_key = cached.client_public_key.clone();
-                        state.wireguard.config_path =
-                            cached.client_config_path.display().to_string();
+                        apply_wireguard_result_to_state(&mut state.wireguard, &cached);
                         state.sunshine.configured = true;
                     })
                     .await?;
@@ -2321,11 +2295,7 @@ async fn run_existing_instance_orchestration(
 
             context
                 .update_state(|state| {
-                    state.wireguard.server_ip = result.server_ip.clone();
-                    state.wireguard.client_ip = result.client_ip.clone();
-                    state.wireguard.server_public_key = result.server_public_key.clone();
-                    state.wireguard.client_public_key = result.client_public_key.clone();
-                    state.wireguard.config_path = result.client_config_path.display().to_string();
+                    apply_wireguard_result_to_state(&mut state.wireguard, &result);
                     state.sunshine.configured = true;
                 })
                 .await?;
@@ -2379,11 +2349,7 @@ async fn run_existing_instance_orchestration(
 
         result
     };
-    if !cached_wireguard_endpoint_matches(
-        wireguard_result.client_config_path.as_path(),
-        &endpoint_host,
-        endpoint_port,
-    ) {
+    if !wireguard_result_endpoint_matches(&wireguard_result, &endpoint_host, endpoint_port) {
         return Err(AppError::Provisioning(format!(
             "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
             endpoint_host,
@@ -2394,11 +2360,7 @@ async fn run_existing_instance_orchestration(
     persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
     context
         .update_state(|state| {
-            state.wireguard.server_ip = wireguard_result.server_ip.clone();
-            state.wireguard.client_ip = wireguard_result.client_ip.clone();
-            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
-            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
-            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
+            apply_wireguard_result_to_state(&mut state.wireguard, &wireguard_result);
             state.sunshine.configured = true;
         })
         .await?;
@@ -2420,13 +2382,7 @@ async fn run_existing_instance_orchestration(
         ensure_not_cancelled(&context)?;
     }
 
-    initialize_post_wireguard_flow(
-        &app,
-        &context,
-        instance.id,
-        &wireguard_result.client_config_path,
-    )
-    .await?;
+    continue_after_wireguard_provisioning(&app, &context, instance.id, &wireguard_result).await?;
 
     Ok(())
 }
@@ -3174,6 +3130,8 @@ async fn try_launch_existing_moonlight_session(
                     server_public_key: snapshot.wireguard.server_public_key.clone(),
                     client_public_key: snapshot.wireguard.client_public_key.clone(),
                     client_config_path: PathBuf::from(snapshot.wireguard.config_path.clone()),
+                    client_config_text: snapshot.wireguard.config_text.clone(),
+                    tunnel_session: None,
                 },
             )
             .await?;
@@ -3429,6 +3387,7 @@ async fn hydrate_state_from_server_record(
     let wireguard_server_public_key = record.wireguard_server_public_key.clone();
     let wireguard_client_public_key = record.wireguard_client_public_key.clone();
     let wireguard_config_path = record.wireguard_config_path.clone();
+    let wireguard_config_text = record.wireguard_config_text.clone();
     let sunshine_configured = record.steps.sunshine_configured;
     let moonlight_configured = record.steps.moonlight_configured || record.steps.pairing_completed;
     let moonlight_host_address = if record.moonlight_host_address.trim().is_empty() {
@@ -3461,6 +3420,7 @@ async fn hydrate_state_from_server_record(
             state.wireguard.server_public_key = wireguard_server_public_key.clone();
             state.wireguard.client_public_key = wireguard_client_public_key.clone();
             state.wireguard.config_path = wireguard_config_path.clone();
+            state.wireguard.config_text = wireguard_config_text.clone();
             state.sunshine.configured = sunshine_configured;
             state.moonlight.configured = moonlight_configured;
             state.moonlight.host_address = moonlight_host_address.clone();
@@ -3484,13 +3444,138 @@ async fn load_wireguard_result_from_server_record(
         return None;
     }
 
+    let client_config_path = PathBuf::from(record.wireguard_config_path.clone());
+    let client_config_text = record.wireguard_config_text.clone();
+    let tunnel_session = if !client_config_text.trim().is_empty() {
+        crate::services::wireguard::core::config::parse_tunnel_session(
+            &client_config_text,
+            client_config_path.as_path(),
+            Some(instance_id),
+            "wg0client",
+            &record.wireguard_server_ip,
+            47990,
+        )
+        .ok()
+    } else {
+        None
+    };
+
     Some(WireGuardProvisionResult {
         server_ip: record.wireguard_server_ip.clone(),
         client_ip: record.wireguard_client_ip.clone(),
         server_public_key: record.wireguard_server_public_key.clone(),
         client_public_key: record.wireguard_client_public_key.clone(),
-        client_config_path: PathBuf::from(record.wireguard_config_path.clone()),
+        client_config_path,
+        client_config_text,
+        tunnel_session,
     })
+}
+
+fn resolve_tunnel_session(result: &WireGuardProvisionResult) -> Option<TunnelSession> {
+    result.tunnel_session.clone().or_else(|| {
+        if result.client_config_text.trim().is_empty() {
+            return None;
+        }
+        crate::services::wireguard::core::config::parse_tunnel_session(
+            &result.client_config_text,
+            result.client_config_path.as_path(),
+            None,
+            "wg0client",
+            &result.server_ip,
+            47990,
+        )
+        .ok()
+    })
+}
+
+fn apply_wireguard_result_to_state(
+    wireguard_state: &mut crate::models::app_state::WireGuardState,
+    result: &WireGuardProvisionResult,
+) {
+    wireguard_state.server_ip = result.server_ip.clone();
+    wireguard_state.client_ip = result.client_ip.clone();
+    wireguard_state.server_public_key = result.server_public_key.clone();
+    wireguard_state.client_public_key = result.client_public_key.clone();
+    wireguard_state.config_path = result.client_config_path.display().to_string();
+    wireguard_state.config_text = result.client_config_text.clone();
+
+    if let Some(session) = resolve_tunnel_session(result) {
+        let manager = TunnelManager::default();
+        wireguard_state.endpoint_host = session.endpoint_host.clone();
+        wireguard_state.endpoint_port = session.endpoint_port;
+        wireguard_state.driver_kind = driver_kind_label(manager.select_driver(&session)).to_string();
+        wireguard_state.runtime_state = "idle".to_string();
+        wireguard_state.health_status = "unknown".to_string();
+        wireguard_state.allowed_ips = session.allowed_ips.clone();
+        wireguard_state.mtu = session.mtu;
+        wireguard_state.keepalive_secs = session.persistent_keepalive_secs;
+        wireguard_state.sunshine_host = session.sunshine_host.clone();
+        wireguard_state.sunshine_port = session.sunshine_port;
+        wireguard_state.sunshine_reachable = false;
+        wireguard_state.last_runtime_interface = session.interface_name;
+    }
+}
+
+fn driver_kind_label(kind: crate::services::wireguard::core::session::TunnelDriverKind) -> &'static str {
+    match kind {
+        crate::services::wireguard::core::session::TunnelDriverKind::LinuxNative => "linux_native",
+        crate::services::wireguard::core::session::TunnelDriverKind::MacosNative => "macos_native",
+        crate::services::wireguard::core::session::TunnelDriverKind::WindowsNative => "windows_native",
+        crate::services::wireguard::core::session::TunnelDriverKind::ManualApp => "manual_app",
+    }
+}
+
+async fn continue_after_wireguard_provisioning(
+    app: &AppHandle,
+    context: &AppContext,
+    instance_id: u64,
+    wireguard_result: &WireGuardProvisionResult,
+) -> AppResult<()> {
+    let config_text = wireguard_result.client_config_text.clone();
+    initialize_post_wireguard_flow(app, context, instance_id, &config_text).await?;
+
+    let Some(session) = resolve_tunnel_session(wireguard_result) else {
+        return Ok(());
+    };
+
+    let manager = TunnelManager::default();
+    context
+        .update_state(|state| {
+            state.wireguard.runtime_state = "starting".to_string();
+            state.wireguard.health_status = "unknown".to_string();
+        })
+        .await?;
+
+    match manager.start(&session) {
+        Ok(driver_kind) => {
+            verify_wireguard_connection(app, context).await?;
+            context
+                .update_state(|state| {
+                    state.wireguard.runtime_state = "ready".to_string();
+                    state.wireguard.health_status = "healthy".to_string();
+                    state.wireguard.sunshine_reachable = true;
+                    state.wireguard.driver_kind = driver_kind_label(driver_kind).to_string();
+                })
+                .await?;
+            setup_moonlight_sunshine(app, context).await?;
+            Ok(())
+        }
+        Err(error) => {
+            warn!(
+                "native WireGuard startup failed for instance {}. Falling back to manual WireGuard flow: {}",
+                instance_id, error
+            );
+            context
+                .update_state(|state| {
+                    state.wireguard.runtime_state = "failed".to_string();
+                    state.wireguard.health_status = "unhealthy".to_string();
+                    state.wireguard.sunshine_reachable = false;
+                    state.wireguard.driver_kind = "manual_app".to_string();
+                })
+                .await?;
+            Ok(())
+        }
+    }
 }
 
 async fn load_moonlight_host_from_server_record(
@@ -3526,6 +3611,7 @@ async fn persist_wireguard_result_for_server(
     let server_public_key = result.server_public_key.clone();
     let client_public_key = result.client_public_key.clone();
     let config_path = result.client_config_path.display().to_string();
+    let config_text = result.client_config_text.clone();
 
     context
         .update_state(|app_state| {
@@ -3546,6 +3632,7 @@ async fn persist_wireguard_result_for_server(
             record.wireguard_server_public_key = server_public_key.clone();
             record.wireguard_client_public_key = client_public_key.clone();
             record.wireguard_config_path = config_path.clone();
+            record.wireguard_config_text = config_text.clone();
         })
         .await?;
 
