@@ -4,3 +4,8 @@ src-tauri/target/
 src-tauri/gen/
 *.log
 .DS_Store
+.env
+AuthKey_SNUVSFN2NN.p8
+DeveloperID.p12
+DeveloperID-modern.p12
+src-tauri/platform/*
