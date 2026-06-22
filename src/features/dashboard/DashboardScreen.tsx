@@ -245,7 +245,10 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={openTutorial}>Help</Button>
+            <Button variant="ghost" onClick={openTutorial}>
+              <SpriteIcon icon="help" />
+              <span className="ml-1">Help</span>
+            </Button>
             <Button variant="ghost" onClick={() => navigate("/settings")}>Settings</Button>
             <Button variant="secondary" onClick={() => setPickerOpen(true)}>
               Select Server
@@ -471,13 +474,14 @@ export function DashboardScreen({
               </p>
             </div>
             <Button
-              className="h-12 w-full justify-center text-[12px]"
+              className="h-12 w-full justify-center text-[16px]"
               disabled={busy || !appState.selectedOffer}
               loading={blockingAction?.key === "provisioning.flow"}
               loadingText="Starting session..."
               onClick={handlePlay}
             >
-              Play
+              <SpriteIcon icon="play" />
+              <span className="ml-1">Play</span>
             </Button>
           </Card>
         </section>

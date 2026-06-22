@@ -7,7 +7,7 @@ use crate::{
     errors::{AppError, FrontendError},
     models::{
         app_state::{
-            BackupStatusResponse, BundleIndex, EdidMode, InstanceMicConfig,
+            BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
             InstanceMicRuntimeStatus, LocationSource, ManualLocationInput, MicQualityProfile,
             MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OnboardingPayload,
             OrchestrationState, PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary,
@@ -225,6 +225,9 @@ pub async fn complete_onboarding(
             state.credentials.app_username = payload.app_username.clone();
             state.credentials.app_password = payload.app_password.clone();
             state.credentials.vast_api_key = payload.vast_api_key.clone();
+            if !payload.tailscale_api_key.is_empty() {
+                state.credentials.tailscale_api_key = payload.tailscale_api_key.clone();
+            }
             state.ssh.key_name = "nolandConnectSSH".to_string();
             state.ssh.private_key_path = key_paths.private_key_path.display().to_string();
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
@@ -1201,6 +1204,52 @@ pub async fn update_vast_api_key(
         })
         .await?;
 
+    Ok(next_state)
+}
+
+#[tauri::command]
+pub async fn update_tailscale_api_key(
+    api_key: String,
+    context: State<'_, AppContext>,
+) -> Result<PersistedAppState, FrontendError> {
+    let trimmed = api_key.trim().to_string();
+    let next_state = context
+        .update_state(|state| {
+            state.credentials.tailscale_api_key = trimmed;
+            state.last_error = None;
+        })
+        .await?;
+    Ok(next_state)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionProviderUpdate {
+    pub connection_provider: String,
+}
+
+#[tauri::command]
+pub async fn update_connection_provider(
+    payload: ConnectionProviderUpdate,
+    context: State<'_, AppContext>,
+) -> Result<PersistedAppState, FrontendError> {
+    let provider = match payload.connection_provider.as_str() {
+        "wireguard" => ConnectionProvider::Wireguard,
+        "tailscale" => ConnectionProvider::Tailscale,
+        _ => {
+            return Err(AppError::InvalidInput(format!(
+                "Unknown connection provider: {}",
+                payload.connection_provider
+            ))
+            .into());
+        }
+    };
+    let next_state = context
+        .update_state(|state| {
+            state.connection_provider = provider;
+            state.last_error = None;
+        })
+        .await?;
     Ok(next_state)
 }
 

@@ -67,7 +67,7 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           onClick={() => onSettings(instance.instanceId)}
         >
-          <span className="text-xs">⚙</span>
+          <SpriteIcon icon="settings" />
           <span className="ml-1">Settings</span>
         </Button>
       </div>
@@ -75,7 +75,7 @@ export function InstanceCardActions({
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.export"}
           loadingText="Saving files..."
@@ -86,7 +86,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
           loadingText="Syncing files..."
@@ -97,7 +97,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.wireguard.reconnect"}
           loadingText="Opening..."
@@ -110,7 +110,7 @@ export function InstanceCardActions({
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.services.reboot"}
           loadingText="Rebooting..."
@@ -121,7 +121,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.pause"}
           loadingText="Pausing..."
@@ -132,13 +132,18 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className={`w-full text-xs ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
+          className={`w-full text-[14px] ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
           disabled={actionDisabled}
           loading={loadingKey === "instance.destroy"}
           loadingText="Destroying..."
           onClick={handleDestroy}
         >
-          {showDestroyConfirm ? "Confirm Destroy" : "Destroy"}
+          {showDestroyConfirm ? "Confirm Destroy" : (
+            <>
+                <SpriteIcon icon="destroy" />
+                <span className="ml-1">Destroy</span>
+              </>
+          )}
         </Button>
       </div>
 

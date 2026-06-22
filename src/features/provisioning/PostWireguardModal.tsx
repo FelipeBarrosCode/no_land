@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
+import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import type {
   OrchestrationState,
   PersistedAppState,
@@ -66,13 +67,18 @@ export function PostWireguardModal({
   void onDetectMoonlight;
   const setup = appState.postWireguardSetup;
   const activeInstanceId = appState.instance.instanceId;
+  const isTailscaleFlow = appState.connectionProvider === "tailscale";
+  const moonlightHost =
+    setup.moonlightHost || appState.moonlight.hostAddress || "10.77.0.1";
   const configMatchesActiveInstance =
     activeInstanceId !== null &&
     activeInstanceId !== undefined &&
     setup.currentInstanceId === activeInstanceId;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase =
-    wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
+    wireguardStages.has(setup.stage) &&
+    !streamingPrepStages.has(setup.stage) &&
+    !isTailscaleFlow;
   const hasStartedManualSetup =
     setup.stage !== "wireguard_config_generated" &&
     setup.stage !== "pre_wireguard_existing_flow";
@@ -130,13 +136,22 @@ export function PostWireguardModal({
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame crt-surface w-full max-w-3xl p-6">
+        <button
+          onClick={() => window.history.back()}
+          className="absolute right-4 top-4 text-[#b9caf0] hover:text-white transition"
+          aria-label="Close modal"
+        >
+          <SpriteIcon icon="close" />
+        </button>
         <h3
           className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
           data-text="Secure Tunnel Setup"
         >
-          {isWireguardPhase
-            ? "Secure Tunnel Setup"
-            : "Moonlight & Sunshine Setup"}
+          {isTailscaleFlow
+            ? "Tailscale Connection"
+            : isWireguardPhase
+              ? "Secure Tunnel Setup"
+              : "Moonlight & Sunshine Setup"}
         </h3>
 
         {isWireguardPhase ? (
@@ -163,19 +178,24 @@ export function PostWireguardModal({
             )}
 
             {canShowWireguardConfig && (
-              <textarea
-                readOnly
-                value={setup.wireguardConfig}
-                className="mt-4 min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
-              />
+              <div className="mt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b9caf0]">
+                    WireGuard Configuration
+                  </span>
+                  <Button variant="primary" onClick={() => void copyConfig()}>
+                    <SpriteIcon icon="copy" />
+                    <span className="ml-1">Copy to Clipboard</span>
+                  </Button>
+                </div>
+                <textarea
+                  readOnly
+                  value={setup.wireguardConfig}
+                  className="min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
+                />
+              </div>
             )}
-
             <div className="mt-4 flex flex-wrap gap-2">
-              {canShowWireguardConfig && (
-                <Button variant="ghost" onClick={() => void copyConfig()}>
-                  Copy Config
-                </Button>
-              )}
               <Button
                 variant="secondary"
                 onClick={() => void onDownloadWireguardConfig()}
@@ -221,14 +241,36 @@ export function PostWireguardModal({
               </p>
             )}
           </>
+        ) : isTailscaleFlow &&
+          !isStreamingPrepPhase &&
+          !stageShowsPinSubmission ? (
+          <>
+            <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
+              Tailscale is connected! Your remote instance is reachable at{" "}
+              <span className="text-neon-lime">{moonlightHost}</span>.
+            </p>
+            <p className="mt-2 text-[1.1rem] leading-snug text-[#cfe7ff]">
+              No WireGuard config or app import needed. Continue to set up
+              Sunshine TLS, verify the Sunshine API, and pair with Moonlight
+              directly from this app.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-2">
+              <Button
+                onClick={() => void onSetupMoonlightSunshine()}
+                disabled={busy}
+              >
+                Continue to Moonlight Setup
+              </Button>
+            </div>
+          </>
         ) : (
           <>
             {isStreamingPrepPhase ? (
               <>
                 <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
                   Finishing Sunshine and Moonlight setup on{" "}
-                  <span className="text-neon-cyan">10.77.0.1</span>. PIN entry
-                  unlocks when this preparation is done.
+                  <span className="text-neon-cyan">{moonlightHost}</span>. PIN
+                  entry unlocks when this preparation is done.
                 </p>
               </>
             ) : (
@@ -260,7 +302,7 @@ export function PostWireguardModal({
                 <ol className="mt-3 list-decimal space-y-2 pl-5 text-[1.05rem] leading-snug text-[#cfe7ff]">
                   <li>
                     Open Moonlight and add the PC at{" "}
-                    <span className="text-neon-cyan">10.77.0.1</span>.
+                    <span className="text-neon-cyan">{moonlightHost}</span>.
                   </li>
                   <li>Generate the PIN in Moonlight.</li>
                   <li>

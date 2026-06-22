@@ -31,14 +31,16 @@ import type {
   PostWireGuardSetupState,
   ReachabilityResult,
   SetupStage,
-  SunshineVerificationResult
+  SunshineVerificationResult,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
 }
 
-export async function completeOnboarding(payload: OnboardingPayload): Promise<PersistedAppState> {
+export async function completeOnboarding(
+  payload: OnboardingPayload,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("complete_onboarding", { payload });
 }
 
@@ -46,19 +48,29 @@ export async function refreshIpLocation(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("refresh_ip_location");
 }
 
-export async function setManualLocation(payload: ManualLocationInput): Promise<PersistedAppState> {
+export async function setManualLocation(
+  payload: ManualLocationInput,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("set_manual_location", { payload });
 }
 
-export async function setOsLocation(payload: ManualLocationInput): Promise<PersistedAppState> {
+export async function setOsLocation(
+  payload: ManualLocationInput,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("set_os_location", { payload });
 }
 
-export async function searchOffers(page = 1, pageSize = 24): Promise<OfferCandidate[]> {
+export async function searchOffers(
+  page = 1,
+  pageSize = 24,
+): Promise<OfferCandidate[]> {
   return invokeSafe<OfferCandidate[]>("search_offers", { page, pageSize });
 }
 
-export async function selectOffer(offerId: number, storageGb: number): Promise<PersistedAppState> {
+export async function selectOffer(
+  offerId: number,
+  storageGb: number,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("select_offer", { offerId, storageGb });
 }
 
@@ -66,11 +78,15 @@ export async function startPlayFlow(): Promise<void> {
   await invokeSafe<void>("start_play_flow");
 }
 
-export async function startPlayExistingInstance(instanceId: number): Promise<void> {
+export async function startPlayExistingInstance(
+  instanceId: number,
+): Promise<void> {
   await invokeSafe<void>("start_play_existing_instance", { instanceId });
 }
 
-export async function submitPairingPin(pin: string): Promise<PersistedAppState> {
+export async function submitPairingPin(
+  pin: string,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("submit_pairing_pin", { pin });
 }
 
@@ -87,7 +103,9 @@ export async function reconnectLocalWireguardClientQuick(): Promise<string> {
 }
 
 export async function setupWireguardAppHandoff(): Promise<PostWireGuardSetupState> {
-  return invokeSafe<PostWireGuardSetupState>("setup_wireguard_app_handoff_command");
+  return invokeSafe<PostWireGuardSetupState>(
+    "setup_wireguard_app_handoff_command",
+  );
 }
 
 export async function verifyWireguard(): Promise<ReachabilityResult> {
@@ -115,15 +133,26 @@ export async function detectMoonlight(): Promise<MoonlightDetectionResult> {
 }
 
 export async function setupMoonlightSunshine(): Promise<PostWireGuardSetupState> {
-  return invokeSafe<PostWireGuardSetupState>("setup_moonlight_sunshine_command");
+  return invokeSafe<PostWireGuardSetupState>(
+    "setup_moonlight_sunshine_command",
+  );
 }
 
-export async function submitMoonlightPinToSunshine(pin: string): Promise<PostWireGuardSetupState> {
-  return invokeSafe<PostWireGuardSetupState>("submit_moonlight_pin_to_sunshine_command", { pin });
+export async function submitMoonlightPinToSunshine(
+  pin: string,
+): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>(
+    "submit_moonlight_pin_to_sunshine_command",
+    { pin },
+  );
 }
 
-export async function retrySetupStage(stage: SetupStage): Promise<PostWireGuardSetupState> {
-  return invokeSafe<PostWireGuardSetupState>("retry_setup_stage_command", { stage });
+export async function retrySetupStage(
+  stage: SetupStage,
+): Promise<PostWireGuardSetupState> {
+  return invokeSafe<PostWireGuardSetupState>("retry_setup_stage_command", {
+    stage,
+  });
 }
 
 export async function startLocalSleepPrevention(): Promise<string> {
@@ -172,7 +201,9 @@ export async function configureMoonlightClient(options?: {
   });
 }
 
-export async function restoreMoonlightBackup(backupFile: string): Promise<string> {
+export async function restoreMoonlightBackup(
+  backupFile: string,
+): Promise<string> {
   return invokeSafe<string>("restore_moonlight_backup", { backupFile });
 }
 
@@ -180,26 +211,48 @@ export async function getRentedInstances(): Promise<RentedInstanceSummary[]> {
   return invokeSafe<RentedInstanceSummary[]>("get_rented_instances");
 }
 
-export async function updateVastApiKey(apiKey: string): Promise<PersistedAppState> {
+export async function updateVastApiKey(
+  apiKey: string,
+): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("update_vast_api_key", { apiKey });
 }
 
-export async function updatePlatformCredentials(
-  payload: PlatformCredentialsUpdate
+export async function updateTailscaleApiKey(
+  apiKey: string,
 ): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("update_platform_credentials", { payload });
+  return invokeSafe<PersistedAppState>("update_tailscale_api_key", { apiKey });
+}
+
+export async function updateConnectionProvider(payload: {
+  connectionProvider: "wireguard" | "tailscale";
+}): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("update_connection_provider", {
+    payload,
+  });
+}
+
+export async function updatePlatformCredentials(
+  payload: PlatformCredentialsUpdate,
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("update_platform_credentials", {
+    payload,
+  });
 }
 
 export async function updateServerPreferences(
-  payload: ServerPreferencesUpdate
+  payload: ServerPreferencesUpdate,
 ): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("update_server_preferences", { payload });
+  return invokeSafe<PersistedAppState>("update_server_preferences", {
+    payload,
+  });
 }
 
 export async function updateMoonlightPreferences(
-  payload: MoonlightPreferences
+  payload: MoonlightPreferences,
 ): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("update_moonlight_preferences", { payload });
+  return invokeSafe<PersistedAppState>("update_moonlight_preferences", {
+    payload,
+  });
 }
 
 export async function regenerateEdid(payload: {
@@ -210,17 +263,20 @@ export async function regenerateEdid(payload: {
 }
 
 export async function updateSshCredentials(
-  payload: SshCredentialsUpdate
+  payload: SshCredentialsUpdate,
 ): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("update_ssh_credentials", { payload });
 }
 
 export async function subscribeProvisioningEvents(
-  callback: (event: ProvisioningEvent) => void
+  callback: (event: ProvisioningEvent) => void,
 ): Promise<() => void> {
-  const unlisten = await listen<ProvisioningEvent>("orchestration:progress", ({ payload }) => {
-    callback(payload);
-  });
+  const unlisten = await listen<ProvisioningEvent>(
+    "orchestration:progress",
+    ({ payload }) => {
+      callback(payload);
+    },
+  );
 
   return () => {
     unlisten();
@@ -228,13 +284,17 @@ export async function subscribeProvisioningEvents(
 }
 
 export async function getSharedStorageSettings(): Promise<SharedStorageSettingsResponse> {
-  return invokeSafe<SharedStorageSettingsResponse>("get_shared_storage_settings");
+  return invokeSafe<SharedStorageSettingsResponse>(
+    "get_shared_storage_settings",
+  );
 }
 
 export async function saveSharedStorageSettings(
-  payload: SharedStorageSettingsUpdate
+  payload: SharedStorageSettingsUpdate,
 ): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("save_shared_storage_settings", { payload });
+  return invokeSafe<PersistedAppState>("save_shared_storage_settings", {
+    payload,
+  });
 }
 
 export async function testSharedStorageConfig(): Promise<string> {
@@ -245,45 +305,53 @@ export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
   return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
 }
 
-export async function triggerInstanceBackupFor(instanceId: number): Promise<BackupStatusResponse> {
-  return invokeSafe<BackupStatusResponse>("trigger_instance_backup_for", { instanceId });
+export async function triggerInstanceBackupFor(
+  instanceId: number,
+): Promise<BackupStatusResponse> {
+  return invokeSafe<BackupStatusResponse>("trigger_instance_backup_for", {
+    instanceId,
+  });
 }
 
-export async function syncInstanceFromSharedStorage(instanceId: number): Promise<string> {
-  return invokeSafe<string>("sync_instance_from_shared_storage", { instanceId });
+export async function syncInstanceFromSharedStorage(
+  instanceId: number,
+): Promise<string> {
+  return invokeSafe<string>("sync_instance_from_shared_storage", {
+    instanceId,
+  });
 }
 
 export async function listInstanceSharedStorageObjects(instanceId: number) {
   return invokeSafe<SharedStorageObjectEntry[]>(
     "list_instance_shared_storage_objects",
-    { instanceId }
+    { instanceId },
   );
 }
 
 export async function syncInstanceFromSharedStorageSelected(
   instanceId: number,
-  selectedPaths: string[]
+  selectedPaths: string[],
 ): Promise<string> {
   return invokeSafe<string>("sync_instance_from_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths }
+    payload: { selectedPaths },
   });
 }
 
 export async function listInstanceExportableStorageObjects(instanceId: number) {
   return invokeSafe<SharedStorageObjectEntry[]>(
     "list_instance_exportable_storage_objects",
-    { instanceId }
+    { instanceId },
   );
 }
 
 export async function saveInstanceToSharedStorageSelected(
   instanceId: number,
-  selectedPaths: string[]
+  selectedPaths: string[],
 ): Promise<string> {
   return invokeSafe<string>("save_instance_to_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths }
+    payload: { selectedPaths },
   });
 }
 
@@ -302,46 +370,53 @@ export async function removeInstanceBackupSchedule(): Promise<string> {
 export async function getInstanceSunshineSettings(
   instanceId: number,
   sunshineUsername: string,
-  sunshinePassword: string
+  sunshinePassword: string,
 ): Promise<SunshineSettingsResponse> {
-  return invokeSafe<SunshineSettingsResponse>("get_instance_sunshine_settings", {
-    instanceId,
-    sunshineUsername,
-    sunshinePassword
-  });
+  return invokeSafe<SunshineSettingsResponse>(
+    "get_instance_sunshine_settings",
+    {
+      instanceId,
+      sunshineUsername,
+      sunshinePassword,
+    },
+  );
 }
 
 export async function updateInstanceSunshineSettings(
   instanceId: number,
   settings: Record<string, unknown>,
   sunshineUsername: string,
-  sunshinePassword: string
+  sunshinePassword: string,
 ): Promise<void> {
   return invokeSafe<void>("update_instance_sunshine_settings", {
     instanceId,
     settings,
     sunshineUsername,
-    sunshinePassword
+    sunshinePassword,
   });
 }
 
 export async function resetInstanceSunshineSettings(
   instanceId: number,
   sunshineUsername: string,
-  sunshinePassword: string
+  sunshinePassword: string,
 ): Promise<void> {
   return invokeSafe<void>("reset_instance_sunshine_settings", {
     instanceId,
     sunshineUsername,
-    sunshinePassword
+    sunshinePassword,
   });
 }
 
-export async function reconnectInstanceWireguard(instanceId: number): Promise<string> {
+export async function reconnectInstanceWireguard(
+  instanceId: number,
+): Promise<string> {
   return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
 }
 
-export async function rebootInstanceServices(instanceId: number): Promise<string> {
+export async function rebootInstanceServices(
+  instanceId: number,
+): Promise<string> {
   return invokeSafe<string>("reboot_instance_services", { instanceId });
 }
 
@@ -357,20 +432,27 @@ export async function generateBundleIndex(): Promise<void> {
   return invokeSafe<void>("generate_bundle_index");
 }
 
-export async function getInstanceRestoreBundles(instanceId: number): Promise<BundleIndex> {
-  return invokeSafe<BundleIndex>("get_instance_restore_bundles", { instanceId });
+export async function getInstanceRestoreBundles(
+  instanceId: number,
+): Promise<BundleIndex> {
+  return invokeSafe<BundleIndex>("get_instance_restore_bundles", {
+    instanceId,
+  });
 }
 
 export async function dryRunRestore(
   instanceId: number,
-  payload: RestoreRequest
+  payload: RestoreRequest,
 ): Promise<RestoreDryRunResult> {
-  return invokeSafe<RestoreDryRunResult>("dry_run_restore", { instanceId, payload });
+  return invokeSafe<RestoreDryRunResult>("dry_run_restore", {
+    instanceId,
+    payload,
+  });
 }
 
 export async function restoreBundle(
   instanceId: number,
-  payload: RestoreRequest
+  payload: RestoreRequest,
 ): Promise<RestoreJob> {
   return invokeSafe<RestoreJob>("restore_bundle", { instanceId, payload });
 }
@@ -379,36 +461,56 @@ export async function getRestoreJob(jobId: string): Promise<RestoreJob> {
   return invokeSafe<RestoreJob>("get_restore_job", { jobId });
 }
 
-export async function getInstanceMicConfig(instanceId: number): Promise<InstanceMicConfig> {
-  return invokeSafe<InstanceMicConfig>("get_instance_mic_config", { instanceId });
+export async function getInstanceMicConfig(
+  instanceId: number,
+): Promise<InstanceMicConfig> {
+  return invokeSafe<InstanceMicConfig>("get_instance_mic_config", {
+    instanceId,
+  });
 }
 
 export async function updateInstanceMicSettings(
   instanceId: number,
-  payload: MicSettingsUpdate
+  payload: MicSettingsUpdate,
 ): Promise<InstanceMicConfig> {
-  return invokeSafe<InstanceMicConfig>("update_instance_mic_settings", { instanceId, payload });
+  return invokeSafe<InstanceMicConfig>("update_instance_mic_settings", {
+    instanceId,
+    payload,
+  });
 }
 
 export async function enableInstanceMic(
   instanceId: number,
-  qualityProfile?: MicQualityProfile
+  qualityProfile?: MicQualityProfile,
 ): Promise<MicSessionResponse> {
-  return invokeSafe<MicSessionResponse>("enable_instance_mic", { instanceId, qualityProfile });
+  return invokeSafe<MicSessionResponse>("enable_instance_mic", {
+    instanceId,
+    qualityProfile,
+  });
 }
 
 export async function disableInstanceMic(instanceId: number): Promise<void> {
   return invokeSafe<void>("disable_instance_mic", { instanceId });
 }
 
-export async function reconnectInstanceMic(instanceId: number): Promise<MicSessionResponse> {
-  return invokeSafe<MicSessionResponse>("reconnect_instance_mic", { instanceId });
+export async function reconnectInstanceMic(
+  instanceId: number,
+): Promise<MicSessionResponse> {
+  return invokeSafe<MicSessionResponse>("reconnect_instance_mic", {
+    instanceId,
+  });
 }
 
-export async function recreateInstanceMicDevice(instanceId: number): Promise<void> {
+export async function recreateInstanceMicDevice(
+  instanceId: number,
+): Promise<void> {
   return invokeSafe<void>("recreate_instance_mic_device", { instanceId });
 }
 
-export async function getInstanceMicStatus(instanceId: number): Promise<InstanceMicRuntimeStatus> {
-  return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", { instanceId });
+export async function getInstanceMicStatus(
+  instanceId: number,
+): Promise<InstanceMicRuntimeStatus> {
+  return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", {
+    instanceId,
+  });
 }

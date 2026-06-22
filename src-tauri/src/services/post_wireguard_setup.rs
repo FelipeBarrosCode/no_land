@@ -47,8 +47,8 @@ fn sunshine_http_client() -> AppResult<reqwest::Client> {
         .map_err(|error| AppError::Command(format!("Failed building Sunshine client: {error}")))
 }
 
-fn sunshine_api_url(path: &str) -> String {
-    format!("https://{}:{}{}", TUNNEL_HOST, SUNSHINE_API_PORT, path)
+fn sunshine_api_url(host: &str, path: &str) -> String {
+    format!("https://{}:{}{}", host, SUNSHINE_API_PORT, path)
 }
 
 #[derive(Debug, Clone)]
@@ -399,6 +399,16 @@ pub async fn verify_sunshine_api(
         })
         .await?;
 
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
+
     emit_post_wireguard_event(
         app,
         context,
@@ -406,7 +416,7 @@ pub async fn verify_sunshine_api(
         "Verifying Sunshine over the secure tunnel",
         Some(format!(
             "Checking https://{}:{}/api/config",
-            TUNNEL_HOST, SUNSHINE_API_PORT
+            moonlight_host, SUNSHINE_API_PORT
         )),
         false,
     )
@@ -437,20 +447,20 @@ pub async fn verify_sunshine_api(
     }
 
     let client = sunshine_http_client()?;
-    let response = sunshine_config_response(&client, &username, &password).await;
+    let response = sunshine_config_response(&client, &moonlight_host, &username, &password).await;
 
     let result = match response {
         Ok(response) if response.status.is_success() => SunshineVerificationResult {
             reachable: true,
             authenticated: true,
-            host: TUNNEL_HOST.to_string(),
+            host: moonlight_host.clone(),
             port: SUNSHINE_API_PORT,
             error: None,
         },
         Ok(response) if response.welcome_redirect() => SunshineVerificationResult {
             reachable: true,
             authenticated: false,
-            host: TUNNEL_HOST.to_string(),
+            host: moonlight_host.clone(),
             port: SUNSHINE_API_PORT,
             error: Some(
                 "Sunshine is still in its first-run welcome flow. Finish Sunshine setup on the host before pairing."
@@ -461,7 +471,7 @@ pub async fn verify_sunshine_api(
             SunshineVerificationResult {
                 reachable: true,
                 authenticated: false,
-                host: TUNNEL_HOST.to_string(),
+                host: moonlight_host.clone(),
                 port: SUNSHINE_API_PORT,
                 error: Some(
                     "Sunshine is reachable, but the stored credentials were rejected. Create or update your Sunshine login, then retry.".to_string(),
@@ -471,7 +481,7 @@ pub async fn verify_sunshine_api(
         Ok(response) => SunshineVerificationResult {
             reachable: false,
             authenticated: false,
-            host: TUNNEL_HOST.to_string(),
+            host: moonlight_host.clone(),
             port: SUNSHINE_API_PORT,
             error: Some(format!(
                 "Sunshine API returned status {}{}",
@@ -486,7 +496,7 @@ pub async fn verify_sunshine_api(
         Err(error) => SunshineVerificationResult {
             reachable: false,
             authenticated: false,
-            host: TUNNEL_HOST.to_string(),
+            host: moonlight_host.clone(),
             port: SUNSHINE_API_PORT,
             error: Some(error.to_string()),
         },
@@ -740,8 +750,17 @@ pub async fn setup_moonlight_sunshine(
 
     let moonlight = MoonlightService;
     let preferences = { context.state.read().await.moonlight_preferences.clone() };
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
     moonlight
-        .patch_local_config(TUNNEL_HOST, SUNSHINE_API_PORT, &preferences)
+        .patch_local_config(&moonlight_host, SUNSHINE_API_PORT, &preferences)
         .await?;
     let config_result = moonlight
         .configure_client(MoonlightConfigureOptions {
@@ -765,21 +784,22 @@ pub async fn setup_moonlight_sunshine(
             );
         }
 
-        if let Err(error) = moonlight.pair_host(TUNNEL_HOST) {
+        if let Err(error) = moonlight.pair_host(&moonlight_host) {
             warn!(
                 "windows moonlight auto-pair command failed for {}: {}",
-                TUNNEL_HOST, error
+                moonlight_host, error
             );
         }
     }
 
+    let moonlight_host_for_state = moonlight_host.clone();
     let state = context
-        .update_state(|state| {
+        .update_state(move |state| {
             state.post_wireguard_setup.stage = SetupStage::MoonlightPairingStarted;
             state.orchestration_state = OrchestrationState::MoonlightPairingStarted;
-            state.moonlight.host_address = TUNNEL_HOST.to_string();
+            state.moonlight.host_address = moonlight_host_for_state.clone();
             state.moonlight.configured = true;
-            state.post_wireguard_setup.moonlight_host = TUNNEL_HOST.to_string();
+            state.post_wireguard_setup.moonlight_host = moonlight_host_for_state.clone();
         })
         .await?;
 
@@ -844,12 +864,28 @@ pub async fn submit_moonlight_pin_to_sunshine(
         .await?;
 
     let client = sunshine_http_client()?;
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
     let client_name = env::var("COMPUTERNAME")
         .or_else(|_| env::var("HOSTNAME"))
         .unwrap_or_else(|_| "machine".to_string());
-    let response = submit_sunshine_pin_request(&client, &username, &password, &pin, &client_name)
-        .await
-        .map_err(|error| AppError::Api(format!("Failed submitting Sunshine PIN: {error}")))?;
+    let response = submit_sunshine_pin_request(
+        &client,
+        &moonlight_host,
+        &username,
+        &password,
+        &pin,
+        &client_name,
+    )
+    .await
+    .map_err(|error| AppError::Api(format!("Failed submitting Sunshine PIN: {error}")))?;
 
     if response.welcome_redirect() {
         let error = "Sunshine is still in its first-run welcome flow after repair. Finish Sunshine setup on the host before submitting a Moonlight PIN.".to_string();
@@ -1197,11 +1233,12 @@ fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
 
 async fn sunshine_config_response(
     client: &reqwest::Client,
+    host: &str,
     username: &str,
     password: &str,
 ) -> Result<SunshineApiResponse, reqwest::Error> {
     let response = client
-        .get(sunshine_api_url("/api/config"))
+        .get(sunshine_api_url(host, "/api/config"))
         .basic_auth(username, Some(password))
         .send()
         .await?;
@@ -1217,13 +1254,14 @@ async fn sunshine_config_response(
 
 async fn submit_sunshine_pin_request(
     client: &reqwest::Client,
+    host: &str,
     username: &str,
     password: &str,
     pin: &str,
     client_name: &str,
 ) -> Result<SunshineApiResponse, reqwest::Error> {
     let response = client
-        .post(sunshine_api_url("/api/pin"))
+        .post(sunshine_api_url(host, "/api/pin"))
         .basic_auth(username, Some(password))
         .json(&serde_json::json!({
             "pin": pin,
@@ -1282,9 +1320,25 @@ async fn repair_sunshine_auth_state(
     )
     .await;
 
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
     let client = sunshine_http_client()?;
     for attempt in 1..=SUNSHINE_API_READY_RETRIES {
-        match sunshine_config_response(&client, sunshine_username, sunshine_password).await {
+        match sunshine_config_response(
+            &client,
+            &moonlight_host,
+            sunshine_username,
+            sunshine_password,
+        )
+        .await
+        {
             Ok(response) if response.status.is_success() => {
                 info!(attempt, "Sunshine API became ready after restart");
                 return Ok(());

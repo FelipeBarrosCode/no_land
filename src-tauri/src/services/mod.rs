@@ -19,5 +19,6 @@ pub mod sleep_inhibit;
 pub mod ssh_keys;
 pub mod state_store;
 pub mod sunshine;
+pub mod tailscale;
 pub mod vast_api;
 pub mod wireguard;

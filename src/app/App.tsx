@@ -17,7 +17,9 @@ function RootRoute() {
   const searchingOffers = useAppStore((state) => state.searching);
   const offersPage = useAppStore((state) => state.offersPage);
   const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
-  const instanceActionRunning = useAppStore((state) => state.instanceActionRunning);
+  const instanceActionRunning = useAppStore(
+    (state) => state.instanceActionRunning,
+  );
   const sunshineSettings = useAppStore((state) => state.sunshineSettings);
   const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
@@ -29,18 +31,34 @@ function RootRoute() {
   const chooseOffer = useAppStore((state) => state.chooseOffer);
   const startPlay = useAppStore((state) => state.startPlay);
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
-  const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
-  const loadSunshineSettings = useAppStore((state) => state.loadSunshineSettings);
-  const saveSunshineSettings = useAppStore((state) => state.saveSunshineSettings);
-  const resetSunshineSettings = useAppStore((state) => state.resetSunshineSettings);
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+  const loadSunshineSettings = useAppStore(
+    (state) => state.loadSunshineSettings,
+  );
+  const saveSunshineSettings = useAppStore(
+    (state) => state.saveSunshineSettings,
+  );
+  const resetSunshineSettings = useAppStore(
+    (state) => state.resetSunshineSettings,
+  );
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
-  const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
+  const rebootInstanceServices = useAppStore(
+    (state) => state.rebootInstanceServices,
+  );
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
   const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
-  const listSyncableStorageObjects = useAppStore((state) => state.listSyncableStorageObjects);
-  const saveInstanceStorageSelected = useAppStore((state) => state.saveInstanceStorageSelected);
-  const listExportableStorageObjects = useAppStore((state) => state.listExportableStorageObjects);
+  const listSyncableStorageObjects = useAppStore(
+    (state) => state.listSyncableStorageObjects,
+  );
+  const saveInstanceStorageSelected = useAppStore(
+    (state) => state.saveInstanceStorageSelected,
+  );
+  const listExportableStorageObjects = useAppStore(
+    (state) => state.listExportableStorageObjects,
+  );
 
   if (!appState) {
     return null;
@@ -91,16 +109,28 @@ function ProvisioningRoute() {
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
   const blockingAction = useAppStore((state) => state.blockingAction);
-  const setupWireguardAppHandoff = useAppStore((state) => state.setupWireguardAppHandoff);
+  const setupWireguardAppHandoff = useAppStore(
+    (state) => state.setupWireguardAppHandoff,
+  );
   const openWireguardApp = useAppStore((state) => state.openWireguardApp);
-  const downloadWireguardConfig = useAppStore((state) => state.downloadWireguardConfig);
-  const verifyWireguardConnection = useAppStore((state) => state.verifyWireguardConnection);
+  const downloadWireguardConfig = useAppStore(
+    (state) => state.downloadWireguardConfig,
+  );
+  const verifyWireguardConnection = useAppStore(
+    (state) => state.verifyWireguardConnection,
+  );
   const detectMoonlight = useAppStore((state) => state.detectMoonlight);
-  const setupMoonlightSunshine = useAppStore((state) => state.setupMoonlightSunshine);
+  const setupMoonlightSunshine = useAppStore(
+    (state) => state.setupMoonlightSunshine,
+  );
   const submitMoonlightPin = useAppStore((state) => state.submitMoonlightPin);
   const retrySetupStage = useAppStore((state) => state.retrySetupStage);
-  const sleepPreventionActive = useAppStore((state) => state.sleepPreventionActive);
-  const startSleepPrevention = useAppStore((state) => state.startSleepPrevention);
+  const sleepPreventionActive = useAppStore(
+    (state) => state.sleepPreventionActive,
+  );
+  const startSleepPrevention = useAppStore(
+    (state) => state.startSleepPrevention,
+  );
   const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
 
   if (!appState) {
@@ -108,23 +138,23 @@ function ProvisioningRoute() {
   }
 
   return (
-      <ProvisioningScreen
-        appState={appState}
-        logs={logs}
-        busy={busy}
-        blockingAction={blockingAction}
-        onSetupWireguardAppHandoff={setupWireguardAppHandoff}
-        onOpenWireguardApp={openWireguardApp}
-        onDownloadWireguardConfig={downloadWireguardConfig}
-        onVerifyWireguard={verifyWireguardConnection}
-        onDetectMoonlight={detectMoonlight}
-        onSetupMoonlightSunshine={setupMoonlightSunshine}
-        onSubmitMoonlightPin={submitMoonlightPin}
-        onRetrySetupStage={retrySetupStage}
-        sleepPreventionActive={sleepPreventionActive}
-        onStartSleepPrevention={startSleepPrevention}
-        onStopSleepPrevention={stopSleepPrevention}
-      />
+    <ProvisioningScreen
+      appState={appState}
+      logs={logs}
+      busy={busy}
+      blockingAction={blockingAction}
+      onSetupWireguardAppHandoff={setupWireguardAppHandoff}
+      onOpenWireguardApp={openWireguardApp}
+      onDownloadWireguardConfig={downloadWireguardConfig}
+      onVerifyWireguard={verifyWireguardConnection}
+      onDetectMoonlight={detectMoonlight}
+      onSetupMoonlightSunshine={setupMoonlightSunshine}
+      onSubmitMoonlightPin={submitMoonlightPin}
+      onRetrySetupStage={retrySetupStage}
+      sleepPreventionActive={sleepPreventionActive}
+      onStartSleepPrevention={startSleepPrevention}
+      onStopSleepPrevention={stopSleepPrevention}
+    />
   );
 }
 
@@ -137,7 +167,10 @@ function BootScreen() {
           alt="Noland logo"
           className="mx-auto mb-4 max-h-40 w-auto border border-[#3d426f]"
         />
-        <p className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base" data-text="Loading Noland Connect...">
+        <p
+          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+          data-text="Loading Noland Connect..."
+        >
           Loading Noland Connect...
         </p>
       </Card>
@@ -156,15 +189,33 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
-  const savePlatformCredentials = useAppStore((state) => state.savePlatformCredentials);
-  const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
-  const saveMoonlightPreferences = useAppStore((state) => state.saveMoonlightPreferences);
+  const saveTailscaleApiKey = useAppStore((state) => state.saveTailscaleApiKey);
+  const saveConnectionProvider = useAppStore(
+    (state) => state.saveConnectionProvider,
+  );
+  const savePlatformCredentials = useAppStore(
+    (state) => state.savePlatformCredentials,
+  );
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+  const saveMoonlightPreferences = useAppStore(
+    (state) => state.saveMoonlightPreferences,
+  );
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
   const regenerateEdid = useAppStore((state) => state.regenerateEdid);
-  const sharedStorageSettings = useAppStore((state) => state.sharedStorageSettings);
-  const saveSharedStorageSettings = useAppStore((state) => state.saveSharedStorageSettings);
-  const testSharedStorageConfig = useAppStore((state) => state.testSharedStorageConfig);
-  const loadSharedStorageSettings = useAppStore((state) => state.loadSharedStorageSettings);
+  const sharedStorageSettings = useAppStore(
+    (state) => state.sharedStorageSettings,
+  );
+  const saveSharedStorageSettings = useAppStore(
+    (state) => state.saveSharedStorageSettings,
+  );
+  const testSharedStorageConfig = useAppStore(
+    (state) => state.testSharedStorageConfig,
+  );
+  const loadSharedStorageSettings = useAppStore(
+    (state) => state.loadSharedStorageSettings,
+  );
 
   useEffect(() => {
     void initialize();
@@ -192,7 +243,9 @@ export function App() {
         </div>
       )}
 
-      {isBlocking && blockingAction && <BlockingLoaderOverlay action={blockingAction} />}
+      {isBlocking && blockingAction && (
+        <BlockingLoaderOverlay action={blockingAction} />
+      )}
 
       <HashRouter>
         <Routes>
@@ -215,6 +268,8 @@ export function App() {
                   onSaveSharedStorageSettings={saveSharedStorageSettings}
                   onTestSharedStorageConfig={testSharedStorageConfig}
                   onLoadSharedStorageSettings={loadSharedStorageSettings}
+                  onSaveConnectionProvider={saveConnectionProvider}
+                  onSaveTailscaleApiKey={saveTailscaleApiKey}
                 />
               ) : null
             }

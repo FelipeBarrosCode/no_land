@@ -20,6 +20,8 @@ pub struct PersistedAppState {
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
     pub orchestration_state: OrchestrationState,
+    #[serde(default)]
+    pub connection_provider: ConnectionProvider,
     pub last_error: Option<String>,
 }
 
@@ -42,17 +44,31 @@ impl Default for PersistedAppState {
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
+            connection_provider: ConnectionProvider::default(),
             last_error: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsState {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
+    #[serde(default)]
+    pub tailscale_api_key: String,
+}
+
+impl Default for CredentialsState {
+    fn default() -> Self {
+        Self {
+            app_username: String::new(),
+            app_password: String::new(),
+            vast_api_key: String::new(),
+            tailscale_api_key: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +279,14 @@ pub struct WireGuardState {
     pub endpoint_port: u16,
     #[serde(default)]
     pub last_runtime_interface: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionProvider {
+    #[default]
+    Wireguard,
+    Tailscale,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -542,6 +566,10 @@ pub struct ProvisionedServerState {
     pub wireguard_config_path: String,
     #[serde(default)]
     pub moonlight_host_address: String,
+    #[serde(default)]
+    pub connection_provider: ConnectionProvider,
+    #[serde(default)]
+    pub tailscale_client_ip: String,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -583,6 +611,8 @@ impl ProvisionedServerState {
             wireguard_client_public_key: String::new(),
             wireguard_config_path: String::new(),
             moonlight_host_address: String::new(),
+            connection_provider: ConnectionProvider::default(),
+            tailscale_client_ip: String::new(),
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),
@@ -606,6 +636,10 @@ pub enum OrchestrationState {
     ConfiguringWireGuard,
     ConfiguringSunshine,
     ConfiguringNvidiaHeadless,
+    SelectingConnectionProvider,
+    ConfiguringTailscale,
+    TailscaleConfigGenerated,
+    TailscaleConnected,
     WireGuardConfigGenerated,
     WireGuardAppHandoffStarted,
     WireGuardWaitingForImport,
@@ -633,6 +667,8 @@ pub struct OnboardingPayload {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
+    #[serde(default)]
+    pub tailscale_api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
