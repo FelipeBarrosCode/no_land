@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -258,7 +260,10 @@ export function DashboardScreen({
           <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
-              <SpriteIcon icon="moonlight" />
+              <div className="flex items-center gap-2">
+                <AIPromptHelper topic="Moonlight Client Download" promptText={APP_PROMPTS.moonlightCard} variant="icon" />
+                <SpriteIcon icon="moonlight" />
+              </div>
             </div>
             <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
               <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
@@ -280,7 +285,10 @@ export function DashboardScreen({
               <div>
                 <div className="flex items-center justify-between">
                   <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Connection Type</p>
-                  <SpriteIcon icon="settings" />
+                  <div className="flex items-center gap-2">
+                    <AIPromptHelper topic="WireGuard Connection Option" promptText={APP_PROMPTS.wireguardCard} variant="icon" />
+                    <SpriteIcon icon="settings" />
+                  </div>
                 </div>
                 <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
                   WireGuard
@@ -295,7 +303,10 @@ export function DashboardScreen({
               <div>
                 <div className="flex items-center justify-between">
                   <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Connection Type</p>
-                  <SpriteIcon icon="settings" />
+                  <div className="flex items-center gap-2">
+                    <AIPromptHelper topic="Tailscale Connection Option" promptText={APP_PROMPTS.tailscaleCard} variant="icon" />
+                    <SpriteIcon icon="settings" />
+                  </div>
                 </div>
                 <h2 className="mt-2 font-display text-base text-neon-lime md:text-lg">
                   Tailscale
@@ -310,7 +321,10 @@ export function DashboardScreen({
           <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 3</p>
-              <SpriteIcon icon="server" />
+              <div className="flex items-center gap-2">
+                <AIPromptHelper topic="Set Server Selection Offering" promptText={APP_PROMPTS.setServerCard} variant="icon" />
+                <SpriteIcon icon="server" />
+              </div>
             </div>
             <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">Set Server</h2>
             <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
@@ -333,8 +347,9 @@ export function DashboardScreen({
         <section>
           <Card className="pixel-frame">
             <div className="mb-3 flex items-center justify-between">
-              <div>
+              <div className="flex items-center gap-2">
                 <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Rented Servers</h3>
+                <AIPromptHelper topic="Managing Rented Servers" promptText={APP_PROMPTS.rentedServersSection} variant="icon" />
                 {blockingAction && blockingAction.key.startsWith("instance.") && (
                   <p className="mt-1 text-[1.1rem] text-[#9ec4df]" aria-live="polite">
                     {blockingLabel}
@@ -392,10 +407,13 @@ export function DashboardScreen({
           </Card>
         </section>
 
-        <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
+         <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
           <Card className="pixel-frame min-h-44">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Selected Server</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Selected Server</h3>
+                <AIPromptHelper topic="Selected Server Specifications" promptText={APP_PROMPTS.selectedServerSection} variant="icon" />
+              </div>
               <StatusPill state={appState.orchestrationState} />
             </div>
 
@@ -466,7 +484,10 @@ export function DashboardScreen({
           <Card className="pixel-frame flex flex-col justify-between gap-4">
             <div>
               <div className="flex items-center justify-between">
-                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Action</p>
+                <div className="flex items-center gap-2">
+                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Action</p>
+                  <AIPromptHelper topic="Provisioning and Play Execution" promptText={APP_PROMPTS.playButtonSection} variant="icon" />
+                </div>
                 <SpriteIcon icon="play" />
               </div>
               <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
@@ -546,12 +567,19 @@ export function DashboardScreen({
       {connectionInfoModalType && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
           <div className="glass-panel pixel-frame crt-surface w-full max-w-xl p-6">
-            <h3
-              className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base mb-4"
-              data-text={connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
-            >
-              {connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
-            </h3>
+            <div className="flex items-center justify-between mb-4 gap-2 border-b border-[#3e4270] pb-2">
+              <h3
+                className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+                data-text={connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+              >
+                {connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+              </h3>
+              <AIPromptHelper
+                topic={connectionInfoModalType === "wireguard" ? "WireGuard VPN Connection" : "Tailscale VPN Connection"}
+                promptText={connectionInfoModalType === "wireguard" ? APP_PROMPTS.wireguardModalInfo : APP_PROMPTS.tailscaleModalInfo}
+                variant="both"
+              />
+            </div>
 
             <div className="text-[1.2rem] leading-relaxed text-[#c5d8ec] space-y-4">
               {connectionInfoModalType === "wireguard" ? (

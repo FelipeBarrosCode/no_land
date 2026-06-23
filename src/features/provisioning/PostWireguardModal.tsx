@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import type {
   OrchestrationState,
   PersistedAppState,
@@ -143,16 +145,35 @@ export function PostWireguardModal({
         >
           <SpriteIcon icon="close" />
         </button>
-        <h3
-          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-          data-text="Secure Tunnel Setup"
-        >
-          {isTailscaleFlow
-            ? "Tailscale Connection"
-            : isWireguardPhase
-              ? "Secure Tunnel Setup"
-              : "Moonlight & Sunshine Setup"}
-        </h3>
+        <div className="flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2 mb-4">
+          <h3
+            className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+            data-text={isTailscaleFlow
+              ? "Tailscale Connection"
+              : isWireguardPhase
+                ? "Secure Tunnel Setup"
+                : "Moonlight & Sunshine Setup"}
+          >
+            {isTailscaleFlow
+              ? "Tailscale Connection"
+              : isWireguardPhase
+                ? "Secure Tunnel Setup"
+                : "Moonlight & Sunshine Setup"}
+          </h3>
+          <AIPromptHelper
+            topic={isTailscaleFlow
+              ? "Tailscale Connection Setup"
+              : isWireguardPhase
+                ? "WireGuard Connection Setup"
+                : "Moonlight & Sunshine Pair Setup"}
+            promptText={isTailscaleFlow
+              ? APP_PROMPTS.tailscaleModalInfo
+              : isWireguardPhase
+                ? APP_PROMPTS.wireguardModalInfo
+                : APP_PROMPTS.playButtonSection}
+            variant="both"
+          />
+        </div>
 
         {isWireguardPhase ? (
           <>

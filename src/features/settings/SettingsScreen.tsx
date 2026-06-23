@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -759,16 +761,23 @@ export function SettingsScreen({
     <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <div className="flex items-center justify-between">
-          <div>
-            <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-              Settings
-            </p>
-            <h1
-              className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
-              data-text="Preferences"
-            >
-              Preferences
-            </h1>
+          <div className="flex items-center gap-3">
+            <div>
+              <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
+                Settings
+              </p>
+              <h1
+                className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
+                data-text="Preferences"
+              >
+                Preferences
+              </h1>
+            </div>
+            <AIPromptHelper
+              topic="App Configuration & Settings"
+              promptText={APP_PROMPTS.settingsPage}
+              variant="both"
+            />
           </div>
 
           <div className="flex items-center gap-2">
