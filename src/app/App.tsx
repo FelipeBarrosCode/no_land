@@ -59,6 +59,10 @@ function RootRoute() {
   const listExportableStorageObjects = useAppStore(
     (state) => state.listExportableStorageObjects,
   );
+  const saveConnectionProvider = useAppStore(
+    (state) => state.saveConnectionProvider,
+  );
+  const saveTailscaleApiKey = useAppStore((state) => state.saveTailscaleApiKey);
 
   if (!appState) {
     return null;
@@ -100,6 +104,8 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
+      onSaveConnectionProvider={saveConnectionProvider}
+      onSaveTailscaleApiKey={saveTailscaleApiKey}
     />
   );
 }

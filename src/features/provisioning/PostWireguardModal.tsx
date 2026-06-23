@@ -250,7 +250,7 @@ export function PostWireguardModal({
               <span className="text-neon-lime">{moonlightHost}</span>.
             </p>
             <p className="mt-2 text-[1.1rem] leading-snug text-[#cfe7ff]">
-              No WireGuard config or app import needed. Continue to set up
+              No WireGuard/Tailscale config or app import needed. Continue to set up
               Sunshine TLS, verify the Sunshine API, and pair with Moonlight
               directly from this app.
             </p>

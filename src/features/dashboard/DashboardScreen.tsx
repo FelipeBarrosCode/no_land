@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -8,8 +8,8 @@ import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { resolveMoonlightDownloadUrl, resolveWireguardDownloadUrl } from "../../lib/backend";
-import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL } from "../../lib/constants";
+import { resolveMoonlightDownloadUrl } from "../../lib/backend";
+import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL, TAILSCALE_DOWNLOAD_URL } from "../../lib/constants";
 import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
@@ -56,15 +56,10 @@ interface Props {
   onSyncInstanceStorage: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
   onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onListExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
+  onSaveConnectionProvider: (payload: { connectionProvider: "wireguard" | "tailscale" }) => Promise<void>;
+  onSaveTailscaleApiKey: (apiKey: string) => Promise<void>;
 }
 
-const placeholders = [
-  "Steam Library",
-  "Cloud Presets",
-  "Latency Tuning",
-  "Controller Profiles",
-  "Scene Presets"
-];
 
 export function DashboardScreen({
   appState,
@@ -96,7 +91,9 @@ export function DashboardScreen({
   onSaveInstanceStorageSelected,
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
-  onListExportableStorageObjects
+  onListExportableStorageObjects,
+  onSaveConnectionProvider,
+  onSaveTailscaleApiKey
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
@@ -104,6 +101,14 @@ export function DashboardScreen({
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
+  const [connectionInfoModalType, setConnectionInfoModalType] = useState<"wireguard" | "tailscale" | null>(null);
+  const [localTailscaleKey, setLocalTailscaleKey] = useState("");
+
+  useEffect(() => {
+    if (appState?.credentials?.tailscaleApiKey) {
+      setLocalTailscaleKey(appState.credentials.tailscaleApiKey);
+    }
+  }, [appState?.credentials?.tailscaleApiKey]);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -117,14 +122,6 @@ export function DashboardScreen({
     }
   }
 
-  async function handleWireguardDownload() {
-    const downloadUrl = await resolveWireguardDownloadUrl();
-    try {
-      await openUrl(downloadUrl);
-    } catch {
-      window.open(downloadUrl, "_blank", "noopener,noreferrer");
-    }
-  }
 
   async function handlePlay() {
     await onStartPlay();
@@ -258,67 +255,70 @@ export function DashboardScreen({
         </header>
 
         <section className="grid gap-4 md:grid-cols-3">
-          <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40">
+          <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
               <SpriteIcon icon="moonlight" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
+            <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
               <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
                 Download Moonlight
               </a>
             </h2>
-            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official installer for your OS and complete setup. Noland Connect updates
+            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+              Download and install the official client for your OS to stream remote gameplay with ultra-low latency. Noland Connect automatically updates
               {" "}
               <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
                 Moonlight
               </a>{" "}
-              settings after provisioning.
+              host configuration details and optimises streaming protocols after provisioning.
             </p>
           </Card>
 
-          <Card interactive onClick={handleWireguardDownload} className="pixel-frame min-h-40">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 2</p>
-              <SpriteIcon icon="settings" />
-            </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
-              <a href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Download WireGuard
-              </a>
-            </h2>
-            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official{" "}
-              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                WireGuard
-              </a>{" "}
-              install guide for your OS, install the app, then manage the tunnel from there.
-            </p>
-          </Card>
+          <div className="flex flex-col gap-4">
+            <Card interactive onClick={() => setConnectionInfoModalType("wireguard")} className="pixel-frame flex-1 flex flex-col justify-between p-4">
+              <div>
+                <div className="flex items-center justify-between">
+                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Connection Type</p>
+                  <SpriteIcon icon="settings" />
+                </div>
+                <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
+                  WireGuard
+                </h2>
+                <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                  Bare-bones process that manually requires setting up the connection.
+                </p>
+              </div>
+            </Card>
 
-          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40">
+            <Card interactive onClick={() => setConnectionInfoModalType("tailscale")} className="pixel-frame flex-1 flex flex-col justify-between p-4">
+              <div>
+                <div className="flex items-center justify-between">
+                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Connection Type</p>
+                  <SpriteIcon icon="settings" />
+                </div>
+                <h2 className="mt-2 font-display text-base text-neon-lime md:text-lg">
+                  Tailscale
+                </h2>
+                <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                  Requires downloading the Tailscale app and adding the API key.
+                </p>
+              </div>
+            </Card>
+          </div>
+
+          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
             <div className="flex items-center justify-between">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 3</p>
               <SpriteIcon icon="server" />
             </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Set Server</h2>
-            <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Discover nearby GPU offers by reliability, distance, and price. Adjust storage before
-              launch.
+            <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">Set Server</h2>
+            <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+              Discover nearby high-performance GPU server offers filtered by price, reliability, and network distance. Adjust template hash and storage allocation prior to launching your machine.
             </p>
           </Card>
         </section>
 
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          {placeholders.map((item) => (
-            <Card key={item} className="min-h-28 animate-slide-up">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#93b7d6]">Cartridge</p>
-              <h3 className="mt-2 font-display text-[11px] leading-[1.4] text-white">{item}</h3>
-              <p className="mt-2 text-[1.2rem] leading-none text-[#98adc9]">Coming soon</p>
-            </Card>
-          ))}
-        </section>
 
         <TutorialModal
           open={tutorialOpen}
@@ -347,46 +347,48 @@ export function DashboardScreen({
               </Button>
             </div>
 
-            {rentedInstances.length === 0 ? (
-              <p className="text-[1.25rem] text-[#bfd3ee]">
-                No active rented servers found for this account.
-              </p>
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {rentedInstances.map((instance) => (
-                  <Card key={instance.instanceId} className="border-2 border-[#3a4068]">
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="font-display text-[11px] text-white">{instance.label}</h4>
-                      <StatusPill
-                        state={instance.status.toLowerCase().includes("run") ? "Ready" : "WaitingForInstance"}
-                      />
-                    </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
-                      <p>ID: {instance.instanceId}</p>
-                      <p>Status: {instance.status}</p>
-                      <p>GPU: {instance.gpuName}</p>
-                      <p>SSH: {instance.sshHost || "pending"}</p>
-                    </div>
-                    <div className="mt-3">
-                      <InstanceCardActions
-                         instance={instance}
-                         busy={busy}
-                         instanceActionRunning={instanceActionRunning}
-                         blockingAction={blockingAction}
-                         onPlay={handlePlayExisting}
-                        onSettings={handleOpenSettings}
-                        onReconnect={handleReconnect}
-                        onReboot={handleReboot}
-                        onPause={handlePause}
-                        onDestroy={handleDestroy}
-                        onSaveStorage={handleSaveStorage}
-                        onSyncStorage={handleSyncStorage}
-                      />
-                    </div>
-                  </Card>
-                ))}
-              </div>
-            )}
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {rentedInstances.map((instance) => (
+                <Card key={instance.instanceId} className="border-2 border-[#3a4068]">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="font-display text-[11px] text-white">{instance.label}</h4>
+                    <StatusPill
+                      state={instance.status.toLowerCase().includes("run") ? "Ready" : "WaitingForInstance"}
+                    />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
+                    <p>ID: {instance.instanceId}</p>
+                    <p>Status: {instance.status}</p>
+                    <p>GPU: {instance.gpuName}</p>
+                    <p>SSH: {instance.sshHost || "pending"}</p>
+                  </div>
+                  <div className="mt-3">
+                    <InstanceCardActions
+                      instance={instance}
+                      busy={busy}
+                      instanceActionRunning={instanceActionRunning}
+                      blockingAction={blockingAction}
+                      onPlay={handlePlayExisting}
+                      onSettings={handleOpenSettings}
+                      onReconnect={handleReconnect}
+                      onReboot={handleReboot}
+                      onPause={handlePause}
+                      onDestroy={handleDestroy}
+                      onSaveStorage={handleSaveStorage}
+                      onSyncStorage={handleSyncStorage}
+                    />
+                  </div>
+                </Card>
+              ))}
+
+              <Card
+                interactive
+                onClick={() => setPickerOpen(true)}
+                className="flex items-center justify-center border-2 border-dashed border-[#3a4068] hover:border-neon-cyan hover:bg-[#10152f]/30 transition-colors min-h-[14rem] bg-[#10152f]/10"
+              >
+                <div className="text-[9rem] text-[#bfd3ee] font-bold transition-transform hover:scale-110 select-none leading-none">+</div>
+              </Card>
+            </div>
           </Card>
         </section>
 
@@ -516,7 +518,10 @@ export function DashboardScreen({
         onNextPage={onNextOffersPage}
         onPreviousPage={onPreviousOffersPage}
         onManualLocationSave={onManualLocationSave}
-        onSelectOffer={onSelectOffer}
+        onSelectOffer={async (offerId, storageGb) => {
+          await onSelectOffer(offerId, storageGb);
+          setPickerOpen(false);
+        }}
         onUpdateServerPreferences={onSaveServerPreferences}
       />
 
@@ -537,6 +542,102 @@ export function DashboardScreen({
         onLoadObjects={onListExportableStorageObjects}
         onConfirmExport={handleExportSelection}
       />
+
+      {connectionInfoModalType && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
+          <div className="glass-panel pixel-frame crt-surface w-full max-w-xl p-6">
+            <h3
+              className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base mb-4"
+              data-text={connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+            >
+              {connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+            </h3>
+
+            <div className="text-[1.2rem] leading-relaxed text-[#c5d8ec] space-y-4">
+              {connectionInfoModalType === "wireguard" ? (
+                <>
+                  <p>
+                    <strong>WireGuard</strong> is a bare-bones, high-performance VPN protocol that creates a secure direct tunnel to your instance.
+                  </p>
+                  <div>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">How it works</p>
+                    <p className="text-[1.15rem] text-[#b9cce2]">
+                      It requires manual setup: Noland generates a config profile which you download and manually import/activate inside your local WireGuard application.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">Requirements</p>
+                    <p className="text-[1.15rem] text-[#b9cce2]">
+                      Requires installing the official WireGuard client app on your system and importing the generated `.conf` files.
+                    </p>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p>
+                    <strong>Tailscale</strong> is a configuration-free mesh VPN that connects your machines securely with zero port forwarding or manual config files.
+                  </p>
+                  <div>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">How it works</p>
+                    <p className="text-[1.15rem] text-[#b9cce2]">
+                      Download the Tailscale client app on your system, then save your Tailscale API Key. Noland handles the rest of the configuration automatically.
+                    </p>
+                  </div>
+                  <div>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">Requirements</p>
+                    <p className="text-[1.15rem] text-[#b9cce2]">
+                      Requires installing the Tailscale client application and configuring a Tailscale API Key in Noland.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+
+            {connectionInfoModalType === "tailscale" && (
+              <div className="mt-4 border-t border-[#3e4270] pt-4">
+                <p className="font-display text-[10px] uppercase tracking-[0.1em] text-white mb-2">
+                  Add API Key & Set Preferred
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    placeholder="Enter Tailscale API Key (tskey-api-...)"
+                    value={localTailscaleKey}
+                    onChange={(e) => setLocalTailscaleKey(e.target.value)}
+                    className="flex-1 border border-[#3d426f] bg-[#0f1430] px-3 py-1.5 text-[1.15rem] text-white outline-none focus:border-neon-cyan"
+                  />
+                  <Button
+                    disabled={busy}
+                    onClick={async () => {
+                      if (localTailscaleKey.trim()) {
+                        await onSaveTailscaleApiKey(localTailscaleKey.trim());
+                        await onSaveConnectionProvider({ connectionProvider: "tailscale" });
+                        setConnectionInfoModalType(null);
+                      }
+                    }}
+                  >
+                    Save & Prefer
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-[#3e4270] pt-4">
+              <a
+                href={connectionInfoModalType === "wireguard" ? WIREGUARD_DOWNLOAD_URL : TAILSCALE_DOWNLOAD_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white"
+              >
+                Download {connectionInfoModalType === "wireguard" ? "WireGuard" : "Tailscale"} App
+              </a>
+              <Button variant="secondary" onClick={() => setConnectionInfoModalType(null)}>
+                Close
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

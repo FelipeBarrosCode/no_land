@@ -1,6 +1,7 @@
 import {
   MOONLIGHT_DOWNLOAD_URL,
   TAILSCALE_API_KEY_URL,
+  TAILSCALE_DOWNLOAD_URL,
   VAST_API_KEY_URL,
   WIREGUARD_DOWNLOAD_URL,
 } from "../../lib/constants";
@@ -11,6 +12,7 @@ export interface TutorialStep {
   description: string;
   linkLabel?: string;
   linkUrl?: string;
+  links?: { label: string; url: string }[];
 }
 
 export const tutorialSteps: TutorialStep[] = [
@@ -65,8 +67,10 @@ export const tutorialSteps: TutorialStep[] = [
     title: "Install your connection app",
     description:
       "Install WireGuard or Tailscale. WireGuard creates a direct VPN tunnel. Tailscale uses your Tailscale mesh network for an even simpler setup.",
-    linkLabel: "Download WireGuard",
-    linkUrl: WIREGUARD_DOWNLOAD_URL,
+    links: [
+      { label: "Download WireGuard", url: WIREGUARD_DOWNLOAD_URL },
+      { label: "Download Tailscale", url: TAILSCALE_DOWNLOAD_URL },
+    ],
   },
   {
     eyebrow: "Step 8 (Optional)",

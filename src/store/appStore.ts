@@ -1456,8 +1456,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.wireguard.reconnect",
-          label: "Opening WireGuard",
-          detail: "Open the WireGuard app and manage the tunnel manually.",
+          label: "Opening WireGuard / Tailscale",
+          detail: "Open the WireGuard or Tailscale app and manage the tunnel manually.",
           blocking: true,
         },
         async () => await reconnectInstanceWireguard(instanceId),

@@ -6,6 +6,7 @@ export const TAILSCALE_API_KEY_URL =
 export const MOONLIGHT_DOWNLOAD_URL =
   "https://github.com/moonlight-stream/moonlight-qt/releases";
 export const WIREGUARD_DOWNLOAD_URL = "https://www.wireguard.com/install/";
+export const TAILSCALE_DOWNLOAD_URL = "https://tailscale.com/download";
 
 export const MOONLIGHT_DOWNLOADS: Record<string, string> = {
   windows: MOONLIGHT_DOWNLOAD_URL,

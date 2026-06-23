@@ -103,7 +103,7 @@ export function InstanceCardActions({
           loadingText="Opening..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open WireGuard
+          Open WireGuard/Tailscale
         </Button>
       </div>
 
