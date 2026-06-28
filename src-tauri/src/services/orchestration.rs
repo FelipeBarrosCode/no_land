@@ -733,12 +733,23 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         initial_state.server_preferences.storage_gb
     );
 
+    let (env_user, env_pass) = {
+        let state = context.state.read().await;
+        (state.credentials.app_username.clone(), state.credentials.app_password.clone())
+    };
+
+    let env_vars = serde_json::json!({
+        "-e USER": env_user,
+        "-e PASS": env_pass
+    });
+
     let mut instance = match instance_manager
         .create_instance(
             &vast,
             offer.id,
             &initial_state.server_preferences.template_hash,
             initial_state.server_preferences.storage_gb,
+            Some(env_vars),
         )
         .await
     {

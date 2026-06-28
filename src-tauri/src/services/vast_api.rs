@@ -170,13 +170,14 @@ impl VastApiClient {
         template_hash: &str,
         storage_gb: u32,
         label: &str,
+        env_vars: Option<serde_json::Value>,
     ) -> AppResult<VastInstance> {
         let url = format!(
             "{}/api/v0/asks/{offer_id}/",
             self.base_url.trim_end_matches('/')
         );
 
-        let payload = json!({
+        let mut payload = json!({
             "template_hash_id": template_hash,
             "disk": storage_gb,
             "runtype": "vm",
@@ -185,6 +186,10 @@ impl VastApiClient {
             "label": label,
             "cancel_unavail": true
         });
+
+        if let Some(env) = env_vars {
+            payload["env"] = env;
+        }
 
         info!(
             "Vast request create_instance offer_id={} storage_gb={} template_hash={} endpoint={}",
