@@ -821,7 +821,10 @@ pub async fn setup_moonlight_sunshine(
     tauri::async_runtime::spawn(async move {
         if let Ok((remote, sunshine_user)) = sunshine_ssh_remote(&ctx_clone).await {
             let command = format!("sudo bash -c 'if ! command -v steam >/dev/null 2>&1; then wget -qO /tmp/steam.deb https://repo.steampowered.com/steam/archive/precise/steam_latest.deb && dpkg -i /tmp/steam.deb || apt-get install -f -y; fi'; sudo -u {} env DISPLAY=:0 steam -gamepadui >/dev/null 2>&1 & disown", sunshine_user);
-            let _ = tokio::task::spawn_blocking(move || remote.ssh(&command, std::time::Duration::from_secs(120))).await;
+            let _ = tokio::task::spawn_blocking(move || {
+                remote.ssh(&command, std::time::Duration::from_secs(120))
+            })
+            .await;
         }
     });
 
@@ -961,6 +964,7 @@ pub async fn submit_moonlight_pin_to_sunshine(
             state.post_wireguard_setup.paired = true;
             state.post_wireguard_setup.setup_complete = true;
             state.orchestration_state = OrchestrationState::Ready;
+            state.has_completed_guided_setup = true;
             state.last_error = None;
         })
         .await?;

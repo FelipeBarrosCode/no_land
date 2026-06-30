@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct PersistedAppState {
     pub version: u32,
     pub onboarding_completed: bool,
+    #[serde(default)]
+    pub has_completed_guided_setup: bool,
     pub credentials: CredentialsState,
     pub ssh: SshState,
     pub location: LocationState,
@@ -30,6 +32,7 @@ impl Default for PersistedAppState {
         Self {
             version: 1,
             onboarding_completed: false,
+            has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
             ssh: SshState::default(),
             location: LocationState::default(),

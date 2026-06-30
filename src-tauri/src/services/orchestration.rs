@@ -367,6 +367,7 @@ impl OrchestrationService {
         context
             .update_state(|state| {
                 state.orchestration_state = OrchestrationState::Ready;
+                state.has_completed_guided_setup = true;
                 state.last_error = None;
             })
             .await?;
@@ -434,6 +435,7 @@ impl OrchestrationService {
         context
             .update_state(|state| {
                 state.orchestration_state = OrchestrationState::Ready;
+                state.has_completed_guided_setup = true;
                 state.last_error = None;
             })
             .await?;
@@ -735,7 +737,10 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
     let (env_user, env_pass) = {
         let state = context.state.read().await;
-        (state.credentials.app_username.clone(), state.credentials.app_password.clone())
+        (
+            state.credentials.app_username.clone(),
+            state.credentials.app_password.clone(),
+        )
     };
 
     let env_vars = serde_json::json!({

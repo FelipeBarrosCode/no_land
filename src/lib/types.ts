@@ -308,6 +308,7 @@ export interface PlatformCredentialsUpdate {
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;
+  hasCompletedGuidedSetup: boolean;
   credentials: CredentialsState;
   ssh: SshState;
   location: LocationState;

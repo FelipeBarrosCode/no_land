@@ -11,8 +11,19 @@ import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { resolveMoonlightDownloadUrl } from "../../lib/backend";
-import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL, TAILSCALE_DOWNLOAD_URL } from "../../lib/constants";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
+import {
+  MOONLIGHT_DOWNLOAD_URL,
+  WIREGUARD_DOWNLOAD_URL,
+  TAILSCALE_DOWNLOAD_URL,
+} from "../../lib/constants";
+import type {
+  OfferCandidate,
+  PersistedAppState,
+  RentedInstanceSummary,
+  ServerPreferences,
+  SharedStorageObjectEntry,
+  SunshineSettingsResponse,
+} from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
@@ -46,22 +57,48 @@ interface Props {
   onStartPlayExisting: (instanceId: number) => Promise<void>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
-  onSaveServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
-  onLoadSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
-  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
-  onResetSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onSaveServerPreferences: (
+    payload: Partial<ServerPreferences>,
+  ) => Promise<void>;
+  onLoadSunshineSettings: (
+    instanceId: number,
+    sunshineUsername: string,
+    sunshinePassword: string,
+  ) => Promise<void>;
+  onSaveSunshineSettings: (
+    instanceId: number,
+    settings: Record<string, unknown>,
+    sunshineUsername: string,
+    sunshinePassword: string,
+  ) => Promise<void>;
+  onResetSunshineSettings: (
+    instanceId: number,
+    sunshineUsername: string,
+    sunshinePassword: string,
+  ) => Promise<void>;
   onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
-  onSaveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
-  onSyncInstanceStorage: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
-  onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
-  onListExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
-  onSaveConnectionProvider: (payload: { connectionProvider: "wireguard" | "tailscale" }) => Promise<void>;
+  onSaveInstanceStorageSelected: (
+    instanceId: number,
+    selectedPaths: string[],
+  ) => Promise<string | null>;
+  onSyncInstanceStorage: (
+    instanceId: number,
+    selectedPaths: string[],
+  ) => Promise<string | null>;
+  onListSyncableStorageObjects: (
+    instanceId: number,
+  ) => Promise<SharedStorageObjectEntry[] | null>;
+  onListExportableStorageObjects: (
+    instanceId: number,
+  ) => Promise<SharedStorageObjectEntry[] | null>;
+  onSaveConnectionProvider: (payload: {
+    connectionProvider: "wireguard" | "tailscale";
+  }) => Promise<void>;
   onSaveTailscaleApiKey: (apiKey: string) => Promise<void>;
 }
-
 
 export function DashboardScreen({
   appState,
@@ -95,15 +132,19 @@ export function DashboardScreen({
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
   onSaveConnectionProvider,
-  onSaveTailscaleApiKey
+  onSaveTailscaleApiKey,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
+  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(
+    null,
+  );
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
-  const [connectionInfoModalType, setConnectionInfoModalType] = useState<"wireguard" | "tailscale" | null>(null);
+  const [connectionInfoModalType, setConnectionInfoModalType] = useState<
+    "wireguard" | "tailscale" | null
+  >(null);
   const [localTailscaleKey, setLocalTailscaleKey] = useState("");
 
   useEffect(() => {
@@ -114,6 +155,7 @@ export function DashboardScreen({
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
+  const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
 
   async function handleMoonlightDownload() {
     const downloadUrl = await resolveMoonlightDownloadUrl();
@@ -123,7 +165,6 @@ export function DashboardScreen({
       window.open(downloadUrl, "_blank", "noopener,noreferrer");
     }
   }
-
 
   async function handlePlay() {
     await onStartPlay();
@@ -139,25 +180,44 @@ export function DashboardScreen({
     setSettingsInstanceId(instanceId);
   }
 
-  async function handleLoadSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
+  async function handleLoadSunshineSettings(
+    sunshineUsername: string,
+    sunshinePassword: string,
+  ) {
     if (settingsInstanceId !== null) {
-      await onLoadSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
+      await onLoadSunshineSettings(
+        settingsInstanceId,
+        sunshineUsername,
+        sunshinePassword,
+      );
     }
   }
 
   async function handleSaveSunshineSettings(
     settings: Record<string, unknown>,
     sunshineUsername: string,
-    sunshinePassword: string
+    sunshinePassword: string,
   ) {
     if (settingsInstanceId !== null) {
-      await onSaveSunshineSettings(settingsInstanceId, settings, sunshineUsername, sunshinePassword);
+      await onSaveSunshineSettings(
+        settingsInstanceId,
+        settings,
+        sunshineUsername,
+        sunshinePassword,
+      );
     }
   }
 
-  async function handleResetSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
+  async function handleResetSunshineSettings(
+    sunshineUsername: string,
+    sunshinePassword: string,
+  ) {
     if (settingsInstanceId !== null) {
-      await onResetSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
+      await onResetSunshineSettings(
+        settingsInstanceId,
+        sunshineUsername,
+        sunshinePassword,
+      );
     }
   }
 
@@ -248,7 +308,9 @@ export function DashboardScreen({
               <SpriteIcon icon="help" />
               <span className="ml-1">Help</span>
             </Button>
-            <Button variant="ghost" onClick={() => navigate("/settings")}>Settings</Button>
+            <Button variant="ghost" onClick={() => navigate("/settings")}>
+              Settings
+            </Button>
             <Button variant="secondary" onClick={() => setPickerOpen(true)}>
               Select Server
             </Button>
@@ -256,83 +318,141 @@ export function DashboardScreen({
           </div>
         </header>
 
-        <section className="grid gap-4 md:grid-cols-3">
-          <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
-              <div className="flex items-center gap-2">
-                <AIPromptHelper topic="Moonlight Client Download" promptText={APP_PROMPTS.moonlightCard} variant="icon" />
-                <SpriteIcon icon="moonlight" />
-              </div>
-            </div>
-            <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-              <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Download Moonlight
-              </a>
-            </h2>
-            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
-              Download and install the official client for your OS to stream remote gameplay with ultra-low latency. Noland Connect automatically updates
-              {" "}
-              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Moonlight
-              </a>{" "}
-              host configuration details and optimises streaming protocols after provisioning.
-            </p>
-          </Card>
-
-          <div className="flex flex-col gap-4">
-            <Card interactive onClick={() => setConnectionInfoModalType("wireguard")} className="pixel-frame flex-1 flex flex-col justify-between p-4">
-              <div>
-                <div className="flex items-center justify-between">
-                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Connection Type</p>
-                  <div className="flex items-center gap-2">
-                    <AIPromptHelper topic="WireGuard Connection Option" promptText={APP_PROMPTS.wireguardCard} variant="icon" />
-                    <SpriteIcon icon="settings" />
-                  </div>
-                </div>
-                <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
-                  WireGuard
-                </h2>
-                <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
-                  Bare-bones process that manually requires setting up the connection.
+        {showDashboardGuidance ? (
+          <section className="grid gap-4 md:grid-cols-3">
+            <Card
+              interactive
+              onClick={handleMoonlightDownload}
+              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
+            >
+              <div className="flex items-center justify-between">
+                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                  Panel 1
                 </p>
+                <div className="flex items-center gap-2">
+                  <AIPromptHelper
+                    topic="Moonlight Client Download"
+                    promptText={APP_PROMPTS.moonlightCard}
+                    variant="icon"
+                  />
+                  <SpriteIcon icon="moonlight" />
+                </div>
               </div>
+              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
+                <a
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Download Moonlight
+                </a>
+              </h2>
+              <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+                Download and install the official client for your OS to stream
+                remote gameplay with ultra-low latency. Noland Connect
+                automatically updates{" "}
+                <a
+                  className="text-neon-cyan underline underline-offset-2 hover:text-white"
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  Moonlight
+                </a>{" "}
+                host configuration details and optimises streaming protocols
+                after provisioning.
+              </p>
             </Card>
 
-            <Card interactive onClick={() => setConnectionInfoModalType("tailscale")} className="pixel-frame flex-1 flex flex-col justify-between p-4">
-              <div>
-                <div className="flex items-center justify-between">
-                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Connection Type</p>
-                  <div className="flex items-center gap-2">
-                    <AIPromptHelper topic="Tailscale Connection Option" promptText={APP_PROMPTS.tailscaleCard} variant="icon" />
-                    <SpriteIcon icon="settings" />
+            <div className="flex flex-col gap-4">
+              <Card
+                interactive
+                onClick={() => setConnectionInfoModalType("wireguard")}
+                className="pixel-frame flex-1 flex flex-col justify-between p-4"
+              >
+                <div>
+                  <div className="flex items-center justify-between">
+                    <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+                      Connection Type
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <AIPromptHelper
+                        topic="WireGuard Connection Option"
+                        promptText={APP_PROMPTS.wireguardCard}
+                        variant="icon"
+                      />
+                      <SpriteIcon icon="settings" />
+                    </div>
                   </div>
+                  <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
+                    WireGuard
+                  </h2>
+                  <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                    Bare-bones process that manually requires setting up the
+                    connection.
+                  </p>
                 </div>
-                <h2 className="mt-2 font-display text-base text-neon-lime md:text-lg">
-                  Tailscale
-                </h2>
-                <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
-                  Requires downloading the Tailscale app and adding the API key.
-                </p>
-              </div>
-            </Card>
-          </div>
+              </Card>
 
-          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40 flex flex-col justify-center p-4">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 3</p>
-              <div className="flex items-center gap-2">
-                <AIPromptHelper topic="Set Server Selection Offering" promptText={APP_PROMPTS.setServerCard} variant="icon" />
-                <SpriteIcon icon="server" />
-              </div>
+              <Card
+                interactive
+                onClick={() => setConnectionInfoModalType("tailscale")}
+                className="pixel-frame flex-1 flex flex-col justify-between p-4"
+              >
+                <div>
+                  <div className="flex items-center justify-between">
+                    <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                      Connection Type
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <AIPromptHelper
+                        topic="Tailscale Connection Option"
+                        promptText={APP_PROMPTS.tailscaleCard}
+                        variant="icon"
+                      />
+                      <SpriteIcon icon="settings" />
+                    </div>
+                  </div>
+                  <h2 className="mt-2 font-display text-base text-neon-lime md:text-lg">
+                    Tailscale
+                  </h2>
+                  <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                    Requires downloading the Tailscale app and adding the API
+                    key.
+                  </p>
+                </div>
+              </Card>
             </div>
-            <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">Set Server</h2>
-            <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
-              Discover nearby high-performance GPU server offers filtered by price, reliability, and network distance. Adjust template hash and storage allocation prior to launching your machine.
-            </p>
-          </Card>
-        </section>
 
+            <Card
+              interactive
+              onClick={() => setPickerOpen(true)}
+              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
+            >
+              <div className="flex items-center justify-between">
+                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                  Panel 3
+                </p>
+                <div className="flex items-center gap-2">
+                  <AIPromptHelper
+                    topic="Set Server Selection Offering"
+                    promptText={APP_PROMPTS.setServerCard}
+                    variant="icon"
+                  />
+                  <SpriteIcon icon="server" />
+                </div>
+              </div>
+              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
+                Set Server
+              </h2>
+              <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+                Discover nearby high-performance GPU server offers filtered by
+                price, reliability, and network distance. Adjust template hash
+                and storage allocation prior to launching your machine.
+              </p>
+            </Card>
+          </section>
+        ) : null}
 
         <TutorialModal
           open={tutorialOpen}
@@ -348,27 +468,52 @@ export function DashboardScreen({
           <Card className="pixel-frame">
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Rented Servers</h3>
-                <AIPromptHelper topic="Managing Rented Servers" promptText={APP_PROMPTS.rentedServersSection} variant="icon" />
-                {blockingAction && blockingAction.key.startsWith("instance.") && (
-                  <p className="mt-1 text-[1.1rem] text-[#9ec4df]" aria-live="polite">
-                    {blockingLabel}
-                    {blockingDetail ? `: ${blockingDetail}` : "..."}
-                  </p>
-                )}
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
+                  Rented Servers
+                </h3>
+                <AIPromptHelper
+                  topic="Managing Rented Servers"
+                  promptText={APP_PROMPTS.rentedServersSection}
+                  variant="icon"
+                />
+                {blockingAction &&
+                  blockingAction.key.startsWith("instance.") && (
+                    <p
+                      className="mt-1 text-[1.1rem] text-[#9ec4df]"
+                      aria-live="polite"
+                    >
+                      {blockingLabel}
+                      {blockingDetail ? `: ${blockingDetail}` : "..."}
+                    </p>
+                  )}
               </div>
-              <Button variant="secondary" onClick={onLoadRentedInstances} disabled={busy} loading={busy && !blockingAction} loadingText="Refreshing...">
+              <Button
+                variant="secondary"
+                onClick={onLoadRentedInstances}
+                disabled={busy}
+                loading={busy && !blockingAction}
+                loadingText="Refreshing..."
+              >
                 Refresh Rented
               </Button>
             </div>
 
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {rentedInstances.map((instance) => (
-                <Card key={instance.instanceId} className="border-2 border-[#3a4068]">
+                <Card
+                  key={instance.instanceId}
+                  className="border-2 border-[#3a4068]"
+                >
                   <div className="flex items-center justify-between gap-2">
-                    <h4 className="font-display text-[11px] text-white">{instance.label}</h4>
+                    <h4 className="font-display text-[11px] text-white">
+                      {instance.label}
+                    </h4>
                     <StatusPill
-                      state={instance.status.toLowerCase().includes("run") ? "Ready" : "WaitingForInstance"}
+                      state={
+                        instance.status.toLowerCase().includes("run")
+                          ? "Ready"
+                          : "WaitingForInstance"
+                      }
                     />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
@@ -401,18 +546,26 @@ export function DashboardScreen({
                 onClick={() => setPickerOpen(true)}
                 className="flex items-center justify-center border-2 border-dashed border-[#3a4068] hover:border-neon-cyan hover:bg-[#10152f]/30 transition-colors min-h-[14rem] bg-[#10152f]/10"
               >
-                <div className="text-[9rem] text-[#bfd3ee] font-bold transition-transform hover:scale-110 select-none leading-none">+</div>
+                <div className="text-[9rem] text-[#bfd3ee] font-bold transition-transform hover:scale-110 select-none leading-none">
+                  +
+                </div>
               </Card>
             </div>
           </Card>
         </section>
 
-         <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
+        <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
           <Card className="pixel-frame min-h-44">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Selected Server</h3>
-                <AIPromptHelper topic="Selected Server Specifications" promptText={APP_PROMPTS.selectedServerSection} variant="icon" />
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
+                  Selected Server
+                </h3>
+                <AIPromptHelper
+                  topic="Selected Server Specifications"
+                  promptText={APP_PROMPTS.selectedServerSection}
+                  variant="icon"
+                />
               </div>
               <StatusPill state={appState.orchestrationState} />
             </div>
@@ -420,36 +573,58 @@ export function DashboardScreen({
             {appState.selectedOffer ? (
               <div className="mt-4 grid grid-cols-2 gap-3 text-[1.25rem] leading-[1.05] text-[#d9efff] md:grid-cols-4">
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Host</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Host
+                  </p>
                   <p>{appState.selectedOffer.hostLabel}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Location</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Location
+                  </p>
                   <p>{appState.selectedOffer.locationLabel}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">GPU</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    GPU
+                  </p>
                   <p>{appState.selectedOffer.gpuName}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Price/hour</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Price/hour
+                  </p>
                   <p>${appState.selectedOffer.hourlyPrice.toFixed(3)}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Distance</p>
-                  <p>{appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Distance
+                  </p>
+                  <p>
+                    {appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km
+                  </p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Reliability</p>
-                  <p>{(appState.selectedOffer.reliability * 100).toFixed(1)}%</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Reliability
+                  </p>
+                  <p>
+                    {(appState.selectedOffer.reliability * 100).toFixed(1)}%
+                  </p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Storage</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Storage
+                  </p>
                   <p>{appState.serverPreferences.storageGb} GB</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Template</p>
-                  <p className="truncate">{appState.serverPreferences.templateHash}</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Template
+                  </p>
+                  <p className="truncate">
+                    {appState.serverPreferences.templateHash}
+                  </p>
                 </div>
               </div>
             ) : null}
@@ -469,7 +644,10 @@ export function DashboardScreen({
                 />
                 <HudBar
                   label="Distance"
-                  value={Math.max(0, 1000 - appState.selectedOffer.estimatedDistanceKm)}
+                  value={Math.max(
+                    0,
+                    1000 - appState.selectedOffer.estimatedDistanceKm,
+                  )}
                   max={1000}
                   valueLabel={`${appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km`}
                 />
@@ -485,15 +663,21 @@ export function DashboardScreen({
             <div>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Action</p>
-                  <AIPromptHelper topic="Provisioning and Play Execution" promptText={APP_PROMPTS.playButtonSection} variant="icon" />
+                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                    Action
+                  </p>
+                  <AIPromptHelper
+                    topic="Provisioning and Play Execution"
+                    promptText={APP_PROMPTS.playButtonSection}
+                    variant="icon"
+                  />
                 </div>
                 <SpriteIcon icon="play" />
               </div>
               <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
               <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-                Creates the instance, waits for readiness, runs provisioning, and opens pairing
-                guidance.
+                Creates the instance, waits for readiness, runs provisioning,
+                and opens pairing guidance.
               </p>
             </div>
             <Button
@@ -570,13 +754,27 @@ export function DashboardScreen({
             <div className="flex items-center justify-between mb-4 gap-2 border-b border-[#3e4270] pb-2">
               <h3
                 className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-                data-text={connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+                data-text={
+                  connectionInfoModalType === "wireguard"
+                    ? "WireGuard Connection Info"
+                    : "Tailscale Connection Info"
+                }
               >
-                {connectionInfoModalType === "wireguard" ? "WireGuard Connection Info" : "Tailscale Connection Info"}
+                {connectionInfoModalType === "wireguard"
+                  ? "WireGuard Connection Info"
+                  : "Tailscale Connection Info"}
               </h3>
               <AIPromptHelper
-                topic={connectionInfoModalType === "wireguard" ? "WireGuard VPN Connection" : "Tailscale VPN Connection"}
-                promptText={connectionInfoModalType === "wireguard" ? APP_PROMPTS.wireguardModalInfo : APP_PROMPTS.tailscaleModalInfo}
+                topic={
+                  connectionInfoModalType === "wireguard"
+                    ? "WireGuard VPN Connection"
+                    : "Tailscale VPN Connection"
+                }
+                promptText={
+                  connectionInfoModalType === "wireguard"
+                    ? APP_PROMPTS.wireguardModalInfo
+                    : APP_PROMPTS.tailscaleModalInfo
+                }
                 variant="both"
               />
             </div>
@@ -585,36 +783,54 @@ export function DashboardScreen({
               {connectionInfoModalType === "wireguard" ? (
                 <>
                   <p>
-                    <strong>WireGuard</strong> is a bare-bones, high-performance VPN protocol that creates a secure direct tunnel to your instance.
+                    <strong>WireGuard</strong> is a bare-bones, high-performance
+                    VPN protocol that creates a secure direct tunnel to your
+                    instance.
                   </p>
                   <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">How it works</p>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">
+                      How it works
+                    </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
-                      It requires manual setup: Noland generates a config profile which you download and manually import/activate inside your local WireGuard application.
+                      It requires manual setup: Noland generates a config
+                      profile which you download and manually import/activate
+                      inside your local WireGuard application.
                     </p>
                   </div>
                   <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">Requirements</p>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">
+                      Requirements
+                    </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
-                      Requires installing the official WireGuard client app on your system and importing the generated `.conf` files.
+                      Requires installing the official WireGuard client app on
+                      your system and importing the generated `.conf` files.
                     </p>
                   </div>
                 </>
               ) : (
                 <>
                   <p>
-                    <strong>Tailscale</strong> is a configuration-free mesh VPN that connects your machines securely with zero port forwarding or manual config files.
+                    <strong>Tailscale</strong> is a configuration-free mesh VPN
+                    that connects your machines securely with zero port
+                    forwarding or manual config files.
                   </p>
                   <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">How it works</p>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">
+                      How it works
+                    </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
-                      Download the Tailscale client app on your system, then save your Tailscale API Key. Noland handles the rest of the configuration automatically.
+                      Download the Tailscale client app on your system, then
+                      save your Tailscale API Key. Noland handles the rest of
+                      the configuration automatically.
                     </p>
                   </div>
                   <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">Requirements</p>
+                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">
+                      Requirements
+                    </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
-                      Requires installing the Tailscale client application and configuring a Tailscale API Key in Noland.
+                      Requires installing the Tailscale client application and
+                      configuring a Tailscale API Key in Noland.
                     </p>
                   </div>
                 </>
@@ -639,7 +855,9 @@ export function DashboardScreen({
                     onClick={async () => {
                       if (localTailscaleKey.trim()) {
                         await onSaveTailscaleApiKey(localTailscaleKey.trim());
-                        await onSaveConnectionProvider({ connectionProvider: "tailscale" });
+                        await onSaveConnectionProvider({
+                          connectionProvider: "tailscale",
+                        });
                         setConnectionInfoModalType(null);
                       }
                     }}
@@ -652,14 +870,25 @@ export function DashboardScreen({
 
             <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-[#3e4270] pt-4">
               <a
-                href={connectionInfoModalType === "wireguard" ? WIREGUARD_DOWNLOAD_URL : TAILSCALE_DOWNLOAD_URL}
+                href={
+                  connectionInfoModalType === "wireguard"
+                    ? WIREGUARD_DOWNLOAD_URL
+                    : TAILSCALE_DOWNLOAD_URL
+                }
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white"
               >
-                Download {connectionInfoModalType === "wireguard" ? "WireGuard" : "Tailscale"} App
+                Download{" "}
+                {connectionInfoModalType === "wireguard"
+                  ? "WireGuard"
+                  : "Tailscale"}{" "}
+                App
               </a>
-              <Button variant="secondary" onClick={() => setConnectionInfoModalType(null)}>
+              <Button
+                variant="secondary"
+                onClick={() => setConnectionInfoModalType(null)}
+              >
                 Close
               </Button>
             </div>

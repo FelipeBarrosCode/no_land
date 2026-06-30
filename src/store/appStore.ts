@@ -370,6 +370,7 @@ async function applyProvisioningEventState(
   ) => void,
 ): Promise<void> {
   let latestPostWireguardSetup: PostWireGuardSetupState | null = null;
+  let latestAppState: PersistedAppState | null = null;
   if (PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
     try {
       latestPostWireguardSetup = await getSetupStatus();
@@ -378,18 +379,33 @@ async function applyProvisioningEventState(
     }
   }
 
+  if (event.state === "Ready") {
+    try {
+      latestAppState = await getAppState();
+    } catch {
+      latestAppState = null;
+    }
+  }
+
   set((state) => {
     const nextLogs = [event, ...state.logs].slice(0, 500);
-    const nextBaseState = state.appState
+    const nextBaseState = latestAppState
       ? {
-          ...state.appState,
-          orchestrationState: event.state,
-          lastError: event.isError ? event.message : state.appState.lastError,
+          ...latestAppState,
           ...(latestPostWireguardSetup
             ? { postWireguardSetup: latestPostWireguardSetup }
             : {}),
         }
-      : state.appState;
+      : state.appState
+        ? {
+            ...state.appState,
+            orchestrationState: event.state,
+            lastError: event.isError ? event.message : state.appState.lastError,
+            ...(latestPostWireguardSetup
+              ? { postWireguardSetup: latestPostWireguardSetup }
+              : {}),
+          }
+        : state.appState;
     const nextState = nextBaseState
       ? applyPostWireguardEventState(nextBaseState, event.state)
       : nextBaseState;
@@ -1457,7 +1473,8 @@ export const useAppStore = create<AppStore>((set, get) => {
         {
           key: "instance.wireguard.reconnect",
           label: "Opening WireGuard / Tailscale",
-          detail: "Open the WireGuard or Tailscale app and manage the tunnel manually.",
+          detail:
+            "Open the WireGuard or Tailscale app and manage the tunnel manually.",
           blocking: true,
         },
         async () => await reconnectInstanceWireguard(instanceId),

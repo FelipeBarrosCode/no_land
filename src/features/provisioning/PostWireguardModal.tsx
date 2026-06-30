@@ -3,6 +3,11 @@ import { Button } from "../../components/ui/Button";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
+import {
+  MOONLIGHT_DOWNLOAD_URL,
+  TAILSCALE_DOWNLOAD_URL,
+  WIREGUARD_DOWNLOAD_URL,
+} from "../../lib/constants";
 import type {
   OrchestrationState,
   PersistedAppState,
@@ -103,6 +108,8 @@ export function PostWireguardModal({
   const pinRetryError =
     setup.lastError?.stage === "moonlight_pin_received" ||
     setup.lastError?.stage === "sunshine_pin_submitting";
+  const installLinkClass =
+    "inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white";
 
   const instructions = useMemo(() => {
     if (isMacManual) {
@@ -148,11 +155,13 @@ export function PostWireguardModal({
         <div className="flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2 mb-4">
           <h3
             className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-            data-text={isTailscaleFlow
-              ? "Tailscale Connection"
-              : isWireguardPhase
-                ? "Secure Tunnel Setup"
-                : "Moonlight & Sunshine Setup"}
+            data-text={
+              isTailscaleFlow
+                ? "Tailscale Connection"
+                : isWireguardPhase
+                  ? "Secure Tunnel Setup"
+                  : "Moonlight & Sunshine Setup"
+            }
           >
             {isTailscaleFlow
               ? "Tailscale Connection"
@@ -161,16 +170,20 @@ export function PostWireguardModal({
                 : "Moonlight & Sunshine Setup"}
           </h3>
           <AIPromptHelper
-            topic={isTailscaleFlow
-              ? "Tailscale Connection Setup"
-              : isWireguardPhase
-                ? "WireGuard Connection Setup"
-                : "Moonlight & Sunshine Pair Setup"}
-            promptText={isTailscaleFlow
-              ? APP_PROMPTS.tailscaleModalInfo
-              : isWireguardPhase
-                ? APP_PROMPTS.wireguardModalInfo
-                : APP_PROMPTS.playButtonSection}
+            topic={
+              isTailscaleFlow
+                ? "Tailscale Connection Setup"
+                : isWireguardPhase
+                  ? "WireGuard Connection Setup"
+                  : "Moonlight & Sunshine Pair Setup"
+            }
+            promptText={
+              isTailscaleFlow
+                ? APP_PROMPTS.tailscaleModalInfo
+                : isWireguardPhase
+                  ? APP_PROMPTS.wireguardModalInfo
+                  : APP_PROMPTS.playButtonSection
+            }
             variant="both"
           />
         </div>
@@ -184,6 +197,33 @@ export function PostWireguardModal({
                   : "Click Start Manual Setup to load the current tunnel config for this instance, then import it into the WireGuard app."
                 : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then continue."}
             </p>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                What to install first
+              </h4>
+              <p className="mt-2">
+                Install WireGuard on this computer, import the generated tunnel,
+                activate it, then return here to continue into Moonlight setup.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  href={WIREGUARD_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download WireGuard
+                </a>
+                <a
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Moonlight
+                </a>
+              </div>
+            </div>
 
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-[1.08rem] leading-snug text-[#cfe7ff]">
               {instructions.map((instruction) => (
@@ -242,7 +282,7 @@ export function PostWireguardModal({
                 onClick={() => void onSetupMoonlightSunshine()}
                 disabled={busy}
               >
-                Done
+                Continue to Moonlight Setup
               </Button>
             </div>
 
@@ -270,10 +310,42 @@ export function PostWireguardModal({
               Tailscale is connected! Your remote instance is reachable at{" "}
               <span className="text-neon-lime">{moonlightHost}</span>.
             </p>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+                What to do on this computer
+              </h4>
+              <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
+                <li>Install Tailscale if it is not already installed.</li>
+                <li>Sign in to the same tailnet and keep Tailscale running.</li>
+                <li>Install Moonlight if needed.</li>
+                <li>
+                  Continue below so Noland can verify Sunshine and start
+                  pairing.
+                </li>
+              </ol>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  href={TAILSCALE_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Tailscale
+                </a>
+                <a
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Moonlight
+                </a>
+              </div>
+            </div>
             <p className="mt-2 text-[1.1rem] leading-snug text-[#cfe7ff]">
-              No WireGuard/Tailscale config or app import needed. Continue to set up
-              Sunshine TLS, verify the Sunshine API, and pair with Moonlight
-              directly from this app.
+              No WireGuard/Tailscale config or app import needed. Continue to
+              set up Sunshine TLS, verify the Sunshine API, and pair with
+              Moonlight directly from this app.
             </p>
             <div className="mt-6 flex flex-wrap gap-2">
               <Button
@@ -293,6 +365,35 @@ export function PostWireguardModal({
                   <span className="text-neon-cyan">{moonlightHost}</span>. PIN
                   entry unlocks when this preparation is done.
                 </p>
+                <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                    Moonlight setup checklist
+                  </h4>
+                  <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
+                    <li>
+                      Install Moonlight on this computer if you have not
+                      already.
+                    </li>
+                    <li>
+                      Open Moonlight and add the PC at{" "}
+                      <span className="text-neon-cyan">{moonlightHost}</span>.
+                    </li>
+                    <li>
+                      When prompted, generate the PIN in Moonlight and return
+                      here.
+                    </li>
+                  </ol>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <a
+                      href={MOONLIGHT_DOWNLOAD_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={installLinkClass}
+                    >
+                      Download Moonlight
+                    </a>
+                  </div>
+                </div>
               </>
             ) : (
               <>

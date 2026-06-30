@@ -74,6 +74,16 @@ fn main() {
                 state_changed = true;
             }
 
+            if !initial_state.has_completed_guided_setup
+                && (initial_state.post_wireguard_setup.setup_complete
+                    || initial_state.provisioned_servers.iter().any(|server| {
+                        server.steps.pairing_completed || server.steps.moonlight_configured
+                    }))
+            {
+                initial_state.has_completed_guided_setup = true;
+                state_changed = true;
+            }
+
             initial_state.sunshine.edid_refresh_rate_hz = initial_state
                 .sunshine
                 .edid_refresh_rate_hz
