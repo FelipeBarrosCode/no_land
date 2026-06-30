@@ -221,7 +221,7 @@ export function SettingsScreen({
   }, []);
 
   const profilePanel = (
-    <Card className="pixel-frame">
+    <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Profile
       </h2>
@@ -312,7 +312,7 @@ export function SettingsScreen({
   );
 
   const serverPanel = (
-    <Card className="pixel-frame">
+    <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Server Configuration
       </h2>
@@ -397,7 +397,7 @@ export function SettingsScreen({
   );
 
   const clientPanel = (
-    <Card className="pixel-frame">
+    <Card className="pixel-frame min-w-0 overflow-x-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Client (Moonlight)
       </h2>
@@ -648,7 +648,7 @@ export function SettingsScreen({
   );
 
   const storagePanel = (
-    <Card className="pixel-frame">
+    <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Shared Storage
       </h2>
@@ -664,7 +664,7 @@ export function SettingsScreen({
   );
 
   const connectionPanel = (
-    <Card className="pixel-frame">
+    <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Connection Provider
       </h2>
@@ -758,9 +758,9 @@ export function SettingsScreen({
             : clientPanel;
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
-        <div className="flex items-center justify-between">
+    <main className="crt-surface h-screen overflow-hidden bg-hero-glow px-4 pb-6 pt-6 md:px-8">
+      <div className="mx-auto flex h-full w-full max-w-7xl flex-col gap-4 overflow-hidden">
+        <div className="flex shrink-0 items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div>
               <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
@@ -788,8 +788,8 @@ export function SettingsScreen({
           </div>
         </div>
 
-        <section className="grid gap-4 md:grid-cols-[240px_1fr]">
-          <Card className="pixel-frame">
+        <section className="grid min-h-0 flex-1 items-start gap-4 overflow-hidden md:grid-cols-[240px_minmax(0,1fr)]">
+          <Card className="pixel-frame self-start overflow-hidden md:sticky md:top-0">
             <div className="grid gap-2">
               <Button
                 variant={section === "profile" ? "secondary" : "ghost"}
@@ -824,7 +824,9 @@ export function SettingsScreen({
             </div>
           </Card>
 
-          {panel}
+          <div className="min-h-0 min-w-0 overflow-y-auto overscroll-contain pr-1">
+            {panel}
+          </div>
         </section>
       </div>
     </main>

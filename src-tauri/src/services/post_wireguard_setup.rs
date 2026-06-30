@@ -816,11 +816,14 @@ pub async fn setup_moonlight_sunshine(
     )
     .await;
 
-    // Launch Steam in the background while the user pairs
+    // Launch Steam in the background while the user pairs so first-run setup can complete.
     let ctx_clone = context.clone();
     tauri::async_runtime::spawn(async move {
         if let Ok((remote, sunshine_user)) = sunshine_ssh_remote(&ctx_clone).await {
-            let command = format!("sudo bash -c 'if ! command -v steam >/dev/null 2>&1; then wget -qO /tmp/steam.deb https://repo.steampowered.com/steam/archive/precise/steam_latest.deb && dpkg -i /tmp/steam.deb || apt-get install -f -y; fi'; sudo -u {} env DISPLAY=:0 steam -gamepadui >/dev/null 2>&1 & disown", sunshine_user);
+            let command = format!(
+                "sudo -u {} env DISPLAY=:0 steam >/dev/null 2>&1 & disown",
+                sunshine_user
+            );
             let _ = tokio::task::spawn_blocking(move || {
                 remote.ssh(&command, std::time::Duration::from_secs(120))
             })

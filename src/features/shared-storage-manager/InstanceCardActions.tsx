@@ -31,7 +31,7 @@ export function InstanceCardActions({
   onPause,
   onDestroy,
   onSaveStorage,
-  onSyncStorage
+  onSyncStorage,
 }: Props) {
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
@@ -103,7 +103,7 @@ export function InstanceCardActions({
           loadingText="Opening..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open WireGuard/Tailscale
+          Open Connections
         </Button>
       </div>
 
@@ -138,23 +138,23 @@ export function InstanceCardActions({
           loadingText="Destroying..."
           onClick={handleDestroy}
         >
-          {showDestroyConfirm ? "Confirm Destroy" : (
+          {showDestroyConfirm ? (
+            "Confirm Destroy"
+          ) : (
             <>
-                <SpriteIcon icon="destroy" />
-                <span className="ml-1">Destroy</span>
-              </>
+              <SpriteIcon icon="destroy" />
+              <span className="ml-1">Destroy</span>
+            </>
           )}
         </Button>
       </div>
 
       {showDestroyConfirm && (
         <div className="text-xs text-red-300 bg-red-900/20 p-2 rounded border border-red-500/30">
-          This will permanently destroy instance {instance.instanceId}. A backup will run first if configured.
+          This will permanently destroy instance {instance.instanceId}. A backup
+          will run first if configured.
           <div className="mt-1 flex gap-2">
-            <button
-              className="text-red-400 underline"
-              onClick={handleDestroy}
-            >
+            <button className="text-red-400 underline" onClick={handleDestroy}>
               Yes, destroy
             </button>
             <button
