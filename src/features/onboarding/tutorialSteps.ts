@@ -74,9 +74,9 @@ export const tutorialSteps: TutorialStep[] = [
   },
   {
     eyebrow: "Step 8 (Optional)",
-    title: "Get a Tailscale API key",
+    title: "Get a Tailscale auth key",
     description:
-      "If you want to use Tailscale instead of WireGuard, grab your Tailscale API key. Paste it in the optional field on the setup screen or in Settings > Connection later.",
+      "If you want to use Tailscale instead of WireGuard, grab your Tailscale auth key. Paste it in the optional field on the setup screen or in Settings > Connection later.",
     linkLabel: "Tailscale Admin Keys",
     linkUrl: TAILSCALE_API_KEY_URL,
   },

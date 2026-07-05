@@ -3533,12 +3533,18 @@ async fn hydrate_state_from_server_record(
     let wireguard_server_public_key = record.wireguard_server_public_key.clone();
     let wireguard_client_public_key = record.wireguard_client_public_key.clone();
     let wireguard_config_path = record.wireguard_config_path.clone();
+    let connection_provider = record.connection_provider;
+    let tailscale_client_ip = record.tailscale_client_ip.clone();
     let sunshine_configured = record.steps.sunshine_configured;
     let moonlight_configured = record.steps.moonlight_configured || record.steps.pairing_completed;
-    let moonlight_host_address = if record.moonlight_host_address.trim().is_empty() {
-        wireguard_server_ip.clone()
-    } else {
+    let moonlight_host_address = if !record.moonlight_host_address.trim().is_empty() {
         record.moonlight_host_address.clone()
+    } else if connection_provider == ConnectionProvider::Tailscale
+        && !tailscale_client_ip.trim().is_empty()
+    {
+        tailscale_client_ip.clone()
+    } else {
+        wireguard_server_ip.clone()
     };
 
     context
@@ -3565,6 +3571,7 @@ async fn hydrate_state_from_server_record(
             state.wireguard.server_public_key = wireguard_server_public_key.clone();
             state.wireguard.client_public_key = wireguard_client_public_key.clone();
             state.wireguard.config_path = wireguard_config_path.clone();
+            state.connection_provider = connection_provider;
             state.sunshine.configured = sunshine_configured;
             state.moonlight.configured = moonlight_configured;
             state.moonlight.host_address = moonlight_host_address.clone();

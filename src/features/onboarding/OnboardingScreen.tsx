@@ -203,7 +203,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                   >
                     Tailscale
                   </a>{" "}
-                  API Key
+                  Auth Key
                   <span className="ml-1 text-[1.0rem] text-[#8fb4d4]">
                     (Optional)
                   </span>

@@ -316,7 +316,10 @@ export function PostWireguardModal({
               </h4>
               <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
                 <li>Install Tailscale if it is not already installed.</li>
-                <li>Sign in to the same tailnet and keep Tailscale running.</li>
+                <li>
+                  Sign in to the same tailnet and keep Tailscale running
+                  locally.
+                </li>
                 <li>Install Moonlight if needed.</li>
                 <li>
                   Continue below so Noland can verify Sunshine and start

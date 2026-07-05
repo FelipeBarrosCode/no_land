@@ -714,7 +714,7 @@ export function SettingsScreen({
 
       <div className="mt-4 border-t border-[#3b4067] pt-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Tailscale API Key
+          Tailscale Auth Key
         </h3>
         <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
           Required if using Tailscale.{" "}
@@ -724,12 +724,12 @@ export function SettingsScreen({
             target="_blank"
             rel="noreferrer"
           >
-            Get your Tailscale API key
+            Get your Tailscale auth key
           </a>
           .
         </p>
         <InputField
-          label="Tailscale API Key"
+          label="Tailscale Auth Key"
           type="password"
           value={tailscaleApiKey}
           onChange={(event) => setTailscaleApiKey(event.target.value)}
@@ -739,7 +739,7 @@ export function SettingsScreen({
             disabled={busy}
             onClick={() => onSaveTailscaleApiKey(tailscaleApiKey.trim())}
           >
-            Save Tailscale API Key
+            Save Tailscale Auth Key
           </Button>
         </div>
       </div>

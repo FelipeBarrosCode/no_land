@@ -66,7 +66,7 @@ export function ConnectionProviderModal({
             </h4>
             <p className="mt-2 text-[1.05rem] leading-snug text-[#cfe7ff]">
               Uses your Tailscale mesh network. No port forwarding or complex
-              config needed. Requires a Tailscale API key and Tailscale
+              config needed. Requires a Tailscale auth key and Tailscale
               installed on your device.
             </p>
             <div className="mt-4">

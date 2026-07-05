@@ -820,7 +820,7 @@ export function DashboardScreen({
                     </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
                       Download the Tailscale client app on your system, then
-                      save your Tailscale API Key. Noland handles the rest of
+                      save your Tailscale auth key. Noland handles the rest of
                       the configuration automatically.
                     </p>
                   </div>
@@ -830,7 +830,7 @@ export function DashboardScreen({
                     </p>
                     <p className="text-[1.15rem] text-[#b9cce2]">
                       Requires installing the Tailscale client application and
-                      configuring a Tailscale API Key in Noland.
+                      configuring a Tailscale auth key in Noland.
                     </p>
                   </div>
                 </>
@@ -840,12 +840,12 @@ export function DashboardScreen({
             {connectionInfoModalType === "tailscale" && (
               <div className="mt-4 border-t border-[#3e4270] pt-4">
                 <p className="font-display text-[10px] uppercase tracking-[0.1em] text-white mb-2">
-                  Add API Key & Set Preferred
+                  Add Auth Key & Set Preferred
                 </p>
                 <div className="flex gap-2">
                   <input
                     type="password"
-                    placeholder="Enter Tailscale API Key (tskey-api-...)"
+                    placeholder="Enter Tailscale auth key (tskey-auth-...)"
                     value={localTailscaleKey}
                     onChange={(e) => setLocalTailscaleKey(e.target.value)}
                     className="flex-1 border border-[#3d426f] bg-[#0f1430] px-3 py-1.5 text-[1.15rem] text-white outline-none focus:border-neon-cyan"

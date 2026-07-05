@@ -1213,6 +1213,7 @@ pub async fn update_tailscale_api_key(
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
     let trimmed = api_key.trim().to_string();
+    validate_tailscale_auth_key(&trimmed)?;
     let next_state = context
         .update_state(|state| {
             state.credentials.tailscale_api_key = trimmed;
@@ -1492,6 +1493,23 @@ fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), Fronte
     if payload.vast_api_key.trim().len() < 16 {
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
+    validate_tailscale_auth_key(payload.tailscale_api_key.trim())?;
+    Ok(())
+}
+
+fn validate_tailscale_auth_key(value: &str) -> Result<(), FrontendError> {
+    if value.is_empty() {
+        return Ok(());
+    }
+
+    if !value.starts_with("tskey-auth-") {
+        return Err(AppError::InvalidInput(
+            "Tailscale requires an auth key (expected prefix: tskey-auth-), not a Tailscale API key."
+                .to_string(),
+        )
+        .into());
+    }
+
     Ok(())
 }
 
