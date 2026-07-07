@@ -99,6 +99,15 @@ impl AppContext {
         self.state.read().await.clone()
     }
 
+    pub async fn reload_state_from_disk(&self) -> AppResult<PersistedAppState> {
+        let fresh_state = self.state_store.load_state().await?;
+        {
+            let mut state = self.state.write().await;
+            *state = fresh_state.clone();
+        }
+        Ok(fresh_state)
+    }
+
     pub async fn emit_progress(&self, app: &AppHandle, event: ProvisioningEvent) {
         {
             let mut logs = self.provisioning_logs.write().await;

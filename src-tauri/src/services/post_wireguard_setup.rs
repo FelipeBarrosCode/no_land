@@ -10,8 +10,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            OrchestrationState, PostWireGuardSetupState, SetupErrorState, SetupStage,
-            WireGuardSetupMode, WireGuardSetupStatus,
+            ConnectionProvider, OrchestrationState, PostWireGuardSetupState, SetupErrorState,
+            SetupStage, WireGuardSetupMode, WireGuardSetupStatus,
         },
         events::ProvisioningEvent,
     },
@@ -28,6 +28,7 @@ use super::{
     os_detection::OsDetection,
     remote_exec::RemoteExec,
     ssh_keys::SshKeyService,
+    tailscale::TailscaleService,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -38,9 +39,11 @@ const SUNSHINE_API_READY_RETRIES: usize = 15;
 const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
 const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
+const SUNSHINE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn sunshine_http_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
+        .timeout(SUNSHINE_HTTP_TIMEOUT)
         .danger_accept_invalid_certs(true)
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -49,6 +52,16 @@ fn sunshine_http_client() -> AppResult<reqwest::Client> {
 
 fn sunshine_api_url(host: &str, path: &str) -> String {
     format!("https://{}:{}{}", host, SUNSHINE_API_PORT, path)
+}
+
+fn sunshine_manual_login_instructions(host: &str, username: &str, password: &str) -> String {
+    format!(
+        "If this step hangs or the Sunshine API is not responding, open the Sunshine web UI manually at https://{host}:{port}/ and try logging in there first. Then come back and retry. Current Sunshine host: {host} | port: {port} | username: {username} | password: {password}",
+        host = host,
+        port = SUNSHINE_API_PORT,
+        username = username,
+        password = password,
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -503,17 +516,22 @@ pub async fn verify_sunshine_api(
     };
 
     if !result.reachable || !result.authenticated {
+        let message = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "Sunshine verification failed".to_string());
+        let details = format!(
+            "{} {}",
+            message,
+            sunshine_manual_login_instructions(&moonlight_host, &username, &password)
+        );
         set_setup_failure(
             context,
             SetupStage::SunshineVerifying,
             OrchestrationState::SunshineVerifying,
             "sunshine_verify_failed",
-            result
-                .error
-                .clone()
-                .unwrap_or_else(|| "Sunshine verification failed".to_string())
-                .as_str(),
-            result.error.clone(),
+            &message,
+            Some(details),
             true,
         )
         .await?;
@@ -606,13 +624,62 @@ pub async fn setup_moonlight_sunshine(
     )
     .await;
 
-    let (username, password) = {
+    let (username, password, connection_provider, moonlight_host) = {
         let state = context.state.read().await;
         (
             state.credentials.app_username.clone(),
             state.credentials.app_password.clone(),
+            state.connection_provider,
+            state.post_wireguard_setup.moonlight_host.clone(),
         )
     };
+
+    if connection_provider == ConnectionProvider::Tailscale {
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::SunshineVerifying,
+            "Checking local Tailscale connectivity",
+            Some(format!(
+                "Verifying this computer can reach Sunshine on https://{}:{}/api/config before pairing.",
+                moonlight_host, SUNSHINE_API_PORT
+            )),
+            false,
+        )
+        .await;
+
+        let local_tailscale_ip = match ensure_local_tailscale_connectivity(&moonlight_host).await {
+            Ok(local_ip) => local_ip,
+            Err(error) => {
+                let message =
+                    "Local Tailscale is not ready. Sign in to the same tailnet on this computer, keep Tailscale running, then retry.";
+                set_setup_failure(
+                    context,
+                    SetupStage::SunshineVerifying,
+                    OrchestrationState::TailscaleConnected,
+                    "tailscale_local_unreachable",
+                    message,
+                    Some(error.to_string()),
+                    true,
+                )
+                .await?;
+                return Err(AppError::Provisioning(message.to_string()));
+            }
+        };
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::SunshineVerifying,
+            "Local Tailscale connectivity verified",
+            Some(format!(
+                "Local tailnet IP: {}. Reachability to {} confirmed.",
+                local_tailscale_ip, moonlight_host
+            )),
+            false,
+        )
+        .await;
+    }
 
     emit_post_wireguard_event(
         app,
@@ -679,18 +746,25 @@ pub async fn setup_moonlight_sunshine(
     {
         Ok(result) => result?,
         Err(_) => {
+            let recovery_hint = if connection_provider == ConnectionProvider::Tailscale {
+                "Reconnect Tailscale locally, confirm you are on the same tailnet, and try again."
+            } else {
+                "Re-import the current WireGuard config and try again."
+            };
             let error = format!(
-                "Sunshine verification took longer than {} seconds. Re-import the current WireGuard config and try again.",
-                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs()
+                "Sunshine verification took longer than {} seconds. {}",
+                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs(),
+                recovery_hint
+            );
+            let timeout_details = format!(
+                "The secure tunnel or Sunshine API did not become ready in time before Moonlight PIN setup. {}",
+                sunshine_manual_login_instructions(&moonlight_host, &username, &password)
             );
             reset_to_wireguard_recovery_step(
                 context,
                 "sunshine_verify_timeout",
                 &error,
-                Some(
-                    "The secure tunnel or Sunshine API did not become ready in time before Moonlight PIN setup."
-                        .to_string(),
-                ),
+                Some(timeout_details),
             )
             .await?;
             emit_post_wireguard_event(
@@ -1245,6 +1319,32 @@ fn tcp_reachability(host: &str, ports: &[u16], timeout: Duration) -> Reachabilit
 
 fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
     (host, port).to_socket_addrs().ok()?.next()
+}
+
+async fn ensure_local_tailscale_connectivity(remote_host: &str) -> AppResult<String> {
+    let local_ip = TailscaleService::get_local_ip().await.map_err(|error| {
+        AppError::Provisioning(format!(
+            "Could not determine a local Tailscale IP. Make sure Tailscale is installed, signed in on this computer, and connected before continuing: {}",
+            error
+        ))
+    })?;
+
+    let reachability = tcp_reachability(remote_host, &REACHABILITY_PORTS, Duration::from_secs(2));
+    if reachability.reachable {
+        return Ok(local_ip);
+    }
+
+    let details = reachability.error.unwrap_or_else(|| {
+        format!(
+            "No Sunshine ports on {} responded over Tailscale. Expected one of {:?}.",
+            remote_host, REACHABILITY_PORTS
+        )
+    });
+
+    Err(AppError::Provisioning(format!(
+        "Local Tailscale IP {} is up, but this computer could not reach {} over Tailscale. {}",
+        local_ip, remote_host, details
+    )))
 }
 
 async fn sunshine_config_response(

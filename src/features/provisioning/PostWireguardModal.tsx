@@ -77,6 +77,10 @@ export function PostWireguardModal({
   const isTailscaleFlow = appState.connectionProvider === "tailscale";
   const moonlightHost =
     setup.moonlightHost || appState.moonlight.hostAddress || "10.77.0.1";
+  const sunshineUrl = `https://${moonlightHost}:47990/`;
+  const sunshineUsername =
+    setup.sunshineUsername || appState.credentials.appUsername || "";
+  const sunshinePassword = appState.credentials.appPassword || "";
   const configMatchesActiveInstance =
     activeInstanceId !== null &&
     activeInstanceId !== undefined &&
@@ -479,11 +483,20 @@ export function PostWireguardModal({
                   <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
                     Sunshine Login
                   </h4>
-                  <p className="mt-2">
-                    Username: <span className="text-white">user</span>
+                  <p className="mt-2 break-all">
+                    URL: <span className="text-white">{sunshineUrl}</span>
                   </p>
-                  <p>
-                    Password: <span className="text-white">password</span>
+                  <p className="break-all">
+                    Username:{" "}
+                    <span className="text-white">
+                      {sunshineUsername || "(empty)"}
+                    </span>
+                  </p>
+                  <p className="break-all">
+                    Password:{" "}
+                    <span className="text-white">
+                      {sunshinePassword || "(empty)"}
+                    </span>
                   </p>
                 </div>
               </div>
@@ -498,7 +511,37 @@ export function PostWireguardModal({
             </h4>
             <p className="mt-2">{setup.lastError.message}</p>
             {setup.lastError.details && (
-              <p className="mt-2 text-[#ffbdc7]">{setup.lastError.details}</p>
+              <p className="mt-2 whitespace-pre-wrap break-words text-[#ffbdc7]">
+                {setup.lastError.details}
+              </p>
+            )}
+            {(setup.lastError.code.includes("sunshine") ||
+              setup.lastError.stage === "sunshine_verifying" ||
+              setup.lastError.stage === "sunshine_credentials_configuring") && (
+              <div className="mt-3 border border-[#7a3f52] bg-[#341723] p-3 text-[1rem] text-[#ffd9df]">
+                <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-[#ffc3cf]">
+                  Manual Sunshine Login
+                </h4>
+                <p className="mt-2 break-all">
+                  URL: <span className="text-white">{sunshineUrl}</span>
+                </p>
+                <p className="break-all">
+                  Username:{" "}
+                  <span className="text-white">
+                    {sunshineUsername || "(empty)"}
+                  </span>
+                </p>
+                <p className="break-all">
+                  Password:{" "}
+                  <span className="text-white">
+                    {sunshinePassword || "(empty)"}
+                  </span>
+                </p>
+                <p className="mt-2 text-[#ffbdc7]">
+                  Open the Sunshine UI manually, log in with these credentials,
+                  confirm the web UI loads, then come back here and retry.
+                </p>
+              </div>
             )}
             {setup.lastError.retryable && !pinRetryError && (
               <div className="mt-3">

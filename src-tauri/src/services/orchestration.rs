@@ -1314,17 +1314,15 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
-    // Check connection provider preference
-    let connection_provider = {
-        let state = context.state.read().await;
-        state.connection_provider
-    };
+    // Reload persisted state.json before choosing the connection provider.
+    // The provider selection and associated credentials are persisted config,
+    // so orchestration should branch from the disk-backed snapshot rather than
+    // relying only on the current in-memory lock state.
+    let persisted_state = context.reload_state_from_disk().await?;
+    let connection_provider = persisted_state.connection_provider;
 
     if connection_provider == ConnectionProvider::Tailscale {
-        let tailscale_api_key = {
-            let state = context.state.read().await;
-            state.credentials.tailscale_api_key.clone()
-        };
+        let tailscale_api_key = persisted_state.credentials.tailscale_api_key.clone();
 
         if tailscale_api_key.is_empty() {
             return Err(AppError::Provisioning(format!(
@@ -1693,6 +1691,8 @@ async fn run_existing_instance_orchestration(
     instance_id: u64,
 ) -> AppResult<()> {
     ensure_not_cancelled(&context)?;
+
+    let _ = context.reload_state_from_disk().await?;
 
     context
         .update_state(|state| {
@@ -2248,6 +2248,49 @@ async fn run_existing_instance_orchestration(
         .await;
     }
     ensure_not_cancelled(&context)?;
+
+    let existing_connection_provider = {
+        let snapshot = context.state.read().await;
+        snapshot.connection_provider
+    };
+
+    if existing_connection_provider == ConnectionProvider::Tailscale {
+        let mut tailscale_host =
+            load_moonlight_host_from_server_record(&context, instance.id).await;
+        if tailscale_host.is_none() {
+            let snapshot = context.state.read().await;
+            tailscale_host = snapshot
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance.id)
+                .and_then(|record| {
+                    if record.tailscale_client_ip.trim().is_empty() {
+                        None
+                    } else {
+                        Some(record.tailscale_client_ip.clone())
+                    }
+                });
+        }
+        let tailscale_host = tailscale_host.ok_or_else(|| {
+            AppError::Provisioning(format!(
+                "Instance {} is marked as using Tailscale, but no saved Tailscale host was found in state.json.",
+                instance.id
+            ))
+        })?;
+
+        emit_transition(
+            &app,
+            &context,
+            OrchestrationState::TailscaleConnected,
+            "Reusing saved Tailscale connection",
+            Some(format!("Remote IP: {}", tailscale_host)),
+            false,
+        )
+        .await;
+
+        initialize_post_tailscale_flow(&app, &context, instance.id, &tailscale_host).await?;
+        return Ok(());
+    }
 
     match vast.get_instance(instance.id).await {
         Ok(refreshed_instance) => {
