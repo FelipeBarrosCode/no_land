@@ -29,6 +29,8 @@ import {
   updateServerPreferences,
   updateSshCredentials,
   updateVastApiKey,
+  updateTailscaleApiKey,
+  updateConnectionProvider,
   getSharedStorageSettings,
   saveSharedStorageSettings,
   testSharedStorageConfig,
@@ -126,6 +128,10 @@ interface AppStore {
   startPlayExisting: (instanceId: number) => Promise<void>;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
+  saveTailscaleApiKey: (apiKey: string) => Promise<void>;
+  saveConnectionProvider: (payload: {
+    connectionProvider: "wireguard" | "tailscale";
+  }) => Promise<void>;
   savePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
@@ -266,6 +272,10 @@ interface AsyncActionOptions {
 }
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
+  "SelectingConnectionProvider",
+  "ConfiguringTailscale",
+  "TailscaleConfigGenerated",
+  "TailscaleConnected",
   "WireGuardConfigGenerated",
   "WireGuardAppHandoffStarted",
   "WireGuardWaitingForImport",
@@ -284,6 +294,9 @@ const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
 const POST_WIREGUARD_EVENT_STAGE_MAP: Partial<
   Record<OrchestrationState, SetupStage>
 > = {
+  ConfiguringTailscale: "wireguard_config_generated",
+  TailscaleConfigGenerated: "wireguard_config_generated",
+  TailscaleConnected: "wireguard_connected",
   WireGuardConfigGenerated: "wireguard_config_generated",
   WireGuardAppHandoffStarted: "wireguard_app_handoff_started",
   WireGuardWaitingForImport: "wireguard_waiting_for_import",
@@ -352,9 +365,12 @@ async function refreshProvisioningState(
 
 async function applyProvisioningEventState(
   event: ProvisioningEvent,
-  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+  set: (
+    partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>),
+  ) => void,
 ): Promise<void> {
   let latestPostWireguardSetup: PostWireGuardSetupState | null = null;
+  let latestAppState: PersistedAppState | null = null;
   if (PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
     try {
       latestPostWireguardSetup = await getSetupStatus();
@@ -363,18 +379,33 @@ async function applyProvisioningEventState(
     }
   }
 
+  if (event.state === "Ready") {
+    try {
+      latestAppState = await getAppState();
+    } catch {
+      latestAppState = null;
+    }
+  }
+
   set((state) => {
     const nextLogs = [event, ...state.logs].slice(0, 500);
-    const nextBaseState = state.appState
+    const nextBaseState = latestAppState
       ? {
-          ...state.appState,
-          orchestrationState: event.state,
-          lastError: event.isError ? event.message : state.appState.lastError,
+          ...latestAppState,
           ...(latestPostWireguardSetup
             ? { postWireguardSetup: latestPostWireguardSetup }
             : {}),
         }
-      : state.appState;
+      : state.appState
+        ? {
+            ...state.appState,
+            orchestrationState: event.state,
+            lastError: event.isError ? event.message : state.appState.lastError,
+            ...(latestPostWireguardSetup
+              ? { postWireguardSetup: latestPostWireguardSetup }
+              : {}),
+          }
+        : state.appState;
     const nextState = nextBaseState
       ? applyPostWireguardEventState(nextBaseState, event.state)
       : nextBaseState;
@@ -421,6 +452,10 @@ const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   ConfiguringSunshine: "Configuring Sunshine",
   ConfiguringWireGuard: "Configuring WireGuard",
   ConfiguringNvidiaHeadless: "Configuring NVIDIA headless mode",
+  SelectingConnectionProvider: "Selecting connection provider",
+  ConfiguringTailscale: "Configuring Tailscale",
+  TailscaleConfigGenerated: "Tailscale config generated",
+  TailscaleConnected: "Tailscale connected",
   WireGuardConfigGenerated: "WireGuard config generated",
   WireGuardAppHandoffStarted: "Opening WireGuard app",
   WireGuardWaitingForImport: "Waiting for WireGuard import",
@@ -789,6 +824,26 @@ export const useAppStore = create<AppStore>((set, get) => {
         const appState = await updateVastApiKey(apiKey);
         const rentedInstances = await getRentedInstances();
         set({ appState, rentedInstances, busy: false });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    saveTailscaleApiKey: async (apiKey) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateTailscaleApiKey(apiKey);
+        set({ appState, busy: false });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    saveConnectionProvider: async (payload) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateConnectionProvider(payload);
+        set({ appState, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
       }
@@ -1417,8 +1472,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.wireguard.reconnect",
-          label: "Opening WireGuard",
-          detail: "Open the WireGuard app and manage the tunnel manually.",
+          label: "Opening WireGuard / Tailscale",
+          detail:
+            "Open the WireGuard or Tailscale app and manage the tunnel manually.",
           blocking: true,
         },
         async () => await reconnectInstanceWireguard(instanceId),

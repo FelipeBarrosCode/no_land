@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { VAST_API_KEY_URL } from "../../lib/constants";
+import { TAILSCALE_API_KEY_URL, VAST_API_KEY_URL } from "../../lib/constants";
 import type { OnboardingPayload } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
@@ -17,6 +17,7 @@ interface FormState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  tailscaleApiKey: string;
 }
 
 export function OnboardingScreen({ busy, onSubmit }: Props) {
@@ -26,26 +27,36 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
   const [form, setForm] = useState<FormState>({
     appUsername: "",
     appPassword: "",
-    vastApiKey: ""
+    vastApiKey: "",
+    tailscaleApiKey: "",
   });
   const [touched, setTouched] = useState<Record<keyof FormState, boolean>>({
     appUsername: false,
     appPassword: false,
-    vastApiKey: false
+    vastApiKey: false,
+    tailscaleApiKey: false,
   });
 
   const errors = useMemo(() => {
     return {
-      appUsername: form.appUsername.trim().length < 3 ? "Use at least 3 characters" : "",
-      appPassword: form.appPassword.length < 6 ? "Use at least 6 characters" : "",
-      vastApiKey: form.vastApiKey.trim().length < 16 ? "API key seems too short" : ""
+      appUsername:
+        form.appUsername.trim().length < 3 ? "Use at least 3 characters" : "",
+      appPassword:
+        form.appPassword.length < 6 ? "Use at least 6 characters" : "",
+      vastApiKey:
+        form.vastApiKey.trim().length < 16 ? "API key seems too short" : "",
     };
   }, [form]);
 
   const hasErrors = Object.values(errors).some(Boolean);
 
   async function submitForm() {
-    setTouched({ appUsername: true, appPassword: true, vastApiKey: true });
+    setTouched({
+      appUsername: true,
+      appPassword: true,
+      vastApiKey: true,
+      tailscaleApiKey: true,
+    });
     if (hasErrors) {
       return;
     }
@@ -53,7 +64,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     await onSubmit({
       appUsername: form.appUsername.trim(),
       appPassword: form.appPassword,
-      vastApiKey: form.vastApiKey.trim()
+      vastApiKey: form.vastApiKey.trim(),
+      tailscaleApiKey: form.tailscaleApiKey.trim(),
     });
   }
 
@@ -109,7 +121,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 >
                   Vast.ai API key
                 </a>
-                . We will generate an SSH key pair and connect your account automatically.
+                . We will generate an SSH key pair and connect your account
+                automatically.
               </p>
             </div>
 
@@ -123,23 +136,39 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               label="Setup Username"
               placeholder="noland-user"
               value={form.appUsername}
-              onChange={(event) => setForm((prev) => ({ ...prev, appUsername: event.target.value }))}
-              onBlur={() => setTouched((prev) => ({ ...prev, appUsername: true }))}
+              onChange={(event) =>
+                setForm((prev) => ({
+                  ...prev,
+                  appUsername: event.target.value,
+                }))
+              }
+              onBlur={() =>
+                setTouched((prev) => ({ ...prev, appUsername: true }))
+              }
               error={touched.appUsername ? errors.appUsername : undefined}
             />
             <InputField
               label="Setup Password"
               type="password"
               value={form.appPassword}
-              onChange={(event) => setForm((prev) => ({ ...prev, appPassword: event.target.value }))}
-              onBlur={() => setTouched((prev) => ({ ...prev, appPassword: true }))}
+              onChange={(event) =>
+                setForm((prev) => ({
+                  ...prev,
+                  appPassword: event.target.value,
+                }))
+              }
+              onBlur={() =>
+                setTouched((prev) => ({ ...prev, appPassword: true }))
+              }
               error={touched.appPassword ? errors.appPassword : undefined}
             />
             <p className="-mt-2 text-[1.1rem] text-[#8fb4d4]">
-              New here? The tutorial explains the full setup flow, and the remote computer password is <span className="text-neon-lime">password</span>.
+              New here? The tutorial explains the full setup flow, and the
+              remote computer password is{" "}
+              <span className="text-neon-lime">password</span>.
             </p>
             <InputField
-              label={(
+              label={
                 <span>
                   <a
                     className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
@@ -151,13 +180,47 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                   </a>{" "}
                   API Key
                 </span>
-              )}
+              }
               type="password"
               placeholder="vast_xxxxx"
               value={form.vastApiKey}
-              onChange={(event) => setForm((prev) => ({ ...prev, vastApiKey: event.target.value }))}
-              onBlur={() => setTouched((prev) => ({ ...prev, vastApiKey: true }))}
+              onChange={(event) =>
+                setForm((prev) => ({ ...prev, vastApiKey: event.target.value }))
+              }
+              onBlur={() =>
+                setTouched((prev) => ({ ...prev, vastApiKey: true }))
+              }
               error={touched.vastApiKey ? errors.vastApiKey : undefined}
+            />
+            <InputField
+              label={
+                <span>
+                  <a
+                    className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
+                    href={TAILSCALE_API_KEY_URL}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Tailscale
+                  </a>{" "}
+                  Auth Key
+                  <span className="ml-1 text-[1.0rem] text-[#8fb4d4]">
+                    (Optional)
+                  </span>
+                </span>
+              }
+              type="password"
+              placeholder="tskey-auth-xxxxx"
+              value={form.tailscaleApiKey}
+              onChange={(event) =>
+                setForm((prev) => ({
+                  ...prev,
+                  tailscaleApiKey: event.target.value,
+                }))
+              }
+              onBlur={() =>
+                setTouched((prev) => ({ ...prev, tailscaleApiKey: true }))
+              }
             />
           </div>
 
@@ -169,7 +232,13 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
             >
               Get your Vast.ai API key
             </button>
-            <Button disabled={busy} loading={busy} loadingText="Configuring..." onClick={submitForm} className="px-8">
+            <Button
+              disabled={busy}
+              loading={busy}
+              loadingText="Configuring..."
+              onClick={submitForm}
+              className="px-8"
+            >
               Continue
             </Button>
           </div>

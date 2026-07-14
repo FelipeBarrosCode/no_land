@@ -31,7 +31,7 @@ export function InstanceCardActions({
   onPause,
   onDestroy,
   onSaveStorage,
-  onSyncStorage
+  onSyncStorage,
 }: Props) {
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
@@ -67,7 +67,7 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           onClick={() => onSettings(instance.instanceId)}
         >
-          <span className="text-xs">⚙</span>
+          <SpriteIcon icon="settings" />
           <span className="ml-1">Settings</span>
         </Button>
       </div>
@@ -75,7 +75,7 @@ export function InstanceCardActions({
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.export"}
           loadingText="Saving files..."
@@ -86,7 +86,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
           loadingText="Syncing files..."
@@ -97,20 +97,20 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.wireguard.reconnect"}
           loadingText="Opening..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open WireGuard
+          Open Connections
         </Button>
       </div>
 
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.services.reboot"}
           loadingText="Rebooting..."
@@ -121,7 +121,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.pause"}
           loadingText="Pausing..."
@@ -132,24 +132,29 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className={`w-full text-xs ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
+          className={`w-full text-[14px] ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
           disabled={actionDisabled}
           loading={loadingKey === "instance.destroy"}
           loadingText="Destroying..."
           onClick={handleDestroy}
         >
-          {showDestroyConfirm ? "Confirm Destroy" : "Destroy"}
+          {showDestroyConfirm ? (
+            "Confirm Destroy"
+          ) : (
+            <>
+              <SpriteIcon icon="destroy" />
+              <span className="ml-1">Destroy</span>
+            </>
+          )}
         </Button>
       </div>
 
       {showDestroyConfirm && (
         <div className="text-xs text-red-300 bg-red-900/20 p-2 rounded border border-red-500/30">
-          This will permanently destroy instance {instance.instanceId}. A backup will run first if configured.
+          This will permanently destroy instance {instance.instanceId}. A backup
+          will run first if configured.
           <div className="mt-1 flex gap-2">
-            <button
-              className="text-red-400 underline"
-              onClick={handleDestroy}
-            >
+            <button className="text-red-400 underline" onClick={handleDestroy}>
               Yes, destroy
             </button>
             <button

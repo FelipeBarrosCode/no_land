@@ -23,12 +23,14 @@ impl InstanceManager {
         offer_id: u64,
         template_hash: &str,
         storage_gb: u32,
+        env_vars: Option<serde_json::Value>,
     ) -> AppResult<VastInstance> {
         api.create_instance(
             offer_id,
             template_hash,
             storage_gb,
             "Noland Connect Session",
+            env_vars,
         )
         .await
     }

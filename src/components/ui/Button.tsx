@@ -36,7 +36,7 @@ export function Button({
   return (
     <button
       className={clsx(
-        "relative inline-flex items-center justify-center border px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] transition duration-100 active:translate-y-[2px] disabled:cursor-not-allowed disabled:opacity-50",
+        "relative inline-flex items-center justify-center border px-4 py-2 font-display text-[16px] uppercase tracking-[0.12em] transition duration-100 active:translate-y-[2px] disabled:cursor-not-allowed disabled:opacity-50",
         variantClasses[variant],
         className
       )}

@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -12,10 +14,15 @@ import type {
   ServerPreferencesUpdate,
   SharedStorageSettingsResponse,
   SharedStorageSettingsUpdate,
-  SshCredentialsUpdate
+  SshCredentialsUpdate,
 } from "../../lib/types";
 
-type SettingsSection = "profile" | "server" | "client" | "storage";
+type SettingsSection =
+  | "profile"
+  | "server"
+  | "client"
+  | "storage"
+  | "connection";
 type ClientForm = {
   bitrate: string;
   fps: string;
@@ -43,14 +50,27 @@ interface Props {
   busy: boolean;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
   onSaveApiKey: (apiKey: string) => Promise<void>;
-  onSavePlatformCredentials: (payload: PlatformCredentialsUpdate) => Promise<void>;
-  onSaveServerPreferences: (payload: Partial<ServerPreferencesUpdate>) => Promise<void>;
+  onSavePlatformCredentials: (
+    payload: PlatformCredentialsUpdate,
+  ) => Promise<void>;
+  onSaveServerPreferences: (
+    payload: Partial<ServerPreferencesUpdate>,
+  ) => Promise<void>;
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
-  onRegenerateEdid: (payload: { mode: "auto_detect" | "manual"; refreshRateHz: number }) => Promise<void>;
-  onSaveSharedStorageSettings: (payload: SharedStorageSettingsUpdate) => Promise<void>;
+  onRegenerateEdid: (payload: {
+    mode: "auto_detect" | "manual";
+    refreshRateHz: number;
+  }) => Promise<void>;
+  onSaveSharedStorageSettings: (
+    payload: SharedStorageSettingsUpdate,
+  ) => Promise<void>;
   onTestSharedStorageConfig: () => Promise<string | null>;
   onLoadSharedStorageSettings: () => Promise<void>;
+  onSaveConnectionProvider: (payload: {
+    connectionProvider: "wireguard" | "tailscale";
+  }) => Promise<void>;
+  onSaveTailscaleApiKey: (apiKey: string) => Promise<void>;
 }
 
 function toNumber(value: string, fallback: number): number {
@@ -62,7 +82,9 @@ function toNumber(value: string, fallback: number): number {
   return parsed;
 }
 
-const clientNumericFields: Array<keyof Omit<ClientForm, "refreshRateMode" | "displayOutput" | "aspectRatio">> = [
+const clientNumericFields: Array<
+  keyof Omit<ClientForm, "refreshRateMode" | "displayOutput" | "aspectRatio">
+> = [
   "bitrate",
   "fps",
   "width",
@@ -78,7 +100,7 @@ const clientNumericFields: Array<keyof Omit<ClientForm, "refreshRateMode" | "dis
   "yuv444",
   "gameopts",
   "gamepadmouse",
-  "detectnetblocking"
+  "detectnetblocking",
 ];
 
 export function SettingsScreen({
@@ -93,27 +115,41 @@ export function SettingsScreen({
   onRegenerateEdid,
   onSaveSharedStorageSettings,
   onTestSharedStorageConfig,
-  onLoadSharedStorageSettings
+  onLoadSharedStorageSettings,
+  onSaveConnectionProvider,
+  onSaveTailscaleApiKey,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
-  const [platformUsername, setPlatformUsername] = useState(appState.credentials.appUsername);
-  const [platformPassword, setPlatformPassword] = useState(appState.credentials.appPassword);
+  const [tailscaleApiKey, setTailscaleApiKey] = useState(
+    appState.credentials.tailscaleApiKey,
+  );
+  const [connectionProvider, setConnectionProvider] = useState<
+    "wireguard" | "tailscale"
+  >(appState.connectionProvider || "wireguard");
+  const [platformUsername, setPlatformUsername] = useState(
+    appState.credentials.appUsername,
+  );
+  const [platformPassword, setPlatformPassword] = useState(
+    appState.credentials.appPassword,
+  );
   const [sshUsername, setSshUsername] = useState(
-    appState.ssh.sshUsername || appState.credentials.appUsername
+    appState.ssh.sshUsername || appState.credentials.appUsername,
   );
   const [sshPassword, setSshPassword] = useState(
-    appState.ssh.sshPassword || appState.credentials.appPassword
+    appState.ssh.sshPassword || appState.credentials.appPassword,
   );
-  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(appState.sunshine.edidMode);
+  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(
+    appState.sunshine.edidMode,
+  );
   const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
-    appState.sunshine.edidRefreshRateHz.toString()
+    appState.sunshine.edidRefreshRateHz.toString(),
   );
 
   const [serverForm, setServerForm] = useState({
     minReliability: appState.serverPreferences.minReliability.toString(),
     storageGb: appState.serverPreferences.storageGb.toString(),
-    templateHash: appState.serverPreferences.templateHash
+    templateHash: appState.serverPreferences.templateHash,
   });
 
   const [clientForm, setClientForm] = useState<ClientForm>(() => ({
@@ -135,21 +171,26 @@ export function SettingsScreen({
     yuv444: appState.moonlightPreferences.yuv444.toString(),
     gameopts: appState.moonlightPreferences.gameopts.toString(),
     gamepadmouse: appState.moonlightPreferences.gamepadmouse.toString(),
-    detectnetblocking: appState.moonlightPreferences.detectnetblocking.toString()
+    detectnetblocking:
+      appState.moonlightPreferences.detectnetblocking.toString(),
   }));
 
   useEffect(() => {
     setApiKey(appState.credentials.vastApiKey);
     setPlatformUsername(appState.credentials.appUsername);
     setPlatformPassword(appState.credentials.appPassword);
-    setSshUsername(appState.ssh.sshUsername || appState.credentials.appUsername);
-    setSshPassword(appState.ssh.sshPassword || appState.credentials.appPassword);
+    setSshUsername(
+      appState.ssh.sshUsername || appState.credentials.appUsername,
+    );
+    setSshPassword(
+      appState.ssh.sshPassword || appState.credentials.appPassword,
+    );
     setEdidMode(appState.sunshine.edidMode);
     setEdidRefreshRateHz(appState.sunshine.edidRefreshRateHz.toString());
     setServerForm({
       minReliability: appState.serverPreferences.minReliability.toString(),
       storageGb: appState.serverPreferences.storageGb.toString(),
-      templateHash: appState.serverPreferences.templateHash
+      templateHash: appState.serverPreferences.templateHash,
     });
     setClientForm({
       bitrate: appState.moonlightPreferences.bitrate.toString(),
@@ -170,7 +211,8 @@ export function SettingsScreen({
       yuv444: appState.moonlightPreferences.yuv444.toString(),
       gameopts: appState.moonlightPreferences.gameopts.toString(),
       gamepadmouse: appState.moonlightPreferences.gamepadmouse.toString(),
-      detectnetblocking: appState.moonlightPreferences.detectnetblocking.toString()
+      detectnetblocking:
+        appState.moonlightPreferences.detectnetblocking.toString(),
     });
   }, [appState]);
 
@@ -179,8 +221,10 @@ export function SettingsScreen({
   }, []);
 
   const profilePanel = (
-    <Card className="pixel-frame">
-      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Profile</h2>
+    <Card className="pixel-frame min-w-0 overflow-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        Profile
+      </h2>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <InputField
           label="Platform Username"
@@ -196,11 +240,15 @@ export function SettingsScreen({
       </div>
       <div className="mt-3">
         <Button
-          disabled={busy || platformUsername.trim().length < 3 || platformPassword.trim().length < 6}
+          disabled={
+            busy ||
+            platformUsername.trim().length < 3 ||
+            platformPassword.trim().length < 6
+          }
           onClick={() =>
             onSavePlatformCredentials({
               appUsername: platformUsername.trim(),
-              appPassword: platformPassword.trim()
+              appPassword: platformPassword.trim(),
             })
           }
         >
@@ -212,7 +260,8 @@ export function SettingsScreen({
           SSH Login Credentials
         </h3>
         <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Used after key-based connection when the VM asks for username/password.
+          Used after key-based connection when the VM asks for
+          username/password.
         </p>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <InputField
@@ -229,11 +278,13 @@ export function SettingsScreen({
         </div>
         <div className="mt-3">
           <Button
-            disabled={busy || !sshUsername.trim() || sshPassword.trim().length < 4}
+            disabled={
+              busy || !sshUsername.trim() || sshPassword.trim().length < 4
+            }
             onClick={() =>
               onSaveSshCredentials({
                 sshUsername: sshUsername.trim(),
-                sshPassword: sshPassword.trim()
+                sshPassword: sshPassword.trim(),
               })
             }
           >
@@ -261,23 +312,40 @@ export function SettingsScreen({
   );
 
   const serverPanel = (
-    <Card className="pixel-frame">
-      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Server Configuration</h2>
+    <Card className="pixel-frame min-w-0 overflow-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        Server Configuration
+      </h2>
       <div className="mt-4 grid gap-3 md:grid-cols-3">
         <InputField
           label="Min Reliability (0.8-1)"
           value={serverForm.minReliability}
-          onChange={(event) => setServerForm((prev) => ({ ...prev, minReliability: event.target.value }))}
+          onChange={(event) =>
+            setServerForm((prev) => ({
+              ...prev,
+              minReliability: event.target.value,
+            }))
+          }
         />
         <InputField
           label="Storage (GB)"
           value={serverForm.storageGb}
-          onChange={(event) => setServerForm((prev) => ({ ...prev, storageGb: event.target.value }))}
+          onChange={(event) =>
+            setServerForm((prev) => ({
+              ...prev,
+              storageGb: event.target.value,
+            }))
+          }
         />
         <InputField
           label="Template Hash"
           value={serverForm.templateHash}
-          onChange={(event) => setServerForm((prev) => ({ ...prev, templateHash: event.target.value }))}
+          onChange={(event) =>
+            setServerForm((prev) => ({
+              ...prev,
+              templateHash: event.target.value,
+            }))
+          }
         />
       </div>
       <div className="mt-4">
@@ -287,16 +355,28 @@ export function SettingsScreen({
             onSaveServerPreferences({
               minReliability: Math.max(
                 0.8,
-                toNumber(serverForm.minReliability, appState.serverPreferences.minReliability)
+                toNumber(
+                  serverForm.minReliability,
+                  appState.serverPreferences.minReliability,
+                ),
               ),
-              storageGb: Math.max(30, Math.round(toNumber(serverForm.storageGb, appState.serverPreferences.storageGb))),
+              storageGb: Math.max(
+                30,
+                Math.round(
+                  toNumber(
+                    serverForm.storageGb,
+                    appState.serverPreferences.storageGb,
+                  ),
+                ),
+              ),
               templateHash: serverForm.templateHash.trim(),
               maxHourlyPrice: appState.serverPreferences.maxHourlyPrice,
               minHourlyPrice: appState.serverPreferences.minHourlyPrice,
               requireVerified: appState.serverPreferences.requireVerified,
               requireDatacenter: appState.serverPreferences.requireDatacenter,
               includeOnDemand: appState.serverPreferences.includeOnDemand,
-              includeInterruptible: appState.serverPreferences.includeInterruptible,
+              includeInterruptible:
+                appState.serverPreferences.includeInterruptible,
               includeReserved: appState.serverPreferences.includeReserved,
               requireStaticIp: false,
               requireAvx: appState.serverPreferences.requireAvx,
@@ -305,7 +385,8 @@ export function SettingsScreen({
               minCpuCores: appState.serverPreferences.minCpuCores,
               minInetDownMbps: appState.serverPreferences.minInetDownMbps,
               minInetUpMbps: appState.serverPreferences.minInetUpMbps,
-              geolocationCountryCode: appState.serverPreferences.geolocationCountryCode
+              geolocationCountryCode:
+                appState.serverPreferences.geolocationCountryCode,
             })
           }
         >
@@ -316,23 +397,33 @@ export function SettingsScreen({
   );
 
   const clientPanel = (
-    <Card className="pixel-frame">
-      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Client (Moonlight)</h2>
+    <Card className="pixel-frame min-w-0 overflow-x-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        Client (Moonlight)
+      </h2>
       <div className="mt-4 border border-[#3b4067] bg-[#10152f] p-4">
-        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Headless EDID</h3>
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          Headless EDID
+        </h3>
         <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
           Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
         </p>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <div className="space-y-2">
-            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">EDID Mode</label>
+            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
+              EDID Mode
+            </label>
             <select
               value={edidMode}
-              onChange={(event) => setEdidMode(event.target.value as "auto_detect" | "manual")}
+              onChange={(event) =>
+                setEdidMode(event.target.value as "auto_detect" | "manual")
+              }
               className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
             >
               <option value="auto_detect">Auto Detect</option>
-              <option value="manual">Manual (use Moonlight width/height)</option>
+              <option value="manual">
+                Manual (use Moonlight width/height)
+              </option>
             </select>
           </div>
           <InputField
@@ -345,13 +436,28 @@ export function SettingsScreen({
           <Button
             disabled={
               busy ||
-              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
-              Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
+              Math.round(
+                toNumber(
+                  edidRefreshRateHz,
+                  appState.sunshine.edidRefreshRateHz,
+                ),
+              ) < 30 ||
+              Math.round(
+                toNumber(
+                  edidRefreshRateHz,
+                  appState.sunshine.edidRefreshRateHz,
+                ),
+              ) > 240
             }
             onClick={() =>
               onRegenerateEdid({
                 mode: edidMode,
-                refreshRateHz: Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz))
+                refreshRateHz: Math.round(
+                  toNumber(
+                    edidRefreshRateHz,
+                    appState.sunshine.edidRefreshRateHz,
+                  ),
+                ),
               })
             }
           >
@@ -365,7 +471,9 @@ export function SettingsScreen({
             key={key}
             label={key}
             value={clientForm[key]}
-            onChange={(event) => setClientForm((prev) => ({ ...prev, [key]: event.target.value }))}
+            onChange={(event) =>
+              setClientForm((prev) => ({ ...prev, [key]: event.target.value }))
+            }
           />
         ))}
         <div className="space-y-2">
@@ -374,7 +482,12 @@ export function SettingsScreen({
           </label>
           <select
             value={clientForm.refreshRateMode}
-            onChange={(event) => setClientForm((prev) => ({ ...prev, refreshRateMode: event.target.value }))}
+            onChange={(event) =>
+              setClientForm((prev) => ({
+                ...prev,
+                refreshRateMode: event.target.value,
+              }))
+            }
             className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
           >
             <option value="60">60.00 Hz</option>
@@ -384,7 +497,12 @@ export function SettingsScreen({
         <InputField
           label="Display Output"
           value={clientForm.displayOutput}
-          onChange={(event) => setClientForm((prev) => ({ ...prev, displayOutput: event.target.value }))}
+          onChange={(event) =>
+            setClientForm((prev) => ({
+              ...prev,
+              displayOutput: event.target.value,
+            }))
+          }
         />
         <div className="space-y-2">
           <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
@@ -392,7 +510,12 @@ export function SettingsScreen({
           </label>
           <select
             value={clientForm.aspectRatio}
-            onChange={(event) => setClientForm((prev) => ({ ...prev, aspectRatio: event.target.value }))}
+            onChange={(event) =>
+              setClientForm((prev) => ({
+                ...prev,
+                aspectRatio: event.target.value,
+              }))
+            }
             className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
           >
             <option value="">Auto (use width/height)</option>
@@ -408,27 +531,113 @@ export function SettingsScreen({
           disabled={busy}
           onClick={() =>
             onSaveMoonlightPreferences({
-              bitrate: Math.max(10000, Math.round(toNumber(clientForm.bitrate, appState.moonlightPreferences.bitrate))),
-              fps: Math.max(30, Math.round(toNumber(clientForm.fps, appState.moonlightPreferences.fps))),
-              refreshRateMode: clientForm.refreshRateMode === "59.94" ? "59.94" : "60",
-              width: Math.max(1280, Math.round(toNumber(clientForm.width, appState.moonlightPreferences.width))),
-              height: Math.max(720, Math.round(toNumber(clientForm.height, appState.moonlightPreferences.height))),
-              displayOutput: clientForm.displayOutput.trim() ? clientForm.displayOutput.trim() : null,
-              aspectRatio: clientForm.aspectRatio.trim() ? clientForm.aspectRatio.trim() : null,
-              hostaudio: Math.round(toNumber(clientForm.hostaudio, appState.moonlightPreferences.hostaudio)),
-              showperfoverlay: Math.round(toNumber(clientForm.showperfoverlay, appState.moonlightPreferences.showperfoverlay)),
-              keepawake: Math.round(toNumber(clientForm.keepawake, appState.moonlightPreferences.keepawake)),
-              framepacing: Math.round(toNumber(clientForm.framepacing, appState.moonlightPreferences.framepacing)),
-              vsync: Math.round(toNumber(clientForm.vsync, appState.moonlightPreferences.vsync)),
-              hdr: Math.round(toNumber(clientForm.hdr, appState.moonlightPreferences.hdr)),
-              videocfg: Math.round(toNumber(clientForm.videocfg, appState.moonlightPreferences.videocfg)),
-              videodec: Math.round(toNumber(clientForm.videodec, appState.moonlightPreferences.videodec)),
-              yuv444: Math.round(toNumber(clientForm.yuv444, appState.moonlightPreferences.yuv444)),
-              gameopts: Math.round(toNumber(clientForm.gameopts, appState.moonlightPreferences.gameopts)),
-              gamepadmouse: Math.round(toNumber(clientForm.gamepadmouse, appState.moonlightPreferences.gamepadmouse)),
+              bitrate: Math.max(
+                10000,
+                Math.round(
+                  toNumber(
+                    clientForm.bitrate,
+                    appState.moonlightPreferences.bitrate,
+                  ),
+                ),
+              ),
+              fps: Math.max(
+                30,
+                Math.round(
+                  toNumber(clientForm.fps, appState.moonlightPreferences.fps),
+                ),
+              ),
+              refreshRateMode:
+                clientForm.refreshRateMode === "59.94" ? "59.94" : "60",
+              width: Math.max(
+                1280,
+                Math.round(
+                  toNumber(
+                    clientForm.width,
+                    appState.moonlightPreferences.width,
+                  ),
+                ),
+              ),
+              height: Math.max(
+                720,
+                Math.round(
+                  toNumber(
+                    clientForm.height,
+                    appState.moonlightPreferences.height,
+                  ),
+                ),
+              ),
+              displayOutput: clientForm.displayOutput.trim()
+                ? clientForm.displayOutput.trim()
+                : null,
+              aspectRatio: clientForm.aspectRatio.trim()
+                ? clientForm.aspectRatio.trim()
+                : null,
+              hostaudio: Math.round(
+                toNumber(
+                  clientForm.hostaudio,
+                  appState.moonlightPreferences.hostaudio,
+                ),
+              ),
+              showperfoverlay: Math.round(
+                toNumber(
+                  clientForm.showperfoverlay,
+                  appState.moonlightPreferences.showperfoverlay,
+                ),
+              ),
+              keepawake: Math.round(
+                toNumber(
+                  clientForm.keepawake,
+                  appState.moonlightPreferences.keepawake,
+                ),
+              ),
+              framepacing: Math.round(
+                toNumber(
+                  clientForm.framepacing,
+                  appState.moonlightPreferences.framepacing,
+                ),
+              ),
+              vsync: Math.round(
+                toNumber(clientForm.vsync, appState.moonlightPreferences.vsync),
+              ),
+              hdr: Math.round(
+                toNumber(clientForm.hdr, appState.moonlightPreferences.hdr),
+              ),
+              videocfg: Math.round(
+                toNumber(
+                  clientForm.videocfg,
+                  appState.moonlightPreferences.videocfg,
+                ),
+              ),
+              videodec: Math.round(
+                toNumber(
+                  clientForm.videodec,
+                  appState.moonlightPreferences.videodec,
+                ),
+              ),
+              yuv444: Math.round(
+                toNumber(
+                  clientForm.yuv444,
+                  appState.moonlightPreferences.yuv444,
+                ),
+              ),
+              gameopts: Math.round(
+                toNumber(
+                  clientForm.gameopts,
+                  appState.moonlightPreferences.gameopts,
+                ),
+              ),
+              gamepadmouse: Math.round(
+                toNumber(
+                  clientForm.gamepadmouse,
+                  appState.moonlightPreferences.gamepadmouse,
+                ),
+              ),
               detectnetblocking: Math.round(
-                toNumber(clientForm.detectnetblocking, appState.moonlightPreferences.detectnetblocking)
-              )
+                toNumber(
+                  clientForm.detectnetblocking,
+                  appState.moonlightPreferences.detectnetblocking,
+                ),
+              ),
             })
           }
         >
@@ -439,8 +648,10 @@ export function SettingsScreen({
   );
 
   const storagePanel = (
-    <Card className="pixel-frame">
-      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">Shared Storage</h2>
+    <Card className="pixel-frame min-w-0 overflow-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        Shared Storage
+      </h2>
       <div className="mt-4">
         <SharedStorageSettings
           settings={sharedStorageSettings}
@@ -452,20 +663,121 @@ export function SettingsScreen({
     </Card>
   );
 
-  const panel = section === "profile" ? profilePanel : section === "server" ? serverPanel : section === "storage" ? storagePanel : clientPanel;
+  const connectionPanel = (
+    <Card className="pixel-frame min-w-0 overflow-hidden">
+      <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+        Connection Provider
+      </h2>
+      <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
+        Choose how to connect to your remote instance. WireGuard creates a
+        direct VPN tunnel. Tailscale uses your Tailscale mesh network for
+        simpler setup.
+      </p>
+
+      <div className="mt-4 space-y-3">
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="radio"
+            name="connectionProvider"
+            value="wireguard"
+            checked={connectionProvider === "wireguard"}
+            onChange={() => setConnectionProvider("wireguard")}
+            className="text-neon-cyan"
+          />
+          <span className="text-[1.15rem] text-white">WireGuard</span>
+        </label>
+        <label className="flex items-center gap-3 cursor-pointer">
+          <input
+            type="radio"
+            name="connectionProvider"
+            value="tailscale"
+            checked={connectionProvider === "tailscale"}
+            onChange={() => setConnectionProvider("tailscale")}
+            className="text-neon-cyan"
+          />
+          <span className="text-[1.15rem] text-white">Tailscale</span>
+        </label>
+      </div>
+
+      <div className="mt-4">
+        <Button
+          disabled={busy}
+          onClick={() =>
+            onSaveConnectionProvider({
+              connectionProvider,
+            })
+          }
+        >
+          Save Connection Provider
+        </Button>
+      </div>
+
+      <div className="mt-4 border-t border-[#3b4067] pt-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          Tailscale Auth Key
+        </h3>
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
+          Required if using Tailscale.{" "}
+          <a
+            className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
+            href="https://login.tailscale.com/admin/settings/keys"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Get your Tailscale auth key
+          </a>
+          .
+        </p>
+        <InputField
+          label="Tailscale Auth Key"
+          type="password"
+          value={tailscaleApiKey}
+          onChange={(event) => setTailscaleApiKey(event.target.value)}
+        />
+        <div className="mt-3">
+          <Button
+            disabled={busy}
+            onClick={() => onSaveTailscaleApiKey(tailscaleApiKey.trim())}
+          >
+            Save Tailscale Auth Key
+          </Button>
+        </div>
+      </div>
+    </Card>
+  );
+
+  const panel =
+    section === "profile"
+      ? profilePanel
+      : section === "server"
+        ? serverPanel
+        : section === "storage"
+          ? storagePanel
+          : section === "connection"
+            ? connectionPanel
+            : clientPanel;
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">Settings</p>
-            <h1
-              className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
-              data-text="Preferences"
-            >
-              Preferences
-            </h1>
+    <main className="crt-surface h-screen overflow-hidden bg-hero-glow px-4 pt-6 md:px-8">
+      <div className="mx-auto flex h-full w-full max-w-7xl flex-col gap-4 overflow-hidden">
+        <div className="flex shrink-0 items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div>
+              <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
+                Settings
+              </p>
+              <h1
+                className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
+                data-text="Preferences"
+              >
+                Preferences
+              </h1>
+            </div>
+            <AIPromptHelper
+              topic="App Configuration & Settings"
+              promptText={APP_PROMPTS.settingsPage}
+              variant="both"
+            />
           </div>
 
           <div className="flex items-center gap-2">
@@ -476,25 +788,45 @@ export function SettingsScreen({
           </div>
         </div>
 
-        <section className="grid gap-4 md:grid-cols-[240px_1fr]">
-          <Card className="pixel-frame">
+        <section className="grid min-h-0 flex-1 items-start gap-4 overflow-hidden md:grid-cols-[240px_minmax(0,1fr)]">
+          <Card className="pixel-frame self-start overflow-hidden md:sticky md:top-6">
             <div className="grid gap-2">
-              <Button variant={section === "profile" ? "secondary" : "ghost"} onClick={() => setSection("profile")}>
+              <Button
+                variant={section === "profile" ? "secondary" : "ghost"}
+                onClick={() => setSection("profile")}
+              >
                 Profile
               </Button>
-              <Button variant={section === "server" ? "secondary" : "ghost"} onClick={() => setSection("server")}>
+              <Button
+                variant={section === "server" ? "secondary" : "ghost"}
+                onClick={() => setSection("server")}
+              >
                 Server Configuration
               </Button>
-              <Button variant={section === "client" ? "secondary" : "ghost"} onClick={() => setSection("client")}>
+              <Button
+                variant={section === "client" ? "secondary" : "ghost"}
+                onClick={() => setSection("client")}
+              >
                 Client
               </Button>
-              <Button variant={section === "storage" ? "secondary" : "ghost"} onClick={() => setSection("storage")}>
+              <Button
+                variant={section === "storage" ? "secondary" : "ghost"}
+                onClick={() => setSection("storage")}
+              >
                 Shared Storage
+              </Button>
+              <Button
+                variant={section === "connection" ? "secondary" : "ghost"}
+                onClick={() => setSection("connection")}
+              >
+                Connection
               </Button>
             </div>
           </Card>
 
-          {panel}
+          <div className="min-h-0 min-w-0 self-stretch overflow-y-auto overscroll-contain pr-1 pb-6">
+            {panel}
+          </div>
         </section>
       </div>
     </main>

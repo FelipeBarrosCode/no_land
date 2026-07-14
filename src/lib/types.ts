@@ -15,6 +15,10 @@ export type OrchestrationState =
   | "ConfiguringWireGuard"
   | "ConfiguringSunshine"
   | "ConfiguringNvidiaHeadless"
+  | "SelectingConnectionProvider"
+  | "ConfiguringTailscale"
+  | "TailscaleConfigGenerated"
+  | "TailscaleConnected"
   | "WireGuardConfigGenerated"
   | "WireGuardAppHandoffStarted"
   | "WireGuardWaitingForImport"
@@ -94,10 +98,13 @@ export interface PostWireGuardSetupState {
   lastError: SetupErrorState | null;
 }
 
+export type ConnectionProvider = "wireguard" | "tailscale";
+
 export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  tailscaleApiKey: string;
 }
 
 export interface SshState {
@@ -228,6 +235,8 @@ export interface ProvisionedServerState {
   wireguardClientPublicKey: string;
   wireguardConfigPath: string;
   moonlightHostAddress: string;
+  connectionProvider: ConnectionProvider;
+  tailscaleClientIp: string;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -299,6 +308,7 @@ export interface PlatformCredentialsUpdate {
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;
+  hasCompletedGuidedSetup: boolean;
   credentials: CredentialsState;
   ssh: SshState;
   location: LocationState;
@@ -313,6 +323,7 @@ export interface PersistedAppState {
   provisionedServers: ProvisionedServerState[];
   postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;
+  connectionProvider: ConnectionProvider;
   lastError: string | null;
 }
 
@@ -329,6 +340,7 @@ export interface OnboardingPayload {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  tailscaleApiKey: string;
 }
 
 export interface ManualLocationInput {

@@ -26,8 +26,12 @@ body,
 #root {
   margin: 0;
   width: 100%;
+  max-width: 100vw;
   min-height: 100%;
   background: var(--bg);
+  overflow-x: hidden;
+  overscroll-behavior: none;
+  touch-action: pan-y;
 }
 
 body {

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
@@ -195,16 +197,19 @@ export function ServerPickerModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame max-h-[92vh] w-full max-w-6xl overflow-hidden">
         <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
-          <div>
-            <h2
-              className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
-              data-text="Select Server"
-            >
-              Select Server
-            </h2>
-            <p className="text-[1.25rem] leading-none text-[#b4c8de]">
-              Search uses region plus Vast geolocation country code.
-            </p>
+          <div className="flex items-center gap-3">
+            <div>
+              <h2
+                className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
+                data-text="Select Server"
+              >
+                Select Server
+              </h2>
+              <p className="text-[1.25rem] leading-none text-[#b4c8de]">
+                Search uses region plus Vast geolocation country code.
+              </p>
+            </div>
+            <AIPromptHelper topic="Server Selection Market" promptText={APP_PROMPTS.serverPickerModalHeader} variant="icon" />
           </div>
           <Button variant="ghost" onClick={onClose}>
             Close
@@ -268,6 +273,10 @@ export function ServerPickerModal({
 
           {/* Price Range and Filters */}
           <div className="mb-4 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] border border-[#3e4270] p-3 rounded">
+            <div className="md:col-span-4 flex items-center justify-between">
+              <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b4c8de]">Search Filters & Preferences</span>
+              <AIPromptHelper topic="Server Search & Filtering" promptText={APP_PROMPTS.serverSearchPreferences} variant="icon" />
+            </div>
             <div>
               <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min Price ($/hr)</span>
               <input
@@ -446,7 +455,10 @@ export function ServerPickerModal({
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <h3 className="font-display text-[11px] leading-[1.45] text-white">{offer.hostLabel}</h3>
+                      <div className="flex items-center gap-1.5">
+                        <h3 className="font-display text-[11px] leading-[1.45] text-white">{offer.hostLabel}</h3>
+                        <AIPromptHelper topic={`Instance Offering ${offer.hostLabel}`} promptText={APP_PROMPTS.serverInstanceCard} variant="icon" />
+                      </div>
                       <span className="border border-[#43508b] bg-[#1a2042] px-2 py-1 font-display text-[10px] text-[#9ad9ff]">
                         ${offer.hourlyPrice.toFixed(3)}/hr
                       </span>

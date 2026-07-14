@@ -1,5 +1,13 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
+import { SpriteIcon } from "../../components/ui/SpriteIcon";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
+import {
+  MOONLIGHT_DOWNLOAD_URL,
+  TAILSCALE_DOWNLOAD_URL,
+  WIREGUARD_DOWNLOAD_URL,
+} from "../../lib/constants";
 import type {
   OrchestrationState,
   PersistedAppState,
@@ -66,13 +74,22 @@ export function PostWireguardModal({
   void onDetectMoonlight;
   const setup = appState.postWireguardSetup;
   const activeInstanceId = appState.instance.instanceId;
+  const isTailscaleFlow = appState.connectionProvider === "tailscale";
+  const moonlightHost =
+    setup.moonlightHost || appState.moonlight.hostAddress || "10.77.0.1";
+  const sunshineUrl = `https://${moonlightHost}:47990/`;
+  const sunshineUsername =
+    setup.sunshineUsername || appState.credentials.appUsername || "";
+  const sunshinePassword = appState.credentials.appPassword || "";
   const configMatchesActiveInstance =
     activeInstanceId !== null &&
     activeInstanceId !== undefined &&
     setup.currentInstanceId === activeInstanceId;
   const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase =
-    wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
+    wireguardStages.has(setup.stage) &&
+    !streamingPrepStages.has(setup.stage) &&
+    !isTailscaleFlow;
   const hasStartedManualSetup =
     setup.stage !== "wireguard_config_generated" &&
     setup.stage !== "pre_wireguard_existing_flow";
@@ -95,6 +112,8 @@ export function PostWireguardModal({
   const pinRetryError =
     setup.lastError?.stage === "moonlight_pin_received" ||
     setup.lastError?.stage === "sunshine_pin_submitting";
+  const installLinkClass =
+    "inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white";
 
   const instructions = useMemo(() => {
     if (isMacManual) {
@@ -130,14 +149,48 @@ export function PostWireguardModal({
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame crt-surface w-full max-w-3xl p-6">
-        <h3
-          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-          data-text="Secure Tunnel Setup"
+        <button
+          onClick={() => window.history.back()}
+          className="absolute right-4 top-4 text-[#b9caf0] hover:text-white transition"
+          aria-label="Close modal"
         >
-          {isWireguardPhase
-            ? "Secure Tunnel Setup"
-            : "Moonlight & Sunshine Setup"}
-        </h3>
+          <SpriteIcon icon="close" />
+        </button>
+        <div className="flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2 mb-4">
+          <h3
+            className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+            data-text={
+              isTailscaleFlow
+                ? "Tailscale Connection"
+                : isWireguardPhase
+                  ? "Secure Tunnel Setup"
+                  : "Moonlight & Sunshine Setup"
+            }
+          >
+            {isTailscaleFlow
+              ? "Tailscale Connection"
+              : isWireguardPhase
+                ? "Secure Tunnel Setup"
+                : "Moonlight & Sunshine Setup"}
+          </h3>
+          <AIPromptHelper
+            topic={
+              isTailscaleFlow
+                ? "Tailscale Connection Setup"
+                : isWireguardPhase
+                  ? "WireGuard Connection Setup"
+                  : "Moonlight & Sunshine Pair Setup"
+            }
+            promptText={
+              isTailscaleFlow
+                ? APP_PROMPTS.tailscaleModalInfo
+                : isWireguardPhase
+                  ? APP_PROMPTS.wireguardModalInfo
+                  : APP_PROMPTS.playButtonSection
+            }
+            variant="both"
+          />
+        </div>
 
         {isWireguardPhase ? (
           <>
@@ -148,6 +201,33 @@ export function PostWireguardModal({
                   : "Click Start Manual Setup to load the current tunnel config for this instance, then import it into the WireGuard app."
                 : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then continue."}
             </p>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                What to install first
+              </h4>
+              <p className="mt-2">
+                Install WireGuard on this computer, import the generated tunnel,
+                activate it, then return here to continue into Moonlight setup.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  href={WIREGUARD_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download WireGuard
+                </a>
+                <a
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Moonlight
+                </a>
+              </div>
+            </div>
 
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-[1.08rem] leading-snug text-[#cfe7ff]">
               {instructions.map((instruction) => (
@@ -163,19 +243,24 @@ export function PostWireguardModal({
             )}
 
             {canShowWireguardConfig && (
-              <textarea
-                readOnly
-                value={setup.wireguardConfig}
-                className="mt-4 min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
-              />
+              <div className="mt-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b9caf0]">
+                    WireGuard Configuration
+                  </span>
+                  <Button variant="primary" onClick={() => void copyConfig()}>
+                    <SpriteIcon icon="copy" />
+                    <span className="ml-1">Copy to Clipboard</span>
+                  </Button>
+                </div>
+                <textarea
+                  readOnly
+                  value={setup.wireguardConfig}
+                  className="min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
+                />
+              </div>
             )}
-
             <div className="mt-4 flex flex-wrap gap-2">
-              {canShowWireguardConfig && (
-                <Button variant="ghost" onClick={() => void copyConfig()}>
-                  Copy Config
-                </Button>
-              )}
               <Button
                 variant="secondary"
                 onClick={() => void onDownloadWireguardConfig()}
@@ -201,7 +286,7 @@ export function PostWireguardModal({
                 onClick={() => void onSetupMoonlightSunshine()}
                 disabled={busy}
               >
-                Done
+                Continue to Moonlight Setup
               </Button>
             </div>
 
@@ -221,15 +306,101 @@ export function PostWireguardModal({
               </p>
             )}
           </>
+        ) : isTailscaleFlow &&
+          !isStreamingPrepPhase &&
+          !stageShowsPinSubmission ? (
+          <>
+            <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
+              Tailscale is connected! Your remote instance is reachable at{" "}
+              <span className="text-neon-lime">{moonlightHost}</span>.
+            </p>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+                What to do on this computer
+              </h4>
+              <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
+                <li>Install Tailscale if it is not already installed.</li>
+                <li>
+                  Sign in to the same tailnet and keep Tailscale running
+                  locally.
+                </li>
+                <li>Install Moonlight if needed.</li>
+                <li>
+                  Continue below so Noland can verify Sunshine and start
+                  pairing.
+                </li>
+              </ol>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <a
+                  href={TAILSCALE_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Tailscale
+                </a>
+                <a
+                  href={MOONLIGHT_DOWNLOAD_URL}
+                  target="_blank"
+                  rel="noreferrer"
+                  className={installLinkClass}
+                >
+                  Download Moonlight
+                </a>
+              </div>
+            </div>
+            <p className="mt-2 text-[1.1rem] leading-snug text-[#cfe7ff]">
+              No WireGuard/Tailscale config or app import needed. Continue to
+              set up Sunshine TLS, verify the Sunshine API, and pair with
+              Moonlight directly from this app.
+            </p>
+            <div className="mt-6 flex flex-wrap gap-2">
+              <Button
+                onClick={() => void onSetupMoonlightSunshine()}
+                disabled={busy}
+              >
+                Continue to Moonlight Setup
+              </Button>
+            </div>
+          </>
         ) : (
           <>
             {isStreamingPrepPhase ? (
               <>
                 <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
                   Finishing Sunshine and Moonlight setup on{" "}
-                  <span className="text-neon-cyan">10.77.0.1</span>. PIN entry
-                  unlocks when this preparation is done.
+                  <span className="text-neon-cyan">{moonlightHost}</span>. PIN
+                  entry unlocks when this preparation is done.
                 </p>
+                <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                    Moonlight setup checklist
+                  </h4>
+                  <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
+                    <li>
+                      Install Moonlight on this computer if you have not
+                      already.
+                    </li>
+                    <li>
+                      Open Moonlight and add the PC at{" "}
+                      <span className="text-neon-cyan">{moonlightHost}</span>.
+                    </li>
+                    <li>
+                      When prompted, generate the PIN in Moonlight and return
+                      here.
+                    </li>
+                  </ol>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <a
+                      href={MOONLIGHT_DOWNLOAD_URL}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={installLinkClass}
+                    >
+                      Download Moonlight
+                    </a>
+                  </div>
+                </div>
               </>
             ) : (
               <>
@@ -260,7 +431,7 @@ export function PostWireguardModal({
                 <ol className="mt-3 list-decimal space-y-2 pl-5 text-[1.05rem] leading-snug text-[#cfe7ff]">
                   <li>
                     Open Moonlight and add the PC at{" "}
-                    <span className="text-neon-cyan">10.77.0.1</span>.
+                    <span className="text-neon-cyan">{moonlightHost}</span>.
                   </li>
                   <li>Generate the PIN in Moonlight.</li>
                   <li>
@@ -312,11 +483,20 @@ export function PostWireguardModal({
                   <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
                     Sunshine Login
                   </h4>
-                  <p className="mt-2">
-                    Username: <span className="text-white">user</span>
+                  <p className="mt-2 break-all">
+                    URL: <span className="text-white">{sunshineUrl}</span>
                   </p>
-                  <p>
-                    Password: <span className="text-white">password</span>
+                  <p className="break-all">
+                    Username:{" "}
+                    <span className="text-white">
+                      {sunshineUsername || "(empty)"}
+                    </span>
+                  </p>
+                  <p className="break-all">
+                    Password:{" "}
+                    <span className="text-white">
+                      {sunshinePassword || "(empty)"}
+                    </span>
                   </p>
                 </div>
               </div>
@@ -331,7 +511,37 @@ export function PostWireguardModal({
             </h4>
             <p className="mt-2">{setup.lastError.message}</p>
             {setup.lastError.details && (
-              <p className="mt-2 text-[#ffbdc7]">{setup.lastError.details}</p>
+              <p className="mt-2 whitespace-pre-wrap break-words text-[#ffbdc7]">
+                {setup.lastError.details}
+              </p>
+            )}
+            {(setup.lastError.code.includes("sunshine") ||
+              setup.lastError.stage === "sunshine_verifying" ||
+              setup.lastError.stage === "sunshine_credentials_configuring") && (
+              <div className="mt-3 border border-[#7a3f52] bg-[#341723] p-3 text-[1rem] text-[#ffd9df]">
+                <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-[#ffc3cf]">
+                  Manual Sunshine Login
+                </h4>
+                <p className="mt-2 break-all">
+                  URL: <span className="text-white">{sunshineUrl}</span>
+                </p>
+                <p className="break-all">
+                  Username:{" "}
+                  <span className="text-white">
+                    {sunshineUsername || "(empty)"}
+                  </span>
+                </p>
+                <p className="break-all">
+                  Password:{" "}
+                  <span className="text-white">
+                    {sunshinePassword || "(empty)"}
+                  </span>
+                </p>
+                <p className="mt-2 text-[#ffbdc7]">
+                  Open the Sunshine UI manually, log in with these credentials,
+                  confirm the web UI loads, then come back here and retry.
+                </p>
+              </div>
             )}
             {setup.lastError.retryable && !pinRetryError && (
               <div className="mt-3">
