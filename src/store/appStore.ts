@@ -11,7 +11,6 @@ import {
   setupWireguardAppHandoff,
   startPlayExistingInstance,
   startPlayFlow,
-  submitMoonlightPinToSunshine,
   submitPairingPin,
   skipPairingAndContinue,
   subscribeProvisioningEvents,
@@ -62,6 +61,10 @@ import {
   syncInstanceFromSharedStorageSelected,
   listInstanceExportableStorageObjects,
   saveInstanceToSharedStorageSelected,
+  setInstanceMoonlightPipelineEnabled,
+  getInstanceMoonlightPipelineStatus,
+  prepareInstanceMoonlightPairing,
+  completeInstanceMoonlightPairing,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -92,6 +95,8 @@ import type {
   MicSettingsUpdate,
   MicQualityProfile,
   MoonlightDetectionResult,
+  MoonlightPairingSessionResponse,
+  EmbeddedMoonlightInstanceStatus,
   OrchestrationState,
   PostWireGuardSetupState,
   ReachabilityResult,
@@ -125,7 +130,7 @@ interface AppStore {
   previousOffersPage: () => Promise<void>;
   chooseOffer: (offerId: number, storageGb: number) => Promise<void>;
   startPlay: () => Promise<void>;
-  startPlayExisting: (instanceId: number) => Promise<void>;
+  startPlayExisting: (instanceId: number) => Promise<string | null>;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
   saveTailscaleApiKey: (apiKey: string) => Promise<void>;
@@ -191,6 +196,8 @@ interface AppStore {
   setupBackupSchedule: () => Promise<string | null>;
   removeBackupSchedule: () => Promise<string | null>;
   sunshineSettings: SunshineSettingsResponse | null;
+  embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null;
+  activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   instanceActionRunning: boolean;
   loadSunshineSettings: (
     instanceId: number,
@@ -203,6 +210,23 @@ interface AppStore {
     sunshineUsername: string,
     sunshinePassword: string,
   ) => Promise<void>;
+  setEmbeddedMoonlightPipelineEnabled: (
+    instanceId: number,
+    enabled: boolean,
+  ) => Promise<void>;
+  loadEmbeddedMoonlightStatus: (
+    instanceId: number,
+  ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
+  prepareEmbeddedMoonlightPairing: (
+    instanceId: number,
+  ) => Promise<MoonlightPairingSessionResponse | null>;
+  completeEmbeddedMoonlightPairing: (
+    instanceId: number,
+    sessionId: string,
+  ) => Promise<boolean>;
+  rerunEmbeddedMoonlightPairing: (
+    instanceId: number,
+  ) => Promise<MoonlightPairingSessionResponse | null>;
   resetSunshineSettings: (
     instanceId: number,
     sunshineUsername: string,
@@ -640,6 +664,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     backupStatus: null,
     instanceBackupStatus: null,
     sunshineSettings: null,
+    embeddedMoonlightStatus: null,
+    activeMoonlightPairing: null,
     instanceActionRunning: false,
     bundleIndex: null,
     restoreJob: null,
@@ -796,15 +822,21 @@ export const useAppStore = create<AppStore>((set, get) => {
     startPlayExisting: async (instanceId) => {
       beginProvisioningBlock("Reconnecting to your existing gaming instance.");
       try {
-        await startPlayExistingInstance(instanceId);
+        const mode = await startPlayExistingInstance(instanceId);
         const appState = await getAppState();
         set({ appState });
+        if (mode === "embedded") {
+          endProvisioningBlock();
+          return mode;
+        }
         if (PROVISIONING_INTERACTIVE_STATES.has(appState.orchestrationState)) {
           endProvisioningBlock();
         }
+        return mode;
       } catch (error) {
         endProvisioningBlock();
         set({ error: mapError(error) });
+        return null;
       }
     },
 
@@ -1116,26 +1148,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    submitMoonlightPin: async (pin) => {
-      return runBusyTask(
-        {
-          key: "moonlightSunshine.pin",
-          label: "Submitting PIN to Sunshine",
-          detail: "Pairing Moonlight with Sunshine over the secure tunnel.",
-          blocking: true,
-        },
-        async () => {
-          try {
-            const setup = await submitMoonlightPinToSunshine(pin);
-            await refreshProvisioningState(set);
-            return setup;
-          } catch (error) {
-            await refreshProvisioningState(set);
-            throw error;
-          }
-        },
-        null,
-      );
+    submitMoonlightPin: async (_pin) => {
+      throw new Error("Legacy Sunshine PIN submission is no longer used by provisioning handoff.");
     },
 
     retrySetupStage: async (stage) => {
@@ -1465,6 +1479,133 @@ export const useAppStore = create<AppStore>((set, get) => {
           set({ sunshineSettings: refreshed });
         },
         undefined,
+      );
+    },
+
+    setEmbeddedMoonlightPipelineEnabled: async (instanceId, enabled) => {
+      await runInstanceTask(
+        {
+          key: "instance.moonlight.pipeline",
+          label: enabled ? "Enabling embedded Moonlight" : "Disabling embedded Moonlight",
+          detail: enabled
+            ? "Turning on the built-in Moonlight pipeline for this instance."
+            : "Turning off the built-in Moonlight pipeline for this instance.",
+        },
+        async () => {
+          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, enabled);
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = enabled
+            ? await getInstanceMoonlightPipelineStatus(instanceId)
+            : null;
+          set({ appState, rentedInstances, embeddedMoonlightStatus });
+        },
+        undefined,
+      );
+    },
+
+    loadEmbeddedMoonlightStatus: async (instanceId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.status",
+          label: "Loading embedded Moonlight status",
+          detail: "Checking whether this instance is ready for the built-in stream pipeline.",
+        },
+        async () => {
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({ embeddedMoonlightStatus });
+          return embeddedMoonlightStatus;
+        },
+        null,
+      );
+    },
+
+    prepareEmbeddedMoonlightPairing: async (instanceId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.begin",
+          label: "Starting embedded Moonlight pairing",
+          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          const session = await prepareInstanceMoonlightPairing(instanceId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: session,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return session;
+        },
+        null,
+      );
+    },
+
+    completeEmbeddedMoonlightPairing: async (instanceId, sessionId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.complete",
+          label: "Completing embedded Moonlight pairing",
+          detail: "Finalizing Sunshine pairing for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          await completeInstanceMoonlightPairing(instanceId, sessionId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: null,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return true;
+        },
+        false,
+      );
+    },
+
+    rerunEmbeddedMoonlightPairing: async (instanceId) => {
+      await runInstanceTask(
+        {
+          key: "instance.moonlight.pipeline",
+          label: "Enabling embedded Moonlight",
+          detail: "Turning on the built-in Moonlight pipeline for this instance.",
+        },
+        async () => {
+          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, true);
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({ appState, rentedInstances, embeddedMoonlightStatus });
+        },
+        undefined,
+      );
+
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.begin",
+          label: "Starting embedded Moonlight pairing",
+          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          const session = await prepareInstanceMoonlightPairing(instanceId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: session,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return session;
+        },
+        null,
       );
     },
 

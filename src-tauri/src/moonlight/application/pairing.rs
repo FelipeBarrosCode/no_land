@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    future::Future,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -8,10 +9,10 @@ use chrono::Utc;
 use rand_core::{OsRng, RngCore};
 
 use crate::moonlight::{
-    application::bootstrap::load_existing_identity,
+    application::bootstrap::bootstrap_client_identity,
     domain::{MoonlightError, PairingStatus, PersistedPairing},
     infrastructure::{
-        gamestream::{pair_host, PairHostRequest},
+        gamestream::{pair_host_with_stage1_authorization, PairHostRequest},
         persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
         secrets::SecretStore,
     },
@@ -31,6 +32,28 @@ pub struct PairingSession {
 #[derive(Debug, Clone)]
 pub struct PairingSessionStore {
     sessions: Arc<Mutex<HashMap<String, PairingSession>>>,
+}
+
+impl PairingSessionStore {
+    pub fn get(
+        &self,
+        session_id: &PairingSessionId,
+    ) -> Result<Option<PairingSession>, MoonlightError> {
+        let guard = self.sessions.lock().map_err(|_| {
+            MoonlightError::Persistence("pairing session mutex poisoned".to_string())
+        })?;
+        Ok(guard.get(&session_id.0).cloned())
+    }
+
+    pub fn remove(
+        &self,
+        session_id: &PairingSessionId,
+    ) -> Result<Option<PairingSession>, MoonlightError> {
+        let mut guard = self.sessions.lock().map_err(|_| {
+            MoonlightError::Persistence("pairing session mutex poisoned".to_string())
+        })?;
+        Ok(guard.remove(&session_id.0))
+    }
 }
 
 impl Default for PairingSessionStore {
@@ -77,20 +100,36 @@ pub async fn complete_pairing(
     sessions: &PairingSessionStore,
     session_id: &PairingSessionId,
 ) -> Result<PairingResult, MoonlightError> {
-    let session = {
-        let mut guard = sessions.sessions.lock().map_err(|_| {
-            MoonlightError::Persistence("pairing session mutex poisoned".to_string())
-        })?;
-        let session = guard
-            .remove(&session_id.0)
-            .ok_or_else(|| MoonlightError::Validation("pairing session not found".to_string()))?;
-        if session.expires_at <= Instant::now() {
-            return Err(MoonlightError::Validation(
-                "pairing session has expired".to_string(),
-            ));
-        }
-        session
-    };
+    complete_pairing_with_stage1_authorization(
+        repository,
+        secret_store,
+        sessions,
+        session_id,
+        || async { Ok(()) },
+    )
+    .await
+}
+
+pub async fn complete_pairing_with_stage1_authorization<F, Fut>(
+    repository: &JsonMoonlightStateRepository,
+    secret_store: &dyn SecretStore,
+    sessions: &PairingSessionStore,
+    session_id: &PairingSessionId,
+    authorize_after_stage1_pending: F,
+) -> Result<PairingResult, MoonlightError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), MoonlightError>>,
+{
+    let session = sessions
+        .get(session_id)?
+        .ok_or_else(|| MoonlightError::Validation("pairing session not found".to_string()))?;
+    if session.expires_at <= Instant::now() {
+        let _ = sessions.remove(session_id);
+        return Err(MoonlightError::Validation(
+            "pairing session has expired".to_string(),
+        ));
+    }
 
     let snapshot = repository.snapshot()?;
     let host = snapshot
@@ -98,10 +137,9 @@ pub async fn complete_pairing(
         .get(&session.host_id)
         .cloned()
         .ok_or_else(|| MoonlightError::Validation(format!("host {} not found", session.host_id)))?;
-    let persisted_identity = snapshot.identity.ok_or_else(|| {
-        MoonlightError::IdentityInvalid("Moonlight identity is missing".to_string())
-    })?;
-    let identity = load_existing_identity(persisted_identity, secret_store).await?;
+    let identity = bootstrap_client_identity(repository, secret_store)
+        .await?
+        .identity;
     let address = host
         .addresses
         .overlay
@@ -111,19 +149,22 @@ pub async fn complete_pairing(
         .ok_or_else(|| {
             MoonlightError::Validation(format!("host {} has no usable address", session.host_id))
         })?;
-    let result = pair_host(PairHostRequest {
-        address,
-        http_port: host.ports.http,
-        https_port: host.ports.https,
-        unique_id: identity.unique_id.clone(),
-        pin: session.pin.clone(),
-        client_certificate_pem: identity.certificate_pem.clone(),
-        client_private_key_pem: identity.private_key_pem.clone(),
-        server_app_version: host
-            .server_info_cache
-            .as_ref()
-            .map(|cache| cache.app_version.clone()),
-    })
+    let result = pair_host_with_stage1_authorization(
+        PairHostRequest {
+            address,
+            http_port: host.ports.http,
+            https_port: host.ports.https,
+            unique_id: identity.unique_id.clone(),
+            pin: session.pin.clone(),
+            client_certificate_pem: identity.certificate_pem.clone(),
+            client_private_key_pem: identity.private_key_pem.clone(),
+            server_app_version: host
+                .server_info_cache
+                .as_ref()
+                .map(|cache| cache.app_version.clone()),
+        },
+        authorize_after_stage1_pending,
+    )
     .await?;
 
     repository.update(|configuration| {
@@ -141,6 +182,8 @@ pub async fn complete_pairing(
         });
         Ok(())
     })?;
+
+    let _ = sessions.remove(session_id)?;
 
     Ok(PairingResult {
         host_id: session.host_id,

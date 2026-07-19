@@ -20,7 +20,7 @@ function RootRoute() {
   const instanceActionRunning = useAppStore(
     (state) => state.instanceActionRunning,
   );
-  const sunshineSettings = useAppStore((state) => state.sunshineSettings);
+
   const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
   const discoverOffers = useAppStore((state) => state.discoverOffers);
@@ -34,15 +34,17 @@ function RootRoute() {
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
-  const loadSunshineSettings = useAppStore(
-    (state) => state.loadSunshineSettings,
+
+  const setEmbeddedMoonlightPipelineEnabled = useAppStore(
+    (state) => state.setEmbeddedMoonlightPipelineEnabled,
   );
-  const saveSunshineSettings = useAppStore(
-    (state) => state.saveSunshineSettings,
+  const loadEmbeddedMoonlightStatus = useAppStore(
+    (state) => state.loadEmbeddedMoonlightStatus,
   );
-  const resetSunshineSettings = useAppStore(
-    (state) => state.resetSunshineSettings,
+  const rerunEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.rerunEmbeddedMoonlightPairing,
   );
+
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const rebootInstanceServices = useAppStore(
     (state) => state.rebootInstanceServices,
@@ -83,7 +85,6 @@ function RootRoute() {
       busy={busy}
       instanceActionRunning={instanceActionRunning}
       blockingAction={blockingAction}
-      sunshineSettings={sunshineSettings}
       onSearchOffers={discoverOffers}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
@@ -93,9 +94,9 @@ function RootRoute() {
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
       onSaveServerPreferences={saveServerPreferences}
-      onLoadSunshineSettings={loadSunshineSettings}
-      onSaveSunshineSettings={saveSunshineSettings}
-      onResetSunshineSettings={resetSunshineSettings}
+      onSetEmbeddedMoonlightPipelineEnabled={setEmbeddedMoonlightPipelineEnabled}
+      onLoadEmbeddedMoonlightStatus={loadEmbeddedMoonlightStatus}
+      onRerunEmbeddedMoonlightPairing={rerunEmbeddedMoonlightPairing}
       onReconnectWireguard={reconnectWireguard}
       onRebootInstanceServices={rebootInstanceServices}
       onPauseInstance={pauseInstance}
@@ -129,7 +130,15 @@ function ProvisioningRoute() {
   const setupMoonlightSunshine = useAppStore(
     (state) => state.setupMoonlightSunshine,
   );
-  const submitMoonlightPin = useAppStore((state) => state.submitMoonlightPin);
+  const activeMoonlightPairing = useAppStore(
+    (state) => state.activeMoonlightPairing,
+  );
+  const prepareEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.prepareEmbeddedMoonlightPairing,
+  );
+  const completeEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.completeEmbeddedMoonlightPairing,
+  );
   const retrySetupStage = useAppStore((state) => state.retrySetupStage);
   const sleepPreventionActive = useAppStore(
     (state) => state.sleepPreventionActive,
@@ -143,6 +152,9 @@ function ProvisioningRoute() {
     return null;
   }
 
+  const provisioningInstanceId =
+    appState.postWireguardSetup.currentInstanceId ?? appState.instance.instanceId;
+
   return (
     <ProvisioningScreen
       appState={appState}
@@ -155,7 +167,22 @@ function ProvisioningRoute() {
       onVerifyWireguard={verifyWireguardConnection}
       onDetectMoonlight={detectMoonlight}
       onSetupMoonlightSunshine={setupMoonlightSunshine}
-      onSubmitMoonlightPin={submitMoonlightPin}
+      activeMoonlightPairing={activeMoonlightPairing}
+      onPrepareMoonlightPairingHandoff={() => {
+        if (!provisioningInstanceId) {
+          return Promise.resolve(null);
+        }
+        return prepareEmbeddedMoonlightPairing(provisioningInstanceId);
+      }}
+      onCompleteMoonlightPairingHandoff={(_pin) => {
+        if (!provisioningInstanceId || !activeMoonlightPairing?.sessionId) {
+          return Promise.resolve(null);
+        }
+        return completeEmbeddedMoonlightPairing(
+          provisioningInstanceId,
+          activeMoonlightPairing.sessionId,
+        );
+      }}
       onRetrySetupStage={retrySetupStage}
       sleepPreventionActive={sleepPreventionActive}
       onStartSleepPrevention={startSleepPrevention}

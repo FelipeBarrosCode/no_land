@@ -9,6 +9,7 @@ import type {
   PersistedAppState,
   ProvisioningEvent,
   SetupStage,
+  MoonlightPairingSessionResponse,
 } from "../../lib/types";
 import { PostWireguardModal } from "./PostWireguardModal";
 import { ConnectionProviderModal } from "./ConnectionProviderModal";
@@ -24,7 +25,9 @@ interface Props {
   onVerifyWireguard: () => Promise<unknown>;
   onDetectMoonlight: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
-  onSubmitMoonlightPin: (pin: string) => Promise<unknown>;
+  activeMoonlightPairing: MoonlightPairingSessionResponse | null;
+  onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
+  onCompleteMoonlightPairingHandoff: (pin: string) => Promise<unknown>;
   onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
   sleepPreventionActive: boolean;
   onStartSleepPrevention: () => Promise<string | null>;
@@ -51,7 +54,9 @@ export function ProvisioningScreen({
   onVerifyWireguard,
   onDetectMoonlight,
   onSetupMoonlightSunshine,
-  onSubmitMoonlightPin,
+  activeMoonlightPairing,
+  onPrepareMoonlightPairingHandoff,
+  onCompleteMoonlightPairingHandoff,
   onRetrySetupStage,
   sleepPreventionActive,
   onStartSleepPrevention,
@@ -281,7 +286,9 @@ export function ProvisioningScreen({
         onVerifyWireguard={onVerifyWireguard}
         onDetectMoonlight={onDetectMoonlight}
         onSetupMoonlightSunshine={onSetupMoonlightSunshine}
-        onSubmitMoonlightPin={onSubmitMoonlightPin}
+        activeMoonlightPairing={activeMoonlightPairing}
+        onPrepareMoonlightPairingHandoff={onPrepareMoonlightPairingHandoff}
+        onCompleteMoonlightPairingHandoff={onCompleteMoonlightPairingHandoff}
         onRetrySetupStage={onRetrySetupStage}
       />
     </main>

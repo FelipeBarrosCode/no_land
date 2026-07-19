@@ -382,10 +382,10 @@ impl Default for PostWireGuardSetupState {
             current_instance_id: None,
             wireguard_export_path: String::new(),
             wireguard_config: String::new(),
-            wireguard_verified_host: "10.77.0.1".to_string(),
+            wireguard_verified_host: String::new(),
             wireguard_reachable_ports: Vec::new(),
             sunshine_username: String::new(),
-            moonlight_host: "10.77.0.1".to_string(),
+            moonlight_host: String::new(),
             moonlight_installed: false,
             paired: false,
             setup_complete: false,
@@ -444,6 +444,10 @@ fn default_edid_source_label() -> String {
 pub struct MoonlightState {
     pub configured: bool,
     pub host_address: String,
+    #[serde(default)]
+    pub session_state: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 impl Default for MoonlightState {
@@ -451,6 +455,8 @@ impl Default for MoonlightState {
         Self {
             configured: false,
             host_address: String::new(),
+            session_state: "idle".to_string(),
+            last_error: None,
         }
     }
 }
@@ -545,6 +551,8 @@ pub struct RentedInstanceSummary {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub public_ip: String,
+    #[serde(default)]
+    pub embedded_moonlight_pipeline_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -573,6 +581,12 @@ pub struct ProvisionedServerState {
     pub connection_provider: ConnectionProvider,
     #[serde(default)]
     pub tailscale_client_ip: String,
+    #[serde(default)]
+    pub embedded_moonlight_pipeline_enabled: bool,
+    #[serde(default)]
+    pub embedded_moonlight_host_id: String,
+    #[serde(default)]
+    pub embedded_moonlight_paired: bool,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -616,6 +630,9 @@ impl ProvisionedServerState {
             moonlight_host_address: String::new(),
             connection_provider: ConnectionProvider::default(),
             tailscale_client_ip: String::new(),
+            embedded_moonlight_pipeline_enabled: false,
+            embedded_moonlight_host_id: String::new(),
+            embedded_moonlight_paired: false,
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),

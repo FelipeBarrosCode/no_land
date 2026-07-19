@@ -205,6 +205,8 @@ export interface SunshineState {
 export interface MoonlightState {
   configured: boolean;
   hostAddress: string;
+  sessionState: string;
+  lastError: string | null;
 }
 
 export interface ProvisionedServerSteps {
@@ -237,6 +239,9 @@ export interface ProvisionedServerState {
   moonlightHostAddress: string;
   connectionProvider: ConnectionProvider;
   tailscaleClientIp: string;
+  embeddedMoonlightPipelineEnabled: boolean;
+  embeddedMoonlightHostId: string;
+  embeddedMoonlightPaired: boolean;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -272,6 +277,7 @@ export interface RentedInstanceSummary {
   sshHost: string;
   sshPort: number;
   publicIp: string;
+  embeddedMoonlightPipelineEnabled: boolean;
 }
 
 export interface ServerPreferencesUpdate {
@@ -412,6 +418,23 @@ export interface MoonlightDetectionResult {
   launchKind: "native_path" | "path_lookup" | "flatpak" | "unknown";
   executablePath?: string;
   error?: string;
+}
+
+export interface MoonlightPairingSessionResponse {
+  sessionId: string;
+  hostId: string;
+  pin: string;
+  expiresInSeconds: number;
+}
+
+export interface EmbeddedMoonlightInstanceStatus {
+  instanceId: number;
+  enabled: boolean;
+  hostId: string;
+  paired: boolean;
+  hostAddress: string;
+  sessionState: string;
+  lastError: string | null;
 }
 
 export interface SunshineVerificationResult {

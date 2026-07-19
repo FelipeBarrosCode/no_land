@@ -56,12 +56,106 @@ pub struct SunshineSettingsUpdatePayload {
 pub struct InstanceLifecycleService;
 
 impl InstanceLifecycleService {
+    async fn resolve_sunshine_api_target(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<(String, u16)> {
+        let state = context.state.read().await;
+        let provisioned = state
+            .provisioned_servers
+            .iter()
+            .find(|server| server.instance_id == instance_id);
+
+        let host = provisioned
+            .and_then(|server| {
+                [
+                    Some(server.wireguard_server_ip.as_str()),
+                    Some(server.moonlight_host_address.as_str()),
+                    Some(server.tailscale_client_ip.as_str()),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::trim)
+                .find(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+            })
+            .or_else(|| {
+                let candidate = state.wireguard.server_ip.trim();
+                (!candidate.is_empty()).then(|| candidate.to_string())
+            })
+            .or_else(|| {
+                let candidate = state.post_wireguard_setup.moonlight_host.trim();
+                (!candidate.is_empty()).then(|| candidate.to_string())
+            })
+            .ok_or_else(|| {
+                AppError::InvalidInput(
+                    "WireGuard tunnel not established. Cannot reach Sunshine API.".to_string(),
+                )
+            })?;
+
+        let port = if state.post_wireguard_setup.current_instance_id == Some(instance_id)
+            && state
+                .post_wireguard_setup
+                .wireguard_reachable_ports
+                .contains(&47990)
+        {
+            47990
+        } else {
+            47990
+        };
+
+        Ok((host, port))
+    }
+
     pub async fn reconcile_owned_instances(
         context: &AppContext,
         owned_instances: &[VastInstance],
     ) -> AppResult<()> {
         let owned_instance_ids = owned_instances.iter().map(|instance| instance.id).collect();
-        Self::remove_local_instances_missing_from_owned_set(context, &owned_instance_ids).await
+        Self::remove_local_instances_missing_from_owned_set(context, &owned_instance_ids).await?;
+
+        context
+            .update_state(|state| {
+                for instance in owned_instances {
+                    let index = state
+                        .provisioned_servers
+                        .iter()
+                        .position(|record| record.instance_id == instance.id)
+                        .unwrap_or_else(|| {
+                            state
+                                .provisioned_servers
+                                .push(ProvisionedServerState::new(instance.id));
+                            state.provisioned_servers.len() - 1
+                        });
+
+                    let record = &mut state.provisioned_servers[index];
+                    record.offer_id = state.selected_offer.as_ref().and_then(|offer| {
+                        (state.instance.instance_id == Some(instance.id)).then_some(offer.id)
+                    });
+                    record.status = instance.status.clone();
+                    record.ssh_host = instance.ssh_host.clone();
+                    record.ssh_port = instance.ssh_port;
+                    record.ssh_command = instance.ssh_command.clone();
+
+                    if !instance.wireguard_host_ip.trim().is_empty() {
+                        record.wireguard_server_ip = instance.wireguard_host_ip.trim().to_string();
+                        if record.moonlight_host_address.trim().is_empty() {
+                            record.moonlight_host_address =
+                                instance.wireguard_host_ip.trim().to_string();
+                        }
+                    }
+
+                    if record.moonlight_host_address.trim().is_empty()
+                        && !record.tailscale_client_ip.trim().is_empty()
+                    {
+                        record.moonlight_host_address =
+                            record.tailscale_client_ip.trim().to_string();
+                    }
+                }
+            })
+            .await?;
+
+        Ok(())
     }
 
     async fn remove_local_instances_missing_from_owned_set(
@@ -114,6 +208,8 @@ impl InstanceLifecycleService {
     }
 
     async fn fetch_sunshine_raw_config(
+        host: &str,
+        port: u16,
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<HashMap<String, Value>> {
@@ -124,14 +220,15 @@ impl InstanceLifecycleService {
         }
 
         let client = sunshine_api_client()?;
+        let endpoint = format!("https://{host}:{port}/api/config");
         let response = client
-            .get("https://10.77.0.1:47990/api/config")
+            .get(&endpoint)
             .basic_auth(sunshine_username, Some(sunshine_password))
             .send()
             .await
             .map_err(|error| {
                 AppError::Provisioning(format!(
-                    "Failed to reach Sunshine config endpoint on https://10.77.0.1:47990: {error}"
+                    "Failed to reach Sunshine config endpoint on {endpoint}: {error}"
                 ))
             })?;
 
@@ -149,6 +246,8 @@ impl InstanceLifecycleService {
     }
 
     async fn post_sunshine_raw_config(
+        host: &str,
+        port: u16,
         payload: &HashMap<String, Value>,
         sunshine_username: &str,
         sunshine_password: &str,
@@ -163,8 +262,9 @@ impl InstanceLifecycleService {
             .map_err(|e| AppError::Serialization(format!("Failed to serialize settings: {e}")))?;
 
         let client = sunshine_api_client()?;
+        let endpoint = format!("https://{host}:{port}/api/config");
         let response = client
-            .post("https://10.77.0.1:47990/api/config")
+            .post(&endpoint)
             .basic_auth(sunshine_username, Some(sunshine_password))
             .header("Content-Type", "application/json")
             .body(json_body)
@@ -172,7 +272,7 @@ impl InstanceLifecycleService {
             .await
             .map_err(|error| {
                 AppError::Provisioning(format!(
-                    "Failed to reach Sunshine config update endpoint on https://10.77.0.1:47990: {error}"
+                    "Failed to reach Sunshine config update endpoint on {endpoint}: {error}"
                 ))
             })?;
 
@@ -384,22 +484,15 @@ impl InstanceLifecycleService {
     /// Get Sunshine settings from the provisioned instance via its REST API.
     pub async fn get_sunshine_settings(
         context: &AppContext,
-        _instance_id: u64,
+        instance_id: u64,
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<SunshineSettingsResponse> {
-        let server_ip = {
-            let state = context.state.read().await;
-            state.wireguard.server_ip.clone()
-        };
+        let (server_ip, port) = Self::resolve_sunshine_api_target(context, instance_id).await?;
 
-        if server_ip.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "WireGuard tunnel not established. Cannot reach Sunshine API.".to_string(),
-            ));
-        }
-
-        let raw = Self::fetch_sunshine_raw_config(sunshine_username, sunshine_password).await?;
+        let raw =
+            Self::fetch_sunshine_raw_config(&server_ip, port, sunshine_username, sunshine_password)
+                .await?;
 
         let settings = raw
             .iter()
@@ -420,24 +513,21 @@ impl InstanceLifecycleService {
     /// Update Sunshine settings on the provisioned instance.
     pub async fn update_sunshine_settings(
         context: &AppContext,
-        _instance_id: u64,
+        instance_id: u64,
         payload: SunshineSettingsUpdatePayload,
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<()> {
-        let server_ip = {
-            let state = context.state.read().await;
-            state.wireguard.server_ip.clone()
-        };
+        let (server_ip, port) = Self::resolve_sunshine_api_target(context, instance_id).await?;
 
-        if server_ip.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "WireGuard tunnel not established. Cannot reach Sunshine API.".to_string(),
-            ));
-        }
-
-        Self::post_sunshine_raw_config(&payload.settings, sunshine_username, sunshine_password)
-            .await?;
+        Self::post_sunshine_raw_config(
+            &server_ip,
+            port,
+            &payload.settings,
+            sunshine_username,
+            sunshine_password,
+        )
+        .await?;
 
         info!("Sunshine settings updated successfully");
         Ok(())
@@ -445,23 +535,15 @@ impl InstanceLifecycleService {
 
     pub async fn reset_sunshine_settings(
         context: &AppContext,
-        _instance_id: u64,
+        instance_id: u64,
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<()> {
-        let server_ip = {
-            let state = context.state.read().await;
-            state.wireguard.server_ip.clone()
-        };
-
-        if server_ip.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "WireGuard tunnel not established. Cannot reach Sunshine API.".to_string(),
-            ));
-        }
+        let (server_ip, port) = Self::resolve_sunshine_api_target(context, instance_id).await?;
 
         let mut current =
-            Self::fetch_sunshine_raw_config(sunshine_username, sunshine_password).await?;
+            Self::fetch_sunshine_raw_config(&server_ip, port, sunshine_username, sunshine_password)
+                .await?;
 
         current.insert(
             "port".to_string(),
@@ -495,7 +577,14 @@ impl InstanceLifecycleService {
             Value::from(context.config.sunshine.ping_timeout),
         );
 
-        Self::post_sunshine_raw_config(&current, sunshine_username, sunshine_password).await?;
+        Self::post_sunshine_raw_config(
+            &server_ip,
+            port,
+            &current,
+            sunshine_username,
+            sunshine_password,
+        )
+        .await?;
 
         info!("Sunshine settings reset to provision defaults successfully");
         Ok(())

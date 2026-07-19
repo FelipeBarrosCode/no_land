@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use reqwest::{Identity, Url};
 use uuid::Uuid;
@@ -32,13 +32,21 @@ pub struct PairHostResult {
 }
 
 pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, MoonlightError> {
+    pair_host_with_stage1_authorization(request, || async { Ok(()) }).await
+}
+
+pub async fn pair_host_with_stage1_authorization<F, Fut>(
+    request: PairHostRequest,
+    authorize_after_stage1_pending: F,
+) -> Result<PairHostResult, MoonlightError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), MoonlightError>>,
+{
+    let resolved_ports = resolve_pairing_ports(&request).await?;
     let app_version = match request.server_app_version {
         Some(version) => version,
-        None => {
-            fetch_server_info(&request.address, request.http_port)
-                .await?
-                .app_version
-        }
+        None => resolved_ports.app_version.clone(),
     };
     let server_major_version = app_version
         .split('.')
@@ -51,21 +59,34 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
     let aes_key = derive_aes_key(&salt, &request.pin, hash);
     let client_cert_hex = hex_encode(request.client_certificate_pem.as_bytes());
 
-    let stage1 = pair_request(
-        &request.address,
-        request.http_port,
-        &request.unique_id,
-        &[
-            ("devicename", "roth".to_string()),
-            ("updateState", "1".to_string()),
-            ("phrase", "getservercert".to_string()),
-            ("salt", hex_encode(&salt)),
-            ("clientcert", client_cert_hex),
-        ],
-        GameStreamScheme::Http,
-        None,
-    )
-    .await?;
+    let address = request.address.clone();
+    let unique_id = request.unique_id.clone();
+    let http_port = resolved_ports.http_port;
+    let stage1_params = vec![
+        ("devicename", "roth".to_string()),
+        ("updateState", "1".to_string()),
+        ("phrase", "getservercert".to_string()),
+        ("salt", hex_encode(&salt)),
+        ("clientcert", client_cert_hex),
+    ];
+    let stage1_task = tokio::spawn(async move {
+        pair_request(
+            &address,
+            http_port,
+            &unique_id,
+            &stage1_params,
+            GameStreamScheme::Http,
+            None,
+        )
+        .await
+    });
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    authorize_after_stage1_pending().await?;
+
+    let stage1 = stage1_task.await.map_err(|error| {
+        MoonlightError::Persistence(format!("pair stage 1 task failed: {error}"))
+    })??;
     ensure_paired(&stage1, 1)?;
     let server_cert_pem_bytes = hex_decode(&xml_value(&stage1, "plaincert")?)?;
     if server_cert_pem_bytes.is_empty() {
@@ -80,7 +101,7 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
     let encrypted_challenge = aes_ecb_encrypt(&random_challenge, &aes_key)?;
     let stage2 = pair_request(
         &request.address,
-        request.http_port,
+        resolved_ports.http_port,
         &request.unique_id,
         &[
             ("devicename", "roth".to_string()),
@@ -114,7 +135,7 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
 
     let stage3 = pair_request(
         &request.address,
-        request.http_port,
+        resolved_ports.http_port,
         &request.unique_id,
         &[
             ("devicename", "roth".to_string()),
@@ -156,7 +177,7 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
     )?);
     let stage4 = pair_request(
         &request.address,
-        request.http_port,
+        resolved_ports.http_port,
         &request.unique_id,
         &[
             ("devicename", "roth".to_string()),
@@ -169,7 +190,7 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
     .await?;
     ensure_paired(&stage4, 4)?;
 
-    let https_port = request.https_port.unwrap_or(47984);
+    let https_port = resolved_ports.https_port;
     let identity_pem = format!(
         "{}{}",
         request.client_certificate_pem, request.client_private_key_pem
@@ -195,6 +216,13 @@ pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, Moonl
     })
 }
 
+#[derive(Debug, Clone)]
+struct ResolvedPairingPorts {
+    http_port: u16,
+    https_port: u16,
+    app_version: String,
+}
+
 async fn fetch_server_info(
     address: &str,
     port: u16,
@@ -203,6 +231,68 @@ async fn fetch_server_info(
         address,
         port,
         GameStreamScheme::Http,
+        "/serverinfo",
+        &[],
+        None,
+    )
+    .await?;
+    parse_server_info_response(&xml)
+}
+
+async fn resolve_pairing_ports(
+    request: &PairHostRequest,
+) -> Result<ResolvedPairingPorts, MoonlightError> {
+    let mut http_candidates = vec![request.http_port, 47989];
+    http_candidates.sort_unstable();
+    http_candidates.dedup();
+
+    let mut last_http_error = None;
+    for &port in &http_candidates {
+        match fetch_server_info(&request.address, port).await {
+            Ok(info) => {
+                return Ok(ResolvedPairingPorts {
+                    http_port: port,
+                    https_port: info.https_port.or(request.https_port).unwrap_or(47984),
+                    app_version: info.app_version,
+                });
+            }
+            Err(error) => {
+                last_http_error = Some(format!("HTTP {port}: {error}"));
+            }
+        }
+    }
+
+    let mut https_candidates = vec![request.https_port.unwrap_or(47984), 47984, 47990];
+    https_candidates.sort_unstable();
+    https_candidates.dedup();
+
+    for &port in &https_candidates {
+        if let Ok(info) = fetch_server_info_https(&request.address, port).await {
+            return Err(MoonlightError::Persistence(format!(
+                "Sunshine responded on HTTPS port {port}, but the GameStream HTTP pairing port is unreachable. Embedded pairing requires HTTP /serverinfo and /pair on port 47989 (or the host's GameStream HTTP port). Last HTTP error: {}. Detected app version: {}",
+                last_http_error.unwrap_or_else(|| "unknown HTTP failure".to_string()),
+                info.app_version,
+            )));
+        }
+    }
+
+    Err(MoonlightError::Persistence(format!(
+        "Unable to reach Sunshine GameStream pairing endpoints on {}. Tried HTTP ports {:?} and HTTPS ports {:?}. Last HTTP error: {}",
+        request.address,
+        http_candidates,
+        https_candidates,
+        last_http_error.unwrap_or_else(|| "unknown HTTP failure".to_string())
+    )))
+}
+
+async fn fetch_server_info_https(
+    address: &str,
+    port: u16,
+) -> Result<crate::moonlight::infrastructure::gamestream::server_info::ServerInfo, MoonlightError> {
+    let xml = simple_get(
+        address,
+        port,
+        GameStreamScheme::Https,
         "/serverinfo",
         &[],
         None,
@@ -271,7 +361,9 @@ async fn simple_get(
         }
     }
 
-    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(5));
+    let mut builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .no_proxy();
     if matches!(scheme, GameStreamScheme::Https) {
         builder = builder.danger_accept_invalid_certs(true);
         if let Some(identity_pem) = identity_pem {

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::moonlight::{
+    application::bootstrap::bootstrap_client_identity,
     domain::{
         build_launch_parameters, negotiate_video_format, select_active_address,
         validate_preferences, ClientVideoCapabilities, LaunchDecisionInput, LaunchResult,
@@ -12,6 +13,7 @@ use crate::moonlight::{
             GameStreamHttpClient,
         },
         persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
+        secrets::SecretStore,
     },
 };
 
@@ -30,6 +32,7 @@ pub struct PreparedStreamStart {
 
 pub async fn start_stream_request(
     repository: &JsonMoonlightStateRepository,
+    secret_store: &dyn SecretStore,
     client: &impl GameStreamHttpClient,
     host_id: &str,
     app_id: u32,
@@ -42,6 +45,10 @@ pub async fn start_stream_request(
         .get(host_id)
         .cloned()
         .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} not found")))?;
+    let identity = bootstrap_client_identity(repository, secret_store)
+        .await?
+        .identity
+        .persisted();
 
     let merged = crate::moonlight::domain::merge_preferences(
         &configuration.defaults,
@@ -49,6 +56,11 @@ pub async fn start_stream_request(
         session_preferences,
     );
     validate_preferences(&merged, None)?;
+
+    let pairing = host
+        .pairing
+        .clone()
+        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} is not paired")))?;
 
     let server_info = host.server_info_cache.clone().ok_or_else(|| {
         MoonlightError::Validation(format!(
@@ -75,7 +87,9 @@ pub async fn start_stream_request(
     let response = client
         .execute(build_launch_or_resume_request(
             address.clone(),
-            host.ports.http,
+            host.ports.https.unwrap_or(host.ports.http),
+            &identity,
+            &pairing,
             operation,
             &params,
             Duration::from_secs(15),
@@ -117,10 +131,24 @@ fn default_client_video_capabilities() -> ClientVideoCapabilities {
 
 pub async fn quit_remote_app(
     repository: &JsonMoonlightStateRepository,
+    secret_store: &dyn SecretStore,
     client: &impl GameStreamHttpClient,
     host_id: &str,
 ) -> Result<(), MoonlightError> {
-    let host = repository.get_host(host_id)?;
+    let configuration = repository.snapshot()?;
+    let host = configuration
+        .hosts
+        .get(host_id)
+        .cloned()
+        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} not found")))?;
+    let identity = bootstrap_client_identity(repository, secret_store)
+        .await?
+        .identity
+        .persisted();
+    let pairing = host
+        .pairing
+        .clone()
+        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} is not paired")))?;
     let address = host
         .addresses
         .overlay
@@ -132,7 +160,9 @@ pub async fn quit_remote_app(
     client
         .execute(build_cancel_request(
             address,
-            host.ports.http,
+            host.ports.https.unwrap_or(host.ports.http),
+            &identity,
+            &pairing,
             Duration::from_secs(10),
         ))
         .await?;

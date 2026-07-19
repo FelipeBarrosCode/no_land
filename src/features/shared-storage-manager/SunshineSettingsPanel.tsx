@@ -1,29 +1,45 @@
 import { useState, useEffect } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
-import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import type { SunshineSetting, SunshineSettingsResponse } from "../../lib/types";
+import type {
+  EmbeddedMoonlightInstanceStatus,
+  MoonlightPairingSessionResponse,
+  SunshineSetting,
+  SunshineSettingsResponse,
+} from "../../lib/types";
 
 interface Props {
   settings: SunshineSettingsResponse | null;
   busy: boolean;
+  instanceLabel: string;
+  embeddedStatus: EmbeddedMoonlightInstanceStatus | null;
+  activePairing: MoonlightPairingSessionResponse | null;
   defaultUsername: string;
   defaultPassword: string;
   onLoad: (sunshineUsername: string, sunshinePassword: string) => Promise<void>;
   onSave: (settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
   onReset: (sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onSetEmbeddedEnabled: (enabled: boolean) => Promise<void>;
+  onPrepareEmbeddedPairing: () => Promise<void>;
+  onCompleteEmbeddedPairing: (sessionId: string) => Promise<void>;
   onClose: () => void;
 }
 
 export function SunshineSettingsPanel({
   settings,
   busy,
+  instanceLabel,
+  embeddedStatus,
+  activePairing,
   defaultUsername,
   defaultPassword,
   onLoad,
   onSave,
   onReset,
+  onSetEmbeddedEnabled,
+  onPrepareEmbeddedPairing,
+  onCompleteEmbeddedPairing,
   onClose
 }: Props) {
   const [formValues, setFormValues] = useState<Record<string, string>>({});
@@ -167,19 +183,84 @@ export function SunshineSettingsPanel({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto p-6">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-display text-neon-cyan">Sunshine Settings</h3>
-          <Button variant="ghost" onClick={onClose} disabled={busy}>
-            Close
-          </Button>
+    <div className="space-y-4 rounded border border-[#3a4068] bg-[#0c1224] p-4">
+      <div className="flex items-center justify-between mb-1">
+        <div>
+          <h3 className="text-lg font-display text-neon-cyan">Instance Settings</h3>
+          <p className="text-xs text-[#9bb4d7] mt-1">{instanceLabel}</p>
+        </div>
+        <Button variant="ghost" onClick={onClose} disabled={busy}>
+          Collapse
+        </Button>
+      </div>
+
+        <div className="mb-6 rounded border border-neon-cyan/30 bg-[#081120] p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h4 className="font-display text-sm uppercase tracking-wider text-neon-cyan">
+                Embedded Moonlight Pipeline
+              </h4>
+              <p className="mt-1 text-sm text-[#bfd3ee]">
+                Use Noland&apos;s built-in Moonlight runtime for this instance instead of the external Moonlight app flow.
+              </p>
+            </div>
+            <Button
+              variant={embeddedStatus?.enabled ? "secondary" : "primary"}
+              onClick={() => onSetEmbeddedEnabled(!(embeddedStatus?.enabled ?? false))}
+              disabled={busy}
+            >
+              {embeddedStatus?.enabled ? "Disable" : "Enable"}
+            </Button>
+          </div>
+
+          <div className="mt-3 grid gap-2 text-xs text-[#9bb4d7] md:grid-cols-2">
+            <p>Enabled: <span className="text-white">{embeddedStatus?.enabled ? "Yes" : "No"}</span></p>
+            <p>Paired: <span className="text-white">{embeddedStatus?.paired ? "Yes" : "No"}</span></p>
+            <p>Session: <span className="text-white">{embeddedStatus?.sessionState ?? "idle"}</span></p>
+            <p>Host: <span className="text-white">{embeddedStatus?.hostAddress || "Not resolved"}</span></p>
+          </div>
+
+          {embeddedStatus?.lastError && (
+            <div className="mt-3 rounded border border-red-500/30 bg-red-950/20 p-2 text-xs text-red-200">
+              {embeddedStatus.lastError}
+            </div>
+          )}
+
+          {embeddedStatus?.enabled && !embeddedStatus.paired && (
+            <div className="mt-4 space-y-3 rounded border border-[#3a4068] bg-[#0b1325] p-3">
+              <p className="text-sm text-[#bfd3ee]">
+                Pair the embedded Moonlight client with Sunshine before using Play.
+              </p>
+              {!activePairing ? (
+                <Button variant="primary" onClick={onPrepareEmbeddedPairing} disabled={busy}>
+                  Start Pairing
+                </Button>
+              ) : (
+                <div className="space-y-3">
+                  <div className="rounded border border-neon-lime/30 bg-neon-lime/10 p-3">
+                    <p className="text-xs uppercase tracking-wide text-neon-lime">Pairing PIN</p>
+                    <p className="mt-1 font-display text-2xl text-white">{activePairing.pin}</p>
+                    <p className="mt-2 text-xs text-[#bfd3ee]">
+                      Enter this PIN in Sunshine&apos;s pairing prompt, then click Complete Pairing.
+                    </p>
+                  </div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => onCompleteEmbeddedPairing(activePairing.sessionId)}
+                    disabled={busy}
+                  >
+                    Complete Pairing
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {!settings ? (
-          <div className="space-y-4">
-            {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
-            <p className="text-gray-300">Enter Sunshine credentials to load settings.</p>
+      {!settings ? (
+        <div className="space-y-4">
+          {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
+          <p className="text-gray-300">Enter Sunshine credentials to load settings.</p>
             <div className="grid gap-3 md:grid-cols-2">
               <InputField
                 label="Sunshine Username"
@@ -217,10 +298,10 @@ export function SunshineSettingsPanel({
                 Load Settings
               </Button>
             </div>
-          </div>
-        ) : (
-          <div className="space-y-6">
-            {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" />}
             <div className="grid gap-3 md:grid-cols-2">
               <InputField
                 label="Sunshine Username"
@@ -290,9 +371,8 @@ export function SunshineSettingsPanel({
                 Cancel
               </Button>
             </div>
-          </div>
-        )}
-      </Card>
+        </div>
+      )}
     </div>
   );
 }

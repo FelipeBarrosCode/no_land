@@ -22,13 +22,13 @@ import type {
   RentedInstanceSummary,
   ServerPreferences,
   SharedStorageObjectEntry,
-  SunshineSettingsResponse,
+  EmbeddedMoonlightInstanceStatus,
 } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
-import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
+
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
 
@@ -42,7 +42,6 @@ interface Props {
   busy: boolean;
   instanceActionRunning: boolean;
   blockingAction: BlockingActionState | null;
-  sunshineSettings: SunshineSettingsResponse | null;
   onSearchOffers: (page?: number) => Promise<void>;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
@@ -54,28 +53,22 @@ interface Props {
     longitude: number;
   }) => Promise<void>;
   onLoadRentedInstances: () => Promise<void>;
-  onStartPlayExisting: (instanceId: number) => Promise<void>;
+  onStartPlayExisting: (instanceId: number) => Promise<string | null>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (
     payload: Partial<ServerPreferences>,
   ) => Promise<void>;
-  onLoadSunshineSettings: (
+  onSetEmbeddedMoonlightPipelineEnabled: (
     instanceId: number,
-    sunshineUsername: string,
-    sunshinePassword: string,
+    enabled: boolean,
   ) => Promise<void>;
-  onSaveSunshineSettings: (
+  onLoadEmbeddedMoonlightStatus: (
     instanceId: number,
-    settings: Record<string, unknown>,
-    sunshineUsername: string,
-    sunshinePassword: string,
-  ) => Promise<void>;
-  onResetSunshineSettings: (
+  ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
+  onRerunEmbeddedMoonlightPairing: (
     instanceId: number,
-    sunshineUsername: string,
-    sunshinePassword: string,
-  ) => Promise<void>;
+  ) => Promise<unknown>;
   onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
@@ -110,7 +103,6 @@ export function DashboardScreen({
   busy,
   instanceActionRunning,
   blockingAction,
-  sunshineSettings,
   onSearchOffers,
   onNextOffersPage,
   onPreviousOffersPage,
@@ -120,9 +112,9 @@ export function DashboardScreen({
   onSelectOffer,
   onStartPlay,
   onSaveServerPreferences,
-  onLoadSunshineSettings,
-  onSaveSunshineSettings,
-  onResetSunshineSettings,
+  onSetEmbeddedMoonlightPipelineEnabled,
+  onLoadEmbeddedMoonlightStatus,
+  onRerunEmbeddedMoonlightPairing,
   onReconnectWireguard,
   onRebootInstanceServices,
   onPauseInstance,
@@ -135,9 +127,6 @@ export function DashboardScreen({
   onSaveTailscaleApiKey,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(
-    null,
-  );
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -172,57 +161,24 @@ export function DashboardScreen({
   }
 
   async function handlePlayExisting(instanceId: number) {
-    await onStartPlayExisting(instanceId);
-    navigate("/provisioning");
+    const mode = await onStartPlayExisting(instanceId);
+    if (mode === "provisioning") {
+      navigate("/provisioning");
+    }
   }
 
   async function handleOpenSettings(instanceId: number) {
-    setSettingsInstanceId(instanceId);
-  }
-
-  async function handleLoadSunshineSettings(
-    sunshineUsername: string,
-    sunshinePassword: string,
-  ) {
-    if (settingsInstanceId !== null) {
-      await onLoadSunshineSettings(
-        settingsInstanceId,
-        sunshineUsername,
-        sunshinePassword,
-      );
+    await onSetEmbeddedMoonlightPipelineEnabled(instanceId, true);
+    await onLoadEmbeddedMoonlightStatus(instanceId);
+    const mode = await onStartPlayExisting(instanceId);
+    if (mode === "provisioning") {
+      navigate("/provisioning");
     }
   }
 
-  async function handleSaveSunshineSettings(
-    settings: Record<string, unknown>,
-    sunshineUsername: string,
-    sunshinePassword: string,
-  ) {
-    if (settingsInstanceId !== null) {
-      await onSaveSunshineSettings(
-        settingsInstanceId,
-        settings,
-        sunshineUsername,
-        sunshinePassword,
-      );
-    }
-  }
-
-  async function handleResetSunshineSettings(
-    sunshineUsername: string,
-    sunshinePassword: string,
-  ) {
-    if (settingsInstanceId !== null) {
-      await onResetSunshineSettings(
-        settingsInstanceId,
-        sunshineUsername,
-        sunshinePassword,
-      );
-    }
-  }
-
-  function handleCloseSunshineSettings() {
-    setSettingsInstanceId(null);
+  async function handlePair(instanceId: number) {
+    await onRerunEmbeddedMoonlightPairing(instanceId);
+    navigate("/provisioning");
   }
 
   async function handleReconnect(instanceId: number) {
@@ -522,6 +478,11 @@ export function DashboardScreen({
                     <p>GPU: {instance.gpuName}</p>
                     <p>SSH: {instance.sshHost || "pending"}</p>
                   </div>
+                  {instance.embeddedMoonlightPipelineEnabled && (
+                    <div className="mt-2 rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
+                      Embedded Moonlight pipeline enabled
+                    </div>
+                  )}
                   <div className="mt-3">
                     <InstanceCardActions
                       instance={instance}
@@ -530,6 +491,7 @@ export function DashboardScreen({
                       blockingAction={blockingAction}
                       onPlay={handlePlayExisting}
                       onSettings={handleOpenSettings}
+                      onPair={handlePair}
                       onReconnect={handleReconnect}
                       onReboot={handleReboot}
                       onPause={handlePause}
@@ -538,6 +500,7 @@ export function DashboardScreen({
                       onSyncStorage={handleSyncStorage}
                     />
                   </div>
+
                 </Card>
               ))}
 
@@ -694,18 +657,7 @@ export function DashboardScreen({
         </section>
       </div>
 
-      {settingsInstanceId !== null && (
-        <SunshineSettingsPanel
-          settings={sunshineSettings}
-          busy={instanceActionRunning}
-          defaultUsername={appState.credentials.appUsername}
-          defaultPassword={appState.credentials.appPassword}
-          onLoad={handleLoadSunshineSettings}
-          onSave={handleSaveSunshineSettings}
-          onReset={handleResetSunshineSettings}
-          onClose={handleCloseSunshineSettings}
-        />
-      )}
+
 
       <ServerPickerModal
         open={pickerOpen}

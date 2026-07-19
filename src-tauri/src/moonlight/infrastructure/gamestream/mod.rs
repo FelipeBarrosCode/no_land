@@ -10,7 +10,11 @@ pub mod xml;
 pub use applist::{parse_app_list_response, RemoteAppAssetEndpoint};
 pub use http_client::{GameStreamHttpClient, ReqwestGameStreamHttpClient};
 pub use launch::{build_cancel_request, build_launch_or_resume_request, parse_launch_response};
-pub use pairing::{pair_host, PairHostRequest, PairHostResult};
-pub use request::{GameStreamRequest, GameStreamScheme};
+pub use pairing::{
+    pair_host, pair_host_with_stage1_authorization, PairHostRequest, PairHostResult,
+};
+pub use request::{
+    ClientIdentityReference, GameStreamRequest, GameStreamScheme, PinnedCertificate,
+};
 pub use response::GameStreamResponse;
 pub use server_info::{parse_server_info_response, PairStatus};

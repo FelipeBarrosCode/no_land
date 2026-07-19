@@ -30,13 +30,25 @@ where
 {
     let snapshot = state_repo.snapshot()?;
     match snapshot.identity {
-        Some(identity) => {
-            let client_identity = load_existing_identity(identity, secret_store).await?;
-            Ok(ClientIdentityBootstrapResult {
+        Some(ref identity) => match load_existing_identity(identity.clone(), secret_store).await {
+            Ok(client_identity) => Ok(ClientIdentityBootstrapResult {
                 identity: client_identity,
                 created: false,
-            })
-        }
+            }),
+            Err(error) if should_repair_missing_identity_key(&snapshot, &error) => {
+                let client_identity = generate_client_identity(secret_store).await?;
+                let persisted = client_identity.persisted();
+                state_repo.update(|configuration| {
+                    configuration.identity = Some(persisted.clone());
+                    Ok(())
+                })?;
+                Ok(ClientIdentityBootstrapResult {
+                    identity: client_identity,
+                    created: true,
+                })
+            }
+            Err(error) => Err(error),
+        },
         None => {
             let client_identity = generate_client_identity(secret_store).await?;
             let persisted = client_identity.persisted();
@@ -126,6 +138,15 @@ where
     })
 }
 
+fn should_repair_missing_identity_key(
+    snapshot: &crate::moonlight::domain::MoonlightConfiguration,
+    error: &MoonlightError,
+) -> bool {
+    matches!(error, MoonlightError::IdentityInvalid(message)
+        if message.contains("private key is missing for the persisted Moonlight identity"))
+        && !snapshot.hosts.values().any(|host| host.pairing.is_some())
+}
+
 fn validate_certificate_matches_private_key(
     certificate_pem: &str,
     private_key_pem: &str,
@@ -194,7 +215,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_private_key_for_existing_identity() {
+    async fn repairs_missing_private_key_when_no_hosts_are_paired() {
+        let repo = JsonMoonlightStateRepository::new(temp_state_path("repair-missing-key"));
+        let secrets = InMemorySecretStore::default();
+        let created = bootstrap_client_identity(&repo, &secrets).await.unwrap();
+        let first_unique_id = created.identity.unique_id.clone();
+        secrets
+            .remove(&created.identity.private_key_ref)
+            .await
+            .unwrap();
+
+        let repaired = bootstrap_client_identity(&repo, &secrets).await.unwrap();
+        assert!(repaired.created);
+        assert_ne!(repaired.identity.unique_id, first_unique_id);
+    }
+
+    #[tokio::test]
+    async fn rejects_missing_private_key_for_existing_identity_when_hosts_are_paired() {
         let repo = JsonMoonlightStateRepository::new(temp_state_path("missing-key"));
         let secrets = InMemorySecretStore::default();
         let created = bootstrap_client_identity(&repo, &secrets).await.unwrap();
@@ -202,6 +239,37 @@ mod tests {
             .remove(&created.identity.private_key_ref)
             .await
             .unwrap();
+        repo.update(|configuration| {
+            configuration.hosts.insert(
+                "host-1".to_string(),
+                crate::moonlight::domain::PersistedHost {
+                    host_id: "host-1".to_string(),
+                    display_name: "Host".to_string(),
+                    addresses: crate::moonlight::domain::HostAddresses {
+                        overlay: Some("10.77.0.1".to_string()),
+                        lan: None,
+                        external: None,
+                    },
+                    active_address_type: crate::moonlight::domain::AddressType::Overlay,
+                    ports: crate::moonlight::domain::HostPorts {
+                        http: 47989,
+                        https: None,
+                    },
+                    pairing: Some(crate::moonlight::domain::PersistedPairing {
+                        status: crate::moonlight::domain::PairingStatus::Paired,
+                        server_certificate_pem: "cert".to_string(),
+                        server_certificate_sha256: "sha".to_string(),
+                        paired_at: "now".to_string(),
+                    }),
+                    server_info_cache: None,
+                    apps_cache: None,
+                    preferences_override: None,
+                    last_selected_app_id: None,
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
 
         let error = bootstrap_client_identity(&repo, &secrets)
             .await

@@ -28,6 +28,8 @@ import type {
   MicSettingsUpdate,
   MicQualityProfile,
   MoonlightDetectionResult,
+  MoonlightPairingSessionResponse,
+  EmbeddedMoonlightInstanceStatus,
   PostWireGuardSetupState,
   ReachabilityResult,
   SetupStage,
@@ -80,8 +82,8 @@ export async function startPlayFlow(): Promise<void> {
 
 export async function startPlayExistingInstance(
   instanceId: number,
-): Promise<void> {
-  await invokeSafe<void>("start_play_existing_instance", { instanceId });
+): Promise<string> {
+  return invokeSafe<string>("start_play_existing_instance", { instanceId });
 }
 
 export async function submitPairingPin(
@@ -253,6 +255,44 @@ export async function updateMoonlightPreferences(
   return invokeSafe<PersistedAppState>("update_moonlight_preferences", {
     payload,
   });
+}
+
+export async function setInstanceMoonlightPipelineEnabled(
+  instanceId: number,
+  enabled: boolean,
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("set_instance_moonlight_pipeline_enabled", {
+    instanceId,
+    enabled,
+  });
+}
+
+export async function getInstanceMoonlightPipelineStatus(
+  instanceId: number,
+): Promise<EmbeddedMoonlightInstanceStatus> {
+  return invokeSafe<EmbeddedMoonlightInstanceStatus>(
+    "moonlight_get_instance_pipeline_status",
+    { instanceId },
+  );
+}
+
+export async function prepareInstanceMoonlightPairing(
+  instanceId: number,
+): Promise<MoonlightPairingSessionResponse> {
+  return invokeSafe<MoonlightPairingSessionResponse>(
+    "moonlight_prepare_instance_pairing",
+    { instanceId },
+  );
+}
+
+export async function completeInstanceMoonlightPairing(
+  instanceId: number,
+  sessionId: string,
+): Promise<{ hostId: string; persisted: boolean }> {
+  return invokeSafe<{ hostId: string; persisted: boolean }>(
+    "moonlight_complete_instance_pairing",
+    { instanceId, input: { sessionId } },
+  );
 }
 
 export async function regenerateEdid(payload: {

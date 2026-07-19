@@ -11,6 +11,7 @@ interface Props {
   blockingAction: BlockingActionState | null;
   onPlay: (instanceId: number) => void;
   onSettings: (instanceId: number) => void;
+  onPair: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
   onPause: (instanceId: number) => void;
@@ -26,6 +27,7 @@ export function InstanceCardActions({
   blockingAction,
   onPlay,
   onSettings,
+  onPair,
   onReconnect,
   onReboot,
   onPause,
@@ -49,7 +51,7 @@ export function InstanceCardActions({
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <Button
           className="w-full"
           disabled={actionDisabled}
@@ -58,7 +60,18 @@ export function InstanceCardActions({
           onClick={() => onPlay(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
-          <span className="ml-1">Play</span>
+          <span className="ml-1">Provisioning</span>
+        </Button>
+
+        <Button
+          variant="ghost"
+          className="w-full"
+          disabled={actionDisabled}
+          loading={loadingKey === "instance.moonlight.pair.begin" || loadingKey === "instance.moonlight.pair.complete"}
+          loadingText="Pairing..."
+          onClick={() => onPair(instance.instanceId)}
+        >
+          <span className="ml-1">Pair</span>
         </Button>
 
         <Button
@@ -67,8 +80,8 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           onClick={() => onSettings(instance.instanceId)}
         >
-          <SpriteIcon icon="settings" />
-          <span className="ml-1">Settings</span>
+          <SpriteIcon icon="play" />
+          <span className="ml-1">Play</span>
         </Button>
       </div>
 

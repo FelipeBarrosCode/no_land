@@ -1,6 +1,7 @@
 use std::{path::Path, process::Command, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -20,14 +21,15 @@ use crate::{
     moonlight::{
         application::{
             apps::{self, RefreshPolicy},
+            bootstrap::bootstrap_client_identity,
             hosts::{self, RegisterHostRequest},
             launch as moonlight_launch,
             pairing::{self, PairingSessionId},
         },
         composition::MoonlightManager,
         domain::{
-            AddressType, HostAddresses, HostPorts, MoonlightConfiguration, SessionState,
-            StreamPreferences, StreamPreferencesPatch,
+            AddressType, HostAddresses, HostPorts, MoonlightConfiguration, PairingStatus,
+            SessionState, StreamPreferences, StreamPreferencesPatch,
         },
         infrastructure::gamestream::ReqwestGameStreamHttpClient,
         platform::{
@@ -49,8 +51,8 @@ use crate::{
         orchestration::OrchestrationService,
         os_detection::OsDetection,
         post_wireguard_setup::{
-            detect_moonlight_client, download_wireguard_config, get_setup_status,
-            open_wireguard_app, retry_setup_stage, setup_moonlight_sunshine,
+            authorize_sunshine_pin, detect_moonlight_client, download_wireguard_config,
+            get_setup_status, open_wireguard_app, retry_setup_stage, setup_moonlight_sunshine,
             setup_wireguard_app_handoff, submit_moonlight_pin_to_sunshine, verify_sunshine_api,
             verify_wireguard_connection, MoonlightDetectionResult, ReachabilityResult,
             SunshineVerificationResult,
@@ -147,6 +149,29 @@ pub struct MoonlightStartStreamResponse {
     pub operation: String,
     pub state: String,
     pub has_session_url: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMoonlightInstanceStatus {
+    pub instance_id: u64,
+    pub enabled: bool,
+    pub host_id: String,
+    pub paired: bool,
+    pub host_address: String,
+    pub session_state: String,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedMoonlightLaunchResponse {
+    pub operation: String,
+    pub state: String,
+    pub has_session_url: bool,
+    pub host_id: String,
+    pub app_id: u32,
+    pub app_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -334,6 +359,769 @@ fn session_state_name(state: &SessionState) -> String {
         SessionState::Stopping => "stopping",
     }
     .to_string()
+}
+
+fn embedded_moonlight_host_id(instance_id: u64) -> String {
+    format!("instance-{instance_id}")
+}
+
+fn parse_instance_id_from_embedded_host_id(host_id: &str) -> Option<u64> {
+    host_id.strip_prefix("instance-")?.parse::<u64>().ok()
+}
+
+fn resolve_instance_id_for_embedded_host(state: &PersistedAppState, host_id: &str) -> Option<u64> {
+    state
+        .provisioned_servers
+        .iter()
+        .find(|server| {
+            let candidate = if server.embedded_moonlight_host_id.trim().is_empty() {
+                embedded_moonlight_host_id(server.instance_id)
+            } else {
+                server.embedded_moonlight_host_id.clone()
+            };
+            candidate == host_id
+        })
+        .map(|server| server.instance_id)
+        .or_else(|| parse_instance_id_from_embedded_host_id(host_id))
+}
+
+fn resolve_embedded_moonlight_host_address(
+    state: &PersistedAppState,
+    instance_id: u64,
+) -> Option<String> {
+    let server = state
+        .provisioned_servers
+        .iter()
+        .find(|server| server.instance_id == instance_id)?;
+
+    [
+        Some(server.wireguard_server_ip.as_str()),
+        Some(server.moonlight_host_address.as_str()),
+        Some(server.tailscale_client_ip.as_str()),
+        Some(state.post_wireguard_setup.moonlight_host.as_str()),
+        Some(state.moonlight.host_address.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .map(ToOwned::to_owned)
+}
+
+fn resolve_embedded_moonlight_host_ports(state: &PersistedAppState, instance_id: u64) -> HostPorts {
+    let post_wireguard_matches_instance = state
+        .post_wireguard_setup
+        .current_instance_id
+        .map(|current| current == instance_id)
+        .unwrap_or(false);
+
+    let mut http_port = 47989;
+    let mut https_port = None;
+
+    if post_wireguard_matches_instance {
+        let reachable = &state.post_wireguard_setup.wireguard_reachable_ports;
+        if reachable.contains(&47989) {
+            http_port = 47989;
+        }
+        if reachable.contains(&47984) {
+            https_port = Some(47984);
+        } else if reachable.contains(&47990) {
+            https_port = Some(47990);
+        }
+    }
+
+    HostPorts {
+        http: http_port,
+        https: https_port,
+    }
+}
+
+fn provisioning_indicates_instance_paired(state: &PersistedAppState, instance_id: u64) -> bool {
+    let post_wireguard_matches_instance = state
+        .post_wireguard_setup
+        .current_instance_id
+        .map(|current| current == instance_id)
+        .unwrap_or(false);
+
+    let provisioned_server = state
+        .provisioned_servers
+        .iter()
+        .find(|server| server.instance_id == instance_id);
+
+    let provisioning_paired = post_wireguard_matches_instance
+        && state.post_wireguard_setup.paired
+        && state.post_wireguard_setup.setup_complete;
+
+    let server_marked_paired = provisioned_server
+        .map(|server| server.embedded_moonlight_paired || server.steps.pairing_completed)
+        .unwrap_or(false);
+
+    provisioning_paired || server_marked_paired
+}
+
+fn is_missing_embedded_identity_private_key_error(
+    error: &crate::moonlight::domain::MoonlightError,
+) -> bool {
+    matches!(error, crate::moonlight::domain::MoonlightError::IdentityInvalid(message)
+        if message.contains("private key is missing for the persisted Moonlight identity"))
+}
+
+fn is_missing_embedded_host_error(
+    error: &crate::moonlight::domain::MoonlightError,
+    host_id: &str,
+) -> bool {
+    matches!(error, crate::moonlight::domain::MoonlightError::Validation(message)
+        if message.contains(&format!("host {host_id} not found")))
+}
+
+async fn repair_embedded_identity_after_missing_private_key(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+) -> Result<(), crate::moonlight::domain::MoonlightError> {
+    let previous_identity =
+        crate::moonlight::infrastructure::persistence::MoonlightStateRepository::snapshot(
+            moonlight.repository.as_ref(),
+        )?
+        .identity;
+
+    if let Some(identity) = previous_identity.as_ref() {
+        let _ = moonlight
+            .secret_store
+            .remove(&identity.private_key_ref)
+            .await;
+    }
+
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+        moonlight.repository.as_ref(),
+        |configuration| {
+            configuration.identity = None;
+            for host in configuration.hosts.values_mut() {
+                host.pairing = None;
+            }
+            Ok(())
+        },
+    )?;
+
+    let _ = bootstrap_client_identity(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+    )
+    .await?;
+
+    let _ = context
+        .update_state(|state| {
+            state.post_wireguard_setup.paired = false;
+            state.post_wireguard_setup.setup_complete = false;
+            for server in state.provisioned_servers.iter_mut() {
+                server.embedded_moonlight_paired = false;
+            }
+        })
+        .await;
+
+    Ok(())
+}
+
+async fn ensure_embedded_identity_ready_for_explicit_action(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+) -> Result<(), crate::moonlight::domain::MoonlightError> {
+    match bootstrap_client_identity(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_missing_embedded_identity_private_key_error(&error) => {
+            warn!(
+                "Embedded Moonlight identity private key is missing locally; resetting embedded identity and stale pairing state before continuing"
+            );
+            repair_embedded_identity_after_missing_private_key(context, moonlight).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn embedded_host_is_paired(
+    repository: &crate::moonlight::infrastructure::persistence::JsonMoonlightStateRepository,
+    host_id: &str,
+) -> bool {
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::get_host(
+        repository, host_id,
+    )
+    .ok()
+    .and_then(|host| host.pairing)
+    .map(|pairing| matches!(pairing.status, PairingStatus::Paired))
+    .unwrap_or(false)
+}
+
+async fn ensure_embedded_moonlight_host(
+    repository: &crate::moonlight::infrastructure::persistence::JsonMoonlightStateRepository,
+    state: &PersistedAppState,
+    instance_id: u64,
+) -> Result<String, crate::moonlight::domain::MoonlightError> {
+    let host_id = embedded_moonlight_host_id(instance_id);
+    let host_address =
+        resolve_embedded_moonlight_host_address(state, instance_id).ok_or_else(|| {
+            crate::moonlight::domain::MoonlightError::Validation(format!(
+                "instance {instance_id} has no Moonlight host address"
+            ))
+        })?;
+    let ports = resolve_embedded_moonlight_host_ports(state, instance_id);
+
+    info!(
+        instance_id,
+        host_id = %host_id,
+        host_address = %host_address,
+        http_port = ports.http,
+        https_port = ?ports.https,
+        "Ensuring embedded Moonlight host"
+    );
+
+    if crate::moonlight::infrastructure::persistence::MoonlightStateRepository::get_host(
+        repository, &host_id,
+    )
+    .is_ok()
+    {
+        crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+            repository,
+            |configuration| {
+                let host = configuration.hosts.get_mut(&host_id).ok_or_else(|| {
+                    crate::moonlight::domain::MoonlightError::Validation(format!(
+                        "host {host_id} not found"
+                    ))
+                })?;
+                host.display_name = format!("Instance {instance_id}");
+                host.addresses.overlay = Some(host_address.clone());
+                host.active_address_type = AddressType::Overlay;
+                host.ports = ports.clone();
+                Ok(())
+            },
+        )?;
+        return Ok(host_id);
+    }
+
+    hosts::register_host(
+        repository,
+        RegisterHostRequest {
+            host_id: host_id.clone(),
+            display_name: format!("Instance {instance_id}"),
+            addresses: HostAddresses {
+                overlay: Some(host_address),
+                lan: None,
+                external: None,
+            },
+            ports,
+            explicit_address_type: Some(AddressType::Overlay),
+        },
+    )
+    .await?;
+
+    Ok(host_id)
+}
+
+fn preferred_embedded_app(
+    apps: &[crate::moonlight::domain::RemoteApp],
+) -> Option<&crate::moonlight::domain::RemoteApp> {
+    apps.iter()
+        .find(|app| app.name.eq_ignore_ascii_case("Computer"))
+        .or_else(|| {
+            apps.iter()
+                .find(|app| app.name.eq_ignore_ascii_case("Desktop"))
+        })
+        .or_else(|| {
+            apps.iter()
+                .find(|app| app.name.to_ascii_lowercase().contains("computer"))
+        })
+        .or_else(|| {
+            apps.iter()
+                .find(|app| app.name.to_ascii_lowercase().contains("desktop"))
+        })
+        .or_else(|| {
+            apps.iter()
+                .find(|app| app.name.to_ascii_lowercase().contains("steam"))
+        })
+        .or_else(|| apps.first())
+}
+
+fn single_computer_app() -> Vec<crate::moonlight::domain::RemoteApp> {
+    vec![crate::moonlight::domain::RemoteApp {
+        id: 0,
+        name: "Computer".to_string(),
+        hdr_supported: false,
+    }]
+}
+
+fn is_embedded_applist_not_found_error(error: &crate::moonlight::domain::MoonlightError) -> bool {
+    matches!(error, crate::moonlight::domain::MoonlightError::Validation(message)
+        if message.contains("/applist returned status_code=404"))
+}
+
+fn parse_sunshine_api_apps(
+    value: Value,
+) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
+    let items = match value {
+        Value::Array(items) => items,
+        Value::Object(mut object) => {
+            if let Some(Value::Array(items)) = object.remove("apps") {
+                items
+            } else if let Some(Value::Array(items)) = object.remove("applications") {
+                items
+            } else if let Some(Value::Array(items)) = object.remove("list") {
+                items
+            } else if object.contains_key("name") || object.contains_key("title") {
+                vec![Value::Object(object)]
+            } else {
+                return Ok(single_computer_app());
+            }
+        }
+        _ => return Ok(single_computer_app()),
+    };
+
+    let mut apps = Vec::new();
+    for item in items {
+        let Value::Object(object) = item else {
+            continue;
+        };
+
+        let name = object
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| object.get("title").and_then(Value::as_str))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        if name.is_empty() {
+            continue;
+        }
+
+        let app_id = object
+            .get("index")
+            .and_then(Value::as_i64)
+            .or_else(|| object.get("id").and_then(Value::as_i64))
+            .or_else(|| object.get("appId").and_then(Value::as_i64))
+            .or_else(|| object.get("appid").and_then(Value::as_i64))
+            .and_then(|value| if value >= 0 { Some(value as u32) } else { None })
+            .or_else(|| {
+                if name.eq_ignore_ascii_case("computer") || name.eq_ignore_ascii_case("desktop") {
+                    Some(0)
+                } else {
+                    None
+                }
+            });
+
+        let Some(id) = app_id else {
+            continue;
+        };
+
+        apps.push(crate::moonlight::domain::RemoteApp {
+            id,
+            name,
+            hdr_supported: false,
+        });
+    }
+
+    if apps.is_empty() {
+        Ok(single_computer_app())
+    } else {
+        Ok(apps)
+    }
+}
+
+async fn fetch_embedded_apps_via_sunshine_api(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: &str,
+    host_address: &str,
+) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
+    let state = context.load_state().await;
+    let username = state.credentials.app_username.trim().to_string();
+    let password = state.credentials.app_password.trim().to_string();
+    if username.is_empty() || password.is_empty() {
+        return Err(FrontendError {
+            code: "moonlight_invalid_input".to_string(),
+            message: "Sunshine credentials are missing".to_string(),
+            details: Some("Embedded app discovery fallback requires the provisioned Sunshine username and password.".to_string()),
+            retryable: false,
+        });
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(format!("Failed building Sunshine apps client: {error}")),
+            retryable: true,
+        })?;
+
+    let response = client
+        .get(format!("https://{}:47990/api/apps", host_address))
+        .basic_auth(username, Some(password))
+        .send()
+        .await
+        .map_err(|error| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(format!(
+                "Failed to fetch Sunshine apps via /api/apps: {error}"
+            )),
+            retryable: true,
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(format!("Sunshine /api/apps failed with {status}: {body}")),
+            retryable: true,
+        });
+    }
+
+    let payload = response
+        .json::<Value>()
+        .await
+        .map_err(|error| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(format!("Invalid Sunshine /api/apps payload: {error}")),
+            retryable: true,
+        })?;
+
+    let apps = parse_sunshine_api_apps(payload)?;
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+        moonlight.repository.as_ref(),
+        |configuration| {
+            let host = configuration.hosts.get_mut(host_id).ok_or_else(|| {
+                crate::moonlight::domain::MoonlightError::Validation(format!(
+                    "host {host_id} not found"
+                ))
+            })?;
+            host.apps_cache = Some(crate::moonlight::domain::AppsCache {
+                fetched_at: chrono::Utc::now().to_rfc3339(),
+                items: apps
+                    .iter()
+                    .map(|app| crate::moonlight::domain::CachedRemoteApp {
+                        id: app.id,
+                        name: app.name.clone(),
+                        hdr_supported: app.hdr_supported,
+                    })
+                    .collect(),
+            });
+            Ok(())
+        },
+    )
+    .map_err(moonlight_frontend_error)?;
+
+    if apps.is_empty() {
+        let apps = single_computer_app();
+        crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+            moonlight.repository.as_ref(),
+            |configuration| {
+                let host = configuration.hosts.get_mut(host_id).ok_or_else(|| {
+                    crate::moonlight::domain::MoonlightError::Validation(format!(
+                        "host {host_id} not found"
+                    ))
+                })?;
+                host.apps_cache = Some(crate::moonlight::domain::AppsCache {
+                    fetched_at: chrono::Utc::now().to_rfc3339(),
+                    items: apps
+                        .iter()
+                        .map(|app| crate::moonlight::domain::CachedRemoteApp {
+                            id: app.id,
+                            name: app.name.clone(),
+                            hdr_supported: app.hdr_supported,
+                        })
+                        .collect(),
+                });
+                Ok(())
+            },
+        )
+        .map_err(moonlight_frontend_error)?;
+        return Ok(apps);
+    }
+
+    Ok(apps)
+}
+
+fn is_retryable_embedded_pairing_error(error: &crate::moonlight::domain::MoonlightError) -> bool {
+    match error {
+        crate::moonlight::domain::MoonlightError::Persistence(message) => {
+            message.contains("error sending request")
+                || message.contains("operation timed out")
+                || message.contains("timed out")
+                || message.contains("connection reset")
+                || message.contains("broken pipe")
+                || message.contains("deadline has elapsed")
+        }
+        crate::moonlight::domain::MoonlightError::Validation(message) => {
+            message.contains("server likely already pairing with another client")
+                || message.contains("failed pairing at stage")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod sunshine_api_app_tests {
+    use super::parse_sunshine_api_apps;
+    use serde_json::json;
+
+    #[test]
+    fn falls_back_to_single_computer_when_payload_is_empty() {
+        let apps = parse_sunshine_api_apps(json!({ "apps": [] })).expect("apps should parse");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, 0);
+        assert_eq!(apps[0].name, "Computer");
+    }
+
+    #[test]
+    fn accepts_alternate_id_fields() {
+        let apps = parse_sunshine_api_apps(json!({
+            "applications": [
+                { "title": "Desktop", "appid": 7 }
+            ]
+        }))
+        .expect("apps should parse");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, 7);
+        assert_eq!(apps[0].name, "Desktop");
+    }
+
+    #[test]
+    fn defaults_desktop_without_explicit_id_to_zero() {
+        let apps = parse_sunshine_api_apps(json!({
+            "name": "Desktop"
+        }))
+        .expect("apps should parse");
+        assert_eq!(apps.len(), 1);
+        assert_eq!(apps[0].id, 0);
+        assert_eq!(apps[0].name, "Desktop");
+    }
+}
+
+async fn auto_pair_embedded_host(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: &str,
+) -> Result<(), crate::moonlight::domain::MoonlightError> {
+    let host = crate::moonlight::infrastructure::persistence::MoonlightStateRepository::get_host(
+        moonlight.repository.as_ref(),
+        host_id,
+    )?;
+    let sunshine_host = host
+        .addresses
+        .overlay
+        .clone()
+        .or(host.addresses.lan.clone())
+        .or(host.addresses.external.clone())
+        .ok_or_else(|| {
+            crate::moonlight::domain::MoonlightError::Validation(format!(
+                "host {host_id} has no usable address"
+            ))
+        })?;
+    let state_snapshot = context.load_state().await;
+    let sunshine_username = state_snapshot.credentials.app_username.clone();
+    let sunshine_password = state_snapshot.credentials.app_password.clone();
+
+    let first_session = pairing::begin_pairing(
+        moonlight.repository.as_ref(),
+        &moonlight.pairing_sessions,
+        host_id,
+    )
+    .await?;
+    let first_pin = first_session.pin.clone();
+
+    match pairing::complete_pairing_with_stage1_authorization(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+        &moonlight.pairing_sessions,
+        &first_session.id,
+        || async {
+            authorize_sunshine_pin(
+                &sunshine_host,
+                &sunshine_username,
+                &sunshine_password,
+                &first_pin,
+                Some("Noland Connect"),
+            )
+            .await
+            .map_err(|error| {
+                crate::moonlight::domain::MoonlightError::Persistence(error.to_string())
+            })
+        },
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) if is_retryable_embedded_pairing_error(&error) => {
+            warn!(
+                "Embedded Moonlight pairing failed for host {} with retryable error: {}. Regenerating PIN and retrying once.",
+                host_id, error
+            );
+
+            let second_session = pairing::begin_pairing(
+                moonlight.repository.as_ref(),
+                &moonlight.pairing_sessions,
+                host_id,
+            )
+            .await?;
+            let second_pin = second_session.pin.clone();
+
+            pairing::complete_pairing_with_stage1_authorization(
+                moonlight.repository.as_ref(),
+                moonlight.secret_store.as_ref(),
+                &moonlight.pairing_sessions,
+                &second_session.id,
+                || async {
+                    authorize_sunshine_pin(
+                        &sunshine_host,
+                        &sunshine_username,
+                        &sunshine_password,
+                        &second_pin,
+                        Some("Noland Connect"),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::moonlight::domain::MoonlightError::Persistence(error.to_string())
+                    })
+                },
+            )
+            .await
+            .map(|_| ())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn start_embedded_stream_for_host(
+    app: &AppHandle,
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: String,
+    app_id: u32,
+) -> Result<MoonlightStartStreamResponse, FrontendError> {
+    ensure_embedded_identity_ready_for_explicit_action(context, moonlight)
+        .await
+        .map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let prepared = match moonlight_launch::start_stream_request(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+        &client,
+        &host_id,
+        app_id,
+        None,
+        false,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error)
+            if parse_instance_id_from_embedded_host_id(&host_id).is_some()
+                && is_missing_embedded_host_error(&error, &host_id) =>
+        {
+            let instance_id = parse_instance_id_from_embedded_host_id(&host_id)
+                .expect("instance id already checked as present");
+            warn!(
+                instance_id,
+                host_id = %host_id,
+                "Embedded Moonlight host record was missing at stream start; rebuilding it and retrying once"
+            );
+            let state_snapshot = context.load_state().await;
+            let rebuilt_host_id = ensure_embedded_moonlight_host(
+                moonlight.repository.as_ref(),
+                &state_snapshot,
+                instance_id,
+            )
+            .await
+            .map_err(moonlight_frontend_error)?;
+            moonlight_launch::start_stream_request(
+                moonlight.repository.as_ref(),
+                moonlight.secret_store.as_ref(),
+                &client,
+                &rebuilt_host_id,
+                app_id,
+                None,
+                false,
+            )
+            .await
+            .map_err(moonlight_frontend_error)?
+        }
+        Err(error) => return Err(moonlight_frontend_error(error)),
+    };
+
+    let stream_window = create_or_reuse_stream_window(
+        app,
+        prepared.preferences.video.width,
+        prepared.preferences.video.height,
+    )
+    .map_err(moonlight_frontend_error)?;
+    let surface =
+        stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
+
+    if let Err(error) = moonlight.runtime.attach_surface(surface).await {
+        let _ = close_stream_window(app);
+        return Err(moonlight_frontend_error(error));
+    }
+
+    if let Err(error) = moonlight
+        .runtime
+        .start(NativeStartRequest {
+            host_id: host_id.clone(),
+            app_id,
+            host_address: prepared.host_address.clone(),
+            app_version: prepared.app_version.clone(),
+            gfe_version: prepared.gfe_version.clone(),
+            session_url: prepared.launch_result.rtsp_session_url.clone(),
+            server_codec_mode_support: prepared.server_codec_mode_support,
+            preferences: prepared.preferences.clone(),
+            supported_video_formats: prepared.supported_video_formats,
+            remote_input_key: prepared.remote_input_key,
+            remote_input_iv: prepared.remote_input_iv,
+        })
+        .await
+    {
+        let _ = moonlight.runtime.detach_surface().await;
+        let _ = close_stream_window(app);
+        return Err(moonlight_frontend_error(error));
+    }
+
+    stream_window.show().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
+    stream_window
+        .set_fullscreen(true)
+        .map_err(|error| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(error.to_string()),
+            retryable: false,
+        })?;
+
+    let state = moonlight
+        .runtime
+        .get_state()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    Ok(MoonlightStartStreamResponse {
+        operation: match prepared.launch_result.operation {
+            crate::moonlight::domain::LaunchOperation::Launch => "launch",
+            crate::moonlight::domain::LaunchOperation::Resume => "resume",
+        }
+        .to_string(),
+        state: session_state_name(&state),
+        has_session_url: prepared.launch_result.rtsp_session_url.is_some(),
+    })
 }
 
 #[tauri::command]
@@ -673,7 +1461,109 @@ pub async fn start_play_existing_instance(
     app: AppHandle,
     instance_id: u64,
     context: State<'_, AppContext>,
-) -> Result<(), FrontendError> {
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<String, FrontendError> {
+    let embedded_enabled = {
+        let state = context.state.read().await;
+        state
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == instance_id)
+            .map(|record| record.embedded_moonlight_pipeline_enabled)
+            .unwrap_or(false)
+    };
+
+    if embedded_enabled {
+        ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+            .await
+            .map_err(moonlight_frontend_error)?;
+
+        let state_snapshot = context.load_state().await;
+        let host_id = ensure_embedded_moonlight_host(
+            moonlight.repository.as_ref(),
+            &state_snapshot,
+            instance_id,
+        )
+        .await
+        .map_err(moonlight_frontend_error)?;
+        let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+        let mut host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+            .await
+            .map_err(moonlight_frontend_error)?;
+
+        if !matches!(
+            host_status
+                .host
+                .pairing
+                .as_ref()
+                .map(|pairing| &pairing.status),
+            Some(PairingStatus::Paired)
+        ) {
+            auto_pair_embedded_host(context.inner(), moonlight.inner(), &host_id)
+                .await
+                .map_err(moonlight_frontend_error)?;
+            host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+                .await
+                .map_err(moonlight_frontend_error)?;
+        }
+
+        let host_address = resolve_embedded_moonlight_host_address(&state_snapshot, instance_id)
+            .unwrap_or_default();
+        let apps = match apps::list_remote_apps(
+            moonlight.repository.as_ref(),
+            &client,
+            &host_id,
+            RefreshPolicy::ForceRefresh,
+        )
+        .await
+        {
+            Ok(apps) => apps,
+            Err(error) if is_embedded_applist_not_found_error(&error) => {
+                fetch_embedded_apps_via_sunshine_api(
+                    context.inner(),
+                    moonlight.inner(),
+                    &host_id,
+                    &host_address,
+                )
+                .await?
+            }
+            Err(error) => return Err(moonlight_frontend_error(error)),
+        };
+        let target_app = preferred_embedded_app(&apps).ok_or_else(|| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some("No Sunshine applications were reported for this instance".to_string()),
+            retryable: true,
+        })?;
+
+        let response = start_embedded_stream_for_host(
+            &app,
+            context.inner(),
+            moonlight.inner(),
+            host_id,
+            target_app.id,
+        )
+        .await?;
+        context
+            .update_state(|state| {
+                state.moonlight.configured = true;
+                state.moonlight.host_address =
+                    resolve_embedded_moonlight_host_address(state, instance_id).unwrap_or_default();
+                state.moonlight.session_state = response.state.clone();
+                state.moonlight.last_error = None;
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance_id)
+                {
+                    server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
+                    server.embedded_moonlight_paired = true;
+                }
+            })
+            .await?;
+        return Ok("embedded".to_string());
+    }
+
     let preflight = local_environment_check(true);
     if !preflight.ok {
         let missing = preflight
@@ -702,7 +1592,7 @@ pub async fn start_play_existing_instance(
         instance_id,
     )
     .await?;
-    Ok(())
+    Ok("provisioning".to_string())
 }
 
 #[tauri::command]
@@ -944,9 +1834,10 @@ async fn validate_local_wireguard_tunnel(
     for attempt in 1..=attempts {
         let local_stdout = read_local_wireguard_show_output()?;
         if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
-            if !local_snapshot.allowed_ips.contains("10.77.0.1/32") {
+            let expected_allowed_ip = format!("{tunnel_server_ip}/32");
+            if !local_snapshot.allowed_ips.contains(&expected_allowed_ip) {
                 return Err(AppError::Provisioning(format!(
-                    "Local WireGuard tunnel is not scoped to 10.77.0.1/32 (found: {})",
+                    "Local WireGuard tunnel is not scoped to {expected_allowed_ip} (found: {})",
                     local_snapshot.allowed_ips
                 ))
                 .into());
@@ -1341,18 +2232,27 @@ pub async fn get_rented_instances(
             let status = instance.status.to_ascii_lowercase();
             !status.contains("destroy") && !status.contains("stopped") && !status.contains("exited")
         })
-        .map(|instance| RentedInstanceSummary {
-            instance_id: instance.id,
-            label: if instance.label.is_empty() {
-                format!("Instance {}", instance.id)
-            } else {
-                instance.label
-            },
-            status: instance.status,
-            gpu_name: instance.gpu_name,
-            ssh_host: instance.ssh_host,
-            ssh_port: instance.ssh_port,
-            public_ip: instance.public_ip,
+        .map(|instance| {
+            let embedded_enabled = state
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance.id)
+                .map(|record| record.embedded_moonlight_pipeline_enabled)
+                .unwrap_or(false);
+            RentedInstanceSummary {
+                instance_id: instance.id,
+                label: if instance.label.is_empty() {
+                    format!("Instance {}", instance.id)
+                } else {
+                    instance.label
+                },
+                status: instance.status,
+                gpu_name: instance.gpu_name,
+                ssh_host: instance.ssh_host,
+                ssh_port: instance.ssh_port,
+                public_ip: instance.public_ip,
+                embedded_moonlight_pipeline_enabled: embedded_enabled,
+            }
         })
         .collect::<Vec<_>>();
 
@@ -1556,6 +2456,278 @@ pub async fn update_moonlight_preferences(
         .await?;
 
     Ok(next_state)
+}
+
+#[tauri::command]
+pub async fn set_instance_moonlight_pipeline_enabled(
+    instance_id: u64,
+    enabled: bool,
+    context: State<'_, AppContext>,
+) -> Result<PersistedAppState, FrontendError> {
+    let next_state = context
+        .update_state(|state| {
+            if let Some(server) = state
+                .provisioned_servers
+                .iter_mut()
+                .find(|record| record.instance_id == instance_id)
+            {
+                server.embedded_moonlight_pipeline_enabled = enabled;
+                if enabled && server.embedded_moonlight_host_id.trim().is_empty() {
+                    server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
+                }
+                if !enabled {
+                    server.embedded_moonlight_paired = false;
+                }
+            } else {
+                let mut server = crate::models::app_state::ProvisionedServerState::new(instance_id);
+                server.embedded_moonlight_pipeline_enabled = enabled;
+                if enabled {
+                    server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
+                }
+                state.provisioned_servers.push(server);
+            }
+            state.last_error = None;
+        })
+        .await?;
+    Ok(next_state)
+}
+
+#[tauri::command]
+pub async fn moonlight_get_instance_pipeline_status(
+    instance_id: u64,
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<EmbeddedMoonlightInstanceStatus, FrontendError> {
+    let state = context.load_state().await;
+    let server = state
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == instance_id)
+        .ok_or_else(|| AppError::NotFound(format!("instance {instance_id} not found")))?;
+    let host_id = if server.embedded_moonlight_host_id.trim().is_empty() {
+        embedded_moonlight_host_id(instance_id)
+    } else {
+        server.embedded_moonlight_host_id.clone()
+    };
+    let paired = embedded_host_is_paired(moonlight.repository.as_ref(), &host_id);
+    Ok(EmbeddedMoonlightInstanceStatus {
+        instance_id,
+        enabled: server.embedded_moonlight_pipeline_enabled,
+        host_id,
+        paired,
+        host_address: resolve_embedded_moonlight_host_address(&state, instance_id)
+            .unwrap_or_default(),
+        session_state: state.moonlight.session_state,
+        last_error: state.moonlight.last_error,
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_prepare_instance_pairing(
+    instance_id: u64,
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightPairingSessionResponse, FrontendError> {
+    ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+        .await
+        .map_err(moonlight_frontend_error)?;
+    let state = context.load_state().await;
+    let host_id =
+        ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id)
+            .await
+            .map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+        .await
+        .map_err(moonlight_frontend_error)?;
+    let session = pairing::begin_pairing(
+        moonlight.repository.as_ref(),
+        &moonlight.pairing_sessions,
+        &host_id,
+    )
+    .await
+    .map_err(moonlight_frontend_error)?;
+    context
+        .update_state(|state| {
+            if let Some(server) = state
+                .provisioned_servers
+                .iter_mut()
+                .find(|record| record.instance_id == instance_id)
+            {
+                server.embedded_moonlight_pipeline_enabled = true;
+                server.embedded_moonlight_host_id = host_id.clone();
+            }
+            state.post_wireguard_setup.current_instance_id = Some(instance_id);
+            state.post_wireguard_setup.stage = SetupStage::MoonlightPairingStarted;
+            state.post_wireguard_setup.paired = false;
+            state.post_wireguard_setup.setup_complete = false;
+            state.orchestration_state = OrchestrationState::MoonlightPairingStarted;
+            state.moonlight.host_address =
+                resolve_embedded_moonlight_host_address(state, instance_id).unwrap_or_default();
+            state.moonlight.last_error = None;
+            state.last_error = None;
+        })
+        .await?;
+    Ok(MoonlightPairingSessionResponse {
+        session_id: session.id.0,
+        host_id: session.host_id,
+        pin: session.pin,
+        expires_in_seconds: 300,
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_complete_instance_pairing(
+    app: AppHandle,
+    instance_id: u64,
+    input: MoonlightCompletePairingInput,
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<crate::moonlight::application::pairing::PairingResult, FrontendError> {
+    let session_id = PairingSessionId(input.session_id.clone());
+    let pairing_session = moonlight
+        .pairing_sessions
+        .get(&session_id)
+        .map_err(moonlight_frontend_error)?
+        .ok_or_else(|| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some("pairing session not found".to_string()),
+            retryable: true,
+        })?;
+
+    let state_snapshot = context.load_state().await;
+    let effective_instance_id =
+        resolve_instance_id_for_embedded_host(&state_snapshot, &pairing_session.host_id)
+            .unwrap_or(instance_id);
+    info!(
+        requested_instance_id = instance_id,
+        effective_instance_id,
+        host_id = %pairing_session.host_id,
+        "Completing embedded Moonlight pairing"
+    );
+    ensure_embedded_moonlight_host(
+        moonlight.repository.as_ref(),
+        &state_snapshot,
+        effective_instance_id,
+    )
+    .await
+    .map_err(moonlight_frontend_error)?;
+
+    let (sunshine_host, sunshine_username, sunshine_password) = {
+        let host = resolve_embedded_moonlight_host_address(&state_snapshot, effective_instance_id)
+            .ok_or_else(|| FrontendError {
+                code: "moonlight_error".to_string(),
+                message: "Moonlight operation failed".to_string(),
+                details: Some(format!(
+                    "instance {} has no Moonlight host address",
+                    effective_instance_id
+                )),
+                retryable: true,
+            })?;
+        let credentials = &state_snapshot.credentials;
+        (
+            host,
+            credentials.app_username.clone(),
+            credentials.app_password.clone(),
+        )
+    };
+
+    let pairing_pin = pairing_session.pin.clone();
+    let result = pairing::complete_pairing_with_stage1_authorization(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+        &moonlight.pairing_sessions,
+        &session_id,
+        || async {
+            authorize_sunshine_pin(
+                &sunshine_host,
+                &sunshine_username,
+                &sunshine_password,
+                &pairing_pin,
+                Some("Noland Connect"),
+            )
+            .await
+            .map_err(|error| {
+                crate::moonlight::domain::MoonlightError::Persistence(error.to_string())
+            })
+        },
+    )
+    .await
+    .map_err(moonlight_frontend_error)?;
+    context
+        .update_state(|state| {
+            if let Some(server) = state
+                .provisioned_servers
+                .iter_mut()
+                .find(|record| record.instance_id == effective_instance_id)
+            {
+                server.embedded_moonlight_pipeline_enabled = true;
+                server.embedded_moonlight_host_id = result.host_id.clone();
+                server.embedded_moonlight_paired = true;
+            }
+            state.post_wireguard_setup.current_instance_id = Some(effective_instance_id);
+            state.post_wireguard_setup.stage = SetupStage::SetupComplete;
+            state.post_wireguard_setup.paired = true;
+            state.post_wireguard_setup.setup_complete = true;
+            state.orchestration_state = OrchestrationState::Ready;
+            state.has_completed_guided_setup = true;
+            state.moonlight.last_error = None;
+            state.last_error = None;
+        })
+        .await?;
+
+    let (offer_id, status, ssh_host, ssh_port) = {
+        let snapshot = context.state.read().await.clone();
+        if let Some(server) = snapshot
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == effective_instance_id)
+        {
+            (
+                server.offer_id,
+                server.status.clone(),
+                server.ssh_host.clone(),
+                server.ssh_port,
+            )
+        } else {
+            (
+                snapshot.instance.offer_id,
+                snapshot.instance.status,
+                snapshot.instance.ssh_host,
+                snapshot.instance.ssh_port,
+            )
+        }
+    };
+
+    crate::services::orchestration::mark_server_step_completed(
+        context.inner(),
+        effective_instance_id,
+        crate::services::orchestration::ProvisionStepMarker::PairingCompleted,
+        OrchestrationState::Ready,
+        &status,
+        &ssh_host,
+        ssh_port,
+        offer_id,
+    )
+    .await
+    .map_err(FrontendError::from)?;
+
+    let pairing_event = crate::models::events::ProvisioningEvent::info(
+        OrchestrationState::MoonlightSunshinePaired,
+        "Moonlight and Sunshine paired",
+        Some("Your secure streaming connection is ready.".to_string()),
+    );
+    context.emit_progress(&app, pairing_event).await;
+
+    let ready_event = crate::models::events::ProvisioningEvent::info(
+        OrchestrationState::Ready,
+        "Setup complete",
+        Some("Your secure streaming connection is ready.".to_string()),
+    );
+    context.emit_progress(&app, ready_event).await;
+
+    Ok(result)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2278,9 +3450,13 @@ pub async fn moonlight_begin_pairing(
 
 #[tauri::command]
 pub async fn moonlight_complete_pairing(
+    context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightCompletePairingInput,
 ) -> Result<crate::moonlight::application::pairing::PairingResult, FrontendError> {
+    ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+        .await
+        .map_err(moonlight_frontend_error)?;
     pairing::complete_pairing(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
@@ -2315,12 +3491,17 @@ pub async fn moonlight_list_apps(
 #[tauri::command]
 pub async fn moonlight_start_stream(
     app: AppHandle,
+    context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightStartStreamInput,
 ) -> Result<MoonlightStartStreamResponse, FrontendError> {
+    ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+        .await
+        .map_err(moonlight_frontend_error)?;
     let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
     let prepared = moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
         &client,
         &input.host_id,
         input.app_id,
@@ -2425,13 +3606,22 @@ pub async fn moonlight_disconnect_stream(
 
 #[tauri::command]
 pub async fn moonlight_quit_remote_app(
+    context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
     host_id: String,
 ) -> Result<(), FrontendError> {
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
-    moonlight_launch::quit_remote_app(moonlight.repository.as_ref(), &client, &host_id)
+    ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
         .await
-        .map_err(moonlight_frontend_error)
+        .map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    moonlight_launch::quit_remote_app(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+        &client,
+        &host_id,
+    )
+    .await
+    .map_err(moonlight_frontend_error)
 }
 
 #[tauri::command]

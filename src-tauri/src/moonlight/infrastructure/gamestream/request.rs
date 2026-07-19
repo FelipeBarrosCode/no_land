@@ -26,6 +26,7 @@ pub struct ClientIdentityReference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PinnedCertificate {
     pub sha256_hex: String,
+    pub certificate_pem: String,
 }
 
 #[derive(Debug, Clone)]

@@ -1,16 +1,21 @@
 use std::{ffi::CStr, time::Duration};
 
 use crate::moonlight::{
-    domain::{LaunchOperation, LaunchRequestParameters, LaunchResult, MoonlightError},
+    domain::{
+        LaunchOperation, LaunchRequestParameters, LaunchResult, MoonlightError, PersistedIdentity,
+        PersistedPairing,
+    },
     infrastructure::gamestream::{
         xml::{first_text, parse_document, parse_success_status},
-        GameStreamRequest, GameStreamScheme,
+        ClientIdentityReference, GameStreamRequest, GameStreamScheme, PinnedCertificate,
     },
 };
 
 pub fn build_launch_or_resume_request(
     address: String,
     port: u16,
+    identity: &PersistedIdentity,
+    pairing: &PersistedPairing,
     operation: LaunchOperation,
     parameters: &LaunchRequestParameters,
     timeout: Duration,
@@ -63,11 +68,17 @@ pub fn build_launch_or_resume_request(
     GameStreamRequest {
         address,
         port,
-        scheme: GameStreamScheme::Http,
+        scheme: GameStreamScheme::Https,
         endpoint: endpoint.to_string(),
         query,
-        identity: None,
-        pinned_certificate: None,
+        identity: Some(ClientIdentityReference {
+            certificate_pem: identity.certificate_pem.clone(),
+            private_key_ref: identity.private_key_ref.clone(),
+        }),
+        pinned_certificate: Some(PinnedCertificate {
+            sha256_hex: pairing.server_certificate_sha256.clone(),
+            certificate_pem: pairing.server_certificate_pem.clone(),
+        }),
         timeout,
     }
 }
@@ -99,15 +110,27 @@ fn moonlight_launch_query_parameters() -> Vec<(String, String)> {
         .collect()
 }
 
-pub fn build_cancel_request(address: String, port: u16, timeout: Duration) -> GameStreamRequest {
+pub fn build_cancel_request(
+    address: String,
+    port: u16,
+    identity: &PersistedIdentity,
+    pairing: &PersistedPairing,
+    timeout: Duration,
+) -> GameStreamRequest {
     GameStreamRequest {
         address,
         port,
-        scheme: GameStreamScheme::Http,
+        scheme: GameStreamScheme::Https,
         endpoint: "/cancel".to_string(),
         query: vec![],
-        identity: None,
-        pinned_certificate: None,
+        identity: Some(ClientIdentityReference {
+            certificate_pem: identity.certificate_pem.clone(),
+            private_key_ref: identity.private_key_ref.clone(),
+        }),
+        pinned_certificate: Some(PinnedCertificate {
+            sha256_hex: pairing.server_certificate_sha256.clone(),
+            certificate_pem: pairing.server_certificate_pem.clone(),
+        }),
         timeout,
     }
 }
@@ -134,13 +157,30 @@ mod tests {
     use std::time::Duration;
 
     use super::{build_cancel_request, build_launch_or_resume_request, parse_launch_response};
-    use crate::moonlight::domain::{AudioConfiguration, LaunchOperation, LaunchRequestParameters};
+    use crate::moonlight::domain::{
+        AudioConfiguration, LaunchOperation, LaunchRequestParameters, PairingStatus,
+        PersistedIdentity, PersistedPairing, SecretReference,
+    };
 
     #[test]
     fn builds_launch_request() {
+        let identity = PersistedIdentity {
+            unique_id: "abc".to_string(),
+            client_name: "Noland Connect".to_string(),
+            certificate_pem: "cert".to_string(),
+            private_key_ref: SecretReference::new("os-keychain://noland/moonlight-client-key"),
+        };
+        let pairing = PersistedPairing {
+            status: PairingStatus::Paired,
+            server_certificate_pem: "server-cert".to_string(),
+            server_certificate_sha256: "deadbeef".to_string(),
+            paired_at: "now".to_string(),
+        };
         let req = build_launch_or_resume_request(
             "10.77.0.1".to_string(),
             47989,
+            &identity,
+            &pairing,
             LaunchOperation::Launch,
             &LaunchRequestParameters {
                 app_id: 1,
@@ -155,8 +195,14 @@ mod tests {
             Duration::from_secs(10),
         );
         assert_eq!(req.endpoint, "/launch");
+        assert!(matches!(
+            req.scheme,
+            crate::moonlight::infrastructure::gamestream::GameStreamScheme::Https
+        ));
         assert!(req.query.iter().any(|(k, _)| k == "rikey"));
         assert!(req.query.iter().any(|(k, v)| k == "corever" && v == "1"));
+        assert!(req.identity.is_some());
+        assert!(req.pinned_certificate.is_some());
     }
 
     #[test]
@@ -167,7 +213,29 @@ mod tests {
 
     #[test]
     fn builds_cancel_request() {
-        let req = build_cancel_request("10.77.0.1".to_string(), 47989, Duration::from_secs(5));
+        let identity = PersistedIdentity {
+            unique_id: "abc".to_string(),
+            client_name: "Noland Connect".to_string(),
+            certificate_pem: "cert".to_string(),
+            private_key_ref: SecretReference::new("os-keychain://noland/moonlight-client-key"),
+        };
+        let pairing = PersistedPairing {
+            status: PairingStatus::Paired,
+            server_certificate_pem: "server-cert".to_string(),
+            server_certificate_sha256: "deadbeef".to_string(),
+            paired_at: "now".to_string(),
+        };
+        let req = build_cancel_request(
+            "10.77.0.1".to_string(),
+            47989,
+            &identity,
+            &pairing,
+            Duration::from_secs(5),
+        );
         assert_eq!(req.endpoint, "/cancel");
+        assert!(matches!(
+            req.scheme,
+            crate::moonlight::infrastructure::gamestream::GameStreamScheme::Https
+        ));
     }
 }
