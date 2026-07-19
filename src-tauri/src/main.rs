@@ -3,6 +3,7 @@
 mod commands;
 mod errors;
 mod models;
+mod moonlight;
 mod services;
 mod utils;
 
@@ -20,7 +21,7 @@ use services::{
     wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
 };
 use tauri::Manager;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use utils::logging::init_logging;
 
 fn main() {
@@ -41,8 +42,31 @@ fn main() {
                 .map_err(|error| format!("Failed to create app data directory: {error}"))?;
 
             let state_path = app_data_dir.join("state.json");
-            let state_store: Arc<dyn StateStore> =
-                Arc::new(JsonStateStore::new(state_path, config.state_schema_version));
+            let state_store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(
+                state_path.clone(),
+                config.state_schema_version,
+            ));
+
+            match tauri::async_runtime::block_on(
+                moonlight::composition::bootstrap_default_services(state_path.clone()),
+            ) {
+                Ok(result) => {
+                    if result.created {
+                        info!(
+                            "Bootstrapped Moonlight identity {} and persisted moonligConf",
+                            result.identity.unique_id
+                        );
+                    } else {
+                        info!(
+                            "Validated existing Moonlight identity {}",
+                            result.identity.unique_id
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!("Moonlight bootstrap could not complete: {error}");
+                }
+            }
 
             let mut initial_state = tauri::async_runtime::block_on(state_store.load_state())
                 .map_err(|error| format!("Failed loading persisted state: {error}"))?;

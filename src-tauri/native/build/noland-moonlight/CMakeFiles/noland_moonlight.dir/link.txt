@@ -1,0 +1,2 @@
+/usr/bin/ar qc libnoland_moonlight.a CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o
+/usr/bin/ranlib libnoland_moonlight.a
