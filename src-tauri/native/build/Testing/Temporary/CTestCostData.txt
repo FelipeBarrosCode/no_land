@@ -1,2 +1,2 @@
-noland_moonlight_smoke_test 1 0.10959
+noland_moonlight_smoke_test 12 0.000325517
 ---

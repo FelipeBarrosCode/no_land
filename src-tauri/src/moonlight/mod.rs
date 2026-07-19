@@ -2,6 +2,8 @@ pub mod application;
 pub mod composition;
 pub mod domain;
 pub mod infrastructure;
+pub mod platform;
+pub mod runtime;
 
 #[allow(
     non_camel_case_types,

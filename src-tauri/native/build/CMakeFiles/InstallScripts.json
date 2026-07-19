@@ -2,6 +2,8 @@
 	"InstallScripts" : 
 	[
 		"/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/cmake_install.cmake",
+		"/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/moonlight-common-c/cmake_install.cmake",
+		"/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/moonlight-common-c/enet/cmake_install.cmake",
 		"/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight/cmake_install.cmake",
 		"/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/harness/noland-stream-harness/cmake_install.cmake"
 	],

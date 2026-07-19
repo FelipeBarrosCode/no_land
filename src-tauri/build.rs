@@ -23,8 +23,27 @@ fn main() {
         .build();
 
     let lib_dir = dst.join("lib");
+    let static_lib_dir = dst.join("lib/static");
+    let moonlight_common_lib_dir = dst.join("build/moonlight-common-c");
+    let enet_lib_dir = dst.join("build/moonlight-common-c/enet");
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        static_lib_dir.display()
+    );
+    println!(
+        "cargo:rustc-link-search=native={}",
+        moonlight_common_lib_dir.display()
+    );
+    println!("cargo:rustc-link-search=native={}", enet_lib_dir.display());
     println!("cargo:rustc-link-lib=static=noland_moonlight");
+    println!("cargo:rustc-link-lib=static=moonlight-common-c");
+    println!("cargo:rustc-link-lib=static=enet");
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-search=native=/opt/homebrew/opt/openssl@3/lib");
+        println!("cargo:rustc-link-search=native=/usr/local/opt/openssl@3/lib");
+        println!("cargo:rustc-link-lib=dylib=crypto");
+    }
 
     let bindings = bindgen::Builder::default()
         .header(wrapper_header.display().to_string())

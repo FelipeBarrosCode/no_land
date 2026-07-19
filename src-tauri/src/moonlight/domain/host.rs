@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::config::StreamPreferencesPatch;
+use super::{config::StreamPreferencesPatch, MoonlightError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -79,4 +79,41 @@ pub struct PersistedHost {
     pub apps_cache: Option<AppsCache>,
     pub preferences_override: Option<StreamPreferencesPatch>,
     pub last_selected_app_id: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedAddress {
+    pub address_type: AddressType,
+    pub address: String,
+}
+
+pub fn select_active_address(
+    host: &PersistedHost,
+    explicit: Option<AddressType>,
+) -> Result<SelectedAddress, MoonlightError> {
+    let ordered = [
+        explicit,
+        Some(AddressType::Overlay),
+        Some(AddressType::Lan),
+        Some(AddressType::External),
+    ];
+
+    for candidate in ordered.into_iter().flatten() {
+        let value = match candidate {
+            AddressType::Overlay => host.addresses.overlay.clone(),
+            AddressType::Lan => host.addresses.lan.clone(),
+            AddressType::External => host.addresses.external.clone(),
+        };
+        if let Some(address) = value.filter(|value| !value.trim().is_empty()) {
+            return Ok(SelectedAddress {
+                address_type: candidate,
+                address,
+            });
+        }
+    }
+
+    Err(MoonlightError::Validation(format!(
+        "host {} has no usable address",
+        host.host_id
+    )))
 }

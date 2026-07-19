@@ -39,6 +39,11 @@ endif()
 
 if(NOT CMAKE_INSTALL_LOCAL_ONLY)
   # Include the install script for the subdirectory.
+  include("/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/moonlight-common-c/cmake_install.cmake")
+endif()
+
+if(NOT CMAKE_INSTALL_LOCAL_ONLY)
+  # Include the install script for the subdirectory.
   include("/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight/cmake_install.cmake")
 endif()
 

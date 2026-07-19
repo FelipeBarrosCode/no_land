@@ -1,1 +1,1 @@
-/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/noland_moonlight_smoke_test.dir/tests/smoke_test.c.o -o noland_moonlight_smoke_test  libnoland_moonlight.a
+/usr/bin/cc  -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/noland_moonlight_smoke_test.dir/tests/smoke_test.c.o -o noland_moonlight_smoke_test  libnoland_moonlight.a ../moonlight-common-c/libmoonlight-common-c.a ../moonlight-common-c/enet/libenet.a /opt/homebrew/Cellar/openssl@3/3.6.2/lib/libcrypto.dylib

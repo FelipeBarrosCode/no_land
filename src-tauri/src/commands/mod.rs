@@ -1,6 +1,6 @@
 use std::{path::Path, process::Command, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
 use crate::{
@@ -16,6 +16,24 @@ use crate::{
             SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
+    },
+    moonlight::{
+        application::{
+            apps::{self, RefreshPolicy},
+            hosts::{self, RegisterHostRequest},
+            launch as moonlight_launch,
+            pairing::{self, PairingSessionId},
+        },
+        composition::MoonlightManager,
+        domain::{
+            AddressType, HostAddresses, HostPorts, MoonlightConfiguration, SessionState,
+            StreamPreferences, StreamPreferencesPatch,
+        },
+        infrastructure::gamestream::ReqwestGameStreamHttpClient,
+        platform::{
+            close_stream_window, create_or_reuse_stream_window, stream_window_surface_descriptor,
+        },
+        runtime::NativeStartRequest,
     },
     services::{
         app_context::AppContext,
@@ -71,6 +89,119 @@ pub struct LocalEnvironmentCheck {
     pub arch: String,
     pub ok: bool,
     pub checks: Vec<ToolCheck>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightRegisterHostInput {
+    pub host_id: String,
+    pub display_name: String,
+    pub overlay_address: Option<String>,
+    pub lan_address: Option<String>,
+    pub external_address: Option<String>,
+    pub http_port: u16,
+    pub https_port: Option<u16>,
+    pub explicit_address_type: Option<AddressType>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightCompletePairingInput {
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightListAppsInput {
+    pub host_id: String,
+    pub force_refresh: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightStartStreamInput {
+    pub host_id: String,
+    pub app_id: u32,
+    pub replace_existing: bool,
+    pub session_preferences: Option<StreamPreferencesPatch>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightPairingSessionResponse {
+    pub session_id: String,
+    pub host_id: String,
+    pub pin: String,
+    pub expires_in_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightSessionStateResponse {
+    pub state: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightStartStreamResponse {
+    pub operation: String,
+    pub state: String,
+    pub has_session_url: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightRelativeMouseInput {
+    pub delta_x: i16,
+    pub delta_y: i16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightAbsoluteMouseInput {
+    pub x: i16,
+    pub y: i16,
+    pub reference_width: i16,
+    pub reference_height: i16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightMouseButtonInput {
+    pub button: u8,
+    pub pressed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightKeyboardInput {
+    pub virtual_key: u16,
+    pub pressed: bool,
+    pub modifiers: u8,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightControllerArrivalInput {
+    pub controller_number: u8,
+    pub active_gamepad_mask: u16,
+    pub controller_type: u8,
+    pub supported_button_flags: u32,
+    pub capabilities: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightControllerStateInput {
+    pub controller_number: i16,
+    pub active_gamepad_mask: i16,
+    pub button_flags: i32,
+    pub left_trigger: u8,
+    pub right_trigger: u8,
+    pub left_stick_x: i16,
+    pub left_stick_y: i16,
+    pub right_stick_x: i16,
+    pub right_stick_y: i16,
 }
 
 fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
@@ -161,6 +292,48 @@ fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
 #[tauri::command]
 pub async fn local_environment_preflight() -> Result<LocalEnvironmentCheck, FrontendError> {
     Ok(local_environment_check(false))
+}
+
+fn moonlight_frontend_error(error: crate::moonlight::domain::MoonlightError) -> FrontendError {
+    match error {
+        crate::moonlight::domain::MoonlightError::Validation(message)
+        | crate::moonlight::domain::MoonlightError::IdentityInvalid(message) => FrontendError {
+            code: "moonlight_invalid_input".to_string(),
+            message,
+            details: None,
+            retryable: false,
+        },
+        crate::moonlight::domain::MoonlightError::InvalidSessionTransition { from, signal } => {
+            FrontendError {
+                code: "moonlight_invalid_state".to_string(),
+                message: format!(
+                    "Invalid Moonlight session transition from {from:?} with signal {signal:?}"
+                ),
+                details: None,
+                retryable: true,
+            }
+        }
+        other => FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(other.to_string()),
+            retryable: true,
+        },
+    }
+}
+
+fn session_state_name(state: &SessionState) -> String {
+    match state {
+        SessionState::Idle => "idle",
+        SessionState::Preparing => "preparing",
+        SessionState::Launching => "launching",
+        SessionState::CreatingSurface => "creating_surface",
+        SessionState::Connecting => "connecting",
+        SessionState::Streaming => "streaming",
+        SessionState::Reconnecting => "reconnecting",
+        SessionState::Stopping => "stopping",
+    }
+    .to_string()
 }
 
 #[tauri::command]
@@ -2033,4 +2206,370 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn moonlight_get_configuration(
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightConfiguration, FrontendError> {
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::snapshot(
+        moonlight.repository.as_ref(),
+    )
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_register_host(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightRegisterHostInput,
+) -> Result<crate::moonlight::domain::PersistedHost, FrontendError> {
+    hosts::register_host(
+        moonlight.repository.as_ref(),
+        RegisterHostRequest {
+            host_id: input.host_id,
+            display_name: input.display_name,
+            addresses: HostAddresses {
+                overlay: input.overlay_address,
+                lan: input.lan_address,
+                external: input.external_address,
+            },
+            ports: HostPorts {
+                http: input.http_port,
+                https: input.https_port,
+            },
+            explicit_address_type: input.explicit_address_type,
+        },
+    )
+    .await
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_refresh_host(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+) -> Result<crate::moonlight::application::hosts::HostStatus, FrontendError> {
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_begin_pairing(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+) -> Result<MoonlightPairingSessionResponse, FrontendError> {
+    let session = pairing::begin_pairing(
+        moonlight.repository.as_ref(),
+        &moonlight.pairing_sessions,
+        &host_id,
+    )
+    .await
+    .map_err(moonlight_frontend_error)?;
+
+    Ok(MoonlightPairingSessionResponse {
+        session_id: session.id.0,
+        host_id: session.host_id,
+        pin: session.pin,
+        expires_in_seconds: 300,
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_complete_pairing(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightCompletePairingInput,
+) -> Result<crate::moonlight::application::pairing::PairingResult, FrontendError> {
+    pairing::complete_pairing(
+        moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
+        &moonlight.pairing_sessions,
+        &PairingSessionId(input.session_id),
+    )
+    .await
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_list_apps(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightListAppsInput,
+) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let refresh_policy = if input.force_refresh {
+        RefreshPolicy::ForceRefresh
+    } else {
+        RefreshPolicy::UseCacheIfFresh
+    };
+    apps::list_remote_apps(
+        moonlight.repository.as_ref(),
+        &client,
+        &input.host_id,
+        refresh_policy,
+    )
+    .await
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_start_stream(
+    app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightStartStreamInput,
+) -> Result<MoonlightStartStreamResponse, FrontendError> {
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let prepared = moonlight_launch::start_stream_request(
+        moonlight.repository.as_ref(),
+        &client,
+        &input.host_id,
+        input.app_id,
+        input.session_preferences.as_ref(),
+        input.replace_existing,
+    )
+    .await
+    .map_err(moonlight_frontend_error)?;
+
+    let stream_window = create_or_reuse_stream_window(
+        &app,
+        prepared.preferences.video.width,
+        prepared.preferences.video.height,
+    )
+    .map_err(moonlight_frontend_error)?;
+    let surface =
+        stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
+
+    if let Err(error) = moonlight.runtime.attach_surface(surface).await {
+        let _ = close_stream_window(&app);
+        return Err(moonlight_frontend_error(error));
+    }
+
+    if let Err(error) = moonlight
+        .runtime
+        .start(NativeStartRequest {
+            host_id: input.host_id.clone(),
+            app_id: input.app_id,
+            host_address: prepared.host_address.clone(),
+            app_version: prepared.app_version.clone(),
+            gfe_version: prepared.gfe_version.clone(),
+            session_url: prepared.launch_result.rtsp_session_url.clone(),
+            server_codec_mode_support: prepared.server_codec_mode_support,
+            preferences: prepared.preferences.clone(),
+            supported_video_formats: prepared.supported_video_formats,
+            remote_input_key: prepared.remote_input_key,
+            remote_input_iv: prepared.remote_input_iv,
+        })
+        .await
+    {
+        let _ = moonlight.runtime.detach_surface().await;
+        let _ = close_stream_window(&app);
+        return Err(moonlight_frontend_error(error));
+    }
+
+    stream_window.show().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
+    stream_window
+        .set_fullscreen(true)
+        .map_err(|error| FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(error.to_string()),
+            retryable: false,
+        })?;
+
+    let state = moonlight
+        .runtime
+        .get_state()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    Ok(MoonlightStartStreamResponse {
+        operation: match prepared.launch_result.operation {
+            crate::moonlight::domain::LaunchOperation::Launch => "launch",
+            crate::moonlight::domain::LaunchOperation::Resume => "resume",
+        }
+        .to_string(),
+        state: session_state_name(&state),
+        has_session_url: prepared.launch_result.rtsp_session_url.is_some(),
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_disconnect_stream(
+    app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightSessionStateResponse, FrontendError> {
+    moonlight
+        .runtime
+        .stop()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    moonlight
+        .runtime
+        .detach_surface()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    close_stream_window(&app).map_err(moonlight_frontend_error)?;
+    let state = moonlight
+        .runtime
+        .get_state()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    Ok(MoonlightSessionStateResponse {
+        state: session_state_name(&state),
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_quit_remote_app(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+) -> Result<(), FrontendError> {
+    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    moonlight_launch::quit_remote_app(moonlight.repository.as_ref(), &client, &host_id)
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_relative_mouse(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightRelativeMouseInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_relative_mouse(input.delta_x, input.delta_y)
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_absolute_mouse(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightAbsoluteMouseInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_absolute_mouse(
+            input.x,
+            input.y,
+            input.reference_width,
+            input.reference_height,
+        )
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_mouse_button(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightMouseButtonInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_mouse_button(input.button, input.pressed)
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_keyboard(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightKeyboardInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_keyboard(input.virtual_key, input.pressed, input.modifiers)
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_controller_arrival(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightControllerArrivalInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_controller_arrival(
+            input.controller_number,
+            input.active_gamepad_mask,
+            input.controller_type,
+            input.supported_button_flags,
+            input.capabilities,
+        )
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_send_controller_state(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightControllerStateInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .runtime
+        .send_controller_state(
+            input.controller_number,
+            input.active_gamepad_mask,
+            input.button_flags,
+            input.left_trigger,
+            input.right_trigger,
+            input.left_stick_x,
+            input.left_stick_y,
+            input.right_stick_x,
+            input.right_stick_y,
+        )
+        .await
+        .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_update_preferences(
+    moonlight: State<'_, MoonlightManager>,
+    defaults: StreamPreferences,
+) -> Result<MoonlightConfiguration, FrontendError> {
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+        moonlight.repository.as_ref(),
+        |configuration| {
+            configuration.defaults = defaults;
+            Ok(configuration.clone())
+        },
+    )
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_forget_host(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+) -> Result<MoonlightConfiguration, FrontendError> {
+    crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+        moonlight.repository.as_ref(),
+        |configuration| {
+            configuration.hosts.remove(&host_id);
+            if configuration.last_selected_host_id.as_deref() == Some(host_id.as_str()) {
+                configuration.last_selected_host_id = None;
+            }
+            Ok(configuration.clone())
+        },
+    )
+    .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_get_session_state(
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightSessionStateResponse, FrontendError> {
+    let state = moonlight
+        .runtime
+        .get_state()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    Ok(MoonlightSessionStateResponse {
+        state: session_state_name(&state),
+    })
 }

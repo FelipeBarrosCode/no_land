@@ -52,7 +52,7 @@ where
     }
 }
 
-async fn load_existing_identity<S>(
+pub async fn load_existing_identity<S>(
     identity: PersistedIdentity,
     secret_store: &S,
 ) -> Result<ClientIdentity, MoonlightError>

@@ -4,7 +4,7 @@
 # compile C with /usr/bin/cc
 C_DEFINES = 
 
-C_INCLUDES = -I/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/include
+C_INCLUDES = -I/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/include -I/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/../moonlight-common-c/src -isystem /Users/felipebarros/Code/noland/no_land/src-tauri/native/moonlight-common-c/src
 
 C_FLAGSarm64 =  -arch arm64 -fPIC
 

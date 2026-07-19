@@ -157,6 +157,14 @@ fn main() {
 
             let context = AppContext::new(config, state_store, initial_state);
             app.manage(context.clone());
+            let moonlight_manager = moonlight::composition::MoonlightManager::new(
+                state_path.clone(),
+                app_data_dir.clone(),
+            );
+            moonlight_manager
+                .runtime
+                .start_event_bridge(app.handle().clone());
+            app.manage(moonlight_manager);
 
             let app_handle = app.handle().clone();
             let resume_context = context.clone();
@@ -250,7 +258,25 @@ fn main() {
             disable_instance_mic,
             reconnect_instance_mic,
             recreate_instance_mic_device,
-            get_instance_mic_status
+            get_instance_mic_status,
+            moonlight_get_configuration,
+            moonlight_register_host,
+            moonlight_refresh_host,
+            moonlight_begin_pairing,
+            moonlight_complete_pairing,
+            moonlight_list_apps,
+            moonlight_start_stream,
+            moonlight_disconnect_stream,
+            moonlight_quit_remote_app,
+            moonlight_send_relative_mouse,
+            moonlight_send_absolute_mouse,
+            moonlight_send_mouse_button,
+            moonlight_send_keyboard,
+            moonlight_send_controller_arrival,
+            moonlight_send_controller_state,
+            moonlight_update_preferences,
+            moonlight_forget_host,
+            moonlight_get_session_state
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

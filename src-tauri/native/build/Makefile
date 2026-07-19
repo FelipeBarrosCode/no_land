@@ -172,6 +172,32 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named moonlight-common-c
+
+# Build rule for target.
+moonlight-common-c: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 moonlight-common-c
+.PHONY : moonlight-common-c
+
+# fast build rule for target.
+moonlight-common-c/fast:
+	$(MAKE) $(MAKESILENT) -f moonlight-common-c/CMakeFiles/moonlight-common-c.dir/build.make moonlight-common-c/CMakeFiles/moonlight-common-c.dir/build
+.PHONY : moonlight-common-c/fast
+
+#=============================================================================
+# Target rules for targets named enet
+
+# Build rule for target.
+enet: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 enet
+.PHONY : enet
+
+# fast build rule for target.
+enet/fast:
+	$(MAKE) $(MAKESILENT) -f moonlight-common-c/enet/CMakeFiles/enet.dir/build.make moonlight-common-c/enet/CMakeFiles/enet.dir/build
+.PHONY : enet/fast
+
+#=============================================================================
 # Target rules for targets named noland_moonlight
 
 # Build rule for target.
@@ -223,6 +249,8 @@ help:
 	@echo "... list_install_components"
 	@echo "... rebuild_cache"
 	@echo "... test"
+	@echo "... enet"
+	@echo "... moonlight-common-c"
 	@echo "... noland-stream-harness"
 	@echo "... noland_moonlight"
 	@echo "... noland_moonlight_smoke_test"
