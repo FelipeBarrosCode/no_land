@@ -177,6 +177,8 @@ export function SettingsScreen({
 
   useEffect(() => {
     setApiKey(appState.credentials.vastApiKey);
+    setTailscaleApiKey(appState.credentials.tailscaleApiKey);
+    setConnectionProvider(appState.connectionProvider || "wireguard");
     setPlatformUsername(appState.credentials.appUsername);
     setPlatformPassword(appState.credentials.appPassword);
     setSshUsername(
