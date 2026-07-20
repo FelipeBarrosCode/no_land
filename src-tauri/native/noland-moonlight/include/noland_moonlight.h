@@ -145,6 +145,8 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output);
 nl_result_t nl_send_relative_mouse(nl_runtime_t* runtime, int16_t delta_x, int16_t delta_y);
 nl_result_t nl_send_absolute_mouse(nl_runtime_t* runtime, int16_t x, int16_t y, int16_t reference_width, int16_t reference_height);
 nl_result_t nl_send_mouse_button(nl_runtime_t* runtime, uint8_t button, bool pressed);
+nl_result_t nl_send_vertical_scroll(nl_runtime_t* runtime, int16_t amount, bool high_resolution);
+nl_result_t nl_send_horizontal_scroll(nl_runtime_t* runtime, int16_t amount, bool high_resolution);
 nl_result_t nl_send_keyboard(nl_runtime_t* runtime, uint16_t virtual_key, bool pressed, uint8_t modifiers);
 nl_result_t nl_send_controller_arrival(nl_runtime_t* runtime, uint8_t controller_number, uint16_t active_gamepad_mask, uint8_t controller_type, uint32_t supported_button_flags, uint16_t capabilities);
 nl_result_t nl_send_controller_state(nl_runtime_t* runtime, int16_t controller_number, int16_t active_gamepad_mask, int32_t button_flags, uint8_t left_trigger, uint8_t right_trigger, int16_t left_stick_x, int16_t left_stick_y, int16_t right_stick_x, int16_t right_stick_y);

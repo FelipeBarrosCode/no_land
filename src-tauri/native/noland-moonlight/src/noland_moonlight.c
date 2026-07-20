@@ -907,6 +907,30 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       return NL_RESULT_OK;
     }
 
+    nl_result_t nl_send_vertical_scroll(nl_runtime_t* runtime, int16_t amount, bool high_resolution) {
+      int result;
+      if (!nl_runtime_can_send_input(runtime)) {
+        return NL_RESULT_INVALID_STATE;
+      }
+      result = high_resolution ? LiSendHighResScrollEvent((short)amount) : LiSendScrollEvent((signed char)amount);
+      if (result != 0) {
+        return NL_RESULT_NOT_READY;
+      }
+      return NL_RESULT_OK;
+    }
+
+    nl_result_t nl_send_horizontal_scroll(nl_runtime_t* runtime, int16_t amount, bool high_resolution) {
+      int result;
+      if (!nl_runtime_can_send_input(runtime)) {
+        return NL_RESULT_INVALID_STATE;
+      }
+      result = high_resolution ? LiSendHighResHScrollEvent((short)amount) : LiSendHScrollEvent((signed char)amount);
+      if (result != 0) {
+        return NL_RESULT_NOT_READY;
+      }
+      return NL_RESULT_OK;
+    }
+
     nl_result_t nl_send_keyboard(nl_runtime_t* runtime, uint16_t virtual_key, bool pressed, uint8_t modifiers) {
       int result;
       char action = pressed ? KEY_ACTION_DOWN : KEY_ACTION_UP;

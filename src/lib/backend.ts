@@ -304,6 +304,34 @@ export async function moonlightGetActiveInputMode(): Promise<
   return response.mouseMode;
 }
 
+export async function moonlightStartInputCapture(
+  mode: "relative" | "absolute",
+): Promise<boolean> {
+  return invokeSafe<boolean>("moonlight_start_input_capture", {
+    input: { mode },
+  });
+}
+
+export async function moonlightStopInputCapture(): Promise<boolean> {
+  return invokeSafe<boolean>("moonlight_stop_input_capture");
+}
+
+export async function moonlightUpdateVideoGeometry(input: {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}): Promise<void> {
+  await invokeSafe<void>("moonlight_update_video_geometry", {
+    input: {
+      left: input.left,
+      top: input.top,
+      width: input.width,
+      height: input.height,
+    },
+  });
+}
+
 export async function moonlightActivateNativeMouseCapture(): Promise<boolean> {
   return invokeSafe<boolean>("moonlight_activate_native_mouse_capture");
 }

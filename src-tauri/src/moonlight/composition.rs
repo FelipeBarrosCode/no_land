@@ -3,6 +3,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::input::manager::InputManager;
+
 use super::{
     application::{
         bootstrap::{bootstrap_client_identity, ClientIdentityBootstrapResult},
@@ -32,19 +34,23 @@ pub struct MoonlightManager {
     pub secret_store: Arc<dyn SecretStore>,
     pub pairing_sessions: PairingSessionStore,
     pub runtime: MoonlightRuntimeHandle,
+    pub input: Arc<InputManager>,
     pub active_session_preferences: Arc<Mutex<Option<StreamPreferences>>>,
 }
 
 impl MoonlightManager {
     pub fn new(state_path: PathBuf, app_data_dir: PathBuf) -> Self {
         let identity_dir = app_data_dir.join("moonlight").join("identity");
+        let runtime = spawn_runtime_actor();
+        let input = InputManager::new(runtime.clone());
         Self {
             state_path: state_path.clone(),
             app_data_dir,
             repository: Arc::new(JsonMoonlightStateRepository::new(state_path)),
             secret_store: Arc::new(FileSecretStore::new(identity_dir)),
             pairing_sessions: PairingSessionStore::default(),
-            runtime: spawn_runtime_actor(),
+            runtime,
+            input,
             active_session_preferences: Arc::new(Mutex::new(None)),
         }
     }

@@ -6,6 +6,10 @@ use tauri::{AppHandle, Manager, State};
 
 use crate::{
     errors::{AppError, FrontendError},
+    input::{
+        event::{ButtonState, MouseButton},
+        state::MouseMode as CaptureMouseMode,
+    },
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -223,6 +227,21 @@ pub struct MoonlightKeyboardInput {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MoonlightStartInputCaptureInput {
+    pub mode: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightVideoGeometryInput {
+    pub left: f64,
+    pub top: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct MoonlightControllerArrivalInput {
     pub controller_number: u8,
     pub active_gamepad_mask: u16,
@@ -375,6 +394,38 @@ fn session_state_name(state: &SessionState) -> String {
         SessionState::Stopping => "stopping",
     }
     .to_string()
+}
+
+fn parse_capture_mouse_mode(mode: &str) -> Result<CaptureMouseMode, FrontendError> {
+    match mode {
+        "relative" => Ok(CaptureMouseMode::Relative),
+        "absolute" => Ok(CaptureMouseMode::Absolute),
+        _ => Err(FrontendError {
+            code: "moonlight_error".to_string(),
+            message: "Moonlight operation failed".to_string(),
+            details: Some(format!("unsupported capture mode: {mode}")),
+            retryable: false,
+        }),
+    }
+}
+
+fn map_mouse_button(button: u8) -> Option<MouseButton> {
+    match button {
+        0x01 => Some(MouseButton::Left),
+        0x02 => Some(MouseButton::Middle),
+        0x03 => Some(MouseButton::Right),
+        0x04 => Some(MouseButton::X1),
+        0x05 => Some(MouseButton::X2),
+        _ => None,
+    }
+}
+
+fn button_state(pressed: bool) -> ButtonState {
+    if pressed {
+        ButtonState::Pressed
+    } else {
+        ButtonState::Released
+    }
 }
 
 fn embedded_moonlight_host_id(instance_id: u64) -> String {
@@ -1081,7 +1132,7 @@ async fn start_embedded_stream_for_host(
         &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
-    install_native_stream_input(&stream_window, moonlight.runtime.clone())
+    install_native_stream_input(&stream_window, moonlight.input.clone())
         .map_err(moonlight_frontend_error)?;
     let surface =
         stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
@@ -3588,7 +3639,7 @@ pub async fn moonlight_start_stream(
         &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
-    install_native_stream_input(&stream_window, moonlight.runtime.clone())
+    install_native_stream_input(&stream_window, moonlight.input.clone())
         .map_err(moonlight_frontend_error)?;
     let surface =
         stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
@@ -3679,6 +3730,7 @@ pub async fn moonlight_disconnect_stream(
         .detach_surface()
         .await
         .map_err(moonlight_frontend_error)?;
+    moonlight.input.end_capture();
     if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
         *active_preferences = None;
     }
@@ -3694,19 +3746,61 @@ pub async fn moonlight_disconnect_stream(
 }
 
 #[tauri::command]
-pub async fn moonlight_activate_native_mouse_capture(
+pub async fn moonlight_start_input_capture(
     app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightStartInputCaptureInput,
 ) -> Result<bool, FrontendError> {
+    let mode = parse_capture_mouse_mode(&input.mode)?;
+    moonlight.input.begin_capture(mode);
     let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
         return Ok(false);
     };
-    activate_native_stream_input(&window).map_err(moonlight_frontend_error)
+    activate_native_stream_input(&window, mode).map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_stop_input_capture(
+    app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<bool, FrontendError> {
+    moonlight.input.end_capture();
+    let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+    deactivate_native_stream_input(&window).map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_update_video_geometry(
+    moonlight: State<'_, MoonlightManager>,
+    input: MoonlightVideoGeometryInput,
+) -> Result<(), FrontendError> {
+    moonlight
+        .input
+        .update_video_geometry(input.left, input.top, input.width, input.height);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn moonlight_activate_native_mouse_capture(
+    app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<bool, FrontendError> {
+    moonlight.input.begin_capture(CaptureMouseMode::Relative);
+    let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+    activate_native_stream_input(&window, CaptureMouseMode::Relative)
+        .map_err(moonlight_frontend_error)
 }
 
 #[tauri::command]
 pub async fn moonlight_deactivate_native_mouse_capture(
     app: AppHandle,
+    moonlight: State<'_, MoonlightManager>,
 ) -> Result<bool, FrontendError> {
+    moonlight.input.end_capture();
     let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
         return Ok(false);
     };
@@ -3740,10 +3834,9 @@ pub async fn moonlight_send_relative_mouse(
     input: MoonlightRelativeMouseInput,
 ) -> Result<(), FrontendError> {
     moonlight
-        .runtime
-        .send_relative_mouse(input.delta_x, input.delta_y)
-        .await
-        .map_err(moonlight_frontend_error)
+        .input
+        .relative_motion(input.delta_x as i32, input.delta_y as i32);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3751,16 +3844,16 @@ pub async fn moonlight_send_absolute_mouse(
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightAbsoluteMouseInput,
 ) -> Result<(), FrontendError> {
+    moonlight.input.update_video_geometry(
+        0.0,
+        0.0,
+        input.reference_width as f64,
+        input.reference_height as f64,
+    );
     moonlight
-        .runtime
-        .send_absolute_mouse(
-            input.x,
-            input.y,
-            input.reference_width,
-            input.reference_height,
-        )
-        .await
-        .map_err(moonlight_frontend_error)
+        .input
+        .absolute_motion(input.x as f64, input.y as f64);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3768,11 +3861,13 @@ pub async fn moonlight_send_mouse_button(
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightMouseButtonInput,
 ) -> Result<(), FrontendError> {
+    let Some(button) = map_mouse_button(input.button) else {
+        return Ok(());
+    };
     moonlight
-        .runtime
-        .send_mouse_button(input.button, input.pressed)
-        .await
-        .map_err(moonlight_frontend_error)
+        .input
+        .mouse_button(button, button_state(input.pressed));
+    Ok(())
 }
 
 #[tauri::command]
@@ -3780,11 +3875,13 @@ pub async fn moonlight_send_keyboard(
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightKeyboardInput,
 ) -> Result<(), FrontendError> {
-    moonlight
-        .runtime
-        .send_keyboard(input.virtual_key, input.pressed, input.modifiers)
-        .await
-        .map_err(moonlight_frontend_error)
+    moonlight.input.key(
+        input.virtual_key,
+        button_state(input.pressed),
+        input.modifiers,
+        false,
+    );
+    Ok(())
 }
 
 #[tauri::command]

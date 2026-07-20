@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  moonlightActivateNativeMouseCapture,
-  moonlightDeactivateNativeMouseCapture,
   moonlightGetActiveInputMode,
   moonlightSendAbsoluteMouse,
   moonlightSendKeyboard,
   moonlightSendMouseButton,
   moonlightSendRelativeMouse,
+  moonlightStartInputCapture,
+  moonlightStopInputCapture,
+  moonlightUpdateVideoGeometry,
 } from "../../lib/backend";
 
 const MOUSE_BUTTON_MAP: Record<number, number> = {
@@ -160,8 +161,13 @@ function pressedSetToModifiers(pressedCodes: Iterable<string>): number {
 type CaptureMode =
   | "none"
   | "native-relative"
+  | "native-absolute"
   | "pointer-lock"
   | "window-absolute";
+
+function isNativeCaptureMode(mode: CaptureMode): boolean {
+  return mode === "native-relative" || mode === "native-absolute";
+}
 
 export function StreamWindowScreen() {
   const overlayRef = useRef<HTMLDivElement | null>(null);
@@ -181,18 +187,21 @@ export function StreamWindowScreen() {
   const captureHint = useMemo(() => {
     if (captured) {
       if (captureMode === "native-relative") {
-        return "Input captured — native mouse mode active · Ctrl+Alt+Shift+Z to release";
+        return "Input captured — native relative mouse active · Ctrl+Alt+Shift+Z to release";
+      }
+      if (captureMode === "native-absolute") {
+        return "Input captured — native desktop mouse active · Ctrl+Alt+Shift+Z to release";
       }
       if (captureMode === "pointer-lock") {
         return "Input captured — pointer lock active · Ctrl+Alt+Shift+Z to release";
       }
       if (captureMode === "window-absolute") {
-        return "Input captured — stream window absolute mouse mode active · Ctrl+Alt+Shift+Z to release";
+        return "Input captured — stream window absolute mouse fallback active · Ctrl+Alt+Shift+Z to release";
       }
       return "Input captured — Ctrl+Alt+Shift+Z to release";
     }
     if (captureRequested) {
-      return "Waiting for pointer lock…";
+      return "Waiting for input capture…";
     }
     return "Click to capture input";
   }, [captureMode, captureRequested, captured]);
@@ -238,7 +247,7 @@ export function StreamWindowScreen() {
     try {
       await appWindowRef.current.setCursorGrab(active);
     } catch {
-      // pointer lock remains the primary path when native grab is unavailable
+      // best-effort only on macOS
     }
     try {
       await appWindowRef.current.setCursorVisible(!active);
@@ -247,17 +256,33 @@ export function StreamWindowScreen() {
     }
   }, []);
 
-  const activateWindowAbsoluteFallback = useCallback(async (reason?: string | null) => {
-    setCaptureRequested(false);
-    captureModeRef.current = "window-absolute";
-    setCaptureMode("window-absolute");
-    setCaptured(true);
-    overlayRef.current?.focus();
-    if (reason) {
-      setLastError(reason);
-    }
-    await setWindowCapture(true);
-  }, [setWindowCapture]);
+  const activateWindowAbsoluteFallback = useCallback(
+    async (reason?: string | null) => {
+      setCaptureRequested(false);
+      captureModeRef.current = "window-absolute";
+      setCaptureMode("window-absolute");
+      setCaptured(true);
+      overlayRef.current?.focus();
+      if (reason) {
+        setLastError(reason);
+      }
+      await setWindowCapture(true);
+    },
+    [setWindowCapture],
+  );
+
+  const activateNativeCapture = useCallback(
+    async (mode: "relative" | "absolute") => {
+      captureModeRef.current = mode === "relative" ? "native-relative" : "native-absolute";
+      setCaptureMode(captureModeRef.current);
+      setCaptured(true);
+      setCaptureRequested(false);
+      setLastError(null);
+      overlayRef.current?.focus();
+      await setWindowCapture(true);
+    },
+    [setWindowCapture],
+  );
 
   const releasePressedInputs = useCallback(() => {
     const pressedCodes = Array.from(pressedKeysRef.current);
@@ -294,7 +319,6 @@ export function StreamWindowScreen() {
   }, []);
 
   const releaseCapture = useCallback(() => {
-    const previousMode = captureModeRef.current;
     setCaptureRequested(false);
     captureModeRef.current = "none";
     setCaptureMode("none");
@@ -302,12 +326,10 @@ export function StreamWindowScreen() {
     if (document.pointerLockElement === overlayRef.current) {
       document.exitPointerLock();
     }
-    if (previousMode === "native-relative") {
-      void moonlightDeactivateNativeMouseCapture().catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setLastError(message);
-      });
-    }
+    void moonlightStopInputCapture().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      setLastError(message);
+    });
     void setWindowCapture(false);
     releasePressedInputs();
   }, [releasePressedInputs, setWindowCapture]);
@@ -333,6 +355,33 @@ export function StreamWindowScreen() {
       releaseCapture();
     };
   }, [releaseCapture]);
+
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) {
+      return;
+    }
+
+    const publishGeometry = () => {
+      const rect = overlay.getBoundingClientRect();
+      void moonlightUpdateVideoGeometry({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      }).catch(() => undefined);
+    };
+
+    publishGeometry();
+    const observer = new ResizeObserver(() => publishGeometry());
+    observer.observe(overlay);
+    window.addEventListener("resize", publishGeometry);
+
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", publishGeometry);
+    };
+  }, []);
 
   useEffect(() => {
     const handlePointerLockChange = () => {
@@ -406,6 +455,10 @@ export function StreamWindowScreen() {
         return;
       }
 
+      if (isNativeCaptureMode(captureModeRef.current)) {
+        return;
+      }
+
       const virtualKey = KEY_CODE_TO_VK[event.code];
       if (virtualKey === undefined) {
         return;
@@ -431,7 +484,7 @@ export function StreamWindowScreen() {
     };
 
     const handleKeyUp = (event: KeyboardEvent) => {
-      if (!captured) {
+      if (!captured || isNativeCaptureMode(captureModeRef.current)) {
         return;
       }
 
@@ -473,6 +526,7 @@ export function StreamWindowScreen() {
     if (
       document.pointerLockElement === overlay ||
       captureModeRef.current === "native-relative" ||
+      captureModeRef.current === "native-absolute" ||
       captureModeRef.current === "window-absolute"
     ) {
       overlay.focus();
@@ -491,18 +545,26 @@ export function StreamWindowScreen() {
     overlay.focus();
 
     if (preferredMouseModeRef.current === "absolute") {
-      await activateWindowAbsoluteFallback(null);
-      return;
+      try {
+        const nativeCaptureActivated = await moonlightStartInputCapture("absolute");
+        if (nativeCaptureActivated) {
+          await activateNativeCapture("absolute");
+          return;
+        }
+        await activateWindowAbsoluteFallback(null);
+        return;
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        setCaptureRequested(false);
+        setLastError(message);
+        return;
+      }
     }
 
     try {
-      const nativeCaptureActivated = await moonlightActivateNativeMouseCapture();
+      const nativeCaptureActivated = await moonlightStartInputCapture("relative");
       if (nativeCaptureActivated) {
-        setCaptureRequested(false);
-        captureModeRef.current = "native-relative";
-        setCaptureMode("native-relative");
-        setCaptured(true);
-        setLastError(null);
+        await activateNativeCapture("relative");
         return;
       }
     } catch {
@@ -520,7 +582,7 @@ export function StreamWindowScreen() {
         `Pointer lock unavailable — using stream window absolute mouse fallback (${message})`,
       );
     }
-  }, [activateWindowAbsoluteFallback]);
+  }, [activateNativeCapture, activateWindowAbsoluteFallback]);
 
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
@@ -528,7 +590,7 @@ export function StreamWindowScreen() {
         return;
       }
 
-      if (captureModeRef.current === "native-relative") {
+      if (isNativeCaptureMode(captureModeRef.current)) {
         return;
       }
 
@@ -566,7 +628,7 @@ export function StreamWindowScreen() {
   const handleMouseButton = useCallback(
     (event: React.MouseEvent<HTMLDivElement>, pressed: boolean) => {
       const mappedButton = MOUSE_BUTTON_MAP[event.button];
-      if (captureModeRef.current === "native-relative") {
+      if (isNativeCaptureMode(captureModeRef.current)) {
         return;
       }
       if (!captured || mappedButton === undefined) {
@@ -622,7 +684,7 @@ export function StreamWindowScreen() {
         <div className="pointer-events-none absolute bottom-4 right-4 max-w-md rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
           <div>
             {captured
-              ? `Mouse + keyboard forwarding active (${captureMode === "native-relative" ? "native relative mouse" : captureMode === "pointer-lock" ? "pointer lock" : captureMode === "window-absolute" ? "stream window absolute mouse" : "captured"})`
+              ? `Mouse + keyboard forwarding active (${captureMode === "native-relative" ? "native relative mouse" : captureMode === "native-absolute" ? "native absolute mouse" : captureMode === "pointer-lock" ? "pointer lock" : captureMode === "window-absolute" ? "stream window absolute mouse fallback" : "captured"})`
               : "Native video stays behind this transparent overlay"}
           </div>
           <div className="mt-1 text-slate-300">

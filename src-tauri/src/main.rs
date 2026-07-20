@@ -2,6 +2,7 @@
 
 mod commands;
 mod errors;
+mod input;
 mod models;
 mod moonlight;
 mod services;
@@ -274,6 +275,9 @@ fn main() {
             moonlight_list_apps,
             moonlight_start_stream,
             moonlight_disconnect_stream,
+            moonlight_start_input_capture,
+            moonlight_stop_input_capture,
+            moonlight_update_video_geometry,
             moonlight_activate_native_mouse_capture,
             moonlight_deactivate_native_mouse_capture,
             moonlight_quit_remote_app,

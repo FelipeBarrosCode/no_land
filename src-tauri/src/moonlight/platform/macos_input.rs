@@ -1,36 +1,34 @@
 use std::{
-    collections::VecDeque,
     ffi::c_void,
-    sync::{Mutex, OnceLock},
+    sync::{Arc, OnceLock, Weak},
 };
 
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tauri::{Runtime, Window};
-use tokio::sync::mpsc;
 
-use crate::moonlight::{domain::MoonlightError, runtime::MoonlightRuntimeHandle};
+use crate::{
+    input::{
+        event::{ButtonState, MouseButton},
+        manager::InputManager,
+        state::MouseMode,
+    },
+    moonlight::domain::MoonlightError,
+};
 
-#[derive(Debug)]
-enum NativeInputEvent {
-    RelativeMouse { delta_x: f64, delta_y: f64 },
-    MouseButton { button: u8, pressed: bool },
-}
-
-static INPUT_TX: OnceLock<mpsc::UnboundedSender<NativeInputEvent>> = OnceLock::new();
-static PENDING_EVENTS: OnceLock<Mutex<VecDeque<NativeInputEvent>>> = OnceLock::new();
+static INPUT_MANAGER: OnceLock<Weak<InputManager>> = OnceLock::new();
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn noland_macos_input_install(ns_view: *mut c_void) -> i32;
     fn noland_macos_input_uninstall(ns_view: *mut c_void);
-    fn noland_macos_input_set_capture_active(ns_view: *mut c_void, active: bool) -> i32;
+    fn noland_macos_input_set_capture_active(ns_view: *mut c_void, active: bool, mode: i32) -> i32;
 }
 
 pub fn install_native_stream_input<R: Runtime>(
     window: &Window<R>,
-    runtime: MoonlightRuntimeHandle,
+    input: Arc<InputManager>,
 ) -> Result<(), MoonlightError> {
-    ensure_input_bridge(runtime);
+    let _ = INPUT_MANAGER.set(Arc::downgrade(&input));
 
     #[cfg(target_os = "macos")]
     {
@@ -46,6 +44,7 @@ pub fn install_native_stream_input<R: Runtime>(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = window;
+        let _ = input;
     }
 
     Ok(())
@@ -68,11 +67,13 @@ pub fn uninstall_native_stream_input<R: Runtime>(window: &Window<R>) -> Result<(
 
 pub fn activate_native_stream_input<R: Runtime>(
     window: &Window<R>,
+    mode: MouseMode,
 ) -> Result<bool, MoonlightError> {
     #[cfg(target_os = "macos")]
     {
         let view = appkit_view_ptr(window)?;
-        let result = unsafe { noland_macos_input_set_capture_active(view, true) };
+        let result =
+            unsafe { noland_macos_input_set_capture_active(view, true, native_capture_mode(mode)) };
         return match result {
             0 => Ok(true),
             1 => Ok(false),
@@ -85,6 +86,7 @@ pub fn activate_native_stream_input<R: Runtime>(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = window;
+        let _ = mode;
         Ok(false)
     }
 }
@@ -95,7 +97,7 @@ pub fn deactivate_native_stream_input<R: Runtime>(
     #[cfg(target_os = "macos")]
     {
         let view = appkit_view_ptr(window)?;
-        let result = unsafe { noland_macos_input_set_capture_active(view, false) };
+        let result = unsafe { noland_macos_input_set_capture_active(view, false, 0) };
         return match result {
             0 => Ok(true),
             1 => Ok(false),
@@ -110,70 +112,6 @@ pub fn deactivate_native_stream_input<R: Runtime>(
         let _ = window;
         Ok(false)
     }
-}
-
-fn ensure_input_bridge(runtime: MoonlightRuntimeHandle) {
-    if INPUT_TX.get().is_some() {
-        return;
-    }
-
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let _ = INPUT_TX.set(tx);
-    let _ = PENDING_EVENTS.get_or_init(|| Mutex::new(VecDeque::new()));
-
-    tauri::async_runtime::spawn(async move {
-        loop {
-            let next = if let Some(event) = PENDING_EVENTS
-                .get()
-                .and_then(|pending| pending.lock().ok().and_then(|mut queue| queue.pop_front()))
-            {
-                Some(event)
-            } else {
-                rx.recv().await
-            };
-
-            let Some(event) = next else {
-                break;
-            };
-
-            match event {
-                NativeInputEvent::RelativeMouse { delta_x, delta_y } => {
-                    let mut sum_x = delta_x;
-                    let mut sum_y = delta_y;
-
-                    while let Ok(more) = rx.try_recv() {
-                        match more {
-                            NativeInputEvent::RelativeMouse { delta_x, delta_y } => {
-                                sum_x += delta_x;
-                                sum_y += delta_y;
-                            }
-                            other => {
-                                if let Some(pending) = PENDING_EVENTS.get() {
-                                    if let Ok(mut queue) = pending.lock() {
-                                        queue.push_back(other);
-                                    }
-                                }
-                                break;
-                            }
-                        }
-                    }
-
-                    let clamped_x = clamp_i16(sum_x.round());
-                    let clamped_y = clamp_i16(sum_y.round());
-                    if clamped_x != 0 || clamped_y != 0 {
-                        let _ = runtime.send_relative_mouse(clamped_x, clamped_y).await;
-                    }
-                }
-                NativeInputEvent::MouseButton { button, pressed } => {
-                    let _ = runtime.send_mouse_button(button, pressed).await;
-                }
-            }
-        }
-    });
-}
-
-fn clamp_i16(value: f64) -> i16 {
-    value.max(i16::MIN as f64).min(i16::MAX as f64) as i16
 }
 
 #[cfg(target_os = "macos")]
@@ -197,16 +135,90 @@ fn appkit_view_ptr<R: Runtime>(_window: &Window<R>) -> Result<*mut c_void, Moonl
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn native_capture_mode(mode: MouseMode) -> i32 {
+    match mode {
+        MouseMode::Relative => 1,
+        MouseMode::Absolute => 2,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn noland_macos_input_on_relative_mouse(delta_x: f64, delta_y: f64) {
-    if let Some(tx) = INPUT_TX.get() {
-        let _ = tx.send(NativeInputEvent::RelativeMouse { delta_x, delta_y });
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.relative_motion(delta_x.round() as i32, delta_y.round() as i32);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_absolute_mouse(x: f64, y: f64) {
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.absolute_motion(x, y);
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn noland_macos_input_on_mouse_button(button: u8, pressed: bool) {
-    if let Some(tx) = INPUT_TX.get() {
-        let _ = tx.send(NativeInputEvent::MouseButton { button, pressed });
+    let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) else {
+        return;
+    };
+    let Some(button) = map_mouse_button(button) else {
+        return;
+    };
+    manager.mouse_button(
+        button,
+        if pressed {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        },
+    );
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_vertical_scroll(amount: f64, high_resolution: bool) {
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.vertical_scroll(amount.round() as i32, high_resolution);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_horizontal_scroll(amount: f64, high_resolution: bool) {
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.horizontal_scroll(amount.round() as i32, high_resolution);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_keyboard(virtual_key: u16, pressed: bool, modifiers: u8) {
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.key(
+            virtual_key,
+            if pressed {
+                ButtonState::Pressed
+            } else {
+                ButtonState::Released
+            },
+            modifiers,
+            false,
+        );
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_focus_changed(focused: bool) {
+    if let Some(manager) = INPUT_MANAGER.get().and_then(Weak::upgrade) {
+        manager.set_focus(focused);
+    }
+}
+
+fn map_mouse_button(button: u8) -> Option<MouseButton> {
+    match button {
+        0x01 => Some(MouseButton::Left),
+        0x02 => Some(MouseButton::Middle),
+        0x03 => Some(MouseButton::Right),
+        0x04 => Some(MouseButton::X1),
+        0x05 => Some(MouseButton::X2),
+        _ => None,
     }
 }

@@ -65,6 +65,16 @@ pub enum RuntimeCommand {
         pressed: bool,
         response: oneshot::Sender<Result<(), MoonlightError>>,
     },
+    SendVerticalScroll {
+        amount: i16,
+        high_resolution: bool,
+        response: oneshot::Sender<Result<(), MoonlightError>>,
+    },
+    SendHorizontalScroll {
+        amount: i16,
+        high_resolution: bool,
+        response: oneshot::Sender<Result<(), MoonlightError>>,
+    },
     SendKeyboard {
         virtual_key: u16,
         pressed: bool,
@@ -264,6 +274,48 @@ impl MoonlightRuntimeHandle {
             .map_err(|_| MoonlightError::Persistence("runtime actor is unavailable".to_string()))?;
         rx.await.map_err(|_| {
             MoonlightError::Persistence("runtime actor dropped mouse button response".to_string())
+        })?
+    }
+
+    pub async fn send_vertical_scroll(
+        &self,
+        amount: i16,
+        high_resolution: bool,
+    ) -> Result<(), MoonlightError> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::SendVerticalScroll {
+                amount,
+                high_resolution,
+                response: tx,
+            })
+            .await
+            .map_err(|_| MoonlightError::Persistence("runtime actor is unavailable".to_string()))?;
+        rx.await.map_err(|_| {
+            MoonlightError::Persistence(
+                "runtime actor dropped vertical scroll response".to_string(),
+            )
+        })?
+    }
+
+    pub async fn send_horizontal_scroll(
+        &self,
+        amount: i16,
+        high_resolution: bool,
+    ) -> Result<(), MoonlightError> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(RuntimeCommand::SendHorizontalScroll {
+                amount,
+                high_resolution,
+                response: tx,
+            })
+            .await
+            .map_err(|_| MoonlightError::Persistence("runtime actor is unavailable".to_string()))?;
+        rx.await.map_err(|_| {
+            MoonlightError::Persistence(
+                "runtime actor dropped horizontal scroll response".to_string(),
+            )
         })?
     }
 
@@ -565,6 +617,25 @@ impl NativeRuntime {
     fn send_mouse_button(&mut self, button: u8, pressed: bool) -> Result<(), MoonlightError> {
         let result = unsafe { native::nl_send_mouse_button(self.raw, button, pressed) };
         map_native_result(result, "nl_send_mouse_button")
+    }
+
+    fn send_vertical_scroll(
+        &mut self,
+        amount: i16,
+        high_resolution: bool,
+    ) -> Result<(), MoonlightError> {
+        let result = unsafe { native::nl_send_vertical_scroll(self.raw, amount, high_resolution) };
+        map_native_result(result, "nl_send_vertical_scroll")
+    }
+
+    fn send_horizontal_scroll(
+        &mut self,
+        amount: i16,
+        high_resolution: bool,
+    ) -> Result<(), MoonlightError> {
+        let result =
+            unsafe { native::nl_send_horizontal_scroll(self.raw, amount, high_resolution) };
+        map_native_result(result, "nl_send_horizontal_scroll")
     }
 
     fn send_keyboard(
@@ -1165,6 +1236,14 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                         }
                         RuntimeCommand::SendMouseButton { button, pressed, response } => {
                             let result = native_runtime.send_mouse_button(button, pressed);
+                            let _ = response.send(result);
+                        }
+                        RuntimeCommand::SendVerticalScroll { amount, high_resolution, response } => {
+                            let result = native_runtime.send_vertical_scroll(amount, high_resolution);
+                            let _ = response.send(result);
+                        }
+                        RuntimeCommand::SendHorizontalScroll { amount, high_resolution, response } => {
+                            let result = native_runtime.send_horizontal_scroll(amount, high_resolution);
                             let _ = response.send(result);
                         }
                         RuntimeCommand::SendKeyboard { virtual_key, pressed, modifiers, response } => {
