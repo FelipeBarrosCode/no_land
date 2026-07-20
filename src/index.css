@@ -68,6 +68,18 @@ body::before {
   z-index: 30;
 }
 
+html.stream-window,
+body.stream-window,
+body.stream-window #root {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+body.stream-window::before,
+body.stream-window .crt-surface::after {
+  display: none !important;
+}
+
 a {
   color: #44d6ff;
   text-decoration: none;

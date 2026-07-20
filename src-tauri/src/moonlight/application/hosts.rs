@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::Utc;
 
@@ -13,6 +13,7 @@ use crate::moonlight::{
             PairStatus, ReqwestGameStreamHttpClient,
         },
         persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
+        secrets::SecretStore,
     },
 };
 
@@ -289,8 +290,9 @@ mod tests {
 
 pub async fn refresh_host_with_default_client(
     repository: &JsonMoonlightStateRepository,
+    secret_store: Arc<dyn SecretStore>,
     host_id: &str,
 ) -> Result<HostStatus, MoonlightError> {
-    let client = ReqwestGameStreamHttpClient::new()?;
+    let client = ReqwestGameStreamHttpClient::new(secret_store)?;
     refresh_host(repository, &client, host_id).await
 }

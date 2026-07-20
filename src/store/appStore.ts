@@ -824,7 +824,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         const mode = await startPlayExistingInstance(instanceId);
         const appState = await getAppState();
-        set({ appState });
+        const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId).catch(() => null);
+        set({ appState, embeddedMoonlightStatus });
         if (mode === "embedded") {
           endProvisioningBlock();
           return mode;

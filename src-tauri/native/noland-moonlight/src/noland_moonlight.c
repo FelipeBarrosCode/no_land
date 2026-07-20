@@ -306,7 +306,19 @@ static void nl_connection_stage_failed(int stage, int errorCode) {
   if (runtime == NULL) {
     return;
   }
-  snprintf(message, sizeof(message), "%s failed (%d)", stage_name != NULL ? stage_name : "stage", errorCode);
+  nl_runtime_lock(runtime);
+  snprintf(
+      message,
+      sizeof(message),
+      "%s failed (%d) [audio=0x%08X channels=%d remote=%d packet=%d sessionUrl=%s]",
+      stage_name != NULL ? stage_name : "stage",
+      errorCode,
+      (unsigned int)runtime->request.audio_configuration,
+      (runtime->request.audio_configuration >> 8) & 0xFF,
+      runtime->request.streaming_remotely,
+      runtime->request.packet_size,
+      runtime->request.session_url != NULL ? "yes" : "no");
+  nl_runtime_unlock(runtime);
   nl_runtime_push_event(runtime, NL_EVENT_STAGE_FAILED, errorCode, message);
 }
 
@@ -325,7 +337,11 @@ static void nl_connection_terminated(int errorCode) {
     return;
   }
   snprintf(message, sizeof(message), "terminated (%d)", errorCode);
-  nl_runtime_push_event(runtime, NL_EVENT_TERMINATED, errorCode, message);
+  nl_set_state(runtime, NL_STREAM_STATE_IDLE, NL_EVENT_TERMINATED, errorCode, message);
+  nl_clear_active_runtime(runtime);
+  nl_runtime_lock(runtime);
+  nl_owned_request_clear(&runtime->request);
+  nl_runtime_unlock(runtime);
 }
 
 static void nl_connection_log_message(const char* format, ...) {
@@ -421,7 +437,7 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     runtime->last_video_rtp_timestamp = frame.rtp_timestamp;
     runtime->last_video_hdr_active = frame.hdr_active;
     runtime->last_video_colorspace = frame.colorspace;
-    renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, &frame);
+    renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, decodeUnit, &frame);
     snprintf(message, sizeof(message), "video frame #%d len=%d", frame.frame_number, frame.full_length);
     nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame.frame_number, message);
     nl_runtime_unlock(runtime);
@@ -466,7 +482,7 @@ static bool nl_runtime_can_send_input(nl_runtime_t* runtime) {
     return false;
   }
   nl_runtime_lock(runtime);
-  ready = runtime->worker_running && runtime->state == NL_STREAM_STATE_STREAMING;
+  ready = runtime->state == NL_STREAM_STATE_STREAMING;
   nl_runtime_unlock(runtime);
   return ready;
 }
@@ -476,10 +492,28 @@ static void nl_runtime_finish_worker(nl_runtime_t* runtime, int errorCode) {
   if (runtime == NULL) {
     return;
   }
-  nl_clear_active_runtime(runtime);
   nl_runtime_lock(runtime);
   runtime->worker_running = false;
+  if (errorCode == 0) {
+    nl_runtime_unlock(runtime);
+    return;
+  }
+  nl_runtime_unlock(runtime);
+
+  nl_clear_active_runtime(runtime);
+  nl_runtime_lock(runtime);
   runtime->state = NL_STREAM_STATE_IDLE;
+  snprintf(
+      message,
+      sizeof(message),
+      "LiStartConnection returned %d [audio=0x%08X channels=%d remote=%d packet=%d sessionUrl=%s]",
+      errorCode,
+      (unsigned int)runtime->request.audio_configuration,
+      (runtime->request.audio_configuration >> 8) & 0xFF,
+      runtime->request.streaming_remotely,
+      runtime->request.packet_size,
+      runtime->request.session_url != NULL ? "yes" : "no");
+  nl_runtime_push_event_locked(runtime, NL_EVENT_ERROR, errorCode, message);
   nl_owned_request_clear(&runtime->request);
   snprintf(message, sizeof(message), "stopped (%d)", errorCode);
   nl_runtime_push_event_locked(runtime, NL_EVENT_STOPPED, errorCode, message);
@@ -524,6 +558,22 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   streamConfig.encryptionFlags = runtime->request.encryption_flags;
   memcpy(streamConfig.remoteInputAesKey, runtime->request.remote_input_aes_key, sizeof(streamConfig.remoteInputAesKey));
   memcpy(streamConfig.remoteInputAesIv, runtime->request.remote_input_aes_iv, sizeof(streamConfig.remoteInputAesIv));
+  {
+    char message[256];
+    snprintf(
+        message,
+        sizeof(message),
+        "starting host=%s appId=%u address=%s audio=0x%08X channels=%d remote=%d packet=%d sessionUrl=%s",
+        runtime->request.host_id,
+        (unsigned int)runtime->request.app_id,
+        runtime->request.host_address,
+        (unsigned int)runtime->request.audio_configuration,
+        (runtime->request.audio_configuration >> 8) & 0xFF,
+        runtime->request.streaming_remotely,
+        runtime->request.packet_size,
+        runtime->request.session_url != NULL ? "yes" : "no");
+    nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, message);
+  }
   nl_runtime_unlock(runtime);
 
   connectionCallbacks.stageStarting = nl_connection_stage_starting;
@@ -577,6 +627,7 @@ nl_result_t nl_runtime_create(nl_runtime_t** output) {
   }
   runtime->state = NL_STREAM_STATE_IDLE;
   nl_video_renderer_init(&runtime->renderer);
+  runtime->renderer.owner_runtime = runtime;
 #if defined(_WIN32)
   InitializeCriticalSection(&runtime->mutex);
   runtime->worker_thread = NULL;
@@ -603,8 +654,9 @@ void nl_runtime_destroy(nl_runtime_t* runtime) {
   }
   DeleteCriticalSection(&runtime->mutex);
 #else
-  if (runtime->worker_running) {
+  if (runtime->worker_thread != 0) {
     pthread_join(runtime->worker_thread, NULL);
+    runtime->worker_thread = 0;
   }
   pthread_mutex_destroy(&runtime->mutex);
 #endif
@@ -682,12 +734,12 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
     nl_runtime_unlock(runtime);
     return NL_RESULT_OK;
   }
+  should_interrupt = runtime->worker_running || runtime->state == NL_STREAM_STATE_STARTING || runtime->state == NL_STREAM_STATE_STREAMING;
+  should_stop = runtime->state == NL_STREAM_STATE_STARTING || runtime->state == NL_STREAM_STATE_STREAMING || runtime->state == NL_STREAM_STATE_STOPPING;
   runtime->state = NL_STREAM_STATE_STOPPING;
   runtime->stop_requested = true;
   runtime->stop_count += 1U;
   nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, "stopping");
-  should_interrupt = runtime->worker_running;
-  should_stop = runtime->worker_running;
   nl_runtime_unlock(runtime);
 
   if (should_interrupt) {
@@ -696,6 +748,13 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
   if (should_stop) {
     LiStopConnection();
   }
+
+  nl_clear_active_runtime(runtime);
+  nl_runtime_lock(runtime);
+  runtime->state = NL_STREAM_STATE_IDLE;
+  nl_owned_request_clear(&runtime->request);
+  nl_runtime_push_event_locked(runtime, NL_EVENT_STOPPED, 0, "stopped (0)");
+  nl_runtime_unlock(runtime);
   return NL_RESULT_OK;
 }
 
@@ -706,6 +765,7 @@ nl_result_t nl_runtime_attach_surface(nl_runtime_t* runtime, const nl_surface_de
   nl_runtime_lock(runtime);
   runtime->surface = *surface;
   runtime->has_surface = true;
+  runtime->renderer.owner_runtime = runtime;
   nl_video_renderer_attach_surface(&runtime->renderer, surface);
   runtime->surface_attach_count += 1U;
   nl_runtime_push_event_locked(runtime, NL_EVENT_SURFACE_ATTACHED, 0, "surface attached");

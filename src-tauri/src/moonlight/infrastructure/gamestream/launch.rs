@@ -41,12 +41,7 @@ pub fn build_launch_or_resume_request(
         ),
         (
             "surroundAudioInfo".to_string(),
-            match parameters.audio_configuration {
-                crate::moonlight::domain::AudioConfiguration::Stereo => "2",
-                crate::moonlight::domain::AudioConfiguration::Surround51 => "6",
-                crate::moonlight::domain::AudioConfiguration::Surround71 => "8",
-            }
-            .to_string(),
+            surround_audio_info_value(parameters.audio_configuration).to_string(),
         ),
         (
             "gcmap".to_string(),
@@ -58,7 +53,7 @@ pub fn build_launch_or_resume_request(
             .to_string(),
         ),
         (
-            "hdr".to_string(),
+            "hdrMode".to_string(),
             if parameters.hdr { "1" } else { "0" }.to_string(),
         ),
     ];
@@ -80,6 +75,14 @@ pub fn build_launch_or_resume_request(
             certificate_pem: pairing.server_certificate_pem.clone(),
         }),
         timeout,
+    }
+}
+
+fn surround_audio_info_value(configuration: crate::moonlight::domain::AudioConfiguration) -> u32 {
+    match configuration {
+        crate::moonlight::domain::AudioConfiguration::Stereo => (0x3 << 16) | 2,
+        crate::moonlight::domain::AudioConfiguration::Surround51 => (0x3F << 16) | 6,
+        crate::moonlight::domain::AudioConfiguration::Surround71 => (0x63F << 16) | 8,
     }
 }
 
@@ -200,6 +203,11 @@ mod tests {
             crate::moonlight::infrastructure::gamestream::GameStreamScheme::Https
         ));
         assert!(req.query.iter().any(|(k, _)| k == "rikey"));
+        assert!(req
+            .query
+            .iter()
+            .any(|(k, v)| k == "surroundAudioInfo" && v == "196610"));
+        assert!(req.query.iter().any(|(k, v)| k == "hdrMode" && v == "0"));
         assert!(req.query.iter().any(|(k, v)| k == "corever" && v == "1"));
         assert!(req.identity.is_some());
         assert!(req.pinned_certificate.is_some());

@@ -435,6 +435,14 @@ export interface EmbeddedMoonlightInstanceStatus {
   hostAddress: string;
   sessionState: string;
   lastError: string | null;
+  runtimeConnected: boolean;
+  rendererReady: boolean;
+  videoSessionActive: boolean;
+  videoFrameCount: number;
+  rendererSubmittedFrameCount: number;
+  rendererDroppedFrameCount: number;
+  audioSampleCount: number;
+  lastRuntimeEvent: string | null;
 }
 
 export interface SunshineVerificationResult {

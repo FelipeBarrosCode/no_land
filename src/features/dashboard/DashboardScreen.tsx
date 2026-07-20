@@ -36,6 +36,7 @@ interface Props {
   appState: PersistedAppState;
   offers: OfferCandidate[];
   rentedInstances: RentedInstanceSummary[];
+  embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null;
   searchingOffers: boolean;
   offersPage: number;
   offersHasNextPage: boolean;
@@ -97,6 +98,7 @@ export function DashboardScreen({
   appState,
   offers,
   rentedInstances,
+  embeddedMoonlightStatus,
   searchingOffers,
   offersPage,
   offersHasNextPage,
@@ -479,8 +481,29 @@ export function DashboardScreen({
                     <p>SSH: {instance.sshHost || "pending"}</p>
                   </div>
                   {instance.embeddedMoonlightPipelineEnabled && (
-                    <div className="mt-2 rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
-                      Embedded Moonlight pipeline enabled
+                    <div className="mt-2 space-y-2">
+                      <div className="rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
+                        Embedded Moonlight pipeline enabled
+                      </div>
+                      {embeddedMoonlightStatus?.instanceId === instance.instanceId && (
+                        <div className="rounded border border-[#3a4068] bg-[#10152f]/60 px-2 py-2 text-[11px] text-[#bfd3ee]">
+                          <p>Session: {embeddedMoonlightStatus.sessionState}</p>
+                          <p>Paired: {embeddedMoonlightStatus.paired ? "yes" : "no"}</p>
+                          <p>Connected: {embeddedMoonlightStatus.runtimeConnected ? "yes" : "no"}</p>
+                          <p>Renderer ready: {embeddedMoonlightStatus.rendererReady ? "yes" : "no"}</p>
+                          <p>Video active: {embeddedMoonlightStatus.videoSessionActive ? "yes" : "no"}</p>
+                          <p>Video frames: {embeddedMoonlightStatus.videoFrameCount}</p>
+                          <p>Rendered frames: {embeddedMoonlightStatus.rendererSubmittedFrameCount}</p>
+                          <p>Dropped frames: {embeddedMoonlightStatus.rendererDroppedFrameCount}</p>
+                          <p>Audio samples: {embeddedMoonlightStatus.audioSampleCount}</p>
+                          {embeddedMoonlightStatus.lastRuntimeEvent ? (
+                            <p className="mt-1 text-[#8db7d8]">{embeddedMoonlightStatus.lastRuntimeEvent}</p>
+                          ) : null}
+                          {embeddedMoonlightStatus.lastError ? (
+                            <p className="mt-1 text-[#ff8fb7]">{embeddedMoonlightStatus.lastError}</p>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
                   )}
                   <div className="mt-3">

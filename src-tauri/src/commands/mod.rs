@@ -161,6 +161,14 @@ pub struct EmbeddedMoonlightInstanceStatus {
     pub host_address: String,
     pub session_state: String,
     pub last_error: Option<String>,
+    pub runtime_connected: bool,
+    pub renderer_ready: bool,
+    pub video_session_active: bool,
+    pub video_frame_count: u64,
+    pub renderer_submitted_frame_count: u64,
+    pub renderer_dropped_frame_count: u64,
+    pub audio_sample_count: u64,
+    pub last_runtime_event: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1010,7 +1018,8 @@ async fn start_embedded_stream_for_host(
     ensure_embedded_identity_ready_for_explicit_action(context, moonlight)
         .await
         .map_err(moonlight_frontend_error)?;
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     let prepared = match moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
@@ -1486,7 +1495,8 @@ pub async fn start_play_existing_instance(
         )
         .await
         .map_err(moonlight_frontend_error)?;
-        let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+        let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+            .map_err(moonlight_frontend_error)?;
         let mut host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
             .await
             .map_err(moonlight_frontend_error)?;
@@ -1511,6 +1521,7 @@ pub async fn start_play_existing_instance(
             .unwrap_or_default();
         let apps = match apps::list_remote_apps(
             moonlight.repository.as_ref(),
+            moonlight.secret_store.as_ref(),
             &client,
             &host_id,
             RefreshPolicy::ForceRefresh,
@@ -2509,7 +2520,29 @@ pub async fn moonlight_get_instance_pipeline_status(
     } else {
         server.embedded_moonlight_host_id.clone()
     };
+
+    if server.embedded_moonlight_pipeline_enabled {
+        let _ = ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id)
+            .await;
+    }
+
     let paired = embedded_host_is_paired(moonlight.repository.as_ref(), &host_id);
+    let runtime_stats = moonlight.runtime.latest_statistics();
+    let runtime_connected = runtime_stats.state == "streaming";
+    let latest_event = moonlight.runtime.latest_event();
+    let last_runtime_event = latest_event.as_ref().map(|event| {
+        if event.message.trim().is_empty() {
+            format!("{} ({})", event.kind, event.code)
+        } else {
+            format!("{}: {} ({})", event.kind, event.message, event.code)
+        }
+    });
+    let runtime_last_error = latest_event
+        .as_ref()
+        .and_then(|event| match event.kind.as_str() {
+            "error" | "stageFailed" | "terminated" => last_runtime_event.clone(),
+            _ => None,
+        });
     Ok(EmbeddedMoonlightInstanceStatus {
         instance_id,
         enabled: server.embedded_moonlight_pipeline_enabled,
@@ -2517,8 +2550,16 @@ pub async fn moonlight_get_instance_pipeline_status(
         paired,
         host_address: resolve_embedded_moonlight_host_address(&state, instance_id)
             .unwrap_or_default(),
-        session_state: state.moonlight.session_state,
-        last_error: state.moonlight.last_error,
+        session_state: runtime_stats.state.clone(),
+        last_error: runtime_last_error.or(state.moonlight.last_error),
+        runtime_connected,
+        renderer_ready: runtime_stats.renderer_ready,
+        video_session_active: runtime_stats.video_session_active,
+        video_frame_count: runtime_stats.video_frame_count,
+        renderer_submitted_frame_count: runtime_stats.renderer_submitted_frame_count,
+        renderer_dropped_frame_count: runtime_stats.renderer_dropped_frame_count,
+        audio_sample_count: runtime_stats.audio_sample_count,
+        last_runtime_event,
     })
 }
 
@@ -2536,7 +2577,8 @@ pub async fn moonlight_prepare_instance_pairing(
         ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id)
             .await
             .map_err(moonlight_frontend_error)?;
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
         .await
         .map_err(moonlight_frontend_error)?;
@@ -3421,7 +3463,8 @@ pub async fn moonlight_refresh_host(
     moonlight: State<'_, MoonlightManager>,
     host_id: String,
 ) -> Result<crate::moonlight::application::hosts::HostStatus, FrontendError> {
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
         .await
         .map_err(moonlight_frontend_error)
@@ -3472,7 +3515,8 @@ pub async fn moonlight_list_apps(
     moonlight: State<'_, MoonlightManager>,
     input: MoonlightListAppsInput,
 ) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     let refresh_policy = if input.force_refresh {
         RefreshPolicy::ForceRefresh
     } else {
@@ -3480,6 +3524,7 @@ pub async fn moonlight_list_apps(
     };
     apps::list_remote_apps(
         moonlight.repository.as_ref(),
+        moonlight.secret_store.as_ref(),
         &client,
         &input.host_id,
         refresh_policy,
@@ -3498,7 +3543,8 @@ pub async fn moonlight_start_stream(
     ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
         .await
         .map_err(moonlight_frontend_error)?;
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     let prepared = moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
@@ -3613,7 +3659,8 @@ pub async fn moonlight_quit_remote_app(
     ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
         .await
         .map_err(moonlight_frontend_error)?;
-    let client = ReqwestGameStreamHttpClient::new().map_err(moonlight_frontend_error)?;
+    let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
+        .map_err(moonlight_frontend_error)?;
     moonlight_launch::quit_remote_app(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),

@@ -9,11 +9,35 @@ fn main() {
         "cargo:rerun-if-changed={}",
         native_root.join("CMakeLists.txt").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/CMakeLists.txt")
+            .display()
+    );
     println!("cargo:rerun-if-changed={}", wrapper_header.display());
     println!(
         "cargo:rerun-if-changed={}",
         native_root
             .join("noland-moonlight/src/noland_moonlight.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_video_renderer.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_video_renderer.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_video_renderer_macos.m")
             .display()
     );
 
@@ -43,6 +67,10 @@ fn main() {
         println!("cargo:rustc-link-search=native=/opt/homebrew/opt/openssl@3/lib");
         println!("cargo:rustc-link-search=native=/usr/local/opt/openssl@3/lib");
         println!("cargo:rustc-link-lib=dylib=crypto");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
+        println!("cargo:rustc-link-lib=framework=QuartzCore");
     }
 
     let bindings = bindgen::Builder::default()

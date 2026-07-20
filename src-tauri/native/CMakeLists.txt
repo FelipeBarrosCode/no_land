@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(noland_moonlight_native C)
 
+if(APPLE)
+  enable_language(OBJC)
+endif()
+
 option(BUILD_NOLAND_MOONLIGHT_HARNESS "Build the standalone native harness" ON)
 option(BUILD_NOLAND_MOONLIGHT_TESTS "Build native tests" ON)
 

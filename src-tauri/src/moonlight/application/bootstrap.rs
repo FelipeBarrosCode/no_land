@@ -121,13 +121,28 @@ where
     let certificate_pem = cert.pem();
 
     let unique_id = uuid::Uuid::new_v4().simple().to_string()[..16].to_string();
-    let private_key_ref = SecretReference::new("os-keychain://noland/moonlight-client-key");
+    let private_key_ref = SecretReference::new("moonlight-file://client.key");
+    let private_key_bytes = SecretBytes(private_key_pem.as_bytes().to_vec());
     secret_store
-        .put(
-            &private_key_ref,
-            SecretBytes(private_key_pem.as_bytes().to_vec()),
-        )
+        .put(&private_key_ref, private_key_bytes.clone())
         .await?;
+
+    let stored_bytes = secret_store
+        .get(&private_key_ref)
+        .await?
+        .ok_or_else(|| {
+            MoonlightError::IdentityInvalid(
+                "Moonlight private key could not be read back from secure storage after it was generated"
+                    .to_string(),
+            )
+        })?;
+
+    if stored_bytes != private_key_bytes {
+        return Err(MoonlightError::IdentityInvalid(
+            "Moonlight private key read back from secure storage did not match the generated key"
+                .to_string(),
+        ));
+    }
 
     Ok(ClientIdentity {
         unique_id,

@@ -17,8 +17,34 @@ impl Default for KeyringSecretStore {
 }
 
 impl KeyringSecretStore {
-    fn entry(&self, reference: &SecretReference) -> Result<keyring::Entry, MoonlightError> {
-        keyring::Entry::new(&self.service_name, &reference.0)
+    fn candidate_accounts(reference: &SecretReference) -> Vec<String> {
+        let raw = reference.0.trim();
+        let mut candidates = Vec::new();
+
+        if !raw.is_empty() {
+            candidates.push(raw.to_string());
+        }
+
+        if let Some(stripped) = raw.strip_prefix("os-keychain://") {
+            let stripped = stripped.trim_matches('/');
+            if !stripped.is_empty() {
+                candidates.push(stripped.to_string());
+                if let Some(last_segment) = stripped.rsplit('/').next() {
+                    let last_segment = last_segment.trim();
+                    if !last_segment.is_empty() {
+                        candidates.push(last_segment.to_string());
+                    }
+                }
+            }
+        }
+
+        candidates.sort();
+        candidates.dedup();
+        candidates
+    }
+
+    fn entry_for_account(&self, account: &str) -> Result<keyring::Entry, MoonlightError> {
+        keyring::Entry::new(&self.service_name, account)
             .map_err(|error| MoonlightError::SecretStore(error.to_string()))
     }
 }
@@ -29,12 +55,16 @@ impl SecretStore for KeyringSecretStore {
         &self,
         reference: &SecretReference,
     ) -> Result<Option<SecretBytes>, MoonlightError> {
-        let entry = self.entry(reference)?;
-        match entry.get_secret() {
-            Ok(bytes) => Ok(Some(SecretBytes(bytes))),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(MoonlightError::SecretStore(error.to_string())),
+        for account in Self::candidate_accounts(reference) {
+            let entry = self.entry_for_account(&account)?;
+            match entry.get_password() {
+                Ok(value) => return Ok(Some(SecretBytes(value.into_bytes()))),
+                Err(keyring::Error::NoEntry) => continue,
+                Err(error) => return Err(MoonlightError::SecretStore(error.to_string())),
+            }
         }
+
+        Ok(None)
     }
 
     async fn put(
@@ -42,17 +72,35 @@ impl SecretStore for KeyringSecretStore {
         reference: &SecretReference,
         value: SecretBytes,
     ) -> Result<(), MoonlightError> {
-        let entry = self.entry(reference)?;
-        entry
-            .set_secret(&value.0)
-            .map_err(|error| MoonlightError::SecretStore(error.to_string()))
+        let accounts = Self::candidate_accounts(reference);
+        if accounts.is_empty() {
+            return Err(MoonlightError::SecretStore(
+                "secret reference is empty".to_string(),
+            ));
+        }
+
+        let string_value = String::from_utf8(value.0)
+            .map_err(|error| MoonlightError::SecretStore(error.to_string()))?;
+
+        for account in accounts {
+            let entry = self.entry_for_account(&account)?;
+            entry
+                .set_password(&string_value)
+                .map_err(|error| MoonlightError::SecretStore(error.to_string()))?;
+        }
+
+        Ok(())
     }
 
     async fn remove(&self, reference: &SecretReference) -> Result<(), MoonlightError> {
-        let entry = self.entry(reference)?;
-        match entry.delete_credential() {
-            Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(MoonlightError::SecretStore(error.to_string())),
+        for account in Self::candidate_accounts(reference) {
+            let entry = self.entry_for_account(&account)?;
+            match entry.delete_credential() {
+                Ok(_) | Err(keyring::Error::NoEntry) => {}
+                Err(error) => return Err(MoonlightError::SecretStore(error.to_string())),
+            }
         }
+
+        Ok(())
     }
 }

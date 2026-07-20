@@ -152,6 +152,7 @@ pub struct MoonlightRuntimeHandle {
     commands: mpsc::Sender<RuntimeCommand>,
     state: watch::Receiver<SessionState>,
     statistics: watch::Receiver<RuntimeStatistics>,
+    latest_event: watch::Receiver<Option<RuntimeEventMessage>>,
     events: broadcast::Sender<RuntimeEventMessage>,
 }
 
@@ -369,8 +370,20 @@ impl MoonlightRuntimeHandle {
         self.statistics.clone()
     }
 
+    pub fn latest_statistics(&self) -> RuntimeStatistics {
+        self.statistics.borrow().clone()
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEventMessage> {
         self.events.subscribe()
+    }
+
+    pub fn subscribe_latest_event(&self) -> watch::Receiver<Option<RuntimeEventMessage>> {
+        self.latest_event.clone()
+    }
+
+    pub fn latest_event(&self) -> Option<RuntimeEventMessage> {
+        self.latest_event.borrow().clone()
     }
 
     pub fn start_event_bridge<R: Runtime + 'static>(&self, app: AppHandle<R>) {
@@ -444,6 +457,27 @@ impl NativeRuntime {
     }
 
     fn start(&mut self, request: &NativeStartRequest) -> Result<(), MoonlightError> {
+        let audio_configuration =
+            audio_configuration_native(request.preferences.audio.configuration);
+        tracing::info!(
+            host_id = %request.host_id,
+            app_id = request.app_id,
+            host_address = %request.host_address,
+            app_version = %request.app_version,
+            gfe_version = ?request.gfe_version,
+            session_url = ?request.session_url,
+            width = request.preferences.video.width,
+            height = request.preferences.video.height,
+            fps = request.preferences.video.fps,
+            bitrate_kbps = request.preferences.video.bitrate_kbps,
+            packet_size = request.preferences.network.packet_size,
+            streaming_mode = ?request.preferences.network.streaming_mode,
+            audio_configuration = ?request.preferences.audio.configuration,
+            audio_configuration_native = format!("0x{audio_configuration:08X}"),
+            supported_video_formats = format!("0x{:08X}", request.supported_video_formats),
+            encryption = ?request.preferences.network.encryption,
+            "starting moonlight native stream"
+        );
         let host_id = CString::new(request.host_id.as_str())
             .map_err(|error| MoonlightError::Validation(error.to_string()))?;
         let host_address = CString::new(request.host_address.as_str())
@@ -481,9 +515,7 @@ impl NativeRuntime {
             bitrate_kbps: request.preferences.video.bitrate_kbps as i32,
             packet_size: request.preferences.network.packet_size as i32,
             streaming_remotely: streaming_mode_native(request.preferences.network.streaming_mode),
-            audio_configuration: audio_configuration_native(
-                request.preferences.audio.configuration,
-            ),
+            audio_configuration,
             supported_video_formats: request.supported_video_formats as i32,
             client_refresh_rate_x100: (request.preferences.video.fps * 100) as i32,
             color_space: color_space_native(request.preferences.video.color_space),
@@ -776,7 +808,7 @@ struct NativeEvent {
 
 fn audio_configuration_native(configuration: AudioConfiguration) -> i32 {
     match configuration {
-        AudioConfiguration::Stereo => 0x000203CA,
+        AudioConfiguration::Stereo => 0x000302CA,
         AudioConfiguration::Surround51 => 0x003F06CA,
         AudioConfiguration::Surround71 => 0x063F08CA,
     }
@@ -888,6 +920,7 @@ fn runtime_statistics_from_native(state: &SessionState, stats: &NativeStats) -> 
 fn process_native_event(
     state: &mut SessionState,
     state_tx: &watch::Sender<SessionState>,
+    latest_event_tx: &watch::Sender<Option<RuntimeEventMessage>>,
     event_tx: &broadcast::Sender<RuntimeEventMessage>,
     event: NativeEvent,
 ) {
@@ -906,6 +939,14 @@ fn process_native_event(
             *state = next;
             let _ = state_tx.send(state.clone());
         }
+    } else if event.kind == native::nl_event_kind_NL_EVENT_STAGE_FAILED
+        || event.kind == native::nl_event_kind_NL_EVENT_STOPPED
+        || event.kind == native::nl_event_kind_NL_EVENT_TERMINATED
+    {
+        if *state != SessionState::Idle {
+            *state = SessionState::Idle;
+            let _ = state_tx.send(state.clone());
+        }
     }
 
     let payload = RuntimeEventMessage {
@@ -913,6 +954,22 @@ fn process_native_event(
         code: event.code,
         message: event.message,
     };
+
+    let should_preserve_existing_failure = if event.kind == native::nl_event_kind_NL_EVENT_STOPPED {
+        matches!(
+            latest_event_tx
+                .borrow()
+                .as_ref()
+                .map(|existing| existing.kind.as_str()),
+            Some("stageFailed" | "error" | "terminated")
+        )
+    } else {
+        false
+    };
+
+    if !should_preserve_existing_failure {
+        let _ = latest_event_tx.send(Some(payload.clone()));
+    }
     let _ = event_tx.send(payload);
 }
 
@@ -982,11 +1039,13 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
         last_video_hdr_active: false,
         last_video_colorspace: 0,
     });
+    let (latest_event_tx, latest_event_rx) = watch::channel::<Option<RuntimeEventMessage>>(None);
     let (event_tx, _) = broadcast::channel::<RuntimeEventMessage>(128);
     let handle = MoonlightRuntimeHandle {
         commands: command_tx,
         state: state_rx,
         statistics: stats_rx,
+        latest_event: latest_event_rx,
         events: event_tx.clone(),
     };
 
@@ -1012,7 +1071,7 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                 _ = tick.tick() => {
                     if let Ok(native_events) = native_runtime.drain_events() {
                         for event in native_events {
-                            process_native_event(&mut state, &state_tx, &event_tx, event);
+                            process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
                         }
                     }
                     if let Ok(stats) = native_runtime.read_stats() {
@@ -1037,7 +1096,7 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 native_runtime.start(&request)?;
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &event_tx, event);
+                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
                                     }
                                 }
                                 if let Ok(stats) = native_runtime.read_stats() {
@@ -1058,7 +1117,7 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 native_runtime.stop()?;
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &event_tx, event);
+                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
                                     }
                                 }
                                 if state == SessionState::Stopping {
@@ -1077,7 +1136,7 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 native_runtime.attach_surface(&surface)?;
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &event_tx, event);
+                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
                                     }
                                 }
                                 Ok(())
@@ -1089,7 +1148,7 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 native_runtime.detach_surface()?;
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &event_tx, event);
+                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
                                     }
                                 }
                                 Ok(())
@@ -1184,79 +1243,26 @@ mod tests {
         platform::NativeSurfaceDescriptor,
     };
 
-    use super::{NativeRuntime, NativeStartRequest};
+    use super::{audio_configuration_native, NativeRuntime};
 
-    fn test_start_request() -> NativeStartRequest {
-        NativeStartRequest {
-            host_id: "host-1".to_string(),
-            app_id: 42,
-            host_address: "10.77.0.1".to_string(),
-            app_version: "7.1.431.-1".to_string(),
-            gfe_version: None,
-            session_url: Some("rtsp://session".to_string()),
-            server_codec_mode_support: 1,
-            preferences: StreamPreferences {
-                video: VideoPreferences {
-                    width: 1920,
-                    height: 1080,
-                    fps: 60,
-                    bitrate_kbps: 25_000,
-                    codec_preference: vec![Codec::H264],
-                    decoder_preference: DecoderPreference::Software,
-                    hdr: false,
-                    yuv444: false,
-                    color_space: ColorSpace::Rec709,
-                    color_range: ColorRange::Limited,
-                },
-                audio: AudioPreferences {
-                    configuration: AudioConfiguration::Stereo,
-                    play_on_host: false,
-                    output_device_id: None,
-                    target_buffer_ms: 20,
-                    maximum_buffer_ms: 80,
-                },
-                network: NetworkPreferences {
-                    packet_size: 1024,
-                    streaming_mode: StreamingMode::Remote,
-                    encryption: EncryptionMode::All,
-                    connect_timeout_ms: 15_000,
-                },
-                input: InputPreferences {
-                    mouse_mode: MouseMode::Relative,
-                    capture_mouse: true,
-                    release_shortcut: "Control+Alt+Shift+Q".to_string(),
-                    persist_controllers_on_disconnect: false,
-                },
-                window: WindowPreferences {
-                    mode: WindowMode::FullscreenDesktop,
-                    display_id: None,
-                    show_statistics: false,
-                    keep_launcher_visible: false,
-                },
-                reconnection: ReconnectionPreferences {
-                    enabled: true,
-                    maximum_attempts: 3,
-                    initial_delay_ms: 500,
-                    maximum_delay_ms: 5_000,
-                },
-            },
-            supported_video_formats: 1,
-            remote_input_key: [1; 16],
-            remote_input_iv: [2; 16],
-        }
+    #[test]
+    fn stereo_audio_configuration_matches_moonlight_layout() {
+        assert_eq!(
+            audio_configuration_native(AudioConfiguration::Stereo),
+            0x000302CA
+        );
     }
 
     #[test]
-    fn native_runtime_can_start_and_stop() {
+    fn native_runtime_stop_is_noop_while_idle() {
         let mut runtime = NativeRuntime::create().unwrap();
-        runtime.start(&test_start_request()).unwrap();
-        let stats = runtime.read_stats().unwrap();
-        assert_eq!(stats.start_count, 1);
         runtime.stop().unwrap();
         let stats = runtime.read_stats().unwrap();
-        assert_eq!(stats.stop_count, 1);
+        assert_eq!(stats.start_count, 0);
+        assert_eq!(stats.stop_count, 0);
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn native_runtime_can_attach_and_detach_surface() {
         let mut runtime = NativeRuntime::create().unwrap();

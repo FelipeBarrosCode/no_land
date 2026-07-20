@@ -32,7 +32,7 @@ int main(void) {
   start_request.bitrate_kbps = 25000;
   start_request.packet_size = 1024;
   start_request.streaming_remotely = 1;
-  start_request.audio_configuration = 0x000203CA;
+  start_request.audio_configuration = 0x000302CA;
   start_request.supported_video_formats = 1;
   start_request.client_refresh_rate_x100 = 6000;
   start_request.color_space = 1;

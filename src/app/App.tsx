@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Card } from "../components/ui/Card";
@@ -6,6 +6,7 @@ import { DashboardScreen } from "../features/dashboard/DashboardScreen";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 
@@ -14,6 +15,9 @@ function RootRoute() {
   const busy = useAppStore((state) => state.busy);
   const offers = useAppStore((state) => state.offers);
   const rentedInstances = useAppStore((state) => state.rentedInstances);
+  const embeddedMoonlightStatus = useAppStore(
+    (state) => state.embeddedMoonlightStatus,
+  );
   const searchingOffers = useAppStore((state) => state.searching);
   const offersPage = useAppStore((state) => state.offersPage);
   const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
@@ -44,6 +48,21 @@ function RootRoute() {
   const rerunEmbeddedMoonlightPairing = useAppStore(
     (state) => state.rerunEmbeddedMoonlightPairing,
   );
+
+  useEffect(() => {
+    if (!embeddedMoonlightStatus?.enabled) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadEmbeddedMoonlightStatus(embeddedMoonlightStatus.instanceId);
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [embeddedMoonlightStatus?.enabled, embeddedMoonlightStatus?.instanceId, loadEmbeddedMoonlightStatus]);
+
 
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const rebootInstanceServices = useAppStore(
@@ -79,6 +98,7 @@ function RootRoute() {
       appState={appState}
       offers={offers}
       rentedInstances={rentedInstances}
+      embeddedMoonlightStatus={embeddedMoonlightStatus}
       searchingOffers={searchingOffers}
       offersPage={offersPage}
       offersHasNextPage={offersHasNextPage}
@@ -212,6 +232,8 @@ function BootScreen() {
 }
 
 export function App() {
+  const [windowLabel, setWindowLabel] = useState<string | null>(null);
+  const [windowLabelResolved, setWindowLabelResolved] = useState(false);
   const initialize = useAppStore((state) => state.initialize);
   const bindEvents = useAppStore((state) => state.bindEvents);
   const loading = useAppStore((state) => state.loading);
@@ -251,9 +273,52 @@ export function App() {
   );
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function resolveWindowLabel() {
+      if (!("__TAURI_INTERNALS__" in window)) {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+        return;
+      }
+      try {
+        const api = await import("@tauri-apps/api/window");
+        const currentWindow = api.getCurrentWindow();
+        if (!cancelled) {
+          setWindowLabel(currentWindow.label);
+          setWindowLabelResolved(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+      }
+    }
+
+    void resolveWindowLabel();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
     void initialize();
     void bindEvents();
-  }, [bindEvents, initialize]);
+  }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
+  if (!windowLabelResolved) {
+    return <BootScreen />;
+  }
+
+  if (windowLabel === "moonlight-stream") {
+    return <StreamWindowScreen />;
+  }
 
   if (loading) {
     return <BootScreen />;

@@ -295,6 +295,60 @@ export async function completeInstanceMoonlightPairing(
   );
 }
 
+export async function moonlightSendRelativeMouse(input: {
+  deltaX: number;
+  deltaY: number;
+}): Promise<void> {
+  await invokeSafe<void>("moonlight_send_relative_mouse", {
+    input: {
+      delta_x: input.deltaX,
+      delta_y: input.deltaY,
+    },
+  });
+}
+
+export async function moonlightSendAbsoluteMouse(input: {
+  x: number;
+  y: number;
+  referenceWidth: number;
+  referenceHeight: number;
+}): Promise<void> {
+  await invokeSafe<void>("moonlight_send_absolute_mouse", {
+    input: {
+      x: input.x,
+      y: input.y,
+      reference_width: input.referenceWidth,
+      reference_height: input.referenceHeight,
+    },
+  });
+}
+
+export async function moonlightSendMouseButton(input: {
+  button: number;
+  pressed: boolean;
+}): Promise<void> {
+  await invokeSafe<void>("moonlight_send_mouse_button", {
+    input: {
+      button: input.button,
+      pressed: input.pressed,
+    },
+  });
+}
+
+export async function moonlightSendKeyboard(input: {
+  virtualKey: number;
+  pressed: boolean;
+  modifiers: number;
+}): Promise<void> {
+  await invokeSafe<void>("moonlight_send_keyboard", {
+    input: {
+      virtual_key: input.virtualKey,
+      pressed: input.pressed,
+      modifiers: input.modifiers,
+    },
+  });
+}
+
 export async function regenerateEdid(payload: {
   mode: "auto_detect" | "manual";
   refreshRateHz: number;

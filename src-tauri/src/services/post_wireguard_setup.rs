@@ -40,6 +40,8 @@ const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
 const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
 const SUNSHINE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const SUNSHINE_PIN_SUBMISSION_ATTEMPTS: usize = 3;
+const SUNSHINE_PIN_RETRY_DELAY: Duration = Duration::from_millis(350);
 
 fn sunshine_http_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
@@ -1410,60 +1412,83 @@ pub async fn authorize_sunshine_pin(
         .or_else(|| env::var("HOSTNAME").ok())
         .unwrap_or_else(|| "machine".to_string());
 
-    let response = submit_sunshine_pin_request(
-        &client,
-        host,
-        username,
-        password,
-        pin,
-        &effective_client_name,
-    )
-    .await
-    .map_err(|error| AppError::Api(format!("Failed submitting Sunshine PIN: {error}")))?;
+    let mut last_pending_session_error = None;
 
-    if response.welcome_redirect() {
-        return Err(AppError::Provisioning(
-            "Sunshine is still in its first-run welcome flow after repair. Finish Sunshine setup on the host before submitting a Moonlight PIN.".to_string(),
-        ));
-    }
+    for attempt in 1..=SUNSHINE_PIN_SUBMISSION_ATTEMPTS {
+        let response = submit_sunshine_pin_request(
+            &client,
+            host,
+            username,
+            password,
+            pin,
+            &effective_client_name,
+        )
+        .await
+        .map_err(|error| AppError::Api(format!("Failed submitting Sunshine PIN: {error}")))?;
 
-    if !response.status.is_success() {
-        return Err(AppError::Provisioning(format!(
-            "Sunshine rejected the PIN request with status {}{}{}",
-            response.status,
-            response
-                .location
-                .as_deref()
-                .map(|location| format!(" (location: {location})"))
-                .unwrap_or_default(),
-            response
-                .body
-                .as_deref()
-                .map(|body| format!(" (body: {body})"))
-                .unwrap_or_default()
-        )));
-    }
+        if response.welcome_redirect() {
+            return Err(AppError::Provisioning(
+                "Sunshine is still in its first-run welcome flow after repair. Finish Sunshine setup on the host before submitting a Moonlight PIN.".to_string(),
+            ));
+        }
 
-    if response.json_status == Some(false) {
-        return Err(AppError::Provisioning(
-            response
+        if !response.status.is_success() {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine rejected the PIN request with status {}{}{}",
+                response.status,
+                response
+                    .location
+                    .as_deref()
+                    .map(|location| format!(" (location: {location})"))
+                    .unwrap_or_default(),
+                response
+                    .body
+                    .as_deref()
+                    .map(|body| format!(" (body: {body})"))
+                    .unwrap_or_default()
+            )));
+        }
+
+        if response.json_status == Some(false) {
+            let message = response
                 .json_error
                 .clone()
                 .or_else(|| response.body.clone())
                 .unwrap_or_else(|| {
                     "Sunshine reported that the PIN approval was rejected because no pending Moonlight pairing session was waiting for it.".to_string()
-                }),
-        ));
+                });
+
+            last_pending_session_error = Some(message.clone());
+            if attempt < SUNSHINE_PIN_SUBMISSION_ATTEMPTS {
+                warn!(
+                    host,
+                    attempt,
+                    total_attempts = SUNSHINE_PIN_SUBMISSION_ATTEMPTS,
+                    "Sunshine /api/pin reported no pending Moonlight pairing session yet; retrying shortly"
+                );
+                sleep(SUNSHINE_PIN_RETRY_DELAY).await;
+                continue;
+            }
+
+            return Err(AppError::Provisioning(message));
+        }
+
+        if response.json_status.is_none() && response.body.is_some() {
+            warn!(
+                host,
+                "Sunshine /api/pin returned success without a parseable JSON status body"
+            );
+        }
+
+        return Ok(());
     }
 
-    if response.json_status.is_none() && response.body.is_some() {
-        warn!(
-            host,
-            "Sunshine /api/pin returned success without a parseable JSON status body"
-        );
-    }
-
-    Ok(())
+    Err(AppError::Provisioning(
+        last_pending_session_error.unwrap_or_else(|| {
+            "Sunshine reported no pending Moonlight pairing session for the submitted PIN."
+                .to_string()
+        }),
+    ))
 }
 
 async fn repair_sunshine_auth_state(

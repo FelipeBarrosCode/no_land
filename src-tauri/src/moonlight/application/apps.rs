@@ -1,15 +1,17 @@
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, time::Duration};
 
 use chrono::Utc;
 
 use crate::moonlight::{
+    application::bootstrap::bootstrap_client_identity,
     domain::{AppArtwork, CachedRemoteApp, MoonlightError, RemoteApp},
     infrastructure::{
         gamestream::{
             parse_app_list_response, GameStreamHttpClient, GameStreamRequest, GameStreamScheme,
-            RemoteAppAssetEndpoint,
+            PinnedCertificate, RemoteAppAssetEndpoint,
         },
         persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
+        secrets::SecretStore,
     },
 };
 
@@ -21,6 +23,7 @@ pub enum RefreshPolicy {
 
 pub async fn list_remote_apps(
     repository: &JsonMoonlightStateRepository,
+    secret_store: &dyn SecretStore,
     client: &impl GameStreamHttpClient,
     host_id: &str,
     refresh: RefreshPolicy,
@@ -51,15 +54,31 @@ pub async fn list_remote_apps(
         .ok_or_else(|| {
             MoonlightError::Validation(format!("host {host_id} has no usable address"))
         })?;
+    let pairing = host
+        .pairing
+        .clone()
+        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} is not paired")))?;
+    let identity = bootstrap_client_identity(repository, secret_store)
+        .await?
+        .identity
+        .persisted();
     let response = client
         .execute(GameStreamRequest {
             address,
-            port: host.ports.http,
-            scheme: GameStreamScheme::Http,
+            port: host.ports.https.unwrap_or(host.ports.http),
+            scheme: GameStreamScheme::Https,
             endpoint: "/applist".to_string(),
             query: vec![],
-            identity: None,
-            pinned_certificate: None,
+            identity: Some(
+                crate::moonlight::infrastructure::gamestream::ClientIdentityReference {
+                    certificate_pem: identity.certificate_pem.clone(),
+                    private_key_ref: identity.private_key_ref.clone(),
+                },
+            ),
+            pinned_certificate: Some(PinnedCertificate {
+                sha256_hex: pairing.server_certificate_sha256.clone(),
+                certificate_pem: pairing.server_certificate_pem.clone(),
+            }),
             timeout: Duration::from_secs(10),
         })
         .await?;
@@ -89,6 +108,7 @@ pub async fn list_remote_apps(
 
 pub async fn get_remote_app_artwork(
     repository: &JsonMoonlightStateRepository,
+    secret_store: &dyn SecretStore,
     client: &impl GameStreamHttpClient,
     app_data_dir: &std::path::Path,
     host_id: &str,
@@ -104,15 +124,32 @@ pub async fn get_remote_app_artwork(
             MoonlightError::Validation(format!("host {host_id} has no usable address"))
         })?;
 
+    let pairing = host
+        .pairing
+        .clone()
+        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} is not paired")))?;
+    let identity = bootstrap_client_identity(repository, secret_store)
+        .await?
+        .identity
+        .persisted();
+
     let response = client
         .execute(GameStreamRequest {
             address,
-            port: host.ports.http,
-            scheme: GameStreamScheme::Http,
+            port: host.ports.https.unwrap_or(host.ports.http),
+            scheme: GameStreamScheme::Https,
             endpoint: RemoteAppAssetEndpoint::default().path,
             query: vec![("appid".to_string(), app_id.to_string())],
-            identity: None,
-            pinned_certificate: None,
+            identity: Some(
+                crate::moonlight::infrastructure::gamestream::ClientIdentityReference {
+                    certificate_pem: identity.certificate_pem.clone(),
+                    private_key_ref: identity.private_key_ref.clone(),
+                },
+            ),
+            pinned_certificate: Some(PinnedCertificate {
+                sha256_hex: pairing.server_certificate_sha256.clone(),
+                certificate_pem: pairing.server_certificate_pem.clone(),
+            }),
             timeout: Duration::from_secs(10),
         })
         .await?;
@@ -141,7 +178,7 @@ pub async fn get_remote_app_artwork(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{fs, path::PathBuf, sync::Mutex};
 
     use async_trait::async_trait;
 
@@ -151,7 +188,7 @@ mod tests {
         domain::{HostAddresses, HostPorts, MoonlightError},
         infrastructure::{
             gamestream::{GameStreamHttpClient, GameStreamRequest, GameStreamResponse},
-            persistence::JsonMoonlightStateRepository,
+            persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
         },
     };
 
@@ -166,14 +203,16 @@ mod tests {
 
     struct FakeClient {
         body: String,
+        requests: Mutex<Vec<GameStreamRequest>>,
     }
 
     #[async_trait]
     impl GameStreamHttpClient for FakeClient {
         async fn execute(
             &self,
-            _request: GameStreamRequest,
+            request: GameStreamRequest,
         ) -> Result<GameStreamResponse, MoonlightError> {
+            self.requests.lock().unwrap().push(request);
             Ok(GameStreamResponse {
                 status: 200,
                 body: self.body.clone(),
@@ -205,8 +244,48 @@ mod tests {
         .await
         .unwrap();
 
-        let apps = list_remote_apps(&repo, &FakeClient { body: r#"<root><status_code>200</status_code><status_message>OK</status_message><App><ID>1</ID><AppTitle>Steam</AppTitle><IsHdrSupported>1</IsHdrSupported></App></root>"#.to_string() }, "host-1", RefreshPolicy::ForceRefresh).await.unwrap();
+        let secrets =
+            crate::moonlight::infrastructure::secrets::testsupport::InMemorySecretStore::default();
+        let _ =
+            crate::moonlight::application::bootstrap::bootstrap_client_identity(&repo, &secrets)
+                .await
+                .unwrap();
+        repo.update(|configuration| {
+            let host = configuration.hosts.get_mut("host-1").unwrap();
+            host.pairing = Some(crate::moonlight::domain::PersistedPairing {
+                status: crate::moonlight::domain::PairingStatus::Paired,
+                server_certificate_pem: "server-cert".to_string(),
+                server_certificate_sha256: "deadbeef".to_string(),
+                paired_at: "now".to_string(),
+            });
+            Ok(())
+        })
+        .unwrap();
+        let client = FakeClient {
+            body: r#"<root><status_code>200</status_code><status_message>OK</status_message><App><ID>1</ID><AppTitle>Steam</AppTitle><IsHdrSupported>1</IsHdrSupported></App></root>"#.to_string(),
+            requests: Mutex::new(Vec::new()),
+        };
+        let apps = list_remote_apps(
+            &repo,
+            &secrets,
+            &client,
+            "host-1",
+            RefreshPolicy::ForceRefresh,
+        )
+        .await
+        .unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "Steam");
+
+        let requests = client.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert!(matches!(
+            request.scheme,
+            crate::moonlight::infrastructure::gamestream::GameStreamScheme::Https
+        ));
+        assert_eq!(request.endpoint, "/applist");
+        assert!(request.identity.is_some());
+        assert!(request.pinned_certificate.is_some());
     }
 }

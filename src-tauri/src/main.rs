@@ -48,7 +48,10 @@ fn main() {
             ));
 
             match tauri::async_runtime::block_on(
-                moonlight::composition::bootstrap_default_services(state_path.clone()),
+                moonlight::composition::bootstrap_default_services(
+                    state_path.clone(),
+                    app_data_dir.clone(),
+                ),
             ) {
                 Ok(result) => {
                     if result.created {
