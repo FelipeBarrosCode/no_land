@@ -35,7 +35,6 @@ typedef struct nl_video_renderer {
   nl_video_frame_metadata_t last_frame;
   uint64_t submitted_frame_count;
   uint64_t dropped_frame_count;
-  void* owner_runtime;
   void* platform_context;
 } nl_video_renderer_t;
 

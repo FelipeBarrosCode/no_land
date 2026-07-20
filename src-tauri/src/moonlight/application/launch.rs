@@ -7,7 +7,7 @@ use crate::moonlight::{
     domain::{
         build_launch_parameters, negotiate_video_format, select_active_address,
         validate_preferences, ClientVideoCapabilities, LaunchDecisionInput, LaunchResult,
-        MoonlightError, RemoteInputCrypto, StreamPreferences, StreamPreferencesPatch,
+        MoonlightError, MouseMode, RemoteInputCrypto, StreamPreferences, StreamPreferencesPatch,
     },
     infrastructure::{
         gamestream::{
@@ -52,11 +52,25 @@ pub async fn start_stream_request(
         .identity
         .persisted();
 
-    let merged = crate::moonlight::domain::merge_preferences(
+    let mut merged = crate::moonlight::domain::merge_preferences(
         &configuration.defaults,
         host.preferences_override.as_ref(),
         session_preferences,
     );
+    if app_id == 0
+        && session_preferences
+            .and_then(|patch| patch.input.as_ref())
+            .and_then(|input| input.mouse_mode)
+            .is_none()
+        && host
+            .preferences_override
+            .as_ref()
+            .and_then(|patch| patch.input.as_ref())
+            .and_then(|input| input.mouse_mode)
+            .is_none()
+    {
+        merged.input.mouse_mode = MouseMode::Absolute;
+    }
     validate_preferences(&merged, None)?;
 
     let pairing = host

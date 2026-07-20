@@ -627,7 +627,6 @@ nl_result_t nl_runtime_create(nl_runtime_t** output) {
   }
   runtime->state = NL_STREAM_STATE_IDLE;
   nl_video_renderer_init(&runtime->renderer);
-  runtime->renderer.owner_runtime = runtime;
 #if defined(_WIN32)
   InitializeCriticalSection(&runtime->mutex);
   runtime->worker_thread = NULL;
@@ -765,7 +764,6 @@ nl_result_t nl_runtime_attach_surface(nl_runtime_t* runtime, const nl_surface_de
   nl_runtime_lock(runtime);
   runtime->surface = *surface;
   runtime->has_surface = true;
-  runtime->renderer.owner_runtime = runtime;
   nl_video_renderer_attach_surface(&runtime->renderer, surface);
   runtime->surface_attach_count += 1U;
   nl_runtime_push_event_locked(runtime, NL_EVENT_SURFACE_ATTACHED, 0, "surface attached");

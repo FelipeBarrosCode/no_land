@@ -3,7 +3,9 @@ use std::ffi::c_void;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 use tauri::{AppHandle, Manager, Runtime, Window};
 
-use crate::moonlight::{domain::MoonlightError, native};
+use crate::moonlight::{
+    domain::MoonlightError, native, platform::macos_input::uninstall_native_stream_input,
+};
 
 pub const STREAM_WINDOW_LABEL: &str = "moonlight-stream";
 
@@ -34,8 +36,11 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
     app: &AppHandle<R>,
     width: u32,
     height: u32,
+    title: &str,
 ) -> Result<Window<R>, MoonlightError> {
     if let Some(window) = app.get_window(STREAM_WINDOW_LABEL) {
+        let _ = window.set_fullscreen(false);
+        let _ = window.set_title(title);
         window
             .hide()
             .map_err(|error| MoonlightError::Native(error.to_string()))?;
@@ -43,10 +48,10 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
     }
 
     let window = tauri::window::WindowBuilder::new(app, STREAM_WINDOW_LABEL)
-        .title("Noland Moonlight Stream")
+        .title(title)
         .inner_size(width as f64, height as f64)
         .resizable(true)
-        .decorations(false)
+        .decorations(true)
         .visible(false)
         .build()
         .map_err(|error| MoonlightError::Native(error.to_string()))?;
@@ -55,6 +60,7 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
 
 pub fn close_stream_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), MoonlightError> {
     if let Some(window) = app.get_window(STREAM_WINDOW_LABEL) {
+        let _ = uninstall_native_stream_input(&window);
         window
             .close()
             .map_err(|error| MoonlightError::Native(error.to_string()))?;

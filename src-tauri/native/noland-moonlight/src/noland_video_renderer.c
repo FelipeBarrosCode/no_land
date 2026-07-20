@@ -128,7 +128,6 @@ void nl_video_renderer_stop(nl_video_renderer_t* renderer) {
 void nl_video_renderer_cleanup(nl_video_renderer_t* renderer) {
   bool preserve_surface_attached = false;
   nl_surface_descriptor_t preserved_surface;
-  void* preserved_owner_runtime = NULL;
 
   if (renderer == NULL) {
     return;
@@ -136,10 +135,8 @@ void nl_video_renderer_cleanup(nl_video_renderer_t* renderer) {
 
   preserved_surface = renderer->surface;
   preserve_surface_attached = renderer->surface_attached;
-  preserved_owner_runtime = renderer->owner_runtime;
   nl_video_renderer_platform_cleanup(renderer);
   memset(renderer, 0, sizeof(*renderer));
-  renderer->owner_runtime = preserved_owner_runtime;
   if (preserve_surface_attached) {
     renderer->surface = preserved_surface;
     renderer->surface_attached = true;

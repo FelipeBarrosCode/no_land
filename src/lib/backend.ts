@@ -295,6 +295,23 @@ export async function completeInstanceMoonlightPairing(
   );
 }
 
+export async function moonlightGetActiveInputMode(): Promise<
+  "relative" | "absolute" | null
+> {
+  const response = await invokeSafe<{ mouseMode: "relative" | "absolute" | null }>(
+    "moonlight_get_active_input_mode",
+  );
+  return response.mouseMode;
+}
+
+export async function moonlightActivateNativeMouseCapture(): Promise<boolean> {
+  return invokeSafe<boolean>("moonlight_activate_native_mouse_capture");
+}
+
+export async function moonlightDeactivateNativeMouseCapture(): Promise<boolean> {
+  return invokeSafe<boolean>("moonlight_deactivate_native_mouse_capture");
+}
+
 export async function moonlightSendRelativeMouse(input: {
   deltaX: number;
   deltaY: number;

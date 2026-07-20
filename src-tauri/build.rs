@@ -40,6 +40,10 @@ fn main() {
             .join("noland-moonlight/src/noland_video_renderer_macos.m")
             .display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
+    );
 
     let dst = cmake::Config::new(&native_root)
         .define("BUILD_NOLAND_MOONLIGHT_HARNESS", "OFF")
@@ -64,10 +68,16 @@ fn main() {
     println!("cargo:rustc-link-lib=static=moonlight-common-c");
     println!("cargo:rustc-link-lib=static=enet");
     if cfg!(target_os = "macos") {
+        cc::Build::new()
+            .file("src/moonlight/platform/macos_stream_input.m")
+            .flag("-fobjc-arc")
+            .compile("noland_macos_stream_input");
         println!("cargo:rustc-link-search=native=/opt/homebrew/opt/openssl@3/lib");
         println!("cargo:rustc-link-search=native=/usr/local/opt/openssl@3/lib");
         println!("cargo:rustc-link-lib=dylib=crypto");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=AppKit");
+        println!("cargo:rustc-link-lib=framework=ApplicationServices");
         println!("cargo:rustc-link-lib=framework=CoreMedia");
         println!("cargo:rustc-link-lib=framework=CoreVideo");
         println!("cargo:rustc-link-lib=framework=QuartzCore");

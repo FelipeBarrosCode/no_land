@@ -2,7 +2,7 @@ use std::{path::Path, process::Command, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     errors::{AppError, FrontendError},
@@ -33,7 +33,9 @@ use crate::{
         },
         infrastructure::gamestream::ReqwestGameStreamHttpClient,
         platform::{
-            close_stream_window, create_or_reuse_stream_window, stream_window_surface_descriptor,
+            activate_native_stream_input, close_stream_window, create_or_reuse_stream_window,
+            deactivate_native_stream_input, install_native_stream_input,
+            stream_window_surface_descriptor,
         },
         runtime::NativeStartRequest,
     },
@@ -141,6 +143,12 @@ pub struct MoonlightPairingSessionResponse {
 #[serde(rename_all = "camelCase")]
 pub struct MoonlightSessionStateResponse {
     pub state: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightActiveInputModeResponse {
+    pub mouse_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1070,14 +1078,21 @@ async fn start_embedded_stream_for_host(
         app,
         prepared.preferences.video.width,
         prepared.preferences.video.height,
+        &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
+    install_native_stream_input(&stream_window, moonlight.runtime.clone())
+        .map_err(moonlight_frontend_error)?;
     let surface =
         stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
 
     if let Err(error) = moonlight.runtime.attach_surface(surface).await {
         let _ = close_stream_window(app);
         return Err(moonlight_frontend_error(error));
+    }
+
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = Some(prepared.preferences.clone());
     }
 
     if let Err(error) = moonlight
@@ -1098,11 +1113,20 @@ async fn start_embedded_stream_for_host(
         .await
     {
         let _ = moonlight.runtime.detach_surface().await;
+        if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+            *active_preferences = None;
+        }
         let _ = close_stream_window(app);
         return Err(moonlight_frontend_error(error));
     }
 
     stream_window.show().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
         code: "moonlight_error".to_string(),
         message: "Moonlight operation failed".to_string(),
         details: Some(error.to_string()),
@@ -3561,14 +3585,21 @@ pub async fn moonlight_start_stream(
         &app,
         prepared.preferences.video.width,
         prepared.preferences.video.height,
+        &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
+    install_native_stream_input(&stream_window, moonlight.runtime.clone())
+        .map_err(moonlight_frontend_error)?;
     let surface =
         stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
 
     if let Err(error) = moonlight.runtime.attach_surface(surface).await {
         let _ = close_stream_window(&app);
         return Err(moonlight_frontend_error(error));
+    }
+
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = Some(prepared.preferences.clone());
     }
 
     if let Err(error) = moonlight
@@ -3589,11 +3620,20 @@ pub async fn moonlight_start_stream(
         .await
     {
         let _ = moonlight.runtime.detach_surface().await;
+        if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+            *active_preferences = None;
+        }
         let _ = close_stream_window(&app);
         return Err(moonlight_frontend_error(error));
     }
 
     stream_window.show().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
         code: "moonlight_error".to_string(),
         message: "Moonlight operation failed".to_string(),
         details: Some(error.to_string()),
@@ -3639,6 +3679,9 @@ pub async fn moonlight_disconnect_stream(
         .detach_surface()
         .await
         .map_err(moonlight_frontend_error)?;
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = None;
+    }
     close_stream_window(&app).map_err(moonlight_frontend_error)?;
     let state = moonlight
         .runtime
@@ -3648,6 +3691,26 @@ pub async fn moonlight_disconnect_stream(
     Ok(MoonlightSessionStateResponse {
         state: session_state_name(&state),
     })
+}
+
+#[tauri::command]
+pub async fn moonlight_activate_native_mouse_capture(
+    app: AppHandle,
+) -> Result<bool, FrontendError> {
+    let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+    activate_native_stream_input(&window).map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_deactivate_native_mouse_capture(
+    app: AppHandle,
+) -> Result<bool, FrontendError> {
+    let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
+        return Ok(false);
+    };
+    deactivate_native_stream_input(&window).map_err(moonlight_frontend_error)
 }
 
 #[tauri::command]
@@ -3795,6 +3858,22 @@ pub async fn moonlight_forget_host(
         },
     )
     .map_err(moonlight_frontend_error)
+}
+
+#[tauri::command]
+pub async fn moonlight_get_active_input_mode(
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightActiveInputModeResponse, FrontendError> {
+    let mouse_mode = moonlight
+        .active_session_preferences
+        .lock()
+        .ok()
+        .and_then(|preferences| preferences.as_ref().map(|prefs| prefs.input.mouse_mode))
+        .map(|mode| match mode {
+            crate::moonlight::domain::MouseMode::Relative => "relative".to_string(),
+            crate::moonlight::domain::MouseMode::Absolute => "absolute".to_string(),
+        });
+    Ok(MoonlightActiveInputModeResponse { mouse_mode })
 }
 
 #[tauri::command]

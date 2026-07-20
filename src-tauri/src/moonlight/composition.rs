@@ -1,10 +1,14 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use super::{
     application::{
         bootstrap::{bootstrap_client_identity, ClientIdentityBootstrapResult},
         pairing::PairingSessionStore,
     },
+    domain::StreamPreferences,
     infrastructure::{
         persistence::JsonMoonlightStateRepository,
         secrets::{FileSecretStore, SecretStore},
@@ -28,6 +32,7 @@ pub struct MoonlightManager {
     pub secret_store: Arc<dyn SecretStore>,
     pub pairing_sessions: PairingSessionStore,
     pub runtime: MoonlightRuntimeHandle,
+    pub active_session_preferences: Arc<Mutex<Option<StreamPreferences>>>,
 }
 
 impl MoonlightManager {
@@ -40,6 +45,7 @@ impl MoonlightManager {
             secret_store: Arc::new(FileSecretStore::new(identity_dir)),
             pairing_sessions: PairingSessionStore::default(),
             runtime: spawn_runtime_actor(),
+            active_session_preferences: Arc::new(Mutex::new(None)),
         }
     }
 }

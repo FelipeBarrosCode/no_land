@@ -2480,6 +2480,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bindgen",
+ "cc",
  "chrono",
  "cmake",
  "dirs 5.0.1",

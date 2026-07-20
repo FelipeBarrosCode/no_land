@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
+  moonlightActivateNativeMouseCapture,
+  moonlightDeactivateNativeMouseCapture,
+  moonlightGetActiveInputMode,
+  moonlightSendAbsoluteMouse,
   moonlightSendKeyboard,
   moonlightSendMouseButton,
   moonlightSendRelativeMouse,
@@ -152,26 +157,45 @@ function pressedSetToModifiers(pressedCodes: Iterable<string>): number {
   return modifiers;
 }
 
+type CaptureMode =
+  | "none"
+  | "native-relative"
+  | "pointer-lock"
+  | "window-absolute";
+
 export function StreamWindowScreen() {
   const overlayRef = useRef<HTMLDivElement | null>(null);
+  const appWindowRef = useRef(getCurrentWindow());
   const pressedKeysRef = useRef<Set<string>>(new Set());
   const pressedMouseButtonsRef = useRef<Set<number>>(new Set());
   const relativeMouseDeltaRef = useRef({ deltaX: 0, deltaY: 0 });
   const relativeMouseFrameRef = useRef<number | null>(null);
   const mouseSendInFlightRef = useRef(false);
+  const captureModeRef = useRef<CaptureMode>("none");
+  const preferredMouseModeRef = useRef<"relative" | "absolute">("relative");
   const [captured, setCaptured] = useState(false);
   const [captureRequested, setCaptureRequested] = useState(false);
+  const [captureMode, setCaptureMode] = useState<CaptureMode>("none");
   const [lastError, setLastError] = useState<string | null>(null);
 
   const captureHint = useMemo(() => {
     if (captured) {
+      if (captureMode === "native-relative") {
+        return "Input captured — native mouse mode active · Ctrl+Alt+Shift+Z to release";
+      }
+      if (captureMode === "pointer-lock") {
+        return "Input captured — pointer lock active · Ctrl+Alt+Shift+Z to release";
+      }
+      if (captureMode === "window-absolute") {
+        return "Input captured — stream window absolute mouse mode active · Ctrl+Alt+Shift+Z to release";
+      }
       return "Input captured — Ctrl+Alt+Shift+Z to release";
     }
     if (captureRequested) {
       return "Waiting for pointer lock…";
     }
     return "Click to capture input";
-  }, [captureRequested, captured]);
+  }, [captureMode, captureRequested, captured]);
 
   const flushRelativeMouse = useCallback(() => {
     relativeMouseFrameRef.current = null;
@@ -210,6 +234,31 @@ export function StreamWindowScreen() {
     relativeMouseFrameRef.current = window.requestAnimationFrame(flushRelativeMouse);
   }, [flushRelativeMouse]);
 
+  const setWindowCapture = useCallback(async (active: boolean) => {
+    try {
+      await appWindowRef.current.setCursorGrab(active);
+    } catch {
+      // pointer lock remains the primary path when native grab is unavailable
+    }
+    try {
+      await appWindowRef.current.setCursorVisible(!active);
+    } catch {
+      // ignore cursor visibility failures
+    }
+  }, []);
+
+  const activateWindowAbsoluteFallback = useCallback(async (reason?: string | null) => {
+    setCaptureRequested(false);
+    captureModeRef.current = "window-absolute";
+    setCaptureMode("window-absolute");
+    setCaptured(true);
+    overlayRef.current?.focus();
+    if (reason) {
+      setLastError(reason);
+    }
+    await setWindowCapture(true);
+  }, [setWindowCapture]);
+
   const releasePressedInputs = useCallback(() => {
     const pressedCodes = Array.from(pressedKeysRef.current);
     const pressedMouseButtons = Array.from(pressedMouseButtonsRef.current);
@@ -245,53 +294,84 @@ export function StreamWindowScreen() {
   }, []);
 
   const releaseCapture = useCallback(() => {
+    const previousMode = captureModeRef.current;
     setCaptureRequested(false);
-    if (document.pointerLockElement) {
+    captureModeRef.current = "none";
+    setCaptureMode("none");
+    setCaptured(false);
+    if (document.pointerLockElement === overlayRef.current) {
       document.exitPointerLock();
     }
+    if (previousMode === "native-relative") {
+      void moonlightDeactivateNativeMouseCapture().catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setLastError(message);
+      });
+    }
+    void setWindowCapture(false);
     releasePressedInputs();
-  }, [releasePressedInputs]);
+  }, [releasePressedInputs, setWindowCapture]);
 
   useEffect(() => {
     document.documentElement.classList.add("stream-window");
     document.body.classList.add("stream-window");
+    void moonlightGetActiveInputMode()
+      .then((mouseMode) => {
+        if (mouseMode) {
+          preferredMouseModeRef.current = mouseMode;
+        }
+      })
+      .catch(() => {
+        preferredMouseModeRef.current = "relative";
+      });
     return () => {
       document.documentElement.classList.remove("stream-window");
       document.body.classList.remove("stream-window");
       if (relativeMouseFrameRef.current !== null) {
         window.cancelAnimationFrame(relativeMouseFrameRef.current);
       }
-      releasePressedInputs();
+      releaseCapture();
     };
-  }, [releasePressedInputs]);
+  }, [releaseCapture]);
 
   useEffect(() => {
     const handlePointerLockChange = () => {
-      const isCaptured = document.pointerLockElement === overlayRef.current;
-      setCaptured(isCaptured);
-      setCaptureRequested(false);
-      if (isCaptured) {
+      const isPointerLocked = document.pointerLockElement === overlayRef.current;
+      if (isPointerLocked) {
+        captureModeRef.current = "pointer-lock";
+        setCaptureMode("pointer-lock");
+        setCaptured(true);
+        setCaptureRequested(false);
         overlayRef.current?.focus();
         setLastError(null);
         return;
       }
-      releasePressedInputs();
+
+      if (captureModeRef.current === "pointer-lock") {
+        captureModeRef.current = "none";
+        setCaptureMode("none");
+        setCaptured(false);
+        void setWindowCapture(false);
+        releasePressedInputs();
+      }
     };
 
     const handlePointerLockError = () => {
-      setCaptureRequested(false);
-      setCaptured(false);
-      setLastError("Pointer lock was denied by the windowing environment");
-      releasePressedInputs();
+      if (captureModeRef.current !== "none" || !captureRequested) {
+        return;
+      }
+      void activateWindowAbsoluteFallback(
+        "Pointer lock denied — using stream window absolute mouse fallback",
+      );
     };
 
     const handleWindowBlur = () => {
-      releasePressedInputs();
+      releaseCapture();
     };
 
     const handleVisibilityChange = () => {
       if (document.visibilityState !== "visible") {
-        releasePressedInputs();
+        releaseCapture();
       }
     };
 
@@ -306,7 +386,7 @@ export function StreamWindowScreen() {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("blur", handleWindowBlur);
     };
-  }, [releasePressedInputs]);
+  }, [activateWindowAbsoluteFallback, captureRequested, releaseCapture, releasePressedInputs, setWindowCapture]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -384,27 +464,98 @@ export function StreamWindowScreen() {
     };
   }, [captured, releaseCapture]);
 
-  const requestCapture = useCallback(() => {
-    if (!overlayRef.current || document.pointerLockElement === overlayRef.current) {
+  const requestCapture = useCallback(async () => {
+    const overlay = overlayRef.current;
+    if (!overlay) {
       return;
     }
+
+    if (
+      document.pointerLockElement === overlay ||
+      captureModeRef.current === "native-relative" ||
+      captureModeRef.current === "window-absolute"
+    ) {
+      overlay.focus();
+      return;
+    }
+
     setCaptureRequested(true);
     setLastError(null);
-    const pointerLockResult = overlayRef.current.requestPointerLock();
-    if (pointerLockResult && typeof pointerLockResult.then === "function") {
-      void pointerLockResult.catch((error: unknown) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setCaptureRequested(false);
-        setLastError(message);
-      });
+
+    try {
+      await appWindowRef.current.setFocus();
+    } catch {
+      // best effort only
     }
-  }, []);
+
+    overlay.focus();
+
+    if (preferredMouseModeRef.current === "absolute") {
+      await activateWindowAbsoluteFallback(null);
+      return;
+    }
+
+    try {
+      const nativeCaptureActivated = await moonlightActivateNativeMouseCapture();
+      if (nativeCaptureActivated) {
+        setCaptureRequested(false);
+        captureModeRef.current = "native-relative";
+        setCaptureMode("native-relative");
+        setCaptured(true);
+        setLastError(null);
+        return;
+      }
+    } catch {
+      // fall through to pointer lock and absolute fallback
+    }
+
+    try {
+      const pointerLockResult = overlay.requestPointerLock();
+      if (pointerLockResult && typeof pointerLockResult.then === "function") {
+        await pointerLockResult;
+      }
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      await activateWindowAbsoluteFallback(
+        `Pointer lock unavailable — using stream window absolute mouse fallback (${message})`,
+      );
+    }
+  }, [activateWindowAbsoluteFallback]);
 
   const handleMouseMove = useCallback(
     (event: React.MouseEvent<HTMLDivElement>) => {
       if (!captured) {
         return;
       }
+
+      if (captureModeRef.current === "native-relative") {
+        return;
+      }
+
+      if (captureModeRef.current === "window-absolute") {
+        const overlay = overlayRef.current;
+        if (!overlay) {
+          return;
+        }
+
+        const rect = overlay.getBoundingClientRect();
+        const x = Math.max(0, Math.min(rect.width, event.clientX - rect.left));
+        const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top));
+        const referenceWidth = Math.max(1, Math.round(rect.width));
+        const referenceHeight = Math.max(1, Math.round(rect.height));
+
+        void moonlightSendAbsoluteMouse({
+          x: Math.round(x),
+          y: Math.round(y),
+          referenceWidth,
+          referenceHeight,
+        }).catch((error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setLastError(message);
+        });
+        return;
+      }
+
       relativeMouseDeltaRef.current.deltaX += event.movementX;
       relativeMouseDeltaRef.current.deltaY += event.movementY;
       scheduleRelativeMouseFlush();
@@ -415,9 +566,12 @@ export function StreamWindowScreen() {
   const handleMouseButton = useCallback(
     (event: React.MouseEvent<HTMLDivElement>, pressed: boolean) => {
       const mappedButton = MOUSE_BUTTON_MAP[event.button];
+      if (captureModeRef.current === "native-relative") {
+        return;
+      }
       if (!captured || mappedButton === undefined) {
         if (!captured && pressed) {
-          requestCapture();
+          void requestCapture();
         }
         return;
       }
@@ -448,7 +602,7 @@ export function StreamWindowScreen() {
         className="absolute inset-0 flex select-none outline-none"
         onClick={() => {
           if (!captured) {
-            requestCapture();
+            void requestCapture();
           }
         }}
         onAuxClick={(event) => event.preventDefault()}
@@ -466,9 +620,17 @@ export function StreamWindowScreen() {
         </div>
 
         <div className="pointer-events-none absolute bottom-4 right-4 max-w-md rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
-          <div>{captured ? "Mouse + keyboard forwarding active" : "Native video stays behind this transparent overlay"}</div>
-          <div className="mt-1 text-slate-300">Press Esc or Ctrl+Alt+Shift+Z to release capture</div>
-          <div className="mt-1 text-slate-400">Ctrl+Alt+Shift+Q remains accepted as a compatibility alias</div>
+          <div>
+            {captured
+              ? `Mouse + keyboard forwarding active (${captureMode === "native-relative" ? "native relative mouse" : captureMode === "pointer-lock" ? "pointer lock" : captureMode === "window-absolute" ? "stream window absolute mouse" : "captured"})`
+              : "Native video stays behind this transparent overlay"}
+          </div>
+          <div className="mt-1 text-slate-300">
+            Click to capture · Ctrl+Alt+Shift+Z to release
+          </div>
+          <div className="mt-1 text-slate-400">
+            Ctrl+Alt+Shift+Q remains accepted as a compatibility alias
+          </div>
           {lastError ? (
             <div className="mt-2 text-rose-300">Input bridge error: {lastError}</div>
           ) : null}

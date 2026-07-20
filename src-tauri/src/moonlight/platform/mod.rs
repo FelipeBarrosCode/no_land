@@ -1,5 +1,10 @@
+pub mod macos_input;
 pub mod window;
 
+pub use macos_input::{
+    activate_native_stream_input, deactivate_native_stream_input, install_native_stream_input,
+    uninstall_native_stream_input,
+};
 pub use window::{
     close_stream_window, create_or_reuse_stream_window, stream_window_surface_descriptor,
     NativeSurfaceDescriptor, STREAM_WINDOW_LABEL,

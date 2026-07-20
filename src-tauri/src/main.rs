@@ -274,6 +274,8 @@ fn main() {
             moonlight_list_apps,
             moonlight_start_stream,
             moonlight_disconnect_stream,
+            moonlight_activate_native_mouse_capture,
+            moonlight_deactivate_native_mouse_capture,
             moonlight_quit_remote_app,
             moonlight_send_relative_mouse,
             moonlight_send_absolute_mouse,
@@ -283,6 +285,7 @@ fn main() {
             moonlight_send_controller_state,
             moonlight_update_preferences,
             moonlight_forget_host,
+            moonlight_get_active_input_mode,
             moonlight_get_session_state
         ])
         .run(tauri::generate_context!())
