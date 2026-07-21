@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use crate::{
     input::{
         event::{ButtonState, InputEvent, MouseButton, OwnedInputEvent},
-        mapping::{map_to_video, VideoRect},
+        mapping::{aspect_fit_video_rect, map_to_video, VideoRect},
         state::{CaptureState, MouseMode},
         worker::{start_input_worker, InputWorkerHandle},
     },
@@ -31,6 +31,11 @@ impl InputManager {
             pressed: Mutex::new(PressedInputState::default()),
             worker: start_input_worker(runtime),
         })
+    }
+
+    pub fn set_mouse_mode(&self, mode: MouseMode) {
+        let mut state = self.state.lock();
+        state.mouse_mode = mode;
     }
 
     pub fn begin_capture(&self, mode: MouseMode) {
@@ -63,6 +68,13 @@ impl InputManager {
         self.state.lock().clone()
     }
 
+    pub fn request_native_capture(&self) -> MouseMode {
+        let mut state = self.state.lock();
+        state.active = true;
+        state.focused = true;
+        state.mouse_mode
+    }
+
     pub fn relative_motion(&self, dx: i32, dy: i32) {
         let state = self.state.lock();
         if !state.active || !state.focused || state.mouse_mode != MouseMode::Relative {
@@ -83,6 +95,44 @@ impl InputManager {
             width: state.video_render_width,
             height: state.video_render_height,
         };
+        drop(state);
+
+        let Some(position) = map_to_video(pointer_x, pointer_y, rect) else {
+            return;
+        };
+
+        self.send_ordered(InputEvent::AbsoluteMouseMove {
+            x: position.x as i32,
+            y: position.y as i32,
+            reference_width: position.reference_width as i32,
+            reference_height: position.reference_height as i32,
+        });
+    }
+
+    pub fn absolute_motion_in_content(
+        &self,
+        pointer_x: f64,
+        pointer_y: f64,
+        content_width: f64,
+        content_height: f64,
+    ) {
+        let state = self.state.lock();
+        if !state.active || !state.focused || state.mouse_mode != MouseMode::Absolute {
+            return;
+        }
+
+        let rect = aspect_fit_video_rect(
+            content_width,
+            content_height,
+            state.video_width,
+            state.video_height,
+        )
+        .unwrap_or(VideoRect {
+            left: 0.0,
+            top: 0.0,
+            width: content_width,
+            height: content_height,
+        });
         drop(state);
 
         let Some(position) = map_to_video(pointer_x, pointer_y, rect) else {
@@ -154,8 +204,18 @@ impl InputManager {
         state.video_top = top;
         state.video_render_width = width;
         state.video_render_height = height;
-        state.video_width = width.round().clamp(0.0, u32::MAX as f64) as u32;
-        state.video_height = height.round().clamp(0.0, u32::MAX as f64) as u32;
+    }
+
+    pub fn set_stream_dimensions(&self, width: u32, height: u32) {
+        let mut state = self.state.lock();
+        state.video_width = width;
+        state.video_height = height;
+        if state.video_render_width <= 0.0 {
+            state.video_render_width = width as f64;
+        }
+        if state.video_render_height <= 0.0 {
+            state.video_render_height = height as f64;
+        }
     }
 
     pub fn release_all_inputs(&self) {

@@ -290,6 +290,7 @@ fn main() {
             moonlight_update_preferences,
             moonlight_forget_host,
             moonlight_get_active_input_mode,
+            moonlight_get_input_debug_state,
             moonlight_get_session_state
         ])
         .run(tauri::generate_context!())

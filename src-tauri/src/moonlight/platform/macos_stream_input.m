@@ -1,32 +1,37 @@
 #import <AppKit/AppKit.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
+#import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 extern void noland_macos_input_on_relative_mouse(double delta_x, double delta_y);
-extern void noland_macos_input_on_absolute_mouse(double x, double y);
+extern void noland_macos_input_on_absolute_mouse(double x, double y, double content_width, double content_height);
 extern void noland_macos_input_on_mouse_button(unsigned char button, bool pressed);
 extern void noland_macos_input_on_keyboard(unsigned short virtual_key, bool pressed, unsigned char modifiers);
 extern void noland_macos_input_on_vertical_scroll(double amount, bool high_resolution);
 extern void noland_macos_input_on_horizontal_scroll(double amount, bool high_resolution);
 extern void noland_macos_input_on_focus_changed(bool focused);
+extern void noland_macos_input_on_capture_changed(bool active, int mode);
+extern int noland_macos_input_request_capture(void);
+extern void noland_macos_input_debug_native_event(int kind);
+extern bool noland_macos_input_debug_capture_active(void);
+extern int noland_macos_input_debug_capture_mode(void);
+extern unsigned long long noland_macos_input_debug_capture_requests(void);
+extern unsigned long long noland_macos_input_debug_native_mouse_moves(void);
+extern unsigned long long noland_macos_input_debug_native_mouse_downs(void);
+extern unsigned long long noland_macos_input_debug_native_mouse_ups(void);
+extern unsigned long long noland_macos_input_debug_native_keys(void);
+extern unsigned long long noland_macos_input_debug_rust_relative_callbacks(void);
+extern unsigned long long noland_macos_input_debug_rust_absolute_callbacks(void);
+extern unsigned long long noland_macos_input_debug_rust_button_callbacks(void);
+extern unsigned long long noland_macos_input_debug_rust_key_callbacks(void);
+extern unsigned long long noland_input_debug_relative_send_attempts(void);
+extern unsigned long long noland_input_debug_absolute_send_attempts(void);
+extern unsigned long long noland_input_debug_button_send_attempts(void);
+extern unsigned long long noland_input_debug_key_send_attempts(void);
+extern unsigned long long noland_input_debug_scroll_send_attempts(void);
+extern unsigned long long noland_input_debug_send_errors(void);
 
-@interface NolandMacosStreamInputBridge : NSObject
-@property (nonatomic, assign) NSView *view;
-@property (nonatomic, weak) NSWindow *window;
-@property (nonatomic, assign) BOOL captureActive;
-@property (nonatomic, assign) NSInteger captureMode;
-@property (nonatomic, assign) BOOL cursorHidden;
-@property (nonatomic, assign) NSEventModifierFlags lastModifierFlags;
-@property (nonatomic, strong) id localMonitor;
-@property (nonatomic, strong) id didBecomeKeyObserver;
-@property (nonatomic, strong) id didResignKeyObserver;
-@end
-
-@implementation NolandMacosStreamInputBridge
-@end
-
-static const void *kNolandMacosStreamInputBridgeKey = &kNolandMacosStreamInputBridgeKey;
 static const NSInteger kNolandCaptureModeNone = 0;
 static const NSInteger kNolandCaptureModeRelative = 1;
 static const NSInteger kNolandCaptureModeAbsolute = 2;
@@ -34,6 +39,59 @@ static const unsigned char kNolandModifierShift = 0x01;
 static const unsigned char kNolandModifierCtrl = 0x02;
 static const unsigned char kNolandModifierAlt = 0x04;
 static const unsigned char kNolandModifierMeta = 0x08;
+
+@class NolandMacosStreamInputBridge;
+
+@interface NolandMacosStreamContainerView : NSView
+@end
+
+@interface NolandMacosCaptureView : NSView
+@property (nonatomic, weak) NolandMacosStreamInputBridge *bridge;
+@property (nonatomic, strong) NSTrackingArea *trackingArea;
+- (void)updateDebugFlashColor:(NSColor *)color;
+@end
+
+@interface NolandMacosStreamInputBridge : NSObject
+@property (nonatomic, assign) NSView *view;
+@property (nonatomic, strong) NolandMacosCaptureView *captureView;
+@property (nonatomic, weak) NSWindow *window;
+@property (nonatomic, assign) BOOL captureActive;
+@property (nonatomic, assign) NSInteger captureMode;
+@property (nonatomic, assign) BOOL cursorHidden;
+@property (nonatomic, assign) BOOL suppressNextLeftMouseUp;
+@property (nonatomic, strong) CATextLayer *debugTextLayer;
+@property (nonatomic, strong) NSView *debugBadgeView;
+@property (nonatomic, strong) NSTextField *debugBadgeLabel;
+@property (nonatomic, strong) NSTimer *debugTimer;
+@property (nonatomic, strong) id didBecomeKeyObserver;
+@property (nonatomic, strong) id didResignKeyObserver;
+@property (nonatomic, strong) id localEventMonitor;
+@end
+
+@implementation NolandMacosStreamContainerView
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self != nil) {
+        self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.wantsLayer = YES;
+        self.layer = [CALayer layer];
+        self.layer.backgroundColor = NSColor.blackColor.CGColor;
+    }
+    return self;
+}
+
+- (BOOL)isOpaque {
+    return YES;
+}
+
+@end
+
+@implementation NolandMacosStreamInputBridge
+@end
+
+static const void *kNolandMacosStreamInputBridgeKey = &kNolandMacosStreamInputBridgeKey;
+static const void *kNolandMacosStreamContainerViewKey = &kNolandMacosStreamContainerViewKey;
 
 static unsigned char noland_modifier_bits(NSEventModifierFlags flags) {
     unsigned char modifiers = 0;
@@ -198,6 +256,31 @@ static BOOL noland_is_release_shortcut(NSEvent *event) {
     return event.keyCode == kVK_ANSI_Z || event.keyCode == kVK_ANSI_Q;
 }
 
+static BOOL noland_modifier_pressed_for_event(NSEvent *event) {
+    if (event == nil) {
+        return NO;
+    }
+
+    switch (event.keyCode) {
+        case kVK_Shift:
+        case kVK_RightShift:
+            return (event.modifierFlags & NSEventModifierFlagShift) != 0;
+        case kVK_Control:
+        case kVK_RightControl:
+            return (event.modifierFlags & NSEventModifierFlagControl) != 0;
+        case kVK_Option:
+        case kVK_RightOption:
+            return (event.modifierFlags & NSEventModifierFlagOption) != 0;
+        case kVK_Command:
+        case kVK_RightCommand:
+            return (event.modifierFlags & NSEventModifierFlagCommand) != 0;
+        case kVK_CapsLock:
+            return (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
+        default:
+            return NO;
+    }
+}
+
 static void noland_emit_absolute_mouse(NolandMacosStreamInputBridge *bridge, NSEvent *event) {
     if (bridge == nil || event == nil || bridge.view == nil) {
         return;
@@ -224,36 +307,362 @@ static void noland_emit_absolute_mouse(NolandMacosStreamInputBridge *bridge, NSE
         y = height;
     }
 
-    noland_macos_input_on_absolute_mouse((double)x, (double)y);
+    noland_macos_input_on_absolute_mouse((double)x, (double)y, (double)width, (double)height);
 }
 
-static BOOL noland_modifier_pressed_for_event(NSEvent *event) {
-    if (event == nil) {
+static void noland_handle_mouse_motion(NolandMacosStreamInputBridge *bridge, NSEvent *event) {
+    if (bridge == nil || event == nil || !bridge.captureActive) {
+        return;
+    }
+
+    if (bridge.captureMode == kNolandCaptureModeRelative) {
+        noland_macos_input_on_relative_mouse(event.deltaX, event.deltaY);
+    } else if (bridge.captureMode == kNolandCaptureModeAbsolute) {
+        noland_emit_absolute_mouse(bridge, event);
+    }
+}
+
+static void noland_set_capture_state(NolandMacosStreamInputBridge *bridge, BOOL active, NSInteger mode);
+static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge);
+static BOOL noland_bridge_contains_window_point(NolandMacosStreamInputBridge *bridge, NSPoint windowPoint);
+static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEvent *event);
+
+static void noland_handle_mouse_button(NolandMacosStreamInputBridge *bridge, NSEvent *event, bool pressed) {
+    if (bridge == nil || event == nil || !bridge.captureActive) {
+        return;
+    }
+
+    if (bridge.captureMode == kNolandCaptureModeAbsolute) {
+        noland_emit_absolute_mouse(bridge, event);
+    }
+
+    noland_macos_input_on_mouse_button(noland_map_mouse_button(event), pressed);
+}
+
+static void noland_handle_scroll(NolandMacosStreamInputBridge *bridge, NSEvent *event) {
+    if (bridge == nil || event == nil || !bridge.captureActive) {
+        return;
+    }
+
+    BOOL highResolution = event.hasPreciseScrollingDeltas;
+    CGFloat deltaY = highResolution ? event.scrollingDeltaY : event.deltaY;
+    CGFloat deltaX = highResolution ? event.scrollingDeltaX : event.deltaX;
+
+    if (highResolution) {
+        deltaY = MAX(-1.0, MIN(1.0, deltaY));
+        deltaX = MAX(-1.0, MIN(1.0, deltaX));
+        deltaY *= 120.0;
+        deltaX *= 120.0;
+    }
+
+    if (deltaY != 0.0) {
+        noland_macos_input_on_vertical_scroll((double)deltaY, highResolution);
+    }
+    if (deltaX != 0.0) {
+        noland_macos_input_on_horizontal_scroll((double)deltaX, highResolution);
+    }
+}
+
+static void noland_handle_key(NolandMacosStreamInputBridge *bridge, NSEvent *event, bool pressed) {
+    if (bridge == nil || event == nil || !bridge.captureActive) {
+        return;
+    }
+
+    if (pressed && noland_is_release_shortcut(event)) {
+        noland_set_capture_state(bridge, NO, kNolandCaptureModeNone);
+        return;
+    }
+
+    unsigned short virtualKey = noland_vk_for_key_code(event.keyCode);
+    if (virtualKey != 0x00) {
+        noland_macos_input_on_keyboard(virtualKey, pressed, noland_modifier_bits(event.modifierFlags));
+    }
+}
+
+static void noland_handle_flags_changed(NolandMacosStreamInputBridge *bridge, NSEvent *event) {
+    if (bridge == nil || event == nil || !bridge.captureActive) {
+        return;
+    }
+
+    unsigned short virtualKey = noland_vk_for_key_code(event.keyCode);
+    if (virtualKey != 0x00) {
+        noland_macos_input_on_keyboard(virtualKey, noland_modifier_pressed_for_event(event), noland_modifier_bits(event.modifierFlags));
+    }
+}
+
+@implementation NolandMacosCaptureView
+
+- (void)updateDebugFlashColor:(NSColor *)color {
+    if (self.layer == nil) {
+        return;
+    }
+    self.layer.backgroundColor = [color colorWithAlphaComponent:0.18].CGColor;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        if (self.layer != nil) {
+            self.layer.backgroundColor = NSColor.clearColor.CGColor;
+        }
+    });
+}
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self != nil) {
+        self.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        self.wantsLayer = YES;
+        self.layer.backgroundColor = NSColor.clearColor.CGColor;
+    }
+    return self;
+}
+
+- (BOOL)isOpaque {
+    return NO;
+}
+
+- (BOOL)acceptsFirstResponder {
+    return YES;
+}
+
+- (BOOL)becomeFirstResponder {
+    return YES;
+}
+
+- (BOOL)resignFirstResponder {
+    return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    (void)event;
+    return YES;
+}
+
+- (BOOL)canBecomeKeyView {
+    return YES;
+}
+
+- (NSView *)hitTest:(NSPoint)point {
+    if (self.bridge == nil || self.hidden || self.alphaValue <= 0.0) {
+        return nil;
+    }
+    return NSPointInRect(point, self.bounds) ? self : nil;
+}
+
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+
+    if (self.trackingArea != nil) {
+        [self removeTrackingArea:self.trackingArea];
+        self.trackingArea = nil;
+    }
+
+    NSTrackingAreaOptions options = NSTrackingMouseMoved |
+        NSTrackingMouseEnteredAndExited |
+        NSTrackingActiveAlways |
+        NSTrackingInVisibleRect |
+        NSTrackingEnabledDuringMouseDrag;
+    self.trackingArea = [[NSTrackingArea alloc] initWithRect:NSZeroRect options:options owner:self userInfo:nil];
+    [self addTrackingArea:self.trackingArea];
+}
+
+- (void)mouseMoved:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)rightMouseDragged:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)otherMouseDragged:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)leftMouseDown:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)leftMouseUp:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)rightMouseDown:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)rightMouseUp:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)otherMouseDown:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)otherMouseUp:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)scrollWheel:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)keyDown:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)keyUp:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+- (void)flagsChanged:(NSEvent *)event {
+    (void)noland_route_local_event(self.bridge, event);
+}
+
+@end
+
+static BOOL noland_bridge_contains_window_point(NolandMacosStreamInputBridge *bridge, NSPoint windowPoint) {
+    if (bridge == nil || bridge.captureView == nil || bridge.window == nil) {
         return NO;
     }
 
-    switch (event.keyCode) {
-        case kVK_Shift:
-        case kVK_RightShift:
-            return (event.modifierFlags & NSEventModifierFlagShift) != 0;
-        case kVK_Control:
-        case kVK_RightControl:
-            return (event.modifierFlags & NSEventModifierFlagControl) != 0;
-        case kVK_Option:
-        case kVK_RightOption:
-            return (event.modifierFlags & NSEventModifierFlagOption) != 0;
-        case kVK_Command:
-        case kVK_RightCommand:
-            return (event.modifierFlags & NSEventModifierFlagCommand) != 0;
-        case kVK_CapsLock:
-            return (event.modifierFlags & NSEventModifierFlagCapsLock) != 0;
+    NSPoint localPoint = [bridge.captureView convertPoint:windowPoint fromView:nil];
+    return NSPointInRect(localPoint, bridge.captureView.bounds);
+}
+
+static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEvent *event) {
+    if (bridge == nil || event == nil || bridge.captureView == nil) {
+        return NO;
+    }
+
+    switch (event.type) {
+        case NSEventTypeMouseMoved:
+        case NSEventTypeLeftMouseDragged:
+        case NSEventTypeRightMouseDragged:
+        case NSEventTypeOtherMouseDragged:
+            if (!bridge.captureActive && !noland_bridge_contains_window_point(bridge, event.locationInWindow)) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(1);
+            [bridge.captureView updateDebugFlashColor:NSColor.systemGreenColor];
+            noland_handle_mouse_motion(bridge, event);
+            NSLog(@"[noland-stream-input] mouse motion active=%d mode=%ld point=(%.1f, %.1f) dx=%.2f dy=%.2f",
+                  bridge.captureActive,
+                  (long)bridge.captureMode,
+                  event.locationInWindow.x,
+                  event.locationInWindow.y,
+                  event.deltaX,
+                  event.deltaY);
+            return YES;
+        case NSEventTypeLeftMouseDown:
+            if (!noland_bridge_contains_window_point(bridge, event.locationInWindow)) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(2);
+            [bridge.window makeFirstResponder:bridge.captureView];
+            [bridge.captureView updateDebugFlashColor:NSColor.systemRedColor];
+            NSLog(@"[noland-stream-input] left down active=%d mode=%ld point=(%.1f, %.1f)",
+                  bridge.captureActive,
+                  (long)bridge.captureMode,
+                  event.locationInWindow.x,
+                  event.locationInWindow.y);
+            if (!bridge.captureActive) {
+                int mode = noland_macos_input_request_capture();
+                NSLog(@"[noland-stream-input] request capture -> mode=%d", mode);
+                if (mode != 0) {
+                    bridge.suppressNextLeftMouseUp = YES;
+                    noland_set_capture_state(bridge, YES, mode);
+                    if (mode == kNolandCaptureModeAbsolute) {
+                        noland_emit_absolute_mouse(bridge, event);
+                    }
+                }
+                return YES;
+            }
+            noland_handle_mouse_button(bridge, event, true);
+            return YES;
+        case NSEventTypeLeftMouseUp:
+            if (!bridge.captureActive && !bridge.suppressNextLeftMouseUp) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(3);
+            [bridge.captureView updateDebugFlashColor:NSColor.systemOrangeColor];
+            if (bridge.suppressNextLeftMouseUp) {
+                bridge.suppressNextLeftMouseUp = NO;
+                NSLog(@"[noland-stream-input] suppress left up after capture activation");
+                return YES;
+            }
+            NSLog(@"[noland-stream-input] left up active=%d", bridge.captureActive);
+            if (!bridge.captureActive) {
+                return YES;
+            }
+            noland_handle_mouse_button(bridge, event, false);
+            return YES;
+        case NSEventTypeRightMouseDown:
+        case NSEventTypeOtherMouseDown:
+            if (!bridge.captureActive && !noland_bridge_contains_window_point(bridge, event.locationInWindow)) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(2);
+            [bridge.window makeFirstResponder:bridge.captureView];
+            [bridge.captureView updateDebugFlashColor:NSColor.systemRedColor];
+            NSLog(@"[noland-stream-input] mouse down type=%ld active=%d button=%ld",
+                  (long)event.type,
+                  bridge.captureActive,
+                  (long)event.buttonNumber);
+            if (!bridge.captureActive) {
+                return YES;
+            }
+            noland_handle_mouse_button(bridge, event, true);
+            return YES;
+        case NSEventTypeRightMouseUp:
+        case NSEventTypeOtherMouseUp:
+            if (!bridge.captureActive) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(3);
+            [bridge.captureView updateDebugFlashColor:NSColor.systemOrangeColor];
+            NSLog(@"[noland-stream-input] mouse up type=%ld button=%ld", (long)event.type, (long)event.buttonNumber);
+            noland_handle_mouse_button(bridge, event, false);
+            return YES;
+        case NSEventTypeScrollWheel:
+            if (!bridge.captureActive && !noland_bridge_contains_window_point(bridge, event.locationInWindow)) {
+                return NO;
+            }
+            [bridge.captureView updateDebugFlashColor:NSColor.systemBlueColor];
+            noland_handle_scroll(bridge, event);
+            return bridge.captureActive;
+        case NSEventTypeKeyDown:
+            if (!bridge.captureActive) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(4);
+            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
+            NSLog(@"[noland-stream-input] key down code=%hu mods=%llu", event.keyCode, (unsigned long long)event.modifierFlags);
+            noland_handle_key(bridge, event, true);
+            return YES;
+        case NSEventTypeKeyUp:
+            if (!bridge.captureActive) {
+                return NO;
+            }
+            noland_macos_input_debug_native_event(4);
+            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
+            NSLog(@"[noland-stream-input] key up code=%hu mods=%llu", event.keyCode, (unsigned long long)event.modifierFlags);
+            noland_handle_key(bridge, event, false);
+            return YES;
+        case NSEventTypeFlagsChanged:
+            if (!bridge.captureActive) {
+                return NO;
+            }
+            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
+            noland_handle_flags_changed(bridge, event);
+            return YES;
         default:
             return NO;
     }
 }
 
 static void noland_set_capture_state(NolandMacosStreamInputBridge *bridge, BOOL active, NSInteger mode) {
-    if (bridge == nil) {
+    if (bridge == nil || bridge.captureView == nil) {
         return;
     }
 
@@ -267,11 +676,15 @@ static void noland_set_capture_state(NolandMacosStreamInputBridge *bridge, BOOL 
 
     bridge.captureActive = active;
     bridge.captureMode = targetMode;
+    bridge.captureView.hidden = NO;
+
+    noland_macos_input_on_capture_changed(active, (int)targetMode);
 
     if (active) {
-        [bridge.window makeFirstResponder:bridge.view];
         [bridge.window makeKeyAndOrderFront:nil];
+        [bridge.window setIgnoresMouseEvents:NO];
         [bridge.window setAcceptsMouseMovedEvents:YES];
+        [bridge.window makeFirstResponder:bridge.captureView];
         if (!bridge.cursorHidden) {
             [NSCursor hide];
             bridge.cursorHidden = YES;
@@ -292,13 +705,97 @@ static void noland_set_capture_state(NolandMacosStreamInputBridge *bridge, BOOL 
     }
 }
 
+static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge) {
+    if (bridge == nil || bridge.captureView == nil) {
+        return;
+    }
+
+    NSRect bounds = bridge.captureView.bounds;
+    CGFloat width = MIN(460.0, MAX(320.0, NSWidth(bounds) - 24.0));
+    CGFloat height = 124.0;
+
+    NSString *text = [NSString stringWithFormat:
+        @"capture: %@ (%d) req:%llu\n"
+         "native move:%llu down:%llu up:%llu key:%llu\n"
+         "rust rel:%llu abs:%llu btn:%llu key:%llu\n"
+         "send rel:%llu abs:%llu btn:%llu key:%llu scr:%llu err:%llu",
+        noland_macos_input_debug_capture_active() ? @"active" : @"inactive",
+        noland_macos_input_debug_capture_mode(),
+        noland_macos_input_debug_capture_requests(),
+        noland_macos_input_debug_native_mouse_moves(),
+        noland_macos_input_debug_native_mouse_downs(),
+        noland_macos_input_debug_native_mouse_ups(),
+        noland_macos_input_debug_native_keys(),
+        noland_macos_input_debug_rust_relative_callbacks(),
+        noland_macos_input_debug_rust_absolute_callbacks(),
+        noland_macos_input_debug_rust_button_callbacks(),
+        noland_macos_input_debug_rust_key_callbacks(),
+        noland_input_debug_relative_send_attempts(),
+        noland_input_debug_absolute_send_attempts(),
+        noland_input_debug_button_send_attempts(),
+        noland_input_debug_key_send_attempts(),
+        noland_input_debug_scroll_send_attempts(),
+        noland_input_debug_send_errors()];
+
+    if (bridge.debugTextLayer != nil) {
+        bridge.debugTextLayer.frame = CGRectMake(NSWidth(bounds) - width - 12.0, 12.0, width, height);
+        bridge.debugTextLayer.string = text;
+    }
+
+    if (bridge.debugBadgeView != nil && bridge.debugBadgeLabel != nil) {
+        bridge.debugBadgeView.frame = NSMakeRect(NSWidth(bounds) - width - 12.0, NSHeight(bounds) - height - 12.0, width, height);
+        bridge.debugBadgeLabel.frame = NSInsetRect(bridge.debugBadgeView.bounds, 10.0, 8.0);
+        bridge.debugBadgeLabel.stringValue = text;
+    }
+}
+
+static NSView *noland_macos_ensure_stream_target_view(NSView *view) {
+    if (view == nil) {
+        return nil;
+    }
+
+    if ([view isKindOfClass:[NolandMacosStreamContainerView class]]) {
+        return view;
+    }
+
+    NSWindow *window = view.window;
+    NSView *contentView = window != nil ? window.contentView : view;
+    if (contentView == nil) {
+        return view;
+    }
+
+    NolandMacosStreamContainerView *container = objc_getAssociatedObject(contentView, kNolandMacosStreamContainerViewKey);
+    if (container == nil) {
+        container = [[NolandMacosStreamContainerView alloc] initWithFrame:contentView.bounds];
+        [contentView addSubview:container positioned:NSWindowAbove relativeTo:nil];
+        objc_setAssociatedObject(contentView, kNolandMacosStreamContainerViewKey, container, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    } else if (container.superview != contentView) {
+        container.frame = contentView.bounds;
+        [contentView addSubview:container positioned:NSWindowAbove relativeTo:nil];
+    }
+
+    return container;
+}
+
+void *noland_macos_resolve_stream_target_view(void *ns_view) {
+    @autoreleasepool {
+        if (ns_view == NULL) {
+            return NULL;
+        }
+
+        NSView *view = (__bridge NSView *)ns_view;
+        NSView *target = noland_macos_ensure_stream_target_view(view);
+        return (__bridge void *)(target != nil ? target : view);
+    }
+}
+
 int noland_macos_input_install(void *ns_view) {
     @autoreleasepool {
         if (ns_view == NULL) {
             return -1;
         }
 
-        NSView *view = (__bridge NSView *)ns_view;
+        NSView *view = noland_macos_ensure_stream_target_view((__bridge NSView *)ns_view);
         NSWindow *window = view.window;
         if (window == nil) {
             return -2;
@@ -308,6 +805,11 @@ int noland_macos_input_install(void *ns_view) {
         if (existing != nil) {
             existing.view = view;
             existing.window = window;
+            if (existing.captureView.superview != view) {
+                [existing.captureView removeFromSuperview];
+                existing.captureView.frame = view.bounds;
+                [view addSubview:existing.captureView positioned:NSWindowAbove relativeTo:nil];
+            }
             return 0;
         }
 
@@ -317,101 +819,75 @@ int noland_macos_input_install(void *ns_view) {
         bridge.captureActive = NO;
         bridge.captureMode = kNolandCaptureModeNone;
         bridge.cursorHidden = NO;
-        bridge.lastModifierFlags = 0;
-        __weak NolandMacosStreamInputBridge *weakBridge = bridge;
+        bridge.suppressNextLeftMouseUp = NO;
 
-        NSEventMask mask = NSEventMaskMouseMoved |
-            NSEventMaskLeftMouseDragged |
-            NSEventMaskRightMouseDragged |
-            NSEventMaskOtherMouseDragged |
-            NSEventMaskLeftMouseDown |
-            NSEventMaskLeftMouseUp |
-            NSEventMaskRightMouseDown |
-            NSEventMaskRightMouseUp |
-            NSEventMaskOtherMouseDown |
-            NSEventMaskOtherMouseUp |
-            NSEventMaskScrollWheel |
-            NSEventMaskKeyDown |
-            NSEventMaskKeyUp |
-            NSEventMaskFlagsChanged;
+        NolandMacosCaptureView *captureView = [[NolandMacosCaptureView alloc] initWithFrame:view.bounds];
+        captureView.bridge = bridge;
+        captureView.hidden = NO;
+        bridge.captureView = captureView;
+        [view addSubview:captureView positioned:NSWindowAbove relativeTo:nil];
 
-        bridge.localMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:mask handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
-            NolandMacosStreamInputBridge *strongBridge = weakBridge;
-            if (strongBridge == nil || !strongBridge.captureActive) {
+        NSView *debugBadgeView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 124)];
+        debugBadgeView.wantsLayer = YES;
+        debugBadgeView.layer.backgroundColor = [NSColor colorWithWhite:0.02 alpha:0.88].CGColor;
+        debugBadgeView.layer.cornerRadius = 10.0;
+        debugBadgeView.layer.borderWidth = 2.0;
+        debugBadgeView.layer.borderColor = NSColor.systemYellowColor.CGColor;
+        debugBadgeView.hidden = NO;
+        debugBadgeView.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
+        NSTextField *debugBadgeLabel = [[NSTextField alloc] initWithFrame:NSInsetRect(debugBadgeView.bounds, 10.0, 8.0)];
+        debugBadgeLabel.bezeled = NO;
+        debugBadgeLabel.drawsBackground = NO;
+        debugBadgeLabel.editable = NO;
+        debugBadgeLabel.selectable = NO;
+        debugBadgeLabel.textColor = NSColor.whiteColor;
+        debugBadgeLabel.font = [NSFont monospacedSystemFontOfSize:12.0 weight:NSFontWeightSemibold];
+        debugBadgeLabel.alignment = NSTextAlignmentLeft;
+        debugBadgeLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        debugBadgeLabel.maximumNumberOfLines = 4;
+        [debugBadgeView addSubview:debugBadgeLabel];
+        [captureView addSubview:debugBadgeView positioned:NSWindowAbove relativeTo:nil];
+        bridge.debugBadgeView = debugBadgeView;
+        bridge.debugBadgeLabel = debugBadgeLabel;
+
+        CATextLayer *debugTextLayer = [CATextLayer layer];
+        debugTextLayer.contentsScale = NSScreen.mainScreen.backingScaleFactor > 0 ? NSScreen.mainScreen.backingScaleFactor : 2.0;
+        debugTextLayer.wrapped = YES;
+        debugTextLayer.fontSize = 11.0;
+        debugTextLayer.foregroundColor = NSColor.whiteColor.CGColor;
+        debugTextLayer.backgroundColor = [NSColor colorWithWhite:0.06 alpha:0.72].CGColor;
+        debugTextLayer.cornerRadius = 8.0;
+        debugTextLayer.borderWidth = 1.0;
+        debugTextLayer.borderColor = [NSColor colorWithRed:0.2 green:0.85 blue:0.95 alpha:0.7].CGColor;
+        debugTextLayer.zPosition = 1000.0;
+        bridge.debugTextLayer = debugTextLayer;
+        [captureView.layer addSublayer:debugTextLayer];
+        bridge.localEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskMouseMoved |
+                                                                                  NSEventMaskLeftMouseDown |
+                                                                                  NSEventMaskLeftMouseUp |
+                                                                                  NSEventMaskRightMouseDown |
+                                                                                  NSEventMaskRightMouseUp |
+                                                                                  NSEventMaskOtherMouseDown |
+                                                                                  NSEventMaskOtherMouseUp |
+                                                                                  NSEventMaskLeftMouseDragged |
+                                                                                  NSEventMaskRightMouseDragged |
+                                                                                  NSEventMaskOtherMouseDragged |
+                                                                                  NSEventMaskScrollWheel |
+                                                                                  NSEventMaskKeyDown |
+                                                                                  NSEventMaskKeyUp |
+                                                                                  NSEventMaskFlagsChanged)
+                                                                       handler:^NSEvent * _Nullable(NSEvent * _Nonnull event) {
+            if (event.window != bridge.window) {
                 return event;
             }
-            if (event.window != strongBridge.window) {
-                return event;
-            }
-
-            switch (event.type) {
-                case NSEventTypeMouseMoved:
-                case NSEventTypeLeftMouseDragged:
-                case NSEventTypeRightMouseDragged:
-                case NSEventTypeOtherMouseDragged:
-                    if (strongBridge.captureMode == kNolandCaptureModeRelative) {
-                        noland_macos_input_on_relative_mouse(event.deltaX, event.deltaY);
-                    } else if (strongBridge.captureMode == kNolandCaptureModeAbsolute) {
-                        noland_emit_absolute_mouse(strongBridge, event);
-                    }
-                    return nil;
-                case NSEventTypeLeftMouseDown:
-                case NSEventTypeRightMouseDown:
-                case NSEventTypeOtherMouseDown:
-                    if (strongBridge.captureMode == kNolandCaptureModeAbsolute) {
-                        noland_emit_absolute_mouse(strongBridge, event);
-                    }
-                    noland_macos_input_on_mouse_button(noland_map_mouse_button(event), true);
-                    return nil;
-                case NSEventTypeLeftMouseUp:
-                case NSEventTypeRightMouseUp:
-                case NSEventTypeOtherMouseUp:
-                    if (strongBridge.captureMode == kNolandCaptureModeAbsolute) {
-                        noland_emit_absolute_mouse(strongBridge, event);
-                    }
-                    noland_macos_input_on_mouse_button(noland_map_mouse_button(event), false);
-                    return nil;
-                case NSEventTypeScrollWheel: {
-                    BOOL highResolution = event.hasPreciseScrollingDeltas;
-                    CGFloat deltaY = highResolution ? event.scrollingDeltaY : event.deltaY;
-                    CGFloat deltaX = highResolution ? event.scrollingDeltaX : event.deltaX;
-                    if (deltaY != 0.0) {
-                        noland_macos_input_on_vertical_scroll((double)deltaY, highResolution);
-                    }
-                    if (deltaX != 0.0) {
-                        noland_macos_input_on_horizontal_scroll((double)deltaX, highResolution);
-                    }
-                    return nil;
-                }
-                case NSEventTypeKeyDown: {
-                    if (noland_is_release_shortcut(event)) {
-                        return event;
-                    }
-                    unsigned short virtualKey = noland_vk_for_key_code(event.keyCode);
-                    if (virtualKey != 0x00) {
-                        noland_macos_input_on_keyboard(virtualKey, true, noland_modifier_bits(event.modifierFlags));
-                    }
-                    return nil;
-                }
-                case NSEventTypeKeyUp: {
-                    unsigned short virtualKey = noland_vk_for_key_code(event.keyCode);
-                    if (virtualKey != 0x00) {
-                        noland_macos_input_on_keyboard(virtualKey, false, noland_modifier_bits(event.modifierFlags));
-                    }
-                    return nil;
-                }
-                case NSEventTypeFlagsChanged: {
-                    unsigned short virtualKey = noland_vk_for_key_code(event.keyCode);
-                    if (virtualKey != 0x00) {
-                        noland_macos_input_on_keyboard(virtualKey, noland_modifier_pressed_for_event(event), noland_modifier_bits(event.modifierFlags));
-                    }
-                    strongBridge.lastModifierFlags = event.modifierFlags;
-                    return nil;
-                }
-                default:
-                    return event;
-            }
+            BOOL handled = noland_route_local_event(bridge, event);
+            return handled ? nil : event;
         }];
+        bridge.debugTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
+            (void)timer;
+            noland_update_debug_overlay(bridge);
+        }];
+        noland_update_debug_overlay(bridge);
 
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         bridge.didBecomeKeyObserver = [center addObserverForName:NSWindowDidBecomeKeyNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
@@ -420,6 +896,7 @@ int noland_macos_input_install(void *ns_view) {
         }];
         bridge.didResignKeyObserver = [center addObserverForName:NSWindowDidResignKeyNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
             (void)note;
+            noland_set_capture_state(bridge, NO, kNolandCaptureModeNone);
             noland_macos_input_on_focus_changed(false);
         }];
 
@@ -434,16 +911,25 @@ void noland_macos_input_uninstall(void *ns_view) {
             return;
         }
 
-        NSView *view = (__bridge NSView *)ns_view;
+        NSView *view = noland_macos_ensure_stream_target_view((__bridge NSView *)ns_view);
         NolandMacosStreamInputBridge *bridge = objc_getAssociatedObject(view, kNolandMacosStreamInputBridgeKey);
         if (bridge == nil) {
             return;
         }
 
         noland_set_capture_state(bridge, NO, kNolandCaptureModeNone);
-        if (bridge.localMonitor != nil) {
-            [NSEvent removeMonitor:bridge.localMonitor];
-            bridge.localMonitor = nil;
+        [bridge.captureView removeFromSuperview];
+        bridge.captureView = nil;
+        [bridge.debugTextLayer removeFromSuperlayer];
+        bridge.debugTextLayer = nil;
+        [bridge.debugBadgeView removeFromSuperview];
+        bridge.debugBadgeView = nil;
+        bridge.debugBadgeLabel = nil;
+        [bridge.debugTimer invalidate];
+        bridge.debugTimer = nil;
+        if (bridge.localEventMonitor != nil) {
+            [NSEvent removeMonitor:bridge.localEventMonitor];
+            bridge.localEventMonitor = nil;
         }
 
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
@@ -466,7 +952,7 @@ int noland_macos_input_set_capture_active(void *ns_view, bool active, int mode) 
             return -1;
         }
 
-        NSView *view = (__bridge NSView *)ns_view;
+        NSView *view = noland_macos_ensure_stream_target_view((__bridge NSView *)ns_view);
         NolandMacosStreamInputBridge *bridge = objc_getAssociatedObject(view, kNolandMacosStreamInputBridgeKey);
         if (bridge == nil) {
             return 1;
@@ -477,8 +963,26 @@ int noland_macos_input_set_capture_active(void *ns_view, bool active, int mode) 
         if (bridge.window == nil) {
             return -2;
         }
+        if (!active) {
+            bridge.suppressNextLeftMouseUp = NO;
+        }
+        if (bridge.captureView.superview != view) {
+            [bridge.captureView removeFromSuperview];
+            bridge.captureView.frame = view.bounds;
+            [view addSubview:bridge.captureView positioned:NSWindowAbove relativeTo:nil];
+        }
+        if (bridge.debugBadgeView != nil && bridge.debugBadgeView.superview != bridge.captureView) {
+            [bridge.debugBadgeView removeFromSuperview];
+            [bridge.captureView addSubview:bridge.debugBadgeView positioned:NSWindowAbove relativeTo:nil];
+        }
+        if (bridge.debugTextLayer != nil && bridge.debugTextLayer.superlayer != bridge.captureView.layer) {
+            [bridge.debugTextLayer removeFromSuperlayer];
+            [bridge.captureView.layer addSublayer:bridge.debugTextLayer];
+            bridge.debugTextLayer.zPosition = 1000.0;
+        }
 
         noland_set_capture_state(bridge, active ? YES : NO, mode);
+        noland_update_debug_overlay(bridge);
         return 0;
     }
 }

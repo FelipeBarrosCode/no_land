@@ -394,6 +394,28 @@ export async function moonlightSendKeyboard(input: {
   });
 }
 
+export async function moonlightGetInputDebugState(): Promise<{
+  captureActive: boolean;
+  captureMode: number;
+  captureRequests: number;
+  nativeMouseMoves: number;
+  nativeMouseDowns: number;
+  nativeMouseUps: number;
+  nativeKeys: number;
+  rustRelativeCallbacks: number;
+  rustAbsoluteCallbacks: number;
+  rustButtonCallbacks: number;
+  rustKeyCallbacks: number;
+  relativeSendAttempts: number;
+  absoluteSendAttempts: number;
+  buttonSendAttempts: number;
+  keySendAttempts: number;
+  scrollSendAttempts: number;
+  sendErrors: number;
+}> {
+  return invokeSafe("moonlight_get_input_debug_state");
+}
+
 export async function regenerateEdid(payload: {
   mode: "auto_detect" | "manual";
   refreshRateHz: number;

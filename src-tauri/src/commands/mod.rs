@@ -165,6 +165,28 @@ pub struct MoonlightStartStreamResponse {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct MoonlightInputDebugStateResponse {
+    pub capture_active: bool,
+    pub capture_mode: i32,
+    pub capture_requests: u64,
+    pub native_mouse_moves: u64,
+    pub native_mouse_downs: u64,
+    pub native_mouse_ups: u64,
+    pub native_keys: u64,
+    pub rust_relative_callbacks: u64,
+    pub rust_absolute_callbacks: u64,
+    pub rust_button_callbacks: u64,
+    pub rust_key_callbacks: u64,
+    pub relative_send_attempts: u64,
+    pub absolute_send_attempts: u64,
+    pub button_send_attempts: u64,
+    pub key_send_attempts: u64,
+    pub scroll_send_attempts: u64,
+    pub send_errors: u64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EmbeddedMoonlightInstanceStatus {
     pub instance_id: u64,
     pub enabled: bool,
@@ -1124,6 +1146,21 @@ async fn start_embedded_stream_for_host(
         }
         Err(error) => return Err(moonlight_frontend_error(error)),
     };
+
+    moonlight
+        .input
+        .set_mouse_mode(match prepared.preferences.input.mouse_mode {
+            crate::moonlight::domain::MouseMode::Relative => {
+                crate::input::state::MouseMode::Relative
+            }
+            crate::moonlight::domain::MouseMode::Absolute => {
+                crate::input::state::MouseMode::Absolute
+            }
+        });
+    moonlight.input.set_stream_dimensions(
+        prepared.preferences.video.width,
+        prepared.preferences.video.height,
+    );
 
     let stream_window = create_or_reuse_stream_window(
         app,
@@ -3632,6 +3669,21 @@ pub async fn moonlight_start_stream(
     .await
     .map_err(moonlight_frontend_error)?;
 
+    moonlight
+        .input
+        .set_mouse_mode(match prepared.preferences.input.mouse_mode {
+            crate::moonlight::domain::MouseMode::Relative => {
+                crate::input::state::MouseMode::Relative
+            }
+            crate::moonlight::domain::MouseMode::Absolute => {
+                crate::input::state::MouseMode::Absolute
+            }
+        });
+    moonlight.input.set_stream_dimensions(
+        prepared.preferences.video.width,
+        prepared.preferences.video.height,
+    );
+
     let stream_window = create_or_reuse_stream_window(
         &app,
         prepared.preferences.video.width,
@@ -3971,6 +4023,34 @@ pub async fn moonlight_get_active_input_mode(
             crate::moonlight::domain::MouseMode::Absolute => "absolute".to_string(),
         });
     Ok(MoonlightActiveInputModeResponse { mouse_mode })
+}
+
+#[tauri::command]
+pub async fn moonlight_get_input_debug_state(
+    _moonlight: State<'_, MoonlightManager>,
+) -> Result<MoonlightInputDebugStateResponse, FrontendError> {
+    let native = crate::moonlight::platform::macos_input::macos_input_debug_snapshot();
+    let worker = crate::input::worker::input_worker_debug_snapshot();
+
+    Ok(MoonlightInputDebugStateResponse {
+        capture_active: native.capture_active,
+        capture_mode: native.capture_mode,
+        capture_requests: native.capture_requests,
+        native_mouse_moves: native.native_mouse_moves,
+        native_mouse_downs: native.native_mouse_downs,
+        native_mouse_ups: native.native_mouse_ups,
+        native_keys: native.native_keys,
+        rust_relative_callbacks: native.rust_relative_callbacks,
+        rust_absolute_callbacks: native.rust_absolute_callbacks,
+        rust_button_callbacks: native.rust_button_callbacks,
+        rust_key_callbacks: native.rust_key_callbacks,
+        relative_send_attempts: worker.relative_send_attempts,
+        absolute_send_attempts: worker.absolute_send_attempts,
+        button_send_attempts: worker.button_send_attempts,
+        key_send_attempts: worker.key_send_attempts,
+        scroll_send_attempts: worker.scroll_send_attempts,
+        send_errors: worker.send_errors,
+    })
 }
 
 #[tauri::command]

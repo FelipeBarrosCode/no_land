@@ -1,6 +1,11 @@
 use std::ffi::c_void;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
+
+#[cfg(all(target_os = "macos", not(test)))]
+unsafe extern "C" {
+    fn noland_macos_resolve_stream_target_view(ns_view: *mut c_void) -> *mut c_void;
+}
 use tauri::{AppHandle, Manager, Runtime, Window};
 
 use crate::moonlight::{
@@ -103,17 +108,35 @@ fn surface_descriptor_from_raw_handles(
     scale_factor: f32,
 ) -> Result<NativeSurfaceDescriptor, MoonlightError> {
     match raw_window {
-        RawWindowHandle::AppKit(handle) => Ok(NativeSurfaceDescriptor {
-            surface_type: native::nl_surface_type_NL_SURFACE_MACOS_NSVIEW,
-            window_handle: handle.ns_view.as_ptr() as usize,
-            display_handle: match raw_display {
-                RawDisplayHandle::AppKit(_) => 0,
-                _ => 0,
-            },
-            width,
-            height,
-            scale_factor,
-        }),
+        RawWindowHandle::AppKit(handle) => {
+            let resolved_view = {
+                #[cfg(all(target_os = "macos", not(test)))]
+                {
+                    let resolved =
+                        unsafe { noland_macos_resolve_stream_target_view(handle.ns_view.as_ptr()) };
+                    if resolved.is_null() {
+                        handle.ns_view.as_ptr()
+                    } else {
+                        resolved
+                    }
+                }
+                #[cfg(any(not(target_os = "macos"), test))]
+                {
+                    handle.ns_view.as_ptr()
+                }
+            };
+            Ok(NativeSurfaceDescriptor {
+                surface_type: native::nl_surface_type_NL_SURFACE_MACOS_NSVIEW,
+                window_handle: resolved_view as usize,
+                display_handle: match raw_display {
+                    RawDisplayHandle::AppKit(_) => 0,
+                    _ => 0,
+                },
+                width,
+                height,
+                scale_factor,
+            })
+        }
         RawWindowHandle::Win32(handle) => Ok(NativeSurfaceDescriptor {
             surface_type: native::nl_surface_type_NL_SURFACE_WINDOWS_HWND,
             window_handle: handle.hwnd.get() as usize,

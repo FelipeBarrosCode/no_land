@@ -14,6 +14,40 @@ pub struct AbsolutePosition {
     pub reference_height: i16,
 }
 
+pub fn aspect_fit_video_rect(
+    content_width: f64,
+    content_height: f64,
+    video_width: u32,
+    video_height: u32,
+) -> Option<VideoRect> {
+    if content_width <= 0.0 || content_height <= 0.0 || video_width == 0 || video_height == 0 {
+        return None;
+    }
+
+    let source_aspect = video_width as f64 / video_height as f64;
+    let content_aspect = content_width / content_height;
+
+    if content_aspect > source_aspect {
+        let height = content_height;
+        let width = height * source_aspect;
+        Some(VideoRect {
+            left: (content_width - width) / 2.0,
+            top: 0.0,
+            width,
+            height,
+        })
+    } else {
+        let width = content_width;
+        let height = width / source_aspect;
+        Some(VideoRect {
+            left: 0.0,
+            top: (content_height - height) / 2.0,
+            width,
+            height,
+        })
+    }
+}
+
 pub fn map_to_video(pointer_x: f64, pointer_y: f64, rect: VideoRect) -> Option<AbsolutePosition> {
     if rect.width <= 0.0 || rect.height <= 0.0 {
         return None;
@@ -41,7 +75,7 @@ pub fn map_to_video(pointer_x: f64, pointer_y: f64, rect: VideoRect) -> Option<A
 
 #[cfg(test)]
 mod tests {
-    use super::{map_to_video, VideoRect};
+    use super::{aspect_fit_video_rect, map_to_video, VideoRect};
 
     #[test]
     fn maps_center_of_video() {
@@ -76,5 +110,23 @@ mod tests {
             },
         )
         .is_none());
+    }
+
+    #[test]
+    fn computes_aspect_fit_video_rect_for_letterboxed_view() {
+        let rect = aspect_fit_video_rect(1600.0, 1000.0, 1920, 1080).unwrap();
+        assert_eq!(rect.left, 0.0);
+        assert_eq!(rect.top, 50.0);
+        assert_eq!(rect.width, 1600.0);
+        assert_eq!(rect.height, 900.0);
+    }
+
+    #[test]
+    fn computes_aspect_fit_video_rect_for_pillarboxed_view() {
+        let rect = aspect_fit_video_rect(1000.0, 1000.0, 1920, 1080).unwrap();
+        assert_eq!(rect.left, 0.0);
+        assert_eq!(rect.top, 218.75);
+        assert_eq!(rect.width, 1000.0);
+        assert_eq!(rect.height, 562.5);
     }
 }
