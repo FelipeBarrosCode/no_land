@@ -289,15 +289,14 @@ static PSDP_OPTION getAttributesList(char*urlSafeAddr) {
             EncryptionFeaturesEnabled |= SS_ENC_VIDEO;
         }
 
-        // If audio encryption is supported by the host and desired by the client, use it
+        // If audio encryption is supported by the host and desired by the client, use it.
+        // For the embedded Noland client, forcing host-requested audio encryption currently
+        // results in silent/invalid decoded PCM on macOS, so respect explicit client opt-out.
         if ((EncryptionFeaturesSupported & SS_ENC_AUDIO) && (StreamConfig.encryptionFlags & ENCFLG_AUDIO)) {
             EncryptionFeaturesEnabled |= SS_ENC_AUDIO;
         }
         else if ((EncryptionFeaturesRequested & SS_ENC_AUDIO) && !(StreamConfig.encryptionFlags & ENCFLG_AUDIO)) {
-            // If audio encryption is explicitly requested by the host but *not* by the client,
-            // we'll encrypt anyway (since we are capable of doing so) and print a warning.
-            Limelog("Enabling audio encryption by host request despite client opt-out. Audio quality may suffer!");
-            EncryptionFeaturesEnabled |= SS_ENC_AUDIO;
+            Limelog("Leaving audio encryption disabled due to explicit client opt-out\n");
         }
 
         snprintf(payloadStr, sizeof(payloadStr), "%" PRIu32, EncryptionFeaturesEnabled);

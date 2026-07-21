@@ -13,7 +13,10 @@ impl RemoteInputCrypto {
         let mut key = [0u8; 16];
         let mut iv = [0u8; 16];
         OsRng.fill_bytes(&mut key);
-        OsRng.fill_bytes(&mut iv);
+
+        let ri_key_id = OsRng.next_u32();
+        iv[..4].copy_from_slice(&ri_key_id.to_be_bytes());
+
         Self { key, iv }
     }
 
@@ -22,11 +25,11 @@ impl RemoteInputCrypto {
     }
 
     pub fn iv_decimal(&self) -> String {
-        let mut value = 0u128;
-        for byte in self.iv {
-            value = (value << 8) | (byte as u128);
-        }
-        value.to_string()
+        self.ri_key_id().to_string()
+    }
+
+    pub fn ri_key_id(&self) -> u32 {
+        u32::from_be_bytes([self.iv[0], self.iv[1], self.iv[2], self.iv[3]])
     }
 }
 
@@ -150,12 +153,13 @@ mod tests {
         let prefs = StreamPreferences::default();
         let crypto = RemoteInputCrypto {
             key: [1; 16],
-            iv: [2; 16],
+            iv: [0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
         };
         let params = build_launch_parameters(7, LaunchOperation::Launch, &prefs, &crypto);
         assert_eq!(params.app_id, 7);
         assert_eq!(params.mode, "1920x1080x60");
         assert_eq!(params.ri_key_hex.len(), 32);
         assert!(!params.ri_key_id.is_empty());
+        assert_eq!(params.ri_key_id, crypto.ri_key_id().to_string());
     }
 }

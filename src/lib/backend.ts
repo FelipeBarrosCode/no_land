@@ -340,6 +340,12 @@ export async function moonlightDeactivateNativeMouseCapture(): Promise<boolean> 
   return invokeSafe<boolean>("moonlight_deactivate_native_mouse_capture");
 }
 
+export async function moonlightDisconnectStream(): Promise<{
+  state: string;
+}> {
+  return invokeSafe<{ state: string }>("moonlight_disconnect_stream");
+}
+
 export async function moonlightSendRelativeMouse(input: {
   deltaX: number;
   deltaY: number;

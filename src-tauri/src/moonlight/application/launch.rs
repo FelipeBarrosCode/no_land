@@ -57,6 +57,16 @@ pub async fn start_stream_request(
         host.preferences_override.as_ref(),
         session_preferences,
     );
+    if matches!(
+        merged.network.encryption,
+        crate::moonlight::domain::EncryptionMode::All
+    ) {
+        tracing::warn!(
+            host_id,
+            "downgrading embedded stream encryption from All to Control to avoid silent/corrupted native audio on current client"
+        );
+        merged.network.encryption = crate::moonlight::domain::EncryptionMode::Control;
+    }
     if app_id == 0
         && session_preferences
             .and_then(|patch| patch.input.as_ref())
