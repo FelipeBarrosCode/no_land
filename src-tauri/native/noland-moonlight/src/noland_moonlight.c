@@ -1,4 +1,5 @@
 #include "noland_moonlight.h"
+#include "noland_audio_renderer.h"
 #include "noland_video_renderer.h"
 #include "Limelight.h"
 
@@ -31,6 +32,8 @@ typedef struct nl_owned_start_request {
   int32_t packet_size;
   int32_t streaming_remotely;
   int32_t audio_configuration;
+  uint32_t audio_target_buffer_ms;
+  uint32_t audio_maximum_buffer_ms;
   int32_t supported_video_formats;
   int32_t client_refresh_rate_x100;
   int32_t color_space;
@@ -68,6 +71,7 @@ struct nl_runtime {
   uint64_t controller_arrival_count;
   uint64_t controller_state_count;
   nl_video_renderer_t renderer;
+  nl_audio_renderer_t audio_renderer;
   int32_t last_video_frame_number;
   int32_t last_video_frame_type;
   int32_t last_video_frame_length;
@@ -191,6 +195,8 @@ static bool nl_owned_request_copy(nl_owned_start_request_t* output, const nl_sta
   output->packet_size = input->packet_size;
   output->streaming_remotely = input->streaming_remotely;
   output->audio_configuration = input->audio_configuration;
+  output->audio_target_buffer_ms = input->audio_target_buffer_ms;
+  output->audio_maximum_buffer_ms = input->audio_maximum_buffer_ms;
   output->supported_video_formats = input->supported_video_formats;
   output->client_refresh_rate_x100 = input->client_refresh_rate_x100;
   output->color_space = input->color_space;
@@ -449,30 +455,55 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
 static int nl_audio_init(int audioConfiguration, const POPUS_MULTISTREAM_CONFIGURATION opusConfig, void* context, int arFlags) {
   nl_runtime_t* runtime = (nl_runtime_t*)context;
   char message[256];
-  (void)opusConfig;
-  (void)arFlags;
-  if (runtime == NULL) {
+  int result;
+  if (runtime == NULL || opusConfig == NULL) {
     return -1;
   }
+
+  result = nl_audio_renderer_init(&runtime->audio_renderer, audioConfiguration, opusConfig, arFlags);
+  if (result != 0) {
+    return result;
+  }
+
   nl_runtime_lock(runtime);
   runtime->audio_init_count += 1U;
   nl_runtime_unlock(runtime);
-  snprintf(message, sizeof(message), "audio init configuration=%d", audioConfiguration);
+  snprintf(message, sizeof(message), "audio init configuration=%d channels=%d rate=%d frame=%d target=%u max=%u", audioConfiguration, opusConfig->channelCount, opusConfig->sampleRate, opusConfig->samplesPerFrame, (unsigned int)runtime->audio_renderer.target_buffer_ms, (unsigned int)runtime->audio_renderer.maximum_buffer_ms);
   nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, message);
   return 0;
 }
 
-static void nl_audio_start(void) {}
-static void nl_audio_stop(void) {}
-static void nl_audio_cleanup(void) {}
+static void nl_audio_start(void) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL) {
+    return;
+  }
+  nl_audio_renderer_start(&runtime->audio_renderer);
+}
+
+static void nl_audio_stop(void) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL) {
+    return;
+  }
+  nl_audio_renderer_stop(&runtime->audio_renderer);
+}
+
+static void nl_audio_cleanup(void) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL) {
+    return;
+  }
+  nl_audio_renderer_cleanup(&runtime->audio_renderer);
+}
+
 static void nl_audio_decode_and_play_sample(char* sampleData, int sampleLength) {
   nl_runtime_t* runtime = nl_get_active_runtime();
-  (void)sampleData;
-  (void)sampleLength;
   if (runtime != NULL) {
     nl_runtime_lock(runtime);
     runtime->audio_sample_count += 1U;
     nl_runtime_unlock(runtime);
+    nl_audio_renderer_decode_and_play_sample(&runtime->audio_renderer, sampleData, sampleLength);
   }
 }
 
@@ -551,6 +582,8 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   streamConfig.packetSize = runtime->request.packet_size;
   streamConfig.streamingRemotely = runtime->request.streaming_remotely;
   streamConfig.audioConfiguration = runtime->request.audio_configuration;
+  runtime->audio_renderer.target_buffer_ms = runtime->request.audio_target_buffer_ms;
+  runtime->audio_renderer.maximum_buffer_ms = runtime->request.audio_maximum_buffer_ms;
   streamConfig.supportedVideoFormats = runtime->request.supported_video_formats;
   streamConfig.clientRefreshRateX100 = runtime->request.client_refresh_rate_x100;
   streamConfig.colorSpace = runtime->request.color_space;
@@ -563,12 +596,14 @@ static int nl_run_connection(nl_runtime_t* runtime) {
     snprintf(
         message,
         sizeof(message),
-        "starting host=%s appId=%u address=%s audio=0x%08X channels=%d remote=%d packet=%d sessionUrl=%s",
+        "starting host=%s appId=%u address=%s audio=0x%08X channels=%d target=%u max=%u remote=%d packet=%d sessionUrl=%s",
         runtime->request.host_id,
         (unsigned int)runtime->request.app_id,
         runtime->request.host_address,
         (unsigned int)runtime->request.audio_configuration,
         (runtime->request.audio_configuration >> 8) & 0xFF,
+        (unsigned int)runtime->request.audio_target_buffer_ms,
+        (unsigned int)runtime->request.audio_maximum_buffer_ms,
         runtime->request.streaming_remotely,
         runtime->request.packet_size,
         runtime->request.session_url != NULL ? "yes" : "no");
@@ -594,6 +629,7 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   audioCallbacks.stop = nl_audio_stop;
   audioCallbacks.cleanup = nl_audio_cleanup;
   audioCallbacks.decodeAndPlaySample = nl_audio_decode_and_play_sample;
+  audioCallbacks.capabilities = CAPABILITY_SUPPORTS_ARBITRARY_AUDIO_DURATION;
 
   nl_set_active_runtime(runtime);
   return LiStartConnection(&serverInfo, &streamConfig, &connectionCallbacks, &videoCallbacks, &audioCallbacks, runtime, 0, runtime, 0);
@@ -627,6 +663,9 @@ nl_result_t nl_runtime_create(nl_runtime_t** output) {
   }
   runtime->state = NL_STREAM_STATE_IDLE;
   nl_video_renderer_init(&runtime->renderer);
+  memset(&runtime->audio_renderer, 0, sizeof(runtime->audio_renderer));
+  runtime->audio_renderer.target_buffer_ms = 20U;
+  runtime->audio_renderer.maximum_buffer_ms = 80U;
 #if defined(_WIN32)
   InitializeCriticalSection(&runtime->mutex);
   runtime->worker_thread = NULL;
@@ -659,6 +698,7 @@ void nl_runtime_destroy(nl_runtime_t* runtime) {
   }
   pthread_mutex_destroy(&runtime->mutex);
 #endif
+  nl_audio_renderer_cleanup(&runtime->audio_renderer);
   nl_owned_request_clear(&runtime->request);
   free(runtime);
 }

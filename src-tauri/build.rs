@@ -37,7 +37,19 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         native_root
+            .join("noland-moonlight/src/noland_audio_renderer.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
             .join("noland-moonlight/src/noland_video_renderer_macos.m")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_audio_renderer_macos.m")
             .display()
     );
     println!(
@@ -74,7 +86,10 @@ fn main() {
             .compile("noland_macos_stream_input");
         println!("cargo:rustc-link-search=native=/opt/homebrew/opt/openssl@3/lib");
         println!("cargo:rustc-link-search=native=/usr/local/opt/openssl@3/lib");
+        println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
         println!("cargo:rustc-link-lib=dylib=crypto");
+        println!("cargo:rustc-link-lib=dylib=opus");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");

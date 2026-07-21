@@ -526,6 +526,8 @@ impl NativeRuntime {
             streaming_mode = ?request.preferences.network.streaming_mode,
             audio_configuration = ?request.preferences.audio.configuration,
             audio_configuration_native = format!("0x{audio_configuration:08X}"),
+            audio_target_buffer_ms = request.preferences.audio.target_buffer_ms,
+            audio_maximum_buffer_ms = request.preferences.audio.maximum_buffer_ms,
             supported_video_formats = format!("0x{:08X}", request.supported_video_formats),
             encryption = ?request.preferences.network.encryption,
             "starting moonlight native stream"
@@ -568,6 +570,8 @@ impl NativeRuntime {
             packet_size: request.preferences.network.packet_size as i32,
             streaming_remotely: streaming_mode_native(request.preferences.network.streaming_mode),
             audio_configuration,
+            audio_target_buffer_ms: request.preferences.audio.target_buffer_ms,
+            audio_maximum_buffer_ms: request.preferences.audio.maximum_buffer_ms,
             supported_video_formats: request.supported_video_formats as i32,
             client_refresh_rate_x100: (request.preferences.video.fps * 100) as i32,
             color_space: color_space_native(request.preferences.video.color_space),

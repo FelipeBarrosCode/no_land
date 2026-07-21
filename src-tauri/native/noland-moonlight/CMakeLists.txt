@@ -4,19 +4,23 @@ add_library(noland_moonlight STATIC
 )
 
 if(APPLE)
-  target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m)
+  target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m src/noland_audio_renderer_macos.m)
 endif()
+
+find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS /opt/homebrew/include /usr/local/include REQUIRED)
+find_library(OPUS_LIBRARY opus HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
 
 target_include_directories(noland_moonlight
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
   PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../moonlight-common-c/src
+    ${OPUS_INCLUDE_DIR}
 )
 
 target_compile_features(noland_moonlight PRIVATE c_std_11)
 set_target_properties(noland_moonlight PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(noland_moonlight PRIVATE moonlight-common-c)
+target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY})
 
 if(APPLE)
   find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
@@ -31,7 +35,11 @@ if(APPLE)
     ${COREVIDEO_FRAMEWORK}
     ${QUARTZCORE_FRAMEWORK}
   )
-  set_source_files_properties(src/noland_video_renderer_macos.m PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+  set_source_files_properties(
+    src/noland_video_renderer_macos.m
+    src/noland_audio_renderer_macos.m
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+  )
 endif()
 
 install(TARGETS noland_moonlight ARCHIVE DESTINATION lib LIBRARY DESTINATION lib RUNTIME DESTINATION bin)

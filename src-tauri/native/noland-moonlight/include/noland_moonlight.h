@@ -64,6 +64,8 @@ typedef struct nl_start_request {
   int32_t packet_size;
   int32_t streaming_remotely;
   int32_t audio_configuration;
+  uint32_t audio_target_buffer_ms;
+  uint32_t audio_maximum_buffer_ms;
   int32_t supported_video_formats;
   int32_t client_refresh_rate_x100;
   int32_t color_space;
