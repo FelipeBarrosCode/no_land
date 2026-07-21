@@ -48,7 +48,6 @@ static const unsigned char kNolandModifierMeta = 0x08;
 @interface NolandMacosCaptureView : NSView
 @property (nonatomic, weak) NolandMacosStreamInputBridge *bridge;
 @property (nonatomic, strong) NSTrackingArea *trackingArea;
-- (void)updateDebugFlashColor:(NSColor *)color;
 @end
 
 @interface NolandMacosStreamInputBridge : NSObject
@@ -392,17 +391,7 @@ static void noland_handle_flags_changed(NolandMacosStreamInputBridge *bridge, NS
 
 @implementation NolandMacosCaptureView
 
-- (void)updateDebugFlashColor:(NSColor *)color {
-    if (self.layer == nil) {
-        return;
-    }
-    self.layer.backgroundColor = [color colorWithAlphaComponent:0.18].CGColor;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(120 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-        if (self.layer != nil) {
-            self.layer.backgroundColor = NSColor.clearColor.CGColor;
-        }
-    });
-}
+
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
@@ -544,7 +533,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
                 return NO;
             }
             noland_macos_input_debug_native_event(1);
-            [bridge.captureView updateDebugFlashColor:NSColor.systemGreenColor];
             noland_handle_mouse_motion(bridge, event);
             NSLog(@"[noland-stream-input] mouse motion active=%d mode=%ld point=(%.1f, %.1f) dx=%.2f dy=%.2f",
                   bridge.captureActive,
@@ -560,7 +548,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
             }
             noland_macos_input_debug_native_event(2);
             [bridge.window makeFirstResponder:bridge.captureView];
-            [bridge.captureView updateDebugFlashColor:NSColor.systemRedColor];
             NSLog(@"[noland-stream-input] left down active=%d mode=%ld point=(%.1f, %.1f)",
                   bridge.captureActive,
                   (long)bridge.captureMode,
@@ -585,7 +572,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
                 return NO;
             }
             noland_macos_input_debug_native_event(3);
-            [bridge.captureView updateDebugFlashColor:NSColor.systemOrangeColor];
             if (bridge.suppressNextLeftMouseUp) {
                 bridge.suppressNextLeftMouseUp = NO;
                 NSLog(@"[noland-stream-input] suppress left up after capture activation");
@@ -604,7 +590,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
             }
             noland_macos_input_debug_native_event(2);
             [bridge.window makeFirstResponder:bridge.captureView];
-            [bridge.captureView updateDebugFlashColor:NSColor.systemRedColor];
             NSLog(@"[noland-stream-input] mouse down type=%ld active=%d button=%ld",
                   (long)event.type,
                   bridge.captureActive,
@@ -620,7 +605,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
                 return NO;
             }
             noland_macos_input_debug_native_event(3);
-            [bridge.captureView updateDebugFlashColor:NSColor.systemOrangeColor];
             NSLog(@"[noland-stream-input] mouse up type=%ld button=%ld", (long)event.type, (long)event.buttonNumber);
             noland_handle_mouse_button(bridge, event, false);
             return YES;
@@ -628,7 +612,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
             if (!bridge.captureActive && !noland_bridge_contains_window_point(bridge, event.locationInWindow)) {
                 return NO;
             }
-            [bridge.captureView updateDebugFlashColor:NSColor.systemBlueColor];
             noland_handle_scroll(bridge, event);
             return bridge.captureActive;
         case NSEventTypeKeyDown:
@@ -636,7 +619,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
                 return NO;
             }
             noland_macos_input_debug_native_event(4);
-            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
             NSLog(@"[noland-stream-input] key down code=%hu mods=%llu", event.keyCode, (unsigned long long)event.modifierFlags);
             noland_handle_key(bridge, event, true);
             return YES;
@@ -645,7 +627,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
                 return NO;
             }
             noland_macos_input_debug_native_event(4);
-            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
             NSLog(@"[noland-stream-input] key up code=%hu mods=%llu", event.keyCode, (unsigned long long)event.modifierFlags);
             noland_handle_key(bridge, event, false);
             return YES;
@@ -653,7 +634,6 @@ static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEve
             if (!bridge.captureActive) {
                 return NO;
             }
-            [bridge.captureView updateDebugFlashColor:NSColor.systemPurpleColor];
             noland_handle_flags_changed(bridge, event);
             return YES;
         default:
