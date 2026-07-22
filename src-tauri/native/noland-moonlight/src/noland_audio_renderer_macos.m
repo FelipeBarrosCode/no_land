@@ -67,8 +67,6 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   AVAudioEngine* _engine;
   AVAudioPlayerNode* _player;
   AVAudioFormat* _sourceFormat;
-  AVAudioFormat* _playbackFormat;
-  AVAudioConverter* _converter;
   dispatch_queue_t _queue;
   OpusMSDecoder* _decoder;
   float* _decodeScratch;
@@ -150,33 +148,15 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   _player = [[AVAudioPlayerNode alloc] init];
   [_engine attachNode:_player];
 
-  AVAudioFormat* mixerOutputFormat = [_engine.mainMixerNode outputFormatForBus:0];
-  AVAudioFormat* outputNodeInputFormat = [_engine.outputNode inputFormatForBus:0];
-  double playbackSampleRate = mixerOutputFormat != nil && mixerOutputFormat.sampleRate > 0.0
-      ? mixerOutputFormat.sampleRate
-      : (outputNodeInputFormat != nil && outputNodeInputFormat.sampleRate > 0.0
-            ? outputNodeInputFormat.sampleRate
-            : (double)_sampleRate);
-  _playbackFormat = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:playbackSampleRate
-                                                                   channels:(AVAudioChannelCount)_channelCount];
-  if (_playbackFormat == nil) {
-    return nil;
-  }
-
-  if (fabs(_playbackFormat.sampleRate - _sourceFormat.sampleRate) > 0.5 ||
-      _playbackFormat.channelCount != _sourceFormat.channelCount) {
-    _converter = [[AVAudioConverter alloc] initFromFormat:_sourceFormat toFormat:_playbackFormat];
-    if (_converter == nil) {
-      NSLog(@"[noland-audio] failed to create converter from %@ to %@", _sourceFormat, _playbackFormat);
-      return nil;
-    }
-  }
-
-  [_engine connect:_player to:_engine.mainMixerNode format:_playbackFormat];
+  // Connect player → main mixer with nil format so AVAudioEngine
+  // inserts any needed sample-rate converter automatically.
+  [_engine connect:_player to:_engine.mainMixerNode format:nil];
   _player.volume = 1.0f;
   _engine.mainMixerNode.outputVolume = 1.0f;
 
-  NSLog(@"[noland-audio] init sampleRate=%d channels=%d samplesPerFrame=%d chunkFrames=%u target=%u max=%u sourceFormat=%@ playbackFormat=%@ mixerOutputFormat=%@ outputFormat=%@ converter=%@ playerVolume=%.3f mixerVolume=%.3f",
+  AVAudioFormat* mixerOutputFormat = [_engine.mainMixerNode outputFormatForBus:0];
+  AVAudioFormat* outputNodeInputFormat = [_engine.outputNode inputFormatForBus:0];
+  NSLog(@"[noland-audio] init sampleRate=%d channels=%d samplesPerFrame=%d chunkFrames=%u target=%u max=%u sourceFormat=%@ mixerOutputFormat=%@ outputFormat=%@ playerVolume=%.3f mixerVolume=%.3f",
         _sampleRate,
         _channelCount,
         _samplesPerFrame,
@@ -184,10 +164,8 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
         (unsigned int)_targetBufferMs,
         (unsigned int)_maximumBufferMs,
         _sourceFormat,
-        _playbackFormat,
-        [_engine.mainMixerNode outputFormatForBus:0],
-        [_engine.outputNode inputFormatForBus:0],
-        _converter,
+        mixerOutputFormat,
+        outputNodeInputFormat,
         _player.volume,
         _engine.mainMixerNode.outputVolume);
   return self;
@@ -285,7 +263,7 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
 }
 
 - (void)scheduleInterleavedFrames:(uint32_t)frameCount {
-  if (_stagingInterleaved == NULL || _sourceFormat == nil || _playbackFormat == nil || _player == nil || frameCount == 0) {
+  if (_stagingInterleaved == NULL || _sourceFormat == nil || _player == nil || frameCount == 0) {
     return;
   }
 
@@ -306,65 +284,21 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   }
   sourceBuffer.frameLength = (AVAudioFrameCount)frameCount;
 
-  AVAudioPCMBuffer* playbackBuffer = sourceBuffer;
-  if (_converter != nil) {
-    double ratio = _playbackFormat.sampleRate / _sourceFormat.sampleRate;
-    AVAudioFrameCount convertedCapacity = (AVAudioFrameCount)MAX(1.0, ceil((double)frameCount * ratio) + 16.0);
-    AVAudioPCMBuffer* convertedBuffer = [[AVAudioPCMBuffer alloc] initWithPCMFormat:_playbackFormat
-                                                                       frameCapacity:convertedCapacity];
-    if (convertedBuffer == nil) {
-      return;
-    }
-
-    __block BOOL providedInput = NO;
-    NSError* conversionError = nil;
-    AVAudioConverterOutputStatus status = [_converter convertToBuffer:convertedBuffer
-                                                                error:&conversionError
-                                                   withInputFromBlock:^AVAudioBuffer* _Nullable(AVAudioPacketCount inNumPackets, AVAudioConverterInputStatus* outStatus) {
-      (void)inNumPackets;
-      if (providedInput) {
-        *outStatus = AVAudioConverterInputStatus_EndOfStream;
-        return nil;
-      }
-      providedInput = YES;
-      *outStatus = AVAudioConverterInputStatus_HaveData;
-      return sourceBuffer;
-    }];
-
-    if (status == AVAudioConverterOutputStatus_Error || conversionError != nil) {
-      NSLog(@"[noland-audio] conversion failed status=%ld error=%@", (long)status, conversionError);
-      return;
-    }
-    if (convertedBuffer.frameLength == 0) {
-      NSLog(@"[noland-audio] conversion produced no frames status=%ld", (long)status);
-      return;
-    }
-    if (status != AVAudioConverterOutputStatus_HaveData && status != AVAudioConverterOutputStatus_InputRanDry) {
-      NSLog(@"[noland-audio] conversion returned unusual status=%ld frameLength=%u",
-            (long)status,
-            (unsigned int)convertedBuffer.frameLength);
-    }
-    playbackBuffer = convertedBuffer;
-  }
-
   [self incrementPendingBufferCount];
   _scheduledBufferCount += 1;
   if (_scheduledBufferCount <= 10 || (_scheduledBufferCount % 200) == 0) {
     float sourcePeak = nl_peak_for_buffer(sourceBuffer, sourceBuffer.frameLength, sourceBuffer.format.channelCount);
-    float playbackPeak = nl_peak_for_buffer(playbackBuffer, playbackBuffer.frameLength, playbackBuffer.format.channelCount);
-    NSLog(@"[noland-audio] scheduled buffer=%llu srcFrameLength=%u playbackFrameLength=%u pendingLocal=%ld sourcePeak=%.6f playbackPeak=%.6f playerVolume=%.3f mixerVolume=%.3f",
+    NSLog(@"[noland-audio] scheduled buffer=%llu srcFrameLength=%u pendingLocal=%ld sourcePeak=%.6f playerVolume=%.3f mixerVolume=%.3f",
           _scheduledBufferCount,
           (unsigned int)sourceBuffer.frameLength,
-          (unsigned int)playbackBuffer.frameLength,
           (long)[self pendingBufferCount],
           sourcePeak,
-          playbackPeak,
           _player.volume,
           _engine.mainMixerNode.outputVolume);
   }
 
   __block NolandAudioPlaybackContext* context = self;
-  [_player scheduleBuffer:playbackBuffer
+  [_player scheduleBuffer:sourceBuffer
         completionHandler:^{
           [context decrementPendingBufferCount];
         }];
@@ -404,11 +338,10 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   }
 
   dispatch_sync(_queue, ^{
-    if (_decoder == NULL || _sourceFormat == nil || _playbackFormat == nil || _player == nil) {
-      NSLog(@"[noland-audio] dropping packet before decode decoder=%p sourceFormat=%@ playbackFormat=%@ player=%@",
+    if (_decoder == NULL || _sourceFormat == nil || _player == nil) {
+      NSLog(@"[noland-audio] dropping packet before decode decoder=%p sourceFormat=%@ player=%@",
             _decoder,
             _sourceFormat,
-            _playbackFormat,
             _player);
       return;
     }

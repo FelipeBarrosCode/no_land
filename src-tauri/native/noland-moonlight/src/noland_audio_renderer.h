@@ -22,6 +22,17 @@ void nl_audio_renderer_cleanup(nl_audio_renderer_t* renderer);
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
                                               int sample_length);
+#elif defined(__linux__)
+int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
+                           int audio_configuration,
+                           const POPUS_MULTISTREAM_CONFIGURATION opus_config,
+                           int ar_flags);
+void nl_audio_renderer_start(nl_audio_renderer_t* renderer);
+void nl_audio_renderer_stop(nl_audio_renderer_t* renderer);
+void nl_audio_renderer_cleanup(nl_audio_renderer_t* renderer);
+void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
+                                              char* sample_data,
+                                              int sample_length);
 #else
 static inline int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
                                          int audio_configuration,

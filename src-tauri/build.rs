@@ -54,6 +54,12 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_audio_renderer_linux.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
     );
 
@@ -96,6 +102,11 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=CoreMedia");
         println!("cargo:rustc-link-lib=framework=CoreVideo");
         println!("cargo:rustc-link-lib=framework=QuartzCore");
+    }
+    if cfg!(target_os = "linux") {
+        println!("cargo:rustc-link-lib=dylib=opus");
+        println!("cargo:rustc-link-lib=dylib=pulse-simple");
+        println!("cargo:rustc-link-lib=dylib=pulse");
     }
 
     let bindings = bindgen::Builder::default()

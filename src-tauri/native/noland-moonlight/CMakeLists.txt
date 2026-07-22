@@ -5,6 +5,12 @@ add_library(noland_moonlight STATIC
 
 if(APPLE)
   target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m src/noland_audio_renderer_macos.m)
+elseif(UNIX)
+  target_sources(noland_moonlight PRIVATE src/noland_audio_renderer_linux.c)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(LIBPULSE_SIMPLE REQUIRED libpulse-simple)
+  target_include_directories(noland_moonlight PRIVATE ${LIBPULSE_SIMPLE_INCLUDE_DIRS})
+  target_link_libraries(noland_moonlight PRIVATE ${LIBPULSE_SIMPLE_LIBRARIES})
 endif()
 
 find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS /opt/homebrew/include /usr/local/include REQUIRED)

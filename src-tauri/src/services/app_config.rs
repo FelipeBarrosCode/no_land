@@ -29,6 +29,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone)]
 pub struct SunshineDefaults {
+    pub audio_sink: String,
     pub av1_mode: i32,
     pub bind_address: String,
     pub cpu_affinity: String,
@@ -118,6 +119,7 @@ impl Default for AppConfig {
             wireguard_download_url_macos: "https://www.wireguard.com/install/".to_string(),
             wireguard_download_url_linux: "https://www.wireguard.com/install/".to_string(),
             sunshine: SunshineDefaults {
+                audio_sink: "sunshine_audio".to_string(),
                 av1_mode: 1,
                 bind_address: env::var("NOLAND_SUNSHINE_BIND_ADDRESS").unwrap_or_default(),
                 cpu_affinity: "2-5".to_string(),
