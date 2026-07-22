@@ -4,6 +4,7 @@ use parking_lot::Mutex;
 
 use crate::{
     input::{
+        controller::ControllerManager,
         event::{ButtonState, InputEvent, MouseButton, OwnedInputEvent},
         mapping::{aspect_fit_video_rect, map_to_video, VideoRect},
         state::{CaptureState, MouseMode},
@@ -22,14 +23,18 @@ pub struct InputManager {
     state: Mutex<CaptureState>,
     pressed: Mutex<PressedInputState>,
     worker: InputWorkerHandle,
+    controllers: ControllerManager,
 }
 
 impl InputManager {
     pub fn new(runtime: MoonlightRuntimeHandle) -> Arc<Self> {
+        let worker = start_input_worker(runtime.clone());
+        let controllers = ControllerManager::start(runtime, worker.events.clone());
         Arc::new(Self {
             state: Mutex::new(CaptureState::default()),
             pressed: Mutex::new(PressedInputState::default()),
-            worker: start_input_worker(runtime),
+            worker,
+            controllers,
         })
     }
 
@@ -253,6 +258,7 @@ impl InputManager {
     }
 
     pub fn stop_worker(&self) {
+        self.controllers.stop();
         self.worker.stop();
     }
 

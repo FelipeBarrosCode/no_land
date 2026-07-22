@@ -60,6 +60,12 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_audio_renderer_windows.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
     );
 

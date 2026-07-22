@@ -1242,7 +1242,7 @@ fn detect_codec_support() -> MoonlightCodecSupport {
     {
         return MoonlightCodecSupport {
             h264: true,
-            hevc: cfg!(target_arch = "aarch64"),
+            hevc: true,
             av1: false,
         };
     }
@@ -1263,9 +1263,16 @@ fn detect_codec_support() -> MoonlightCodecSupport {
             let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
             support.hevc = text.contains(" hevc ")
                 || text.contains("hevc_cuvid")
-                || text.contains("hevc_vaapi");
+                || text.contains("hevc_vaapi")
+                || text.contains("hevc_vdpau");
             support.av1 =
                 text.contains(" av1 ") || text.contains("av1_cuvid") || text.contains("av1_vaapi");
+        }
+
+        // Moonlight bundles its own ffmpeg software decoder, so HEVC works
+        // even when a hardware decoder isn't listed.
+        if !support.hevc {
+            support.hevc = true;
         }
 
         return support;
