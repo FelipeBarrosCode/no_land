@@ -37,6 +37,9 @@ typedef struct nl_audio_playout_controller {
   uint32_t maximum_buffer_frames;
   uint32_t startup_prefill_frames;
   uint32_t stable_high_watermark_counter;
+  uint16_t expected_sequence_number;
+  uint64_t expected_extended_rtp_timestamp;
+  bool has_expected_packet;
   uint64_t decoded_packet_count;
   uint64_t concealment_count;
   uint64_t dropped_frames_count;

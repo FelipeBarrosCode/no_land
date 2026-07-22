@@ -430,7 +430,8 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     int renderer_result;
     uint64_t audio_now_us = 0;
     int64_t sync_error_us = 0;
-    unsigned int wait_budget_ms = 250;
+    unsigned int wait_budget_ms = 50;
+    const int64_t late_drop_threshold_us = -80000;
     memset(&frame, 0, sizeof(frame));
     frame.frame_number = decodeUnit->frameNumber;
     frame.frame_type = decodeUnit->frameType;
@@ -451,19 +452,6 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     if (LiIsAudioMasterClockValid()) {
       audio_now_us = LiGetAudioMasterClockMediaTimeUs();
       sync_error_us = (int64_t)frame.presentation_time_us - (int64_t)audio_now_us;
-
-      if (sync_error_us > 8000) {
-        uint64_t wait_us = (uint64_t)sync_error_us - 8000ULL;
-        unsigned int sleep_ms = (unsigned int)(wait_us / 1000ULL);
-        if (sleep_ms > 0U) {
-          if (sleep_ms > 50U) {
-            sleep_ms = 50U;
-          }
-          nl_sleep_milliseconds(sleep_ms);
-          audio_now_us = LiGetAudioMasterClockMediaTimeUs();
-          sync_error_us = (int64_t)frame.presentation_time_us - (int64_t)audio_now_us;
-        }
-      }
     }
 
     nl_runtime_lock(runtime);
@@ -478,7 +466,7 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     runtime->last_video_rtp_timestamp = frame.rtp_timestamp;
     runtime->last_video_hdr_active = frame.hdr_active;
     runtime->last_video_colorspace = frame.colorspace;
-    if (LiIsAudioMasterClockValid() && sync_error_us < -35000) {
+    if (LiIsAudioMasterClockValid() && sync_error_us < late_drop_threshold_us && frame.frame_type != FRAME_TYPE_IDR) {
       runtime->renderer.dropped_frame_count += 1U;
       snprintf(message, sizeof(message), "video frame #%d dropped late sync=%lldus", frame.frame_number, (long long)sync_error_us);
       nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame.frame_number, message);
