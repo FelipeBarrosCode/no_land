@@ -404,7 +404,7 @@ fn moonlight_frontend_error(error: crate::moonlight::domain::MoonlightError) -> 
     }
 }
 
-fn session_state_name(state: &SessionState) -> String {
+fn session_state_name(state: &SessionState) -> &'static str {
     match state {
         SessionState::Idle => "idle",
         SessionState::Preparing => "preparing",
@@ -415,7 +415,38 @@ fn session_state_name(state: &SessionState) -> String {
         SessionState::Reconnecting => "reconnecting",
         SessionState::Stopping => "stopping",
     }
-    .to_string()
+}
+
+async fn stop_active_stream_if_needed(
+    app: &AppHandle,
+    moonlight: &MoonlightManager,
+) -> Result<(), FrontendError> {
+    let state = moonlight
+        .runtime
+        .get_state()
+        .await
+        .map_err(moonlight_frontend_error)?;
+
+    if matches!(state, SessionState::Idle) {
+        return Ok(());
+    }
+
+    moonlight
+        .runtime
+        .stop()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    moonlight
+        .runtime
+        .detach_surface()
+        .await
+        .map_err(moonlight_frontend_error)?;
+    moonlight.input.end_capture();
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = None;
+    }
+    close_stream_window(app).map_err(moonlight_frontend_error)?;
+    Ok(())
 }
 
 fn parse_capture_mouse_mode(mode: &str) -> Result<CaptureMouseMode, FrontendError> {
@@ -1240,7 +1271,7 @@ async fn start_embedded_stream_for_host(
             crate::moonlight::domain::LaunchOperation::Resume => "resume",
         }
         .to_string(),
-        state: session_state_name(&state),
+        state: session_state_name(&state).to_string(),
         has_session_url: prepared.launch_result.rtsp_session_url.is_some(),
     })
 }
@@ -1550,6 +1581,7 @@ pub async fn select_offer(
 pub async fn start_play_flow(
     app: AppHandle,
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
 ) -> Result<(), FrontendError> {
     let preflight = local_environment_check(true);
     if !preflight.ok {
@@ -1573,6 +1605,7 @@ pub async fn start_play_flow(
         .into());
     }
 
+    stop_active_stream_if_needed(&app, moonlight.inner()).await?;
     OrchestrationService::start_play_flow(app, context.inner().clone()).await?;
     Ok(())
 }
@@ -1584,6 +1617,7 @@ pub async fn start_play_existing_instance(
     context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<String, FrontendError> {
+    stop_active_stream_if_needed(&app, moonlight.inner()).await?;
     let embedded_enabled = {
         let state = context.state.read().await;
         state
@@ -3762,7 +3796,7 @@ pub async fn moonlight_start_stream(
             crate::moonlight::domain::LaunchOperation::Resume => "resume",
         }
         .to_string(),
-        state: session_state_name(&state),
+        state: session_state_name(&state).to_string(),
         has_session_url: prepared.launch_result.rtsp_session_url.is_some(),
     })
 }
@@ -3793,7 +3827,7 @@ pub async fn moonlight_disconnect_stream(
         .await
         .map_err(moonlight_frontend_error)?;
     Ok(MoonlightSessionStateResponse {
-        state: session_state_name(&state),
+        state: session_state_name(&state).to_string(),
     })
 }
 
@@ -4063,6 +4097,6 @@ pub async fn moonlight_get_session_state(
         .await
         .map_err(moonlight_frontend_error)?;
     Ok(MoonlightSessionStateResponse {
-        state: session_state_name(&state),
+        state: session_state_name(&state).to_string(),
     })
 }

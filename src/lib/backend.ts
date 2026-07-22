@@ -422,6 +422,12 @@ export async function moonlightGetInputDebugState(): Promise<{
   return invokeSafe("moonlight_get_input_debug_state");
 }
 
+export async function moonlightGetSessionState(): Promise<{
+  state: string;
+}> {
+  return invokeSafe<{ state: string }>("moonlight_get_session_state");
+}
+
 export async function regenerateEdid(payload: {
   mode: "auto_detect" | "manual";
   refreshRateHz: number;

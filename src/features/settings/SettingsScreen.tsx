@@ -82,26 +82,90 @@ function toNumber(value: string, fallback: number): number {
   return parsed;
 }
 
-const clientNumericFields: Array<
-  keyof Omit<ClientForm, "refreshRateMode" | "displayOutput" | "aspectRatio">
-> = [
-  "bitrate",
-  "fps",
-  "width",
-  "height",
-  "hostaudio",
-  "showperfoverlay",
-  "keepawake",
-  "framepacing",
-  "vsync",
-  "hdr",
-  "videocfg",
-  "videodec",
-  "yuv444",
-  "gameopts",
-  "gamepadmouse",
-  "detectnetblocking",
+type SelectOption = {
+  value: string;
+  label: string;
+};
+
+const binaryOptions: SelectOption[] = [
+  { value: "0", label: "Disabled" },
+  { value: "1", label: "Enabled" },
 ];
+
+const hostAudioOptions: SelectOption[] = [
+  { value: "0", label: "Play locally" },
+  { value: "1", label: "Play on cloud machine" },
+];
+
+const codecOptions: SelectOption[] = [
+  { value: "0", label: "Automatic" },
+  { value: "1", label: "Force H.264" },
+  { value: "2", label: "Force HEVC (H.265)" },
+  { value: "3", label: "Force AV1" },
+];
+
+const decoderOptions: SelectOption[] = [
+  { value: "0", label: "Automatic" },
+  { value: "1", label: "Force software decode" },
+  { value: "2", label: "Force hardware decode" },
+];
+
+function SettingsSubsection({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-[#3b4067] bg-[#10152f] p-4">
+      <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+        {title}
+      </h3>
+      {description ? (
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">{description}</p>
+      ) : null}
+      <div className="mt-4">{children}</div>
+    </div>
+  );
+}
+
+function SettingHelp({ children }: { children: React.ReactNode }) {
+  return <p className="mt-1 text-[1rem] leading-snug text-[#8fa9c8]">{children}</p>;
+}
+
+function SelectField({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  options: SelectOption[];
+  onChange: (value: string) => void;
+}) {
+  return (
+    <label className="flex flex-col gap-2 text-base">
+      <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">
+        {label}
+      </span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.2rem] leading-none text-[#dff8ff] outline-none transition focus:border-neon-cyan focus:shadow-[inset_0_0_0_2px_#121731,0_0_0_2px_rgba(68,214,255,0.28)]"
+      >
+        {options.map((option) => (
+          <option key={option.value} value={option.value}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
 
 export function SettingsScreen({
   appState,
@@ -403,36 +467,42 @@ export function SettingsScreen({
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         Client (Moonlight)
       </h2>
-      <div className="mt-4 border border-[#3b4067] bg-[#10152f] p-4">
-        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Headless EDID
-        </h3>
-        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Display source: {appState.sunshine.edidSourceLabel || "Unknown"}
-        </p>
-        <div className="mt-3 grid gap-3 md:grid-cols-2">
-          <div className="space-y-2">
-            <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
-              EDID Mode
-            </label>
-            <select
-              value={edidMode}
-              onChange={(event) =>
-                setEdidMode(event.target.value as "auto_detect" | "manual")
-              }
-              className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
-            >
-              <option value="auto_detect">Auto Detect</option>
-              <option value="manual">
-                Manual (use Moonlight width/height)
-              </option>
-            </select>
-          </div>
-          <InputField
-            label="EDID Refresh Rate (30-240 Hz)"
-            value={edidRefreshRateHz}
-            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+      <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
+        Tune how Moonlight streams video, audio, and input to this device. Use
+        the text boxes for custom performance targets like bitrate, frame rate,
+        and resolution. Use the dropdowns for fixed on/off and codec choices.
+      </p>
+
+      <SettingsSubsection
+        title="Headless EDID"
+        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}`}
+      >
+        <div className="grid gap-3 md:grid-cols-2">
+          <SelectField
+            label="EDID Mode"
+            value={edidMode}
+            options={[
+              { value: "auto_detect", label: "Auto detect" },
+              {
+                value: "manual",
+                label: "Manual (use Moonlight width and height)",
+              },
+            ]}
+            onChange={(value) =>
+              setEdidMode(value as "auto_detect" | "manual")
+            }
           />
+          <div>
+            <InputField
+              label="EDID Refresh Rate (30–240 Hz)"
+              value={edidRefreshRateHz}
+              onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+            />
+            <SettingHelp>
+              Set this to match your local display refresh rate so games report
+              the correct frame cap.
+            </SettingHelp>
+          </div>
         </div>
         <div className="mt-3">
           <Button
@@ -466,68 +536,291 @@ export function SettingsScreen({
             Regenerate EDID
           </Button>
         </div>
+      </SettingsSubsection>
+
+      <div className="mt-4 space-y-4">
+        <SettingsSubsection
+          title="Video Quality"
+          description="Choose your target bitrate, frame rate, resolution, and codec preferences."
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div>
+              <InputField
+                label="Bitrate (Kbps)"
+                value={clientForm.bitrate}
+                onChange={(event) =>
+                  setClientForm((prev) => ({ ...prev, bitrate: event.target.value }))
+                }
+                placeholder="20000"
+              />
+              <SettingHelp>
+                Higher values improve image quality but require more bandwidth.
+              </SettingHelp>
+            </div>
+            <div>
+              <InputField
+                label="Target FPS"
+                value={clientForm.fps}
+                onChange={(event) =>
+                  setClientForm((prev) => ({ ...prev, fps: event.target.value }))
+                }
+                placeholder="60"
+              />
+              <SettingHelp>
+                Common values are 30, 60, and 120. Do not exceed your display
+                refresh rate.
+              </SettingHelp>
+            </div>
+            <SelectField
+              label="Refresh Timing"
+              value={clientForm.refreshRateMode}
+              options={[
+                { value: "60", label: "60.00 Hz" },
+                { value: "59.94", label: "59.94 Hz" },
+              ]}
+              onChange={(value) =>
+                setClientForm((prev) => ({ ...prev, refreshRateMode: value }))
+              }
+            />
+            <div>
+              <InputField
+                label="Resolution Width"
+                value={clientForm.width}
+                onChange={(event) =>
+                  setClientForm((prev) => ({ ...prev, width: event.target.value }))
+                }
+                placeholder="1920"
+              />
+              <SettingHelp>
+                Horizontal resolution to stream, such as 1920 for 1080p.
+              </SettingHelp>
+            </div>
+            <div>
+              <InputField
+                label="Resolution Height"
+                value={clientForm.height}
+                onChange={(event) =>
+                  setClientForm((prev) => ({ ...prev, height: event.target.value }))
+                }
+                placeholder="1080"
+              />
+              <SettingHelp>
+                Vertical resolution to stream, such as 1080 for 1080p.
+              </SettingHelp>
+            </div>
+            <SelectField
+              label="Aspect Ratio"
+              value={clientForm.aspectRatio}
+              options={[
+                { value: "", label: "Automatic (use width and height)" },
+                { value: "16:9", label: "16:9" },
+                { value: "16:10", label: "16:10" },
+                { value: "21:9", label: "21:9" },
+                { value: "4:3", label: "4:3" },
+              ]}
+              onChange={(value) =>
+                setClientForm((prev) => ({ ...prev, aspectRatio: value }))
+              }
+            />
+            <div>
+              <InputField
+                label="Display Output"
+                value={clientForm.displayOutput}
+                onChange={(event) =>
+                  setClientForm((prev) => ({
+                    ...prev,
+                    displayOutput: event.target.value,
+                  }))
+                }
+                placeholder="Leave blank for default"
+              />
+              <SettingHelp>
+                Optional monitor/output identifier on the cloud machine. Leave
+                blank unless you know the exact output to target.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Preferred Codec"
+                value={clientForm.videocfg}
+                options={codecOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, videocfg: value }))
+                }
+              />
+              <SettingHelp>
+                Automatic is safest. Force a codec only if you are chasing
+                compatibility or quality issues.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Video Decoder"
+                value={clientForm.videodec}
+                options={decoderOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, videodec: value }))
+                }
+              />
+              <SettingHelp>
+                Hardware decode is usually fastest. Software decode can help on
+                unsupported systems.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="HDR Streaming"
+                value={clientForm.hdr}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, hdr: value }))
+                }
+              />
+              <SettingHelp>
+                Enable only when both the cloud machine and your local display
+                support HDR.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="YUV444 Colour"
+                value={clientForm.yuv444}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, yuv444: value }))
+                }
+              />
+              <SettingHelp>
+                Improves text and colour accuracy, but uses more bandwidth.
+              </SettingHelp>
+            </div>
+          </div>
+        </SettingsSubsection>
+
+        <SettingsSubsection
+          title="Audio and Session"
+          description="Control where audio plays and how the client behaves during long sessions."
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div>
+              <SelectField
+                label="Host Audio"
+                value={clientForm.hostaudio}
+                options={hostAudioOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, hostaudio: value }))
+                }
+              />
+              <SettingHelp>
+                Usually you want audio to play locally, not on the remote host.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Performance Overlay"
+                value={clientForm.showperfoverlay}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, showperfoverlay: value }))
+                }
+              />
+              <SettingHelp>
+                Shows a live HUD with stream stats like FPS, latency, and
+                bitrate.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Keep Device Awake"
+                value={clientForm.keepawake}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, keepawake: value }))
+                }
+              />
+              <SettingHelp>
+                Prevents your local machine from sleeping during long sessions.
+              </SettingHelp>
+            </div>
+          </div>
+        </SettingsSubsection>
+
+        <SettingsSubsection
+          title="Smoothness and Compatibility"
+          description="Adjust stream behavior for lower latency, smoother motion, and input compatibility."
+        >
+          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div>
+              <SelectField
+                label="Frame Pacing"
+                value={clientForm.framepacing}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, framepacing: value }))
+                }
+              />
+              <SettingHelp>
+                Helps smooth out motion. Recommended enabled for most users.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="VSync"
+                value={clientForm.vsync}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, vsync: value }))
+                }
+              />
+              <SettingHelp>
+                Reduces tearing, but may add a little input latency.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Game Optimizations"
+                value={clientForm.gameopts}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, gameopts: value }))
+                }
+              />
+              <SettingHelp>
+                Keeps Moonlight tuned for game streaming. Usually best left
+                enabled.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Gamepad Mouse"
+                value={clientForm.gamepadmouse}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, gamepadmouse: value }))
+                }
+              />
+              <SettingHelp>
+                Lets a connected controller also move the remote mouse cursor.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
+                label="Detect Network Blocking"
+                value={clientForm.detectnetblocking}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, detectnetblocking: value }))
+                }
+              />
+              <SettingHelp>
+                Helps the app detect network interruptions and blocked stream
+                traffic.
+              </SettingHelp>
+            </div>
+          </div>
+        </SettingsSubsection>
       </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-4">
-        {clientNumericFields.map((key) => (
-          <InputField
-            key={key}
-            label={key}
-            value={clientForm[key]}
-            onChange={(event) =>
-              setClientForm((prev) => ({ ...prev, [key]: event.target.value }))
-            }
-          />
-        ))}
-        <div className="space-y-2">
-          <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
-            Refresh Timing
-          </label>
-          <select
-            value={clientForm.refreshRateMode}
-            onChange={(event) =>
-              setClientForm((prev) => ({
-                ...prev,
-                refreshRateMode: event.target.value,
-              }))
-            }
-            className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
-          >
-            <option value="60">60.00 Hz</option>
-            <option value="59.94">59.94 Hz</option>
-          </select>
-        </div>
-        <InputField
-          label="Display Output"
-          value={clientForm.displayOutput}
-          onChange={(event) =>
-            setClientForm((prev) => ({
-              ...prev,
-              displayOutput: event.target.value,
-            }))
-          }
-        />
-        <div className="space-y-2">
-          <label className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
-            Aspect Ratio
-          </label>
-          <select
-            value={clientForm.aspectRatio}
-            onChange={(event) =>
-              setClientForm((prev) => ({
-                ...prev,
-                aspectRatio: event.target.value,
-              }))
-            }
-            className="w-full rounded-md border border-neon-cyan/40 bg-black/60 px-3 py-2 text-sm text-neon-cyan outline-none transition focus:border-neon-lime"
-          >
-            <option value="">Auto (use width/height)</option>
-            <option value="16:9">16:9</option>
-            <option value="16:10">16:10</option>
-            <option value="21:9">21:9</option>
-            <option value="4:3">4:3</option>
-          </select>
-        </div>
-      </div>
+
       <div className="mt-4">
         <Button
           disabled={busy}

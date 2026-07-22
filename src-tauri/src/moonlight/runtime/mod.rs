@@ -1,7 +1,7 @@
 use std::{
     ffi::{CStr, CString},
     ptr,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -1140,6 +1140,8 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
 
         let mut state = SessionState::Idle;
         let mut tick = tokio::time::interval(Duration::from_millis(250));
+        let mut last_video_frame_count = 0_u64;
+        let mut last_video_progress_at = Instant::now();
 
         loop {
             tokio::select! {
@@ -1150,6 +1152,39 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                         }
                     }
                     if let Ok(stats) = native_runtime.read_stats() {
+                        if stats.video_frame_count != last_video_frame_count {
+                            last_video_frame_count = stats.video_frame_count;
+                            last_video_progress_at = Instant::now();
+                        }
+
+                        let should_stop_for_stall = matches!(state, SessionState::Streaming | SessionState::Reconnecting)
+                            && stats.video_session_active
+                            && stats.renderer_ready
+                            && stats.video_frame_count > 0
+                            && Instant::now().duration_since(last_video_progress_at) > Duration::from_secs(10);
+
+                        if should_stop_for_stall {
+                            let payload = RuntimeEventMessage {
+                                kind: "error".to_string(),
+                                code: -4100,
+                                message: "Video frames stopped arriving for 10 seconds. Ending stream.".to_string(),
+                            };
+                            let _ = latest_event_tx.send(Some(payload.clone()));
+                            let _ = event_tx.send(payload);
+                            let _ = native_runtime.stop();
+                            if let Ok(next) = transition(&state, SessionSignal::StopRequested) {
+                                state = next;
+                                let _ = state_tx.send(state.clone());
+                            }
+                            if let Ok(next) = transition(&state, SessionSignal::Stopped) {
+                                state = next;
+                                let _ = state_tx.send(state.clone());
+                            } else {
+                                state = SessionState::Idle;
+                                let _ = state_tx.send(state.clone());
+                            }
+                        }
+
                         let _ = stats_tx.send(runtime_statistics_from_native(&state, &stats));
                     }
                 }
@@ -1168,6 +1203,8 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 let _ = state_tx.send(state.clone());
                                 state = transition(&state, SessionSignal::ConnectionStarted)?;
                                 let _ = state_tx.send(state.clone());
+                                last_video_frame_count = 0;
+                                last_video_progress_at = Instant::now();
                                 native_runtime.start(&request)?;
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
@@ -1190,6 +1227,8 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 };
                                 let _ = state_tx.send(state.clone());
                                 native_runtime.stop()?;
+                                last_video_frame_count = 0;
+                                last_video_progress_at = Instant::now();
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
                                         process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);

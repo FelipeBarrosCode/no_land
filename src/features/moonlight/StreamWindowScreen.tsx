@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   moonlightDisconnectStream,
   moonlightGetActiveInputMode,
   moonlightGetInputDebugState,
+  moonlightGetSessionState,
 } from "../../lib/backend";
 
 type DebugState = {
@@ -56,6 +58,18 @@ function captureModeLabel(mode: number): string {
   }
 }
 
+function isActiveSessionState(state: string | null): boolean {
+  return (
+    state === "preparing" ||
+    state === "launching" ||
+    state === "creating_surface" ||
+    state === "connecting" ||
+    state === "streaming" ||
+    state === "reconnecting" ||
+    state === "stopping"
+  );
+}
+
 export function StreamWindowScreen() {
   const [preferredMouseMode, setPreferredMouseMode] = useState<
     "relative" | "absolute" | null
@@ -63,6 +77,9 @@ export function StreamWindowScreen() {
   const [debugState, setDebugState] = useState<DebugState>(EMPTY_DEBUG);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+  const [showHud, setShowHud] = useState(true);
+  const teardownRequestedRef = useRef(false);
+  const hasSeenActiveSessionRef = useRef(false);
 
   useEffect(() => {
     document.documentElement.classList.add("stream-window");
@@ -73,11 +90,31 @@ export function StreamWindowScreen() {
       .catch(() => setPreferredMouseMode(null));
 
     let cancelled = false;
+    const closeStreamWindow = async () => {
+      teardownRequestedRef.current = true;
+      try {
+        await getCurrentWindow().close();
+      } catch {
+        window.close();
+      }
+    };
+
     const poll = async () => {
       try {
-        const next = await moonlightGetInputDebugState();
-        if (!cancelled) {
-          setDebugState(next);
+        const [nextDebug, session] = await Promise.all([
+          moonlightGetInputDebugState(),
+          moonlightGetSessionState(),
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setDebugState(nextDebug);
+        if (isActiveSessionState(session.state)) {
+          hasSeenActiveSessionRef.current = true;
+          return;
+        }
+        if (hasSeenActiveSessionRef.current && session.state === "idle") {
+          void closeStreamWindow();
         }
       } catch {
         // ignore polling errors while debugging
@@ -92,6 +129,10 @@ export function StreamWindowScreen() {
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      if (!teardownRequestedRef.current) {
+        teardownRequestedRef.current = true;
+        void moonlightDisconnectStream().catch(() => undefined);
+      }
       document.documentElement.classList.remove("stream-window");
       document.body.classList.remove("stream-window");
     };
@@ -122,6 +163,7 @@ export function StreamWindowScreen() {
       return;
     }
 
+    teardownRequestedRef.current = true;
     setDisconnecting(true);
     setDisconnectError(null);
     try {
@@ -136,23 +178,34 @@ export function StreamWindowScreen() {
   return (
     <main className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
       <div className="pointer-events-none absolute inset-0 select-none">
-        <div className="absolute inset-x-0 top-0 flex justify-center p-4">
-          <div className="rounded border border-cyan-300/70 bg-slate-950/70 px-4 py-2 font-mono text-sm shadow-[0_0_18px_rgba(34,211,238,0.25)] backdrop-blur-sm">
-            {captureHint}
+        {showHud ? (
+          <div className="absolute inset-x-0 top-0 flex justify-center p-4">
+            <div className="rounded border border-cyan-300/70 bg-slate-950/70 px-4 py-2 font-mono text-sm shadow-[0_0_18px_rgba(34,211,238,0.25)] backdrop-blur-sm">
+              {captureHint}
+            </div>
           </div>
-        </div>
+        ) : null}
 
         <div className="pointer-events-auto absolute right-4 top-4 flex flex-col items-end gap-2">
-          <button
-            type="button"
-            onClick={() => {
-              void handleDisconnectStream();
-            }}
-            disabled={disconnecting}
-            className="rounded border border-amber-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-amber-100 shadow-[0_0_18px_rgba(251,191,36,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
-          >
-            {disconnecting ? "Ending stream…" : "End stream"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowHud((value) => !value)}
+              className="rounded border border-cyan-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90"
+            >
+              {showHud ? "Hide HUD" : "Show HUD"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                void handleDisconnectStream();
+              }}
+              disabled={disconnecting}
+              className="rounded border border-amber-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-amber-100 shadow-[0_0_18px_rgba(251,191,36,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
+            >
+              {disconnecting ? "Ending stream…" : "End stream"}
+            </button>
+          </div>
           {disconnectError ? (
             <div className="max-w-md rounded border border-red-400/70 bg-red-950/80 px-3 py-2 font-mono text-xs text-red-100 shadow-[0_0_18px_rgba(248,113,113,0.18)] backdrop-blur-sm">
               {disconnectError}
@@ -160,36 +213,38 @@ export function StreamWindowScreen() {
           ) : null}
         </div>
 
-        <div className="absolute bottom-4 right-4 max-w-lg rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
-          <div>{detail}</div>
-          <div className="mt-1 text-slate-300">
-            Click the stream window itself to enter capture
-          </div>
-          <div className="mt-1 text-slate-400">
-            Ctrl+Alt+Shift+Z releases capture · Ctrl+Alt+Shift+Q remains a compatibility alias
-          </div>
-          <div className="mt-1 text-slate-400">
-            Use End stream if audio/video gets into a bad state, then start the session again from the main app.
-          </div>
+        {showHud ? (
+          <div className="absolute bottom-4 right-4 max-w-lg rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
+            <div>{detail}</div>
+            <div className="mt-1 text-slate-300">
+              Click the stream window itself to enter capture
+            </div>
+            <div className="mt-1 text-slate-400">
+              Ctrl+Alt+Shift+Z releases capture · Ctrl+Alt+Shift+Q remains a compatibility alias
+            </div>
+            <div className="mt-1 text-slate-400">
+              Use End stream if audio/video gets into a bad state, then start the session again from the main app.
+            </div>
 
-          <div className="mt-3 border-t border-slate-700/80 pt-2 text-[11px] leading-5 text-cyan-100">
-            <div>
-              capture: {debugState.captureActive ? "active" : "inactive"} ({captureModeLabel(debugState.captureMode)}) · requests: {debugState.captureRequests}
-            </div>
-            <div>
-              native events: move={debugState.nativeMouseMoves} down={debugState.nativeMouseDowns} up={debugState.nativeMouseUps} key={debugState.nativeKeys}
-            </div>
-            <div>
-              rust callbacks: rel={debugState.rustRelativeCallbacks} abs={debugState.rustAbsoluteCallbacks} btn={debugState.rustButtonCallbacks} key={debugState.rustKeyCallbacks}
-            </div>
-            <div>
-              send attempts: rel={debugState.relativeSendAttempts} abs={debugState.absoluteSendAttempts} btn={debugState.buttonSendAttempts} key={debugState.keySendAttempts} scroll={debugState.scrollSendAttempts}
-            </div>
-            <div>
-              send errors: {debugState.sendErrors}
+            <div className="mt-3 border-t border-slate-700/80 pt-2 text-[11px] leading-5 text-cyan-100">
+              <div>
+                capture: {debugState.captureActive ? "active" : "inactive"} ({captureModeLabel(debugState.captureMode)}) · requests: {debugState.captureRequests}
+              </div>
+              <div>
+                native events: move={debugState.nativeMouseMoves} down={debugState.nativeMouseDowns} up={debugState.nativeMouseUps} key={debugState.nativeKeys}
+              </div>
+              <div>
+                rust callbacks: rel={debugState.rustRelativeCallbacks} abs={debugState.rustAbsoluteCallbacks} btn={debugState.rustButtonCallbacks} key={debugState.rustKeyCallbacks}
+              </div>
+              <div>
+                send attempts: rel={debugState.relativeSendAttempts} abs={debugState.absoluteSendAttempts} btn={debugState.buttonSendAttempts} key={debugState.keySendAttempts} scroll={debugState.scrollSendAttempts}
+              </div>
+              <div>
+                send errors: {debugState.sendErrors}
+              </div>
             </div>
           </div>
-        </div>
+        ) : null}
       </div>
     </main>
   );
