@@ -563,7 +563,7 @@ static void handleMissingPackets(PRTP_AUDIO_QUEUE queue) {
     }
 }
 
-int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
+int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length, uint64_t arrivalTimeUs) {
     if (queue->incompatibleServer) {
         // Just feed audio data straight through to the decoder. We lose handling of out-of-order
         // and duplicated packets in this mode, but it shouldn't be a problem for the very small
@@ -591,6 +591,7 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
         if (fecBlock->marks[pos]) {
             // If there was a missing data shard, copy the RTP header and packet data into it
             memcpy(fecBlock->dataPackets[pos], packet, length);
+            fecBlock->dataPacketArrivalTimeUs[pos] = arrivalTimeUs;
             fecBlock->marks[pos] = 0;
             fecBlock->dataShardsReceived++;
         }
@@ -659,7 +660,7 @@ int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length) {
     return queueHasPacketReady(queue) ? RTPQ_RET_PACKET_READY : 0;
 }
 
-PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length) {
+PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length, uint64_t* arrivalTimeUs, bool* missingPacketPlaceholder) {
     validateFecBlockState(queue);
 
     // If we're returning audio data even with discontinuities, we'll fill in blank entries
@@ -679,6 +680,12 @@ PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLen
 
             // Lost packet placeholder entries have no associated data
             *length = 0;
+            if (arrivalTimeUs != NULL) {
+                *arrivalTimeUs = nextBlock->queueTimeUs;
+            }
+            if (missingPacketPlaceholder != NULL) {
+                *missingPacketPlaceholder = true;
+            }
 
             // Move on to the next data shard
             nextBlock->nextDataPacketIndex++;
@@ -710,6 +717,12 @@ PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLen
             return NULL;
         }
 
+        if (missingPacketPlaceholder != NULL) {
+            *missingPacketPlaceholder = false;
+        }
+        if (arrivalTimeUs != NULL) {
+            *arrivalTimeUs = nextBlock->dataPacketArrivalTimeUs[nextBlock->nextDataPacketIndex];
+        }
         *length = nextBlock->blockSize + sizeof(RTP_PACKET);
         memcpy((uint8_t*)packet + customHeaderLength, nextBlock->dataPackets[nextBlock->nextDataPacketIndex], *length);
         nextBlock->nextDataPacketIndex++;

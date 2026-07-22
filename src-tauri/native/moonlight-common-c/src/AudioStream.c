@@ -28,6 +28,11 @@ static uint8_t opusHeaderByte;
 typedef struct _QUEUE_AUDIO_PACKET_HEADER {
     LINKED_BLOCKING_QUEUE_ENTRY lentry;
     int size;
+    uint16_t sequenceNumber;
+    uint32_t rtpTimestamp;
+    uint64_t extendedRtpTimestamp;
+    uint64_t arrivalTimeUs;
+    bool missingPacketPlaceholder;
 } QUEUED_AUDIO_PACKET_HEADER, *PQUEUED_AUDIO_PACKET_HEADER;
 
 typedef struct _QUEUED_AUDIO_PACKET {
@@ -68,6 +73,7 @@ static void AudioPingThreadProc(void* context) {
 int initializeAudioStream(void) {
     LbqInitializeLinkedBlockingQueue(&packetQueue, 30);
     RtpaInitializeQueue(&rtpAudioQueue);
+    AudioClockReset(0);
     lastSeq = 0;
     receivedDataFromPeer = false;
     pingThreadStarted = false;
@@ -164,9 +170,19 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
     // packet. Trigger packet loss concealment logic in libopus by
     // invoking the decoder with a NULL buffer.
     if (packet->header.size == 0) {
-        AudioCallbacks.decodeAndPlaySample(NULL, 0);
+        AudioCallbacks.decodeAndPlaySample(NULL,
+                                           0,
+                                           packet->header.sequenceNumber,
+                                           packet->header.rtpTimestamp,
+                                           packet->header.extendedRtpTimestamp,
+                                           packet->header.arrivalTimeUs);
         return;
     }
+
+    AudioClockObservePacket(packet->header.sequenceNumber,
+                            packet->header.rtpTimestamp,
+                            packet->header.extendedRtpTimestamp,
+                            packet->header.arrivalTimeUs);
 
     PRTP_PACKET rtp = (PRTP_PACKET)&packet->data[0];
     if (lastSeq != 0 && (unsigned short)(lastSeq + 1) != rtp->sequenceNumber) {
@@ -215,7 +231,12 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
         }
 #endif
 
-        AudioCallbacks.decodeAndPlaySample((char*)decryptedOpusData, dataLength);
+        AudioCallbacks.decodeAndPlaySample((char*)decryptedOpusData,
+                                           dataLength,
+                                           packet->header.sequenceNumber,
+                                           packet->header.rtpTimestamp,
+                                           packet->header.extendedRtpTimestamp,
+                                           packet->header.arrivalTimeUs);
     }
     else {
 #ifdef LC_DEBUG
@@ -232,7 +253,12 @@ static void decodeInputData(PQUEUED_AUDIO_PACKET packet) {
         }
 #endif
 
-        AudioCallbacks.decodeAndPlaySample((char*)(rtp + 1), packet->header.size - sizeof(*rtp));
+        AudioCallbacks.decodeAndPlaySample((char*)(rtp + 1),
+                                           packet->header.size - sizeof(*rtp),
+                                           packet->header.sequenceNumber,
+                                           packet->header.rtpTimestamp,
+                                           packet->header.extendedRtpTimestamp,
+                                           packet->header.arrivalTimeUs);
     }
 }
 
@@ -267,7 +293,9 @@ static void AudioReceiveThreadProc(void* context) {
             }
         }
 
+        uint64_t arrivalTimeUs;
         packet->header.size = recvUdpSocket(rtpSocket, &packet->data[0], MAX_PACKET_SIZE, useSelect);
+        arrivalTimeUs = LiGetMicroseconds();
         if (packet->header.size < 0) {
             Limelog("Audio Receive: recvUdpSocket() failed: %d\n", (int)LastSocketError());
             ListenerCallbacks.connectionTerminated(LastSocketFail());
@@ -322,7 +350,13 @@ static void AudioReceiveThreadProc(void* context) {
         rtp->timestamp = BE32(rtp->timestamp);
         rtp->ssrc = BE32(rtp->ssrc);
 
-        queueStatus = RtpaAddPacket(&rtpAudioQueue, (PRTP_PACKET)&packet->data[0], (uint16_t)packet->header.size);
+        packet->header.sequenceNumber = rtp->sequenceNumber;
+        packet->header.rtpTimestamp = rtp->timestamp;
+        packet->header.extendedRtpTimestamp = AudioClockExtendRtpTimestamp32(rtp->timestamp);
+        packet->header.arrivalTimeUs = arrivalTimeUs;
+        packet->header.missingPacketPlaceholder = false;
+
+        queueStatus = RtpaAddPacket(&rtpAudioQueue, (PRTP_PACKET)&packet->data[0], (uint16_t)packet->header.size, arrivalTimeUs);
         if (RTPQ_HANDLE_NOW(queueStatus)) {
             if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
                 if (!queuePacketToLbq(&packet)) {
@@ -348,9 +382,34 @@ static void AudioReceiveThreadProc(void* context) {
                 // If packets are ready, pull them and send them to the decoder
                 uint16_t length;
                 PQUEUED_AUDIO_PACKET queuedPacket;
-                while ((queuedPacket = (PQUEUED_AUDIO_PACKET)RtpaGetQueuedPacket(&rtpAudioQueue, sizeof(QUEUED_AUDIO_PACKET_HEADER), &length)) != NULL) {
+                while (true) {
+                    uint64_t queuedArrivalTimeUs = 0;
+                    bool missingPacketPlaceholder = false;
+
+                    queuedPacket = (PQUEUED_AUDIO_PACKET)RtpaGetQueuedPacket(&rtpAudioQueue,
+                                                                             sizeof(QUEUED_AUDIO_PACKET_HEADER),
+                                                                             &length,
+                                                                             &queuedArrivalTimeUs,
+                                                                             &missingPacketPlaceholder);
+                    if (queuedPacket == NULL) {
+                        break;
+                    }
+
                     // Populate header data (not preserved in queued packets)
                     queuedPacket->header.size = length;
+                    queuedPacket->header.arrivalTimeUs = queuedArrivalTimeUs;
+                    queuedPacket->header.missingPacketPlaceholder = missingPacketPlaceholder;
+                    if (length == 0) {
+                        queuedPacket->header.sequenceNumber = (uint16_t)(lastSeq + 1);
+                        queuedPacket->header.extendedRtpTimestamp = AudioClockPredictNextExtendedTimestamp((uint32_t)(48 * AudioPacketDuration));
+                        queuedPacket->header.rtpTimestamp = (uint32_t)(queuedPacket->header.extendedRtpTimestamp & 0xFFFFFFFFU);
+                    }
+                    else {
+                        PRTP_PACKET queuedRtp = (PRTP_PACKET)&queuedPacket->data[0];
+                        queuedPacket->header.sequenceNumber = queuedRtp->sequenceNumber;
+                        queuedPacket->header.rtpTimestamp = queuedRtp->timestamp;
+                        queuedPacket->header.extendedRtpTimestamp = AudioClockExtendRtpTimestamp32(queuedRtp->timestamp);
+                    }
 
                     if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
                         if (!queuePacketToLbq(&queuedPacket)) {
@@ -438,6 +497,7 @@ int startAudioStream(void* audioContext, int arFlags) {
     }
 
     chosenConfig.samplesPerFrame = 48 * AudioPacketDuration;
+    AudioClockReset((uint32_t)chosenConfig.sampleRate);
 
     err = AudioCallbacks.init(StreamConfig.audioConfiguration, &chosenConfig, audioContext, arFlags);
     if (err != 0) {
@@ -479,4 +539,16 @@ int LiGetPendingAudioDuration(void) {
 
 const RTP_AUDIO_STATS* LiGetRTPAudioStats(void) {
     return &rtpAudioQueue.stats;
+}
+
+const AUDIO_MASTER_CLOCK_STATS* LiGetAudioMasterClockStats(void) {
+    return AudioClockGetStats();
+}
+
+uint8_t LiIsAudioMasterClockValid(void) {
+    return AudioClockIsValid() ? 1 : 0;
+}
+
+uint64_t LiGetAudioMasterClockMediaTimeUs(void) {
+    return AudioClockGetMediaTimeUs();
 }

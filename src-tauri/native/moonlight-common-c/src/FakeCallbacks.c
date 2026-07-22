@@ -18,7 +18,19 @@ static int fakeArInit(int audioConfiguration, POPUS_MULTISTREAM_CONFIGURATION op
 static void fakeArStart(void) {}
 static void fakeArStop(void) {}
 static void fakeArCleanup(void) {}
-static void fakeArDecodeAndPlaySample(char* sampleData, int sampleLength) {}
+static void fakeArDecodeAndPlaySample(char* sampleData,
+                                      int sampleLength,
+                                      uint16_t sequenceNumber,
+                                      uint32_t rtpTimestamp,
+                                      uint64_t extendedRtpTimestamp,
+                                      uint64_t arrivalTimeUs) {
+    (void)sampleData;
+    (void)sampleLength;
+    (void)sequenceNumber;
+    (void)rtpTimestamp;
+    (void)extendedRtpTimestamp;
+    (void)arrivalTimeUs;
+}
 
 AUDIO_RENDERER_CALLBACKS fakeArCallbacks = {
     .init = fakeArInit,

@@ -66,6 +66,18 @@ fn main() {
     );
     println!(
         "cargo:rerun-if-changed={}",
+        native_root
+            .join("moonlight-common-c/src/AudioMasterClock.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("moonlight-common-c/src/AudioMasterClock.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
         PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
     );
 

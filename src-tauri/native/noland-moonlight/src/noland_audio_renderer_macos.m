@@ -1,10 +1,11 @@
 #import <AVFoundation/AVFoundation.h>
 
 #include "noland_audio_renderer.h"
+#include "AudioMasterClock.h"
+#include "AudioPlayoutController.h"
 
 #include <float.h>
 #include <math.h>
-#include <opus/opus_multistream.h>
 #include <unistd.h>
 
 @interface NolandAudioPlaybackContext : NSObject
@@ -14,7 +15,13 @@
 - (BOOL)startPlayback;
 - (void)stopPlayback;
 - (void)cleanupPlayback;
-- (void)decodeAndPlaySample:(char*)sampleData length:(int)sampleLength;
+- (void)decodeAndPlaySample:(char*)sampleData
+                       length:(int)sampleLength
+               sequenceNumber:(uint16_t)sequenceNumber
+                 rtpTimestamp:(uint32_t)rtpTimestamp
+         extendedRtpTimestamp:(uint64_t)extendedRtpTimestamp
+                arrivalTimeUs:(uint64_t)arrivalTimeUs;
+- (void)fillStats:(nl_audio_renderer_stats_t*)stats;
 @end
 
 static float nl_peak_for_planar_samples(float* const* channelData, AVAudioFrameCount frameCount, AVAudioChannelCount channelCount) {
@@ -68,19 +75,20 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   AVAudioPlayerNode* _player;
   AVAudioFormat* _sourceFormat;
   dispatch_queue_t _queue;
-  OpusMSDecoder* _decoder;
-  float* _decodeScratch;
+  nl_audio_playout_controller_t _playoutController;
   float* _stagingInterleaved;
   uint64_t _incomingPacketCount;
   uint64_t _decodeCallCount;
   uint64_t _scheduledBufferCount;
   uint64_t _droppedForMaximumDurationCount;
+  uint64_t _totalScheduledFrames;
   uint32_t _scheduleChunkFrames;
   uint32_t _stagedFrames;
   int _sampleRate;
   int _channelCount;
   int _samplesPerFrame;
   BOOL _started;
+  BOOL _playing;
   NSInteger _pendingBufferCount;
   uint32_t _targetBufferMs;
   uint32_t _maximumBufferMs;
@@ -122,25 +130,17 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   }
   _scheduleChunkFrames = chunkFrames;
 
-  _decodeScratch = calloc((size_t)_samplesPerFrame * (size_t)_channelCount, sizeof(float));
-  if (_decodeScratch == NULL) {
-    return nil;
-  }
   _stagingInterleaved = calloc((size_t)_scheduleChunkFrames * (size_t)_channelCount, sizeof(float));
   if (_stagingInterleaved == NULL) {
-    free(_decodeScratch);
-    _decodeScratch = NULL;
     return nil;
   }
 
-  int error = 0;
-  _decoder = opus_multistream_decoder_create(opusConfig->sampleRate,
-                                             opusConfig->channelCount,
-                                             opusConfig->streams,
-                                             opusConfig->coupledStreams,
-                                             opusConfig->mapping,
-                                             &error);
-  if (_decoder == NULL || error != OPUS_OK) {
+  if (!nl_audio_playout_controller_init(&_playoutController,
+                                        opusConfig,
+                                        _targetBufferMs,
+                                        _maximumBufferMs)) {
+    free(_stagingInterleaved);
+    _stagingInterleaved = NULL;
     return nil;
   }
 
@@ -203,9 +203,8 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
     return NO;
   }
 
-  [_player play];
   _started = YES;
-  NSLog(@"[noland-audio] playback started engineRunning=%d playerPlaying=%d",
+  NSLog(@"[noland-audio] output activated engineRunning=%d playerPlaying=%d",
         [_engine isRunning] ? 1 : 0,
         [_player isPlaying] ? 1 : 0);
   return YES;
@@ -219,6 +218,13 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   return started;
 }
 
+- (void)ensurePlayerPlayingOnQueue {
+  if (_player != nil && !_playing) {
+    [_player play];
+    _playing = YES;
+  }
+}
+
 - (void)stopPlayback {
   dispatch_sync(_queue, ^{
     if (_player != nil && [_player isPlaying]) {
@@ -228,9 +234,14 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
       [_engine pause];
     }
     _started = NO;
+    _playing = NO;
+    _stagedFrames = 0;
+    _totalScheduledFrames = 0;
+    nl_audio_playout_controller_reset(&_playoutController);
     @synchronized(self) {
       _pendingBufferCount = 0;
     }
+    AudioClockUpdatePendingSamples(0);
   });
 }
 
@@ -242,24 +253,54 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
     if (_engine != nil) {
       [_engine stop];
     }
-    if (_decoder != NULL) {
-      opus_multistream_decoder_destroy(_decoder);
-      _decoder = NULL;
-    }
-    if (_decodeScratch != NULL) {
-      free(_decodeScratch);
-      _decodeScratch = NULL;
-    }
     if (_stagingInterleaved != NULL) {
       free(_stagingInterleaved);
       _stagingInterleaved = NULL;
     }
+    nl_audio_playout_controller_cleanup(&_playoutController);
     _stagedFrames = 0;
     _started = NO;
+    _playing = NO;
+    _totalScheduledFrames = 0;
     @synchronized(self) {
       _pendingBufferCount = 0;
     }
+    AudioClockUpdatePendingSamples(0);
   });
+}
+
+- (uint32_t)estimatedPendingFrames {
+  if (_sampleRate <= 0) {
+    return 0;
+  }
+
+  uint64_t renderedFrames = 0;
+  AVAudioTime* nodeTime = [_player lastRenderTime];
+  if (nodeTime != nil) {
+    AVAudioTime* playerTime = [_player playerTimeForNodeTime:nodeTime];
+    if (playerTime != nil && playerTime.sampleTime >= 0) {
+      renderedFrames = (uint64_t)playerTime.sampleTime;
+    }
+  }
+
+  uint64_t pendingFrames = _totalScheduledFrames +
+                           (uint64_t)nl_audio_playout_controller_available_frames(&_playoutController) +
+                           (uint64_t)_stagedFrames;
+  if (pendingFrames > renderedFrames) {
+    pendingFrames -= renderedFrames;
+  }
+  else {
+    pendingFrames = 0;
+  }
+
+  if (pendingFrames > UINT32_MAX) {
+    pendingFrames = UINT32_MAX;
+  }
+  return (uint32_t)pendingFrames;
+}
+
+- (void)updateAudioClockPendingFrames {
+  AudioClockUpdatePendingSamples([self estimatedPendingFrames]);
 }
 
 - (void)scheduleInterleavedFrames:(uint32_t)frameCount {
@@ -286,6 +327,7 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
 
   [self incrementPendingBufferCount];
   _scheduledBufferCount += 1;
+  _totalScheduledFrames += (uint64_t)frameCount;
   if (_scheduledBufferCount <= 10 || (_scheduledBufferCount % 200) == 0) {
     float sourcePeak = nl_peak_for_buffer(sourceBuffer, sourceBuffer.frameLength, sourceBuffer.format.channelCount);
     NSLog(@"[noland-audio] scheduled buffer=%llu srcFrameLength=%u pendingLocal=%ld sourcePeak=%.6f playerVolume=%.3f mixerVolume=%.3f",
@@ -301,123 +343,147 @@ static float nl_peak_for_buffer(AVAudioPCMBuffer* buffer, AVAudioFrameCount fram
   [_player scheduleBuffer:sourceBuffer
         completionHandler:^{
           [context decrementPendingBufferCount];
+          [context updateAudioClockPendingFrames];
         }];
+  AudioClockRecordSubmittedSamples(frameCount);
+  [self updateAudioClockPendingFrames];
 }
 
-- (void)decodeAndPlaySample:(char*)sampleData length:(int)sampleLength {
-  if (sampleData == NULL || sampleLength <= 0 || _decoder == NULL) {
+- (void)pumpPlaybackFromControllerOnQueue {
+  uint32_t availableFrames = nl_audio_playout_controller_available_frames(&_playoutController);
+  uint32_t queuedPacketFrames = nl_audio_playout_controller_queued_packet_frames(&_playoutController);
+  uint32_t startupPrefillFrames = nl_audio_playout_controller_startup_prefill_frames(&_playoutController);
+  uint32_t targetFrames = nl_audio_playout_controller_current_target_frames(&_playoutController);
+  uint32_t pendingFrames = [self estimatedPendingFrames];
+  BOOL allowConcealment = _playing ? YES : NO;
+
+  if (!_started) {
     return;
   }
 
-  int pendingAudioDuration = LiGetPendingAudioDuration();
-  if (pendingAudioDuration > (int)_maximumBufferMs) {
-    _droppedForMaximumDurationCount += 1;
-    if (_droppedForMaximumDurationCount <= 10 || (_droppedForMaximumDurationCount % 200) == 0) {
-      NSLog(@"[noland-audio] dropping sample due to pending duration pending=%d max=%u drops=%llu",
-            pendingAudioDuration,
-            (unsigned int)_maximumBufferMs,
-            _droppedForMaximumDurationCount);
+  availableFrames = nl_audio_playout_controller_fill_frames(&_playoutController,
+                                                            !_playing ? startupPrefillFrames : targetFrames,
+                                                            allowConcealment);
+  queuedPacketFrames = nl_audio_playout_controller_queued_packet_frames(&_playoutController);
+
+  if (!_playing) {
+    if (availableFrames + queuedPacketFrames < startupPrefillFrames) {
+      [self updateAudioClockPendingFrames];
+      return;
     }
-    return;
+    [self ensurePlayerPlayingOnQueue];
+    availableFrames = nl_audio_playout_controller_fill_frames(&_playoutController,
+                                                              targetFrames,
+                                                              YES);
+    queuedPacketFrames = nl_audio_playout_controller_queued_packet_frames(&_playoutController);
   }
 
-  int frameDurationMs = _sampleRate > 0 ? (_samplesPerFrame * 1000) / _sampleRate : 5;
-  if (frameDurationMs <= 0) {
-    frameDurationMs = 5;
-  }
-  int maxPendingBuffers = (int)((_targetBufferMs + (uint32_t)frameDurationMs - 1U) / (uint32_t)frameDurationMs);
-  if (maxPendingBuffers < 1) {
-    maxPendingBuffers = 1;
+  if (_playing && availableFrames == 0 && pendingFrames == 0 && queuedPacketFrames == 0) {
+    nl_audio_playout_controller_note_starvation(&_playoutController);
+    availableFrames = nl_audio_playout_controller_fill_frames(&_playoutController,
+                                                              _samplesPerFrame,
+                                                              YES);
   }
 
-  for (int i = 0; i < 100; ++i) {
-    if ([self pendingBufferCount] <= maxPendingBuffers) {
+  while (availableFrames > 0 && (pendingFrames < targetFrames || pendingFrames == 0)) {
+    uint32_t framesToSchedule = availableFrames;
+    if (framesToSchedule > _scheduleChunkFrames) {
+      framesToSchedule = _scheduleChunkFrames;
+    }
+    if (framesToSchedule < (uint32_t)_samplesPerFrame && pendingFrames > 0) {
       break;
     }
-    usleep(1000);
+
+    if (nl_audio_playout_controller_pop_frames(&_playoutController,
+                                               _stagingInterleaved,
+                                               framesToSchedule) != framesToSchedule) {
+      break;
+    }
+
+    [self scheduleInterleavedFrames:framesToSchedule];
+    pendingFrames += framesToSchedule;
+    availableFrames = nl_audio_playout_controller_available_frames(&_playoutController);
+    if (availableFrames < _scheduleChunkFrames) {
+      availableFrames = nl_audio_playout_controller_fill_frames(&_playoutController,
+                                                                _scheduleChunkFrames,
+                                                                _playing ? YES : NO);
+    }
+    queuedPacketFrames = nl_audio_playout_controller_queued_packet_frames(&_playoutController);
   }
 
+  nl_audio_playout_controller_note_buffer_level(&_playoutController,
+                                                pendingFrames + availableFrames + queuedPacketFrames);
+  [self updateAudioClockPendingFrames];
+}
+
+- (void)decodeAndPlaySample:(char*)sampleData
+                       length:(int)sampleLength
+               sequenceNumber:(uint16_t)sequenceNumber
+                 rtpTimestamp:(uint32_t)rtpTimestamp
+         extendedRtpTimestamp:(uint64_t)extendedRtpTimestamp
+                arrivalTimeUs:(uint64_t)arrivalTimeUs {
   dispatch_sync(_queue, ^{
-    if (_decoder == NULL || _sourceFormat == nil || _player == nil) {
-      NSLog(@"[noland-audio] dropping packet before decode decoder=%p sourceFormat=%@ player=%@",
-            _decoder,
+    if (_sourceFormat == nil || _player == nil || _stagingInterleaved == NULL) {
+      NSLog(@"[noland-audio] dropping packet before enqueue sourceFormat=%@ player=%@ staging=%p",
             _sourceFormat,
-            _player);
+            _player,
+            _stagingInterleaved);
       return;
     }
     if (![self startPlaybackOnQueue]) {
       return;
     }
 
-    if (_decodeScratch == NULL || _stagingInterleaved == NULL) {
-      NSLog(@"[noland-audio] decode buffers unavailable scratch=%p staging=%p",
-            _decodeScratch,
-            _stagingInterleaved);
-      return;
-    }
-
     _incomingPacketCount += 1;
     if (_incomingPacketCount <= 10 || (_incomingPacketCount % 200) == 0) {
-      NSLog(@"[noland-audio] incoming packet=%llu sampleBytes=%d pendingMoonlight=%d pendingLocal=%ld stagedFrames=%u",
+      NSLog(@"[noland-audio] enqueue packet=%llu seq=%u sampleBytes=%d pendingLocal=%ld pendingDeviceFrames=%u pcmFrames=%u queuedPacketFrames=%u",
             _incomingPacketCount,
+            (unsigned int)sequenceNumber,
             sampleLength,
-            pendingAudioDuration,
             (long)[self pendingBufferCount],
-            (unsigned int)_stagedFrames);
-    }
+            (unsigned int)[self estimatedPendingFrames],
+            (unsigned int)nl_audio_playout_controller_available_frames(&_playoutController),
+            (unsigned int)nl_audio_playout_controller_queued_packet_frames(&_playoutController));
+      }
 
-    int decodedSamples = opus_multistream_decode_float(_decoder,
-                                                       (const unsigned char*)sampleData,
-                                                       sampleLength,
-                                                       _decodeScratch,
-                                                       _samplesPerFrame,
-                                                       0);
-    if (decodedSamples <= 0) {
-      NSLog(@"[noland-audio] opus decode failed sampleBytes=%d code=%d reason=%s",
-            sampleLength,
-            decodedSamples,
-            opus_strerror(decodedSamples));
+    int queuedFrames = nl_audio_playout_controller_submit_packet(&_playoutController,
+                                                                 sampleData,
+                                                                 sampleLength,
+                                                                 sequenceNumber,
+                                                                 rtpTimestamp,
+                                                                 extendedRtpTimestamp,
+                                                                 arrivalTimeUs);
+    if (queuedFrames <= 0 && !(sampleData == NULL || sampleLength == 0)) {
+      _droppedForMaximumDurationCount += 1;
+      if (_droppedForMaximumDurationCount <= 10 || (_droppedForMaximumDurationCount % 200) == 0) {
+        NSLog(@"[noland-audio] dropping compressed packet seq=%u sampleBytes=%d drops=%llu",
+              (unsigned int)sequenceNumber,
+              sampleLength,
+              _droppedForMaximumDurationCount);
+      }
       return;
     }
 
-    _decodeCallCount += 1;
-    float decodedPeak = nl_peak_for_interleaved_samples(_decodeScratch,
-                                                        (uint32_t)decodedSamples,
-                                                        _channelCount);
-    if (_decodeCallCount <= 10 || (_decodeCallCount % 200) == 0) {
-      NSLog(@"[noland-audio] decoded packet=%llu sampleBytes=%d decodedSamples=%d pendingMoonlight=%d pendingLocal=%ld stagedFrames=%u decodedPeak=%.6f",
-            _decodeCallCount,
-            sampleLength,
-            decodedSamples,
-            pendingAudioDuration,
-            (long)[self pendingBufferCount],
-            (unsigned int)_stagedFrames,
-            decodedPeak);
-    }
+    [self pumpPlaybackFromControllerOnQueue];
+  });
+}
 
-    if (_stagedFrames > 0 && (_stagedFrames + (uint32_t)decodedSamples) > _scheduleChunkFrames) {
-      [self scheduleInterleavedFrames:_stagedFrames];
-      _stagedFrames = 0;
-    }
+- (void)fillStats:(nl_audio_renderer_stats_t*)stats {
+  if (stats == NULL) {
+    return;
+  }
 
-    if ((uint32_t)decodedSamples > _scheduleChunkFrames) {
-      memcpy(_stagingInterleaved,
-             _decodeScratch,
-             (size_t)decodedSamples * (size_t)_channelCount * sizeof(float));
-      [self scheduleInterleavedFrames:(uint32_t)decodedSamples];
-      _stagedFrames = 0;
-      return;
-    }
-
-    memcpy(_stagingInterleaved + ((size_t)_stagedFrames * (size_t)_channelCount),
-           _decodeScratch,
-           (size_t)decodedSamples * (size_t)_channelCount * sizeof(float));
-    _stagedFrames += (uint32_t)decodedSamples;
-
-    if (_stagedFrames >= _scheduleChunkFrames || ([self pendingBufferCount] == 0 && _stagedFrames >= (uint32_t)_samplesPerFrame)) {
-      [self scheduleInterleavedFrames:_stagedFrames];
-      _stagedFrames = 0;
-    }
+  dispatch_sync(_queue, ^{
+    stats->buffered_frames = nl_audio_playout_controller_available_frames(&_playoutController);
+    stats->startup_prefill_frames = nl_audio_playout_controller_startup_prefill_frames(&_playoutController);
+    stats->target_frames = nl_audio_playout_controller_target_frames(&_playoutController);
+    stats->current_target_frames = nl_audio_playout_controller_current_target_frames(&_playoutController);
+    stats->maximum_frames = nl_audio_playout_controller_maximum_frames(&_playoutController);
+    stats->concealment_count = nl_audio_playout_controller_concealment_count(&_playoutController);
+    stats->dropped_frames_count = nl_audio_playout_controller_dropped_frames_count(&_playoutController);
+    stats->starvation_event_count = nl_audio_playout_controller_starvation_event_count(&_playoutController);
+    stats->target_increase_count = nl_audio_playout_controller_target_increase_count(&_playoutController);
+    stats->target_decrease_count = nl_audio_playout_controller_target_decrease_count(&_playoutController);
   });
 }
 
@@ -474,10 +540,33 @@ void nl_audio_renderer_cleanup(nl_audio_renderer_t* renderer) {
 
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
-                                              int sample_length) {
+                                              int sample_length,
+                                              uint16_t sequence_number,
+                                              uint32_t rtp_timestamp,
+                                              uint64_t extended_rtp_timestamp,
+                                              uint64_t arrival_time_us) {
   if (renderer == NULL || renderer->platform_context == NULL) {
     return;
   }
   NolandAudioPlaybackContext* context = (__bridge NolandAudioPlaybackContext*)renderer->platform_context;
-  [context decodeAndPlaySample:sample_data length:sample_length];
+  [context decodeAndPlaySample:sample_data
+                        length:sample_length
+                sequenceNumber:sequence_number
+                  rtpTimestamp:rtp_timestamp
+          extendedRtpTimestamp:extended_rtp_timestamp
+                 arrivalTimeUs:arrival_time_us];
+}
+
+void nl_audio_renderer_get_stats(nl_audio_renderer_t* renderer,
+                                 nl_audio_renderer_stats_t* stats) {
+  if (stats == NULL) {
+    return;
+  }
+  memset(stats, 0, sizeof(*stats));
+  if (renderer == NULL || renderer->platform_context == NULL) {
+    return;
+  }
+
+  NolandAudioPlaybackContext* context = (__bridge NolandAudioPlaybackContext*)renderer->platform_context;
+  [context fillStats:stats];
 }

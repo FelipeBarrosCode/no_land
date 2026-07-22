@@ -1,4 +1,5 @@
 #include "noland_audio_renderer.h"
+#include "AudioMasterClock.h"
 
 #include <opus/opus_multistream.h>
 #include <pulse/simple.h>
@@ -161,7 +162,15 @@ void nl_audio_renderer_cleanup(nl_audio_renderer_t* renderer) {
 
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
-                                              int sample_length) {
+                                              int sample_length,
+                                              uint16_t sequence_number,
+                                              uint32_t rtp_timestamp,
+                                              uint64_t extended_rtp_timestamp,
+                                              uint64_t arrival_time_us) {
+  (void)sequence_number;
+  (void)rtp_timestamp;
+  (void)extended_rtp_timestamp;
+  (void)arrival_time_us;
   if (renderer == NULL || renderer->platform_context == NULL || sample_data == NULL || sample_length <= 0) {
     return;
   }
@@ -199,5 +208,17 @@ void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
   int pa_error = 0;
   if (pa_simple_write(ctx->pulse, ctx->interleaved_pcm, sample_count * sizeof(int16_t), &pa_error) < 0) {
     fprintf(stderr, "[noland-audio] pa_simple_write failed: %s\n", pa_strerror(pa_error));
+  }
+  else {
+    AudioClockRecordSubmittedSamples((uint32_t)decoded_samples);
+    AudioClockUpdatePendingSamples(0);
+  }
+}
+
+void nl_audio_renderer_get_stats(nl_audio_renderer_t* renderer,
+                                 nl_audio_renderer_stats_t* stats) {
+  (void)renderer;
+  if (stats != NULL) {
+    memset(stats, 0, sizeof(*stats));
   }
 }

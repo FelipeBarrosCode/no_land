@@ -13,6 +13,7 @@
 #include <windows.h>
 #else
 #include <pthread.h>
+#include <unistd.h>
 #endif
 
 #define NL_EVENT_QUEUE_CAPACITY 64
@@ -116,6 +117,14 @@ static void nl_global_unlock(void) {
   LeaveCriticalSection(&g_active_runtime_mutex);
 #else
   pthread_mutex_unlock(&g_active_runtime_mutex);
+#endif
+}
+
+static void nl_sleep_milliseconds(unsigned int milliseconds) {
+#if defined(_WIN32)
+  Sleep(milliseconds);
+#else
+  usleep((useconds_t)milliseconds * 1000U);
 #endif
 }
 
@@ -415,10 +424,13 @@ static void nl_video_cleanup(void) {
 
 static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
   nl_runtime_t* runtime = nl_get_active_runtime();
-  char message[256];
   if (runtime != NULL && decodeUnit != NULL) {
     nl_video_frame_metadata_t frame;
+    char message[256];
     int renderer_result;
+    uint64_t audio_now_us = 0;
+    int64_t sync_error_us = 0;
+    unsigned int wait_budget_ms = 250;
     memset(&frame, 0, sizeof(frame));
     frame.frame_number = decodeUnit->frameNumber;
     frame.frame_type = decodeUnit->frameType;
@@ -430,6 +442,29 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     frame.rtp_timestamp = decodeUnit->rtpTimestamp;
     frame.hdr_active = decodeUnit->hdrActive ? 1U : 0U;
     frame.colorspace = decodeUnit->colorspace;
+
+    while (wait_budget_ms > 0U && !LiIsAudioMasterClockValid()) {
+      nl_sleep_milliseconds(1U);
+      wait_budget_ms -= 1U;
+    }
+
+    if (LiIsAudioMasterClockValid()) {
+      audio_now_us = LiGetAudioMasterClockMediaTimeUs();
+      sync_error_us = (int64_t)frame.presentation_time_us - (int64_t)audio_now_us;
+
+      if (sync_error_us > 8000) {
+        uint64_t wait_us = (uint64_t)sync_error_us - 8000ULL;
+        unsigned int sleep_ms = (unsigned int)(wait_us / 1000ULL);
+        if (sleep_ms > 0U) {
+          if (sleep_ms > 50U) {
+            sleep_ms = 50U;
+          }
+          nl_sleep_milliseconds(sleep_ms);
+          audio_now_us = LiGetAudioMasterClockMediaTimeUs();
+          sync_error_us = (int64_t)frame.presentation_time_us - (int64_t)audio_now_us;
+        }
+      }
+    }
 
     nl_runtime_lock(runtime);
     runtime->video_frame_count += 1U;
@@ -443,6 +478,14 @@ static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
     runtime->last_video_rtp_timestamp = frame.rtp_timestamp;
     runtime->last_video_hdr_active = frame.hdr_active;
     runtime->last_video_colorspace = frame.colorspace;
+    if (LiIsAudioMasterClockValid() && sync_error_us < -35000) {
+      runtime->renderer.dropped_frame_count += 1U;
+      snprintf(message, sizeof(message), "video frame #%d dropped late sync=%lldus", frame.frame_number, (long long)sync_error_us);
+      nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame.frame_number, message);
+      nl_runtime_unlock(runtime);
+      return DR_OK;
+    }
+
     renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, decodeUnit, &frame);
     snprintf(message, sizeof(message), "video frame #%d len=%d", frame.frame_number, frame.full_length);
     nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame.frame_number, message);
@@ -497,13 +540,24 @@ static void nl_audio_cleanup(void) {
   nl_audio_renderer_cleanup(&runtime->audio_renderer);
 }
 
-static void nl_audio_decode_and_play_sample(char* sampleData, int sampleLength) {
+static void nl_audio_decode_and_play_sample(char* sampleData,
+                                           int sampleLength,
+                                           uint16_t sequenceNumber,
+                                           uint32_t rtpTimestamp,
+                                           uint64_t extendedRtpTimestamp,
+                                           uint64_t arrivalTimeUs) {
   nl_runtime_t* runtime = nl_get_active_runtime();
   if (runtime != NULL) {
     nl_runtime_lock(runtime);
     runtime->audio_sample_count += 1U;
     nl_runtime_unlock(runtime);
-    nl_audio_renderer_decode_and_play_sample(&runtime->audio_renderer, sampleData, sampleLength);
+    nl_audio_renderer_decode_and_play_sample(&runtime->audio_renderer,
+                                             sampleData,
+                                             sampleLength,
+                                             sequenceNumber,
+                                             rtpTimestamp,
+                                             extendedRtpTimestamp,
+                                             arrivalTimeUs);
   }
 }
 
@@ -862,12 +916,45 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
   {
     uint32_t estimated_rtt = 0;
     uint32_t estimated_rtt_variance = 0;
+    nl_audio_renderer_stats_t audio_renderer_stats;
+    const AUDIO_MASTER_CLOCK_STATS* audio_clock_stats = LiGetAudioMasterClockStats();
+    memset(&audio_renderer_stats, 0, sizeof(audio_renderer_stats));
+    nl_audio_renderer_get_stats(&runtime->audio_renderer, &audio_renderer_stats);
     if (LiGetEstimatedRttInfo(&estimated_rtt, &estimated_rtt_variance)) {
           output->estimated_rtt_ms = estimated_rtt;
           output->estimated_rtt_variance_ms = estimated_rtt_variance;
           output->has_estimated_rtt = 1U;
         }
-      }
+    if (audio_clock_stats != NULL) {
+      output->audio_clock_valid = audio_clock_stats->valid;
+      output->audio_clock_media_time_us =
+          (audio_clock_stats->valid && audio_clock_stats->sampleRate != 0)
+              ? (audio_clock_stats->anchorMediaTimeUs +
+                 ((audio_clock_stats->playedSamples * 1000000ULL) / (uint64_t)audio_clock_stats->sampleRate))
+              : 0;
+      output->audio_clock_anchor_rtp_timestamp = audio_clock_stats->anchorRtpTimestamp;
+      output->audio_clock_anchor_media_time_us = audio_clock_stats->anchorMediaTimeUs;
+      output->audio_clock_submitted_samples = audio_clock_stats->submittedSamples;
+      output->audio_clock_played_samples = audio_clock_stats->playedSamples;
+      output->audio_clock_last_extended_rtp_timestamp = audio_clock_stats->lastExtendedRtpTimestamp;
+      output->audio_clock_last_packet_arrival_time_us = audio_clock_stats->lastPacketArrivalTimeUs;
+      output->audio_clock_last_packet_media_time_us = audio_clock_stats->lastPacketMediaTimeUs;
+      output->audio_clock_last_rtp_timestamp = audio_clock_stats->lastRtpTimestamp;
+      output->audio_clock_sample_rate = audio_clock_stats->sampleRate;
+      output->audio_clock_filtered_pending_samples = audio_clock_stats->filteredPendingSamples;
+      output->audio_clock_last_sequence_number = audio_clock_stats->lastSequenceNumber;
+    }
+    output->audio_buffered_frames = audio_renderer_stats.buffered_frames;
+    output->audio_startup_prefill_frames = audio_renderer_stats.startup_prefill_frames;
+    output->audio_target_frames = audio_renderer_stats.target_frames;
+    output->audio_current_target_frames = audio_renderer_stats.current_target_frames;
+    output->audio_maximum_frames = audio_renderer_stats.maximum_frames;
+    output->audio_concealment_count = audio_renderer_stats.concealment_count;
+    output->audio_dropped_frames_count = audio_renderer_stats.dropped_frames_count;
+    output->audio_starvation_event_count = audio_renderer_stats.starvation_event_count;
+    output->audio_target_increase_count = audio_renderer_stats.target_increase_count;
+    output->audio_target_decrease_count = audio_renderer_stats.target_decrease_count;
+  }
 
       nl_runtime_lock(runtime);
       output->video_setup_count = runtime->video_setup_count;

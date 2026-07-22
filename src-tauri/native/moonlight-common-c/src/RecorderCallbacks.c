@@ -78,13 +78,23 @@ static void recArCleanup(void)
     realArCallbacks.cleanup();
 }
 
-static void recArDecodeAndPlaySample(char* sampleData, int sampleLength)
+static void recArDecodeAndPlaySample(char* sampleData,
+                                     int sampleLength,
+                                     uint16_t sequenceNumber,
+                                     uint32_t rtpTimestamp,
+                                     uint64_t extendedRtpTimestamp,
+                                     uint64_t arrivalTimeUs)
 {
-    if (audioFile != NULL) {
+    if (audioFile != NULL && sampleData != NULL && sampleLength > 0) {
         fwrite(sampleData, 1, sampleLength, audioFile);
     }
 
-    realArCallbacks.decodeAndPlaySample(sampleData, sampleLength);
+    realArCallbacks.decodeAndPlaySample(sampleData,
+                                        sampleLength,
+                                        sequenceNumber,
+                                        rtpTimestamp,
+                                        extendedRtpTimestamp,
+                                        arrivalTimeUs);
 }
 
 void setRecorderCallbacks(PDECODER_RENDERER_CALLBACKS drCallbacks, PAUDIO_RENDERER_CALLBACKS arCallbacks)

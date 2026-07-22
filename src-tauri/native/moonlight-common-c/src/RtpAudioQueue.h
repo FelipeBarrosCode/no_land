@@ -30,6 +30,7 @@ typedef struct _RTPA_FEC_BLOCK {
     PRTP_PACKET dataPackets[RTPA_DATA_SHARDS];
     uint8_t* fecPackets[RTPA_FEC_SHARDS];
     uint8_t marks[RTPA_TOTAL_SHARDS];
+    uint64_t dataPacketArrivalTimeUs[RTPA_DATA_SHARDS];
 
     AUDIO_FEC_HEADER fecHeader;
 
@@ -77,5 +78,5 @@ typedef struct _RTP_AUDIO_QUEUE {
 
 void RtpaInitializeQueue(PRTP_AUDIO_QUEUE queue);
 void RtpaCleanupQueue(PRTP_AUDIO_QUEUE queue);
-int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length);
-PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length);
+int RtpaAddPacket(PRTP_AUDIO_QUEUE queue, PRTP_PACKET packet, uint16_t length, uint64_t arrivalTimeUs);
+PRTP_PACKET RtpaGetQueuedPacket(PRTP_AUDIO_QUEUE queue, uint16_t customHeaderLength, uint16_t* length, uint64_t* arrivalTimeUs, bool* missingPacketPlaceholder);

@@ -9,6 +9,7 @@
 #include "Input.h"
 #include "RtpAudioQueue.h"
 #include "RtpVideoQueue.h"
+#include "AudioMasterClock.h"
 #include "ByteBuffer.h"
 
 #include <enet/enet.h>

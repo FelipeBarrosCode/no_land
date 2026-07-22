@@ -353,8 +353,15 @@ typedef void(*AudioRendererStop)(void);
 // This callback performs the final teardown of the audio decoder. No additional audio will be submitted when this callback is invoked.
 typedef void(*AudioRendererCleanup)(void);
 
-// This callback provides Opus audio data to be decoded and played. sampleLength is in bytes.
-typedef void(*AudioRendererDecodeAndPlaySample)(char* sampleData, int sampleLength);
+// This callback provides Opus audio data plus RTP timing metadata to be decoded and played.
+// sampleLength is in bytes. If sampleData is NULL or sampleLength is 0, the renderer should
+// treat this as a packet-loss concealment request for the provided RTP timeline position.
+typedef void(*AudioRendererDecodeAndPlaySample)(char* sampleData,
+                                                int sampleLength,
+                                                uint16_t sequenceNumber,
+                                                uint32_t rtpTimestamp,
+                                                uint64_t extendedRtpTimestamp,
+                                                uint64_t arrivalTimeUs);
 
 typedef struct _AUDIO_RENDERER_CALLBACKS {
     AudioRendererInit init;
@@ -886,6 +893,27 @@ typedef struct _RTP_AUDIO_STATS {
 } RTP_AUDIO_STATS, *PRTP_AUDIO_STATS;
 
 const RTP_AUDIO_STATS* LiGetRTPAudioStats(void);
+
+typedef struct _AUDIO_MASTER_CLOCK_STATS {
+    uint64_t anchorRtpTimestamp;
+    uint64_t anchorMediaTimeUs;
+    uint64_t submittedSamples;
+    uint64_t playedSamples;
+    uint64_t lastExtendedRtpTimestamp;
+    uint64_t lastPacketArrivalTimeUs;
+    uint64_t lastPacketMediaTimeUs;
+    uint32_t lastRtpTimestamp;
+    uint32_t sampleRate;
+    uint32_t filteredPendingSamples;
+    uint16_t lastSequenceNumber;
+    uint8_t valid;
+} AUDIO_MASTER_CLOCK_STATS, *PAUDIO_MASTER_CLOCK_STATS;
+
+// Returns a pointer to the current audio master clock state used for diagnostics
+// while migrating the pipeline to audio-driven synchronization.
+const AUDIO_MASTER_CLOCK_STATS* LiGetAudioMasterClockStats(void);
+uint8_t LiIsAudioMasterClockValid(void);
+uint64_t LiGetAudioMasterClockMediaTimeUs(void);
 
 // Returns a pointer to a struct containing various statistics about the RTP video stream.
 // The data should be considered read-only and must not be modified.

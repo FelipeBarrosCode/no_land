@@ -1,6 +1,8 @@
 add_library(noland_moonlight STATIC
   src/noland_moonlight.c
   src/noland_video_renderer.c
+  src/AudioPcmSyncBuffer.c
+  src/AudioPlayoutController.c
 )
 
 if(APPLE)

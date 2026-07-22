@@ -1,4 +1,5 @@
 #include "noland_audio_renderer.h"
+#include "AudioMasterClock.h"
 
 #include <opus/opus_multistream.h>
 
@@ -241,7 +242,15 @@ static int write_audio_buffer(nl_audio_windows_context_t* ctx) {
 
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
-                                              int sample_length) {
+                                              int sample_length,
+                                              uint16_t sequence_number,
+                                              uint32_t rtp_timestamp,
+                                              uint64_t extended_rtp_timestamp,
+                                              uint64_t arrival_time_us) {
+  (void)sequence_number;
+  (void)rtp_timestamp;
+  (void)extended_rtp_timestamp;
+  (void)arrival_time_us;
   if (renderer == NULL || renderer->platform_context == NULL || sample_data == NULL || sample_length <= 0) {
     return;
   }
@@ -282,5 +291,16 @@ void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
   hdr->dwBufferLength = bytes_to_copy;
 
   // If we filled enough or this is a new buffer, write it out
-  write_audio_buffer(ctx);
+  if (write_audio_buffer(ctx) == 0) {
+    AudioClockRecordSubmittedSamples((uint32_t)decoded_samples);
+    AudioClockUpdatePendingSamples(0);
+  }
+}
+
+void nl_audio_renderer_get_stats(nl_audio_renderer_t* renderer,
+                                 nl_audio_renderer_stats_t* stats) {
+  (void)renderer;
+  if (stats != NULL) {
+    memset(stats, 0, sizeof(*stats));
+  }
 }
