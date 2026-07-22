@@ -13,6 +13,9 @@ static PPLT_CRYPTO_CONTEXT audioDecryptionCtx;
 static uint32_t avRiKeyId;
 
 static unsigned short lastSeq;
+static uint16_t lastDequeuedSequenceNumber;
+static uint64_t lastDequeuedExtendedTimestamp;
+static bool haveLastDequeuedPacketMetadata;
 
 static bool pingThreadStarted;
 static bool receivedDataFromPeer;
@@ -75,6 +78,9 @@ int initializeAudioStream(void) {
     RtpaInitializeQueue(&rtpAudioQueue);
     AudioClockReset(0);
     lastSeq = 0;
+    lastDequeuedSequenceNumber = 0;
+    lastDequeuedExtendedTimestamp = 0;
+    haveLastDequeuedPacketMetadata = false;
     receivedDataFromPeer = false;
     pingThreadStarted = false;
     firstReceiveTime = 0;
@@ -400,8 +406,15 @@ static void AudioReceiveThreadProc(void* context) {
                     queuedPacket->header.arrivalTimeUs = queuedArrivalTimeUs;
                     queuedPacket->header.missingPacketPlaceholder = missingPacketPlaceholder;
                     if (length == 0) {
-                        queuedPacket->header.sequenceNumber = (uint16_t)(lastSeq + 1);
-                        queuedPacket->header.extendedRtpTimestamp = AudioClockPredictNextExtendedTimestamp((uint32_t)(48 * AudioPacketDuration));
+                        uint32_t timestampIncrement = (uint32_t)(48 * AudioPacketDuration);
+                        if (haveLastDequeuedPacketMetadata) {
+                            queuedPacket->header.sequenceNumber = (uint16_t)(lastDequeuedSequenceNumber + 1U);
+                            queuedPacket->header.extendedRtpTimestamp = lastDequeuedExtendedTimestamp + (uint64_t)timestampIncrement;
+                        }
+                        else {
+                            queuedPacket->header.sequenceNumber = (uint16_t)(lastSeq + 1U);
+                            queuedPacket->header.extendedRtpTimestamp = AudioClockPredictNextExtendedTimestamp(timestampIncrement);
+                        }
                         queuedPacket->header.rtpTimestamp = (uint32_t)(queuedPacket->header.extendedRtpTimestamp & 0xFFFFFFFFU);
                     }
                     else {
@@ -410,6 +423,10 @@ static void AudioReceiveThreadProc(void* context) {
                         queuedPacket->header.rtpTimestamp = queuedRtp->timestamp;
                         queuedPacket->header.extendedRtpTimestamp = AudioClockExtendRtpTimestamp32(queuedRtp->timestamp);
                     }
+
+                    lastDequeuedSequenceNumber = queuedPacket->header.sequenceNumber;
+                    lastDequeuedExtendedTimestamp = queuedPacket->header.extendedRtpTimestamp;
+                    haveLastDequeuedPacketMetadata = true;
 
                     if ((AudioCallbacks.capabilities & CAPABILITY_DIRECT_SUBMIT) == 0) {
                         if (!queuePacketToLbq(&queuedPacket)) {

@@ -46,39 +46,6 @@ static int nl_packet_compare(const nl_audio_jitter_packet_t* lhs,
   return 0;
 }
 
-static void nl_advance_expected_packet(nl_audio_playout_controller_t* controller,
-                                       uint16_t sequence_number,
-                                       uint64_t extended_rtp_timestamp) {
-  if (controller == NULL) {
-    return;
-  }
-
-  controller->expected_sequence_number = (uint16_t)(sequence_number + 1U);
-  controller->expected_extended_rtp_timestamp = extended_rtp_timestamp + (uint64_t)controller->samples_per_frame;
-  controller->has_expected_packet = true;
-}
-
-static bool nl_packet_is_obsolete(const nl_audio_playout_controller_t* controller,
-                                  const nl_audio_jitter_packet_t* packet) {
-  uint64_t audio_now_us;
-  uint64_t packet_end_media_time_us;
-  const uint64_t late_grace_us = 5000ULL;
-
-  if (controller == NULL || packet == NULL || !AudioClockIsValid()) {
-    return false;
-  }
-
-  audio_now_us = AudioClockGetMediaTimeUs();
-  packet_end_media_time_us = AudioClockMediaTimeUsForExtendedTimestamp(
-      packet->extended_rtp_timestamp + (uint64_t)controller->samples_per_frame);
-
-  if (packet_end_media_time_us == 0) {
-    return false;
-  }
-
-  return packet_end_media_time_us + late_grace_us <= audio_now_us;
-}
-
 static void nl_drop_head_packet(nl_audio_playout_controller_t* controller) {
   if (controller == NULL || controller->packet_queue_count == 0) {
     return;
@@ -141,12 +108,11 @@ static int nl_decode_packet_into_pcm(nl_audio_playout_controller_t* controller,
     return -1;
   }
 
-  AudioClockObservePacket(packet->sequence_number,
-                          packet->rtp_timestamp,
-                          packet->extended_rtp_timestamp,
-                          packet->arrival_time_us);
-
   if (!packet->plc_placeholder) {
+    AudioClockObservePacket(packet->sequence_number,
+                            packet->rtp_timestamp,
+                            packet->extended_rtp_timestamp,
+                            packet->arrival_time_us);
     payload = packet->payload;
     payload_length = (int)packet->payload_length;
   }
@@ -173,25 +139,15 @@ static int nl_decode_packet_into_pcm(nl_audio_playout_controller_t* controller,
 static bool nl_generate_plc_frame(nl_audio_playout_controller_t* controller) {
   nl_audio_jitter_packet_t plc_packet;
 
-  if (controller == NULL || controller->decoded_packet_count == 0 || !controller->has_expected_packet) {
+  if (controller == NULL || controller->decoded_packet_count == 0) {
     return false;
   }
 
   memset(&plc_packet, 0, sizeof(plc_packet));
   plc_packet.plc_placeholder = true;
-  plc_packet.sequence_number = controller->expected_sequence_number;
-  plc_packet.extended_rtp_timestamp = controller->expected_extended_rtp_timestamp;
-  plc_packet.rtp_timestamp = (uint32_t)(plc_packet.extended_rtp_timestamp & 0xFFFFFFFFU);
   plc_packet.arrival_time_us = LiGetMicroseconds();
 
-  if (nl_decode_packet_into_pcm(controller, &plc_packet) <= 0) {
-    return false;
-  }
-
-  nl_advance_expected_packet(controller,
-                             plc_packet.sequence_number,
-                             plc_packet.extended_rtp_timestamp);
-  return true;
+  return nl_decode_packet_into_pcm(controller, &plc_packet) > 0;
 }
 
 bool nl_audio_playout_controller_init(nl_audio_playout_controller_t* controller,
@@ -333,13 +289,15 @@ int nl_audio_playout_controller_submit_packet(nl_audio_playout_controller_t* con
   packet.arrival_time_us = arrival_time_us;
   packet.plc_placeholder = (sample_data == NULL || sample_length <= 0);
 
-  if (!packet.plc_placeholder) {
-    if (sample_length > NL_AUDIO_MAX_COMPRESSED_PACKET_SIZE) {
-      return -1;
-    }
-    packet.payload_length = (uint16_t)sample_length;
-    memcpy(packet.payload, sample_data, (size_t)sample_length);
+  if (packet.plc_placeholder) {
+    return 0;
   }
+
+  if (sample_length > NL_AUDIO_MAX_COMPRESSED_PACKET_SIZE) {
+    return -1;
+  }
+  packet.payload_length = (uint16_t)sample_length;
+  memcpy(packet.payload, sample_data, (size_t)sample_length);
 
   for (insert_at = 0; insert_at < controller->packet_queue_count; ++insert_at) {
     int order = nl_packet_compare(&packet, &controller->packet_queue[insert_at]);
@@ -482,76 +440,20 @@ uint32_t nl_audio_playout_controller_fill_frames(nl_audio_playout_controller_t* 
 
   available_frames = nl_audio_playout_controller_available_frames(controller);
   while (available_frames < minimum_frames) {
-    while (controller->packet_queue_count > 0 &&
-           nl_packet_is_obsolete(controller, &controller->packet_queue[0])) {
-      nl_drop_head_packet(controller);
-    }
-
     if (controller->packet_queue_count > 0) {
       nl_audio_jitter_packet_t packet = controller->packet_queue[0];
       int decoded_samples;
 
-      if (!controller->has_expected_packet) {
-        if (!nl_pop_head_packet(controller, &packet)) {
-          break;
-        }
-
-        decoded_samples = nl_decode_packet_into_pcm(controller, &packet);
-        if (decoded_samples <= 0) {
-          break;
-        }
-
-        nl_advance_expected_packet(controller,
-                                   packet.sequence_number,
-                                   packet.extended_rtp_timestamp);
-        available_frames += (uint32_t)decoded_samples;
-        continue;
-      }
-
-      if (packet.extended_rtp_timestamp < controller->expected_extended_rtp_timestamp) {
-        nl_drop_head_packet(controller);
-        continue;
-      }
-
-      if (packet.extended_rtp_timestamp == controller->expected_extended_rtp_timestamp) {
-        if (!nl_pop_head_packet(controller, &packet)) {
-          break;
-        }
-
-        decoded_samples = nl_decode_packet_into_pcm(controller, &packet);
-        if (decoded_samples <= 0) {
-          break;
-        }
-
-        nl_advance_expected_packet(controller,
-                                   packet.sequence_number,
-                                   packet.extended_rtp_timestamp);
-        available_frames += (uint32_t)decoded_samples;
-        continue;
-      }
-
-      if (!allow_concealment) {
-        if (!nl_pop_head_packet(controller, &packet)) {
-          break;
-        }
-
-        decoded_samples = nl_decode_packet_into_pcm(controller, &packet);
-        if (decoded_samples <= 0) {
-          break;
-        }
-
-        nl_advance_expected_packet(controller,
-                                   packet.sequence_number,
-                                   packet.extended_rtp_timestamp);
-        available_frames += (uint32_t)decoded_samples;
-        continue;
-      }
-
-      if (!nl_generate_plc_frame(controller)) {
+      if (!nl_pop_head_packet(controller, &packet)) {
         break;
       }
 
-      available_frames = nl_audio_playout_controller_available_frames(controller);
+      decoded_samples = nl_decode_packet_into_pcm(controller, &packet);
+      if (decoded_samples <= 0) {
+        break;
+      }
+
+      available_frames += (uint32_t)decoded_samples;
       continue;
     }
 
