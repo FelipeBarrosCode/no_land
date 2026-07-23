@@ -31,6 +31,15 @@ static DEBUG_RUST_ABSOLUTE_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 static DEBUG_RUST_BUTTON_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 static DEBUG_RUST_KEY_CALLBACKS: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn noland_macos_resolve_stream_target_view(ns_view: *mut c_void) -> *mut c_void;
+    fn noland_macos_input_install(ns_view: *mut c_void) -> i32;
+    fn noland_macos_input_uninstall(ns_view: *mut c_void);
+    fn noland_macos_input_set_capture_active(ns_view: *mut c_void, active: bool, mode: i32) -> i32;
+    fn noland_macos_input_set_debug_overlay_enabled(enabled: bool);
+}
+
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MacosInputDebugSnapshot {
@@ -118,12 +127,16 @@ pub extern "C" fn noland_macos_input_debug_rust_key_callbacks() -> u64 {
     DEBUG_RUST_KEY_CALLBACKS.load(Ordering::Relaxed)
 }
 
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn noland_macos_resolve_stream_target_view(ns_view: *mut c_void) -> *mut c_void;
-    fn noland_macos_input_install(ns_view: *mut c_void) -> i32;
-    fn noland_macos_input_uninstall(ns_view: *mut c_void);
-    fn noland_macos_input_set_capture_active(ns_view: *mut c_void, active: bool, mode: i32) -> i32;
+pub fn set_native_stream_input_debug_overlay_enabled(enabled: bool) {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        noland_macos_input_set_debug_overlay_enabled(enabled);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = enabled;
+    }
 }
 
 pub fn install_native_stream_input<R: Runtime>(

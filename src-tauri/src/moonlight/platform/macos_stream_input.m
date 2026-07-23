@@ -91,6 +91,103 @@ static const unsigned char kNolandModifierMeta = 0x08;
 
 static const void *kNolandMacosStreamInputBridgeKey = &kNolandMacosStreamInputBridgeKey;
 static const void *kNolandMacosStreamContainerViewKey = &kNolandMacosStreamContainerViewKey;
+static BOOL kNolandDebugOverlayEnabled = NO;
+static NSHashTable<NolandMacosStreamInputBridge *> *kNolandStreamInputBridges = nil;
+
+static NSHashTable<NolandMacosStreamInputBridge *> *noland_stream_input_bridges(void) {
+    if (kNolandStreamInputBridges == nil) {
+        kNolandStreamInputBridges = [NSHashTable weakObjectsHashTable];
+    }
+    return kNolandStreamInputBridges;
+}
+
+static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge);
+
+static void noland_update_debug_overlay_visibility(NolandMacosStreamInputBridge *bridge) {
+    if (bridge == nil) {
+        return;
+    }
+
+    BOOL hidden = !kNolandDebugOverlayEnabled;
+    if (bridge.debugBadgeView != nil) {
+        bridge.debugBadgeView.hidden = hidden;
+    }
+    if (bridge.debugTextLayer != nil) {
+        bridge.debugTextLayer.hidden = hidden;
+    }
+
+    if (hidden) {
+        if (bridge.debugTimer != nil) {
+            [bridge.debugTimer invalidate];
+            bridge.debugTimer = nil;
+        }
+        return;
+    }
+
+    if (bridge.debugTimer == nil || ![bridge.debugTimer isValid]) {
+        bridge.debugTimer = [NSTimer scheduledTimerWithTimeInterval:0.25
+                                                             repeats:YES
+                                                               block:^(__unused NSTimer *timer) {
+            noland_update_debug_overlay(bridge);
+        }];
+    }
+
+    noland_update_debug_overlay(bridge);
+}
+
+void noland_macos_input_set_debug_overlay_enabled(bool enabled) {
+    kNolandDebugOverlayEnabled = enabled ? YES : NO;
+    for (NolandMacosStreamInputBridge *bridge in noland_stream_input_bridges()) {
+        noland_update_debug_overlay_visibility(bridge);
+    }
+}
+
+int noland_macos_detect_main_display(unsigned int *width,
+                                     unsigned int *height,
+                                     unsigned int *refresh_hz) {
+    NSScreen *screen = [NSScreen mainScreen];
+    if (screen == nil) {
+        NSArray<NSScreen *> *screens = [NSScreen screens];
+        if (screens.count > 0) {
+            screen = screens.firstObject;
+        }
+    }
+    if (screen == nil) {
+        return 0;
+    }
+
+    NSNumber *screenNumber = screen.deviceDescription[@"NSScreenNumber"];
+    if (screenNumber == nil) {
+        return 0;
+    }
+
+    CGDirectDisplayID displayID = (CGDirectDisplayID)screenNumber.unsignedIntValue;
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(displayID);
+    if (mode == NULL) {
+        return 0;
+    }
+
+    size_t detectedWidth = CGDisplayModeGetPixelWidth(mode);
+    size_t detectedHeight = CGDisplayModeGetPixelHeight(mode);
+    double refresh = CGDisplayModeGetRefreshRate(mode);
+    CGDisplayModeRelease(mode);
+
+    if (detectedWidth == 0 || detectedHeight == 0) {
+        return 0;
+    }
+
+    if (width != NULL) {
+        *width = (unsigned int)detectedWidth;
+    }
+    if (height != NULL) {
+        *height = (unsigned int)detectedHeight;
+    }
+    if (refresh_hz != NULL) {
+        *refresh_hz = (unsigned int)((refresh > 1.0) ? llround(refresh) : 60.0);
+    }
+
+    return 1;
+}
 
 static unsigned char noland_modifier_bits(NSEventModifierFlags flags) {
     unsigned char modifiers = 0;
@@ -322,7 +419,6 @@ static void noland_handle_mouse_motion(NolandMacosStreamInputBridge *bridge, NSE
 }
 
 static void noland_set_capture_state(NolandMacosStreamInputBridge *bridge, BOOL active, NSInteger mode);
-static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge);
 static BOOL noland_bridge_contains_window_point(NolandMacosStreamInputBridge *bridge, NSPoint windowPoint);
 static BOOL noland_route_local_event(NolandMacosStreamInputBridge *bridge, NSEvent *event);
 
@@ -790,6 +886,8 @@ int noland_macos_input_install(void *ns_view) {
                 existing.captureView.frame = view.bounds;
                 [view addSubview:existing.captureView positioned:NSWindowAbove relativeTo:nil];
             }
+            [noland_stream_input_bridges() addObject:existing];
+            noland_update_debug_overlay_visibility(existing);
             return 0;
         }
 
@@ -813,7 +911,7 @@ int noland_macos_input_install(void *ns_view) {
         debugBadgeView.layer.cornerRadius = 10.0;
         debugBadgeView.layer.borderWidth = 2.0;
         debugBadgeView.layer.borderColor = NSColor.systemYellowColor.CGColor;
-        debugBadgeView.hidden = NO;
+        debugBadgeView.hidden = !kNolandDebugOverlayEnabled;
         debugBadgeView.autoresizingMask = NSViewMinXMargin | NSViewMinYMargin;
         NSTextField *debugBadgeLabel = [[NSTextField alloc] initWithFrame:NSInsetRect(debugBadgeView.bounds, 10.0, 8.0)];
         debugBadgeLabel.bezeled = NO;
@@ -841,6 +939,7 @@ int noland_macos_input_install(void *ns_view) {
         debugTextLayer.borderColor = [NSColor colorWithRed:0.2 green:0.85 blue:0.95 alpha:0.7].CGColor;
         debugTextLayer.zPosition = 1000.0;
         bridge.debugTextLayer = debugTextLayer;
+        debugTextLayer.hidden = !kNolandDebugOverlayEnabled;
         [captureView.layer addSublayer:debugTextLayer];
         bridge.localEventMonitor = [NSEvent addLocalMonitorForEventsMatchingMask:(NSEventMaskMouseMoved |
                                                                                   NSEventMaskLeftMouseDown |
@@ -863,11 +962,6 @@ int noland_macos_input_install(void *ns_view) {
             BOOL handled = noland_route_local_event(bridge, event);
             return handled ? nil : event;
         }];
-        bridge.debugTimer = [NSTimer scheduledTimerWithTimeInterval:0.25 repeats:YES block:^(NSTimer * _Nonnull timer) {
-            (void)timer;
-            noland_update_debug_overlay(bridge);
-        }];
-        noland_update_debug_overlay(bridge);
 
         NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
         bridge.didBecomeKeyObserver = [center addObserverForName:NSWindowDidBecomeKeyNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
@@ -881,6 +975,8 @@ int noland_macos_input_install(void *ns_view) {
         }];
 
         objc_setAssociatedObject(view, kNolandMacosStreamInputBridgeKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [noland_stream_input_bridges() addObject:bridge];
+        noland_update_debug_overlay_visibility(bridge);
         return 0;
     }
 }
@@ -907,6 +1003,7 @@ void noland_macos_input_uninstall(void *ns_view) {
         bridge.debugBadgeLabel = nil;
         [bridge.debugTimer invalidate];
         bridge.debugTimer = nil;
+        [noland_stream_input_bridges() removeObject:bridge];
         if (bridge.localEventMonitor != nil) {
             [NSEvent removeMonitor:bridge.localEventMonitor];
             bridge.localEventMonitor = nil;
@@ -962,7 +1059,7 @@ int noland_macos_input_set_capture_active(void *ns_view, bool active, int mode) 
         }
 
         noland_set_capture_state(bridge, active ? YES : NO, mode);
-        noland_update_debug_overlay(bridge);
+        noland_update_debug_overlay_visibility(bridge);
         return 0;
     }
 }

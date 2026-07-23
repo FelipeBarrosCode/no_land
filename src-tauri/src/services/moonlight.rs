@@ -19,6 +19,15 @@ use crate::{
     models::app_state::MoonlightPreferences,
 };
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn noland_macos_detect_main_display(
+        width: *mut u32,
+        height: *mut u32,
+        refresh_hz: *mut u32,
+    ) -> i32;
+}
+
 #[cfg(target_os = "linux")]
 use crate::services::os_detection::OsDetection;
 
@@ -1083,6 +1092,19 @@ fn detect_display(native: bool) -> AppResult<DisplayDetection> {
 fn detect_display_impl() -> Option<DisplayDetection> {
     #[cfg(target_os = "macos")]
     {
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut refresh_hz = 0u32;
+        let detected =
+            unsafe { noland_macos_detect_main_display(&mut width, &mut height, &mut refresh_hz) };
+        if detected != 0 && width > 0 && height > 0 {
+            return Some(DisplayDetection {
+                width,
+                height,
+                refresh_rate_hz: refresh_hz.max(60),
+            });
+        }
+
         let output = Command::new("system_profiler")
             .arg("SPDisplaysDataType")
             .output()

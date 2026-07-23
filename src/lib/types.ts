@@ -267,6 +267,7 @@ export interface MoonlightPreferences {
   gameopts: number;
   gamepadmouse: number;
   detectnetblocking: number;
+  showInputDebugHud: number;
 }
 
 export interface RentedInstanceSummary {

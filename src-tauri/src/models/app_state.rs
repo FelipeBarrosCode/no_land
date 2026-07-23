@@ -486,6 +486,8 @@ pub struct MoonlightPreferences {
     pub gameopts: u8,
     pub gamepadmouse: u8,
     pub detectnetblocking: u8,
+    #[serde(default)]
+    pub show_input_debug_hud: u8,
 }
 
 impl Default for MoonlightPreferences {
@@ -510,6 +512,7 @@ impl Default for MoonlightPreferences {
             gameopts: 1,
             gamepadmouse: 1,
             detectnetblocking: 1,
+            show_input_debug_hud: 0,
         }
     }
 }

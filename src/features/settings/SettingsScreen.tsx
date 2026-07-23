@@ -43,6 +43,7 @@ type ClientForm = {
   gameopts: string;
   gamepadmouse: string;
   detectnetblocking: string;
+  showInputDebugHud: string;
 };
 
 interface Props {
@@ -237,6 +238,8 @@ export function SettingsScreen({
     gamepadmouse: appState.moonlightPreferences.gamepadmouse.toString(),
     detectnetblocking:
       appState.moonlightPreferences.detectnetblocking.toString(),
+    showInputDebugHud:
+      appState.moonlightPreferences.showInputDebugHud.toString(),
   }));
 
   useEffect(() => {
@@ -279,6 +282,8 @@ export function SettingsScreen({
       gamepadmouse: appState.moonlightPreferences.gamepadmouse.toString(),
       detectnetblocking:
         appState.moonlightPreferences.detectnetblocking.toString(),
+      showInputDebugHud:
+        appState.moonlightPreferences.showInputDebugHud.toString(),
     });
   }, [appState]);
 
@@ -731,6 +736,20 @@ export function SettingsScreen({
             </div>
             <div>
               <SelectField
+                label="Input Debug HUD"
+                value={clientForm.showInputDebugHud}
+                options={binaryOptions}
+                onChange={(value) =>
+                  setClientForm((prev) => ({ ...prev, showInputDebugHud: value }))
+                }
+              />
+              <SettingHelp>
+                Shows the yellow native macOS input debug box. Keep this disabled
+                unless you are debugging mouse or keyboard capture.
+              </SettingHelp>
+            </div>
+            <div>
+              <SelectField
                 label="Keep Device Awake"
                 value={clientForm.keepawake}
                 options={binaryOptions}
@@ -931,6 +950,12 @@ export function SettingsScreen({
                 toNumber(
                   clientForm.detectnetblocking,
                   appState.moonlightPreferences.detectnetblocking,
+                ),
+              ),
+              showInputDebugHud: Math.round(
+                toNumber(
+                  clientForm.showInputDebugHud,
+                  appState.moonlightPreferences.showInputDebugHud,
                 ),
               ),
             })

@@ -39,7 +39,7 @@ use crate::{
         platform::{
             activate_native_stream_input, close_stream_window, create_or_reuse_stream_window,
             deactivate_native_stream_input, install_native_stream_input,
-            stream_window_surface_descriptor,
+            set_native_stream_input_debug_overlay_enabled, stream_window_surface_descriptor,
         },
         runtime::NativeStartRequest,
     },
@@ -1200,6 +1200,15 @@ async fn start_embedded_stream_for_host(
         &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
+    set_native_stream_input_debug_overlay_enabled(
+        app.state::<AppContext>()
+            .state
+            .read()
+            .await
+            .moonlight_preferences
+            .show_input_debug_hud
+            != 0,
+    );
     install_native_stream_input(&stream_window, moonlight.input.clone())
         .map_err(moonlight_frontend_error)?;
     let surface =
@@ -2612,6 +2621,10 @@ pub async fn update_moonlight_preferences(
         })
         .await?;
 
+    set_native_stream_input_debug_overlay_enabled(
+        next_state.moonlight_preferences.show_input_debug_hud != 0,
+    );
+
     Ok(next_state)
 }
 
@@ -3725,6 +3738,15 @@ pub async fn moonlight_start_stream(
         &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
+    set_native_stream_input_debug_overlay_enabled(
+        app.state::<AppContext>()
+            .state
+            .read()
+            .await
+            .moonlight_preferences
+            .show_input_debug_hud
+            != 0,
+    );
     install_native_stream_input(&stream_window, moonlight.input.clone())
         .map_err(moonlight_frontend_error)?;
     let surface =
