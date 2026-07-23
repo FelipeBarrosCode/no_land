@@ -242,9 +242,11 @@ static int write_audio_buffer(nl_audio_windows_context_t* ctx) {
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
                                               int sample_length) {
-  if (renderer == NULL || renderer->platform_context == NULL || sample_data == NULL || sample_length <= 0) {
+  if (renderer == NULL || renderer->platform_context == NULL || sample_length < 0) {
     return;
   }
+
+  const unsigned char* opus_data = sample_data != NULL ? (const unsigned char*)sample_data : NULL;
 
   nl_audio_windows_context_t* ctx = (nl_audio_windows_context_t*)renderer->platform_context;
   if (!ctx->initialized || ctx->decoder == NULL || ctx->decode_scratch == NULL) {
@@ -253,7 +255,7 @@ void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
 
   int decoded_samples = opus_multistream_decode_float(
       ctx->decoder,
-      (const unsigned char*)sample_data,
+      opus_data,
       sample_length,
       ctx->decode_scratch,
       ctx->samples_per_frame,

@@ -79,6 +79,7 @@ export function StreamWindowScreen() {
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
   const [showHud, setShowHud] = useState(true);
   const teardownRequestedRef = useRef(false);
+  const allowWindowCloseRef = useRef(false);
   const hasSeenActiveSessionRef = useRef(false);
 
   useEffect(() => {
@@ -90,14 +91,47 @@ export function StreamWindowScreen() {
       .catch(() => setPreferredMouseMode(null));
 
     let cancelled = false;
+    const appWindow = getCurrentWindow();
     const closeStreamWindow = async () => {
       teardownRequestedRef.current = true;
+      allowWindowCloseRef.current = true;
       try {
-        await getCurrentWindow().close();
+        await appWindow.close();
       } catch {
         window.close();
       }
     };
+
+    const unlistenCloseRequestedPromise = appWindow.onCloseRequested(
+      async (event) => {
+        if (allowWindowCloseRef.current) {
+          return;
+        }
+        event.preventDefault();
+        if (teardownRequestedRef.current) {
+          return;
+        }
+
+        teardownRequestedRef.current = true;
+        setDisconnecting(true);
+        setDisconnectError(null);
+
+        try {
+          await moonlightDisconnectStream();
+          allowWindowCloseRef.current = true;
+          try {
+            await appWindow.close();
+          } catch {
+            window.close();
+          }
+        } catch (error) {
+          teardownRequestedRef.current = false;
+          setDisconnecting(false);
+          const message = error instanceof Error ? error.message : String(error);
+          setDisconnectError(message || "Failed to end stream session");
+        }
+      },
+    );
 
     const poll = async () => {
       try {
@@ -129,6 +163,7 @@ export function StreamWindowScreen() {
     return () => {
       cancelled = true;
       window.clearInterval(interval);
+      void unlistenCloseRequestedPromise.then((unlisten) => unlisten());
       if (!teardownRequestedRef.current) {
         teardownRequestedRef.current = true;
         void moonlightDisconnectStream().catch(() => undefined);

@@ -100,8 +100,10 @@ fn main() {
         println!("cargo:rustc-link-search=native=/usr/local/opt/openssl@3/lib");
         println!("cargo:rustc-link-search=native=/opt/homebrew/lib");
         println!("cargo:rustc-link-search=native=/usr/local/lib");
+        println!("cargo:rustc-link-search=native=/opt/homebrew/lib/pkgconfig/../");
         println!("cargo:rustc-link-lib=dylib=crypto");
         println!("cargo:rustc-link-lib=dylib=opus");
+        println!("cargo:rustc-link-lib=dylib=SDL2");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");

@@ -5,6 +5,10 @@ add_library(noland_moonlight STATIC
 
 if(APPLE)
   target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m src/noland_audio_renderer_macos.m)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SDL2 REQUIRED sdl2)
+  target_include_directories(noland_moonlight PRIVATE ${SDL2_INCLUDE_DIRS})
+  target_link_libraries(noland_moonlight PRIVATE ${SDL2_LIBRARIES})
 elseif(UNIX)
   target_sources(noland_moonlight PRIVATE src/noland_audio_renderer_linux.c)
   find_package(PkgConfig REQUIRED)

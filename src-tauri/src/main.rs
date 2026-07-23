@@ -21,7 +21,7 @@ use services::{
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
     wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
 };
-use tauri::Manager;
+use tauri::{Manager, WindowEvent};
 use tracing::{error, info, warn};
 use utils::logging::init_logging;
 
@@ -161,6 +161,7 @@ fn main() {
 
             let context = AppContext::new(config, state_store, initial_state);
             app.manage(context.clone());
+            app.manage(moonlight::platform::StreamWindowCloseState::default());
             let moonlight_manager = moonlight::composition::MoonlightManager::new(
                 state_path.clone(),
                 app_data_dir.clone(),
@@ -188,6 +189,41 @@ fn main() {
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if window.label() != moonlight::platform::STREAM_WINDOW_LABEL {
+                return;
+            }
+
+            let WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+
+            let close_state = window.state::<moonlight::platform::StreamWindowCloseState>();
+            if close_state.allow_close() {
+                return;
+            }
+
+            api.prevent_close();
+            if !close_state.begin_close_intercept() {
+                return;
+            }
+
+            let app = window.app_handle().clone();
+            let moonlight = app.state::<moonlight::composition::MoonlightManager>();
+            let runtime = moonlight.runtime.clone();
+            let input = moonlight.input.clone();
+            let active_session_preferences = moonlight.active_session_preferences.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let _ = runtime.stop().await;
+                let _ = runtime.detach_surface().await;
+                input.end_capture();
+                if let Ok(mut active_preferences) = active_session_preferences.lock() {
+                    *active_preferences = None;
+                }
+                let _ = moonlight::platform::close_stream_window(&app);
+            });
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,

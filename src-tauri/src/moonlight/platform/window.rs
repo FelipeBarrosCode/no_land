@@ -1,4 +1,7 @@
-use std::ffi::c_void;
+use std::{
+    ffi::c_void,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
 
@@ -13,6 +16,35 @@ use crate::moonlight::{
 };
 
 pub const STREAM_WINDOW_LABEL: &str = "moonlight-stream";
+
+#[derive(Debug, Default)]
+pub struct StreamWindowCloseState {
+    allow_close: AtomicBool,
+    closing_in_progress: AtomicBool,
+}
+
+impl StreamWindowCloseState {
+    pub fn allow_close(&self) -> bool {
+        self.allow_close.load(Ordering::SeqCst)
+    }
+
+    pub fn set_allow_close(&self, value: bool) {
+        self.allow_close.store(value, Ordering::SeqCst);
+    }
+
+    pub fn begin_close_intercept(&self) -> bool {
+        !self.closing_in_progress.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn finish_close_intercept(&self) {
+        self.closing_in_progress.store(false, Ordering::SeqCst);
+    }
+
+    pub fn reset(&self) {
+        self.allow_close.store(false, Ordering::SeqCst);
+        self.closing_in_progress.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NativeSurfaceDescriptor {
@@ -44,6 +76,7 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
     title: &str,
 ) -> Result<Window<R>, MoonlightError> {
     if let Some(window) = app.get_window(STREAM_WINDOW_LABEL) {
+        app.state::<StreamWindowCloseState>().reset();
         let _ = window.set_fullscreen(false);
         let _ = window.set_title(title);
         window
@@ -52,6 +85,7 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
         return Ok(window);
     }
 
+    app.state::<StreamWindowCloseState>().reset();
     let window = tauri::window::WindowBuilder::new(app, STREAM_WINDOW_LABEL)
         .title(title)
         .inner_size(width as f64, height as f64)
@@ -64,6 +98,9 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
 }
 
 pub fn close_stream_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), MoonlightError> {
+    app.state::<StreamWindowCloseState>().set_allow_close(true);
+    app.state::<StreamWindowCloseState>()
+        .finish_close_intercept();
     if let Some(window) = app.get_window(STREAM_WINDOW_LABEL) {
         let _ = uninstall_native_stream_input(&window);
         window

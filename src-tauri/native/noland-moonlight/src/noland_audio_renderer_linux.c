@@ -162,7 +162,7 @@ void nl_audio_renderer_cleanup(nl_audio_renderer_t* renderer) {
 void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
                                               char* sample_data,
                                               int sample_length) {
-  if (renderer == NULL || renderer->platform_context == NULL || sample_data == NULL || sample_length <= 0) {
+  if (renderer == NULL || renderer->platform_context == NULL || sample_length < 0) {
     return;
   }
 
@@ -171,10 +171,14 @@ void nl_audio_renderer_decode_and_play_sample(nl_audio_renderer_t* renderer,
     return;
   }
 
+  // Moonlight passes NULL/0 to request Opus packet loss concealment (PLC).
+  // Do not early-return in that case; feed it through to the decoder.
+  const unsigned char* opus_data = sample_data != NULL ? (const unsigned char*)sample_data : NULL;
+
   // Decode Opus to float PCM
   int decoded_samples = opus_multistream_decode_float(
       ctx->decoder,
-      (const unsigned char*)sample_data,
+      opus_data,
       sample_length,
       ctx->decode_scratch,
       ctx->samples_per_frame,
