@@ -1,4 +1,3 @@
-pub mod controller;
 pub mod event;
 pub mod manager;
 pub mod mapping;

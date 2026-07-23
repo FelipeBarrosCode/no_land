@@ -1,5 +1,6 @@
 #include "noland_moonlight.h"
 #include "noland_audio_renderer.h"
+#include "noland_controller_manager.h"
 #include "noland_video_renderer.h"
 #include "Limelight.h"
 
@@ -72,6 +73,7 @@ struct nl_runtime {
   uint64_t controller_state_count;
   nl_video_renderer_t renderer;
   nl_audio_renderer_t audio_renderer;
+  nl_controller_manager_t* controller_manager;
   int32_t last_video_frame_number;
   int32_t last_video_frame_type;
   int32_t last_video_frame_length;
@@ -334,6 +336,9 @@ static void nl_connection_started(void) {
     return;
   }
   nl_set_state(runtime, NL_STREAM_STATE_STREAMING, NL_EVENT_CONNECTED, 0, "connected");
+  if (runtime->controller_manager != NULL) {
+    nl_controller_manager_start(runtime->controller_manager, runtime);
+  }
 }
 
 static void nl_connection_terminated(int errorCode) {
@@ -341,6 +346,9 @@ static void nl_connection_terminated(int errorCode) {
   nl_runtime_t* runtime = nl_get_active_runtime();
   if (runtime == NULL) {
     return;
+  }
+  if (runtime->controller_manager != NULL) {
+    nl_controller_manager_stop(runtime->controller_manager);
   }
   snprintf(message, sizeof(message), "terminated (%d)", errorCode);
   nl_set_state(runtime, NL_STREAM_STATE_IDLE, NL_EVENT_TERMINATED, errorCode, message);
@@ -361,6 +369,60 @@ static void nl_connection_log_message(const char* format, ...) {
   vsnprintf(message, sizeof(message), format, args);
   va_end(args);
   nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, message);
+}
+
+static void nl_connection_rumble(unsigned short controllerNumber, unsigned short lowFreqMotor, unsigned short highFreqMotor) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL || runtime->controller_manager == NULL) {
+    return;
+  }
+  nl_controller_manager_rumble(runtime->controller_manager, controllerNumber, lowFreqMotor, highFreqMotor);
+}
+
+static void nl_connection_rumble_triggers(uint16_t controllerNumber, uint16_t leftTriggerMotor, uint16_t rightTriggerMotor) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL || runtime->controller_manager == NULL) {
+    return;
+  }
+  nl_controller_manager_rumble_triggers(runtime->controller_manager, controllerNumber, leftTriggerMotor, rightTriggerMotor);
+}
+
+static void nl_connection_set_motion_event_state(uint16_t controllerNumber, uint8_t motionType, uint16_t reportRateHz) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL || runtime->controller_manager == NULL) {
+    return;
+  }
+  nl_controller_manager_set_motion_event_state(runtime->controller_manager, controllerNumber, motionType, reportRateHz);
+}
+
+static void nl_connection_set_controller_led(uint16_t controllerNumber, uint8_t r, uint8_t g, uint8_t b) {
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL || runtime->controller_manager == NULL) {
+    return;
+  }
+  nl_controller_manager_set_led(runtime->controller_manager, controllerNumber, r, g, b);
+}
+
+static void nl_connection_set_adaptive_triggers(uint16_t controllerNumber, uint8_t eventFlags, uint8_t typeLeft, uint8_t typeRight, uint8_t* left, uint8_t* right) {
+  nl_dualsense_output_report_t report;
+  nl_runtime_t* runtime = nl_get_active_runtime();
+  if (runtime == NULL || runtime->controller_manager == NULL) {
+    return;
+  }
+
+  memset(&report, 0, sizeof(report));
+  report.valid_flag0 = eventFlags;
+  report.valid_flag1 = 0x04;
+  report.right_trigger_effect_type = typeRight;
+  report.left_trigger_effect_type = typeLeft;
+  if (right != NULL) {
+    memcpy(report.right_trigger_effect, right, sizeof(report.right_trigger_effect));
+  }
+  if (left != NULL) {
+    memcpy(report.left_trigger_effect, left, sizeof(report.left_trigger_effect));
+  }
+
+  nl_controller_manager_set_adaptive_triggers(runtime->controller_manager, controllerNumber, &report);
 }
 
 static int nl_video_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
@@ -617,6 +679,11 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   connectionCallbacks.connectionStarted = nl_connection_started;
   connectionCallbacks.connectionTerminated = nl_connection_terminated;
   connectionCallbacks.logMessage = nl_connection_log_message;
+  connectionCallbacks.rumble = nl_connection_rumble;
+  connectionCallbacks.rumbleTriggers = nl_connection_rumble_triggers;
+  connectionCallbacks.setMotionEventState = nl_connection_set_motion_event_state;
+  connectionCallbacks.setControllerLED = nl_connection_set_controller_led;
+  connectionCallbacks.setAdaptiveTriggers = nl_connection_set_adaptive_triggers;
 
   videoCallbacks.setup = nl_video_setup;
   videoCallbacks.start = nl_video_start;
@@ -666,6 +733,11 @@ nl_result_t nl_runtime_create(nl_runtime_t** output) {
   memset(&runtime->audio_renderer, 0, sizeof(runtime->audio_renderer));
   runtime->audio_renderer.target_buffer_ms = 20U;
   runtime->audio_renderer.maximum_buffer_ms = 80U;
+  runtime->controller_manager = nl_controller_manager_create();
+  if (runtime->controller_manager == NULL) {
+    free(runtime);
+    return NL_RESULT_OUT_OF_MEMORY;
+  }
 #if defined(_WIN32)
   InitializeCriticalSection(&runtime->mutex);
   runtime->worker_thread = NULL;
@@ -699,6 +771,7 @@ void nl_runtime_destroy(nl_runtime_t* runtime) {
   pthread_mutex_destroy(&runtime->mutex);
 #endif
   nl_audio_renderer_cleanup(&runtime->audio_renderer);
+  nl_controller_manager_destroy(runtime->controller_manager);
   nl_owned_request_clear(&runtime->request);
   free(runtime);
 }
@@ -786,6 +859,9 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
   }
   if (should_stop) {
     LiStopConnection();
+  }
+  if (runtime->controller_manager != NULL) {
+    nl_controller_manager_stop(runtime->controller_manager);
   }
 
   nl_clear_active_runtime(runtime);

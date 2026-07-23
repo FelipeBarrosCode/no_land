@@ -25,6 +25,18 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         native_root
+            .join("noland-moonlight/src/noland_controller_manager.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_controller_manager.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
             .join("noland-moonlight/src/noland_video_renderer.c")
             .display()
     );

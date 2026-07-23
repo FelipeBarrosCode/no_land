@@ -1,5 +1,6 @@
 add_library(noland_moonlight STATIC
   src/noland_moonlight.c
+  src/noland_controller_manager.c
   src/noland_video_renderer.c
 )
 
