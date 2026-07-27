@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +22,8 @@ pub struct PersistedAppState {
     pub shared_storage: SharedStorageState,
     #[serde(default)]
     pub shared_storage_profiles: Vec<crate::models::application_bundle::ProfileReference>,
+    #[serde(default)]
+    pub shared_storage_credentials: SharedStorageCredentialState,
     #[serde(default)]
     pub application_catalog: Vec<crate::models::application_bundle::ApplicationBundle>,
     pub provisioned_servers: Vec<ProvisionedServerState>,
@@ -49,6 +53,7 @@ impl Default for PersistedAppState {
             moonlight_preferences: MoonlightPreferences::default(),
             shared_storage: SharedStorageState::default(),
             shared_storage_profiles: Vec::new(),
+            shared_storage_credentials: SharedStorageCredentialState::default(),
             application_catalog: Vec::new(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
@@ -740,6 +745,30 @@ impl Default for SharedStorageState {
             last_backup_trigger: "none".to_string(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageCredentialState {
+    #[serde(default)]
+    pub profiles: HashMap<String, SharedStorageProfileSecret>,
+    #[serde(default)]
+    pub oauth_sessions: HashMap<String, SharedStorageOAuthSessionSecret>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageProfileSecret {
+    pub credentials: crate::services::shared_storage::object_storage::StorageCredential,
+    #[serde(default)]
+    pub provider_fields: HashMap<String, String>,
+    pub repository_key_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageOAuthSessionSecret {
+    pub credentials: crate::services::shared_storage::object_storage::StorageCredential,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

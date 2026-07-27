@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
 use tauri::State;
 use tracing::info;
@@ -9,19 +9,15 @@ use crate::models::application_bundle::{
     SharedStorageTestResult, StorageProvider,
 };
 use crate::services::app_context::AppContext;
-use crate::services::shared_storage::credential_vault::CredentialVault;
+use crate::services::remote_exec::RemoteExec;
 use crate::services::shared_storage::object_storage::StorageCredential;
 use crate::services::shared_storage::provider_profiles::{
-    shared_profile_manager, shared_profile_vault, SharedStorageProfileManager,
+    shared_profile_manager, SharedStorageProfileManager,
 };
+use crate::services::shared_storage::shared_storage_manager::SharedStorageManager;
+use crate::services::vast_api::VastApiClient;
 
-// ─── Lazy Vault ────────────────────────────────────────────
-
-fn get_vault() -> Arc<dyn CredentialVault> {
-    shared_profile_vault()
-}
-
-fn get_profile_manager() -> Arc<SharedStorageProfileManager> {
+fn get_profile_manager() -> std::sync::Arc<SharedStorageProfileManager> {
     shared_profile_manager()
 }
 
@@ -42,6 +38,8 @@ pub async fn save_static_provider_credentials(
     prefix: Option<String>,
     display_name: String,
 ) -> Result<SharedStorageProfile, FrontendError> {
+    clear_pending_oauth_sessions(context.inner()).await?;
+    clear_all_connected_profiles(context.inner()).await?;
     let provider: StorageProvider = serde_json::from_str(&format!(r#""{}""#, provider))
         .map_err(|e| AppError::InvalidInput(format!("Unknown provider: {e}")))?;
 
@@ -52,6 +50,7 @@ pub async fn save_static_provider_credentials(
     let manager = get_profile_manager();
     let profile = manager
         .save_static_credentials(
+            context.inner(),
             &provider,
             &credentials,
             &raw_fields,
@@ -69,10 +68,14 @@ pub async fn save_static_provider_credentials(
         provider: Some(provider.clone()),
         bucket: bucket.clone(),
         prefix: prefix.clone(),
+        active: true,
     };
 
     context
         .update_state(|state| {
+            for existing in &mut state.shared_storage_profiles {
+                existing.active = false;
+            }
             state
                 .shared_storage_profiles
                 .retain(|existing| existing.id != profile_ref.id);
@@ -86,30 +89,67 @@ pub async fn save_static_provider_credentials(
 
 #[tauri::command]
 pub async fn test_shared_storage_connection(
+    context: State<'_, AppContext>,
     profile_id: String,
 ) -> Result<SharedStorageTestResult, FrontendError> {
-    // In production, this would retrieve credentials, create a storage adapter,
-    // and perform actual test operations. For now return a basic positive result.
     info!("Testing shared storage connection for profile: {profile_id}");
 
-    Ok(SharedStorageTestResult {
-        authenticated: true,
-        can_list: true,
-        can_write: true,
-        can_read: true,
-        can_delete_test_object: true,
-        repository_accessible: true,
-        latency_ms: Some(120),
-        error: None,
-    })
+    let remote = match build_remote_exec_from_state(context.inner()).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            return Ok(failed_test_result(format!(
+                "Select or start a server before testing shared storage: {error}"
+            )));
+        }
+    };
+    let target_user = context.config.audio_target_user.clone();
+
+    SharedStorageManager::test_profile_connection(
+        context.inner(),
+        &remote,
+        &target_user,
+        Some(&profile_id),
+    )
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn get_shared_storage_profiles(
     context: State<'_, AppContext>,
 ) -> Result<Vec<ProfileReference>, FrontendError> {
+    ensure_active_profile_reference(context.inner()).await?;
     let state = context.load_state().await;
     Ok(state.shared_storage_profiles.clone())
+}
+
+#[tauri::command]
+pub async fn set_active_shared_storage_profile(
+    context: State<'_, AppContext>,
+    profile_id: String,
+) -> Result<(), FrontendError> {
+    let found = {
+        let state = context.load_state().await;
+        state
+            .shared_storage_profiles
+            .iter()
+            .any(|profile| profile.id == profile_id)
+    };
+    if !found {
+        return Err(
+            AppError::NotFound(format!("Shared storage profile {} not found", profile_id)).into(),
+        );
+    }
+
+    context
+        .update_state(|state| {
+            for profile in &mut state.shared_storage_profiles {
+                profile.active = profile.id == profile_id;
+            }
+        })
+        .await?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -128,27 +168,42 @@ pub async fn disconnect_shared_storage_profile(
         .cloned();
 
     if let Some(pref) = profile_ref {
-        let vault_key = format!("shared-storage:profile:{}:credentials", profile_id);
         let profile = SharedStorageProfile {
             id: profile_id.clone(),
             display_name: pref.display_name,
             provider: pref.provider.unwrap_or(StorageProvider::BackblazeB2),
             provider_label: pref.provider_label,
-            bucket: None,
-            prefix: None,
-            credential_vault_reference: vault_key,
+            bucket: pref.bucket.clone(),
+            prefix: pref.prefix.clone(),
+            credential_vault_reference: format!(
+                "state.json:sharedStorageCredentials.profiles.{}",
+                profile_id
+            ),
             repository_id: String::new(),
             status: SharedStorageStatus::NotConfigured,
             last_verified_at: None,
             protected_bundles_count: 0,
             total_stored_bytes: 0,
         };
-        manager.delete_profile_credentials(&profile).await?;
+        manager
+            .delete_profile_credentials(context.inner(), &profile)
+            .await?;
     }
 
     context
         .update_state(|state| {
+            let was_active = state
+                .shared_storage_profiles
+                .iter()
+                .find(|p| p.id == profile_id)
+                .map(|p| p.active)
+                .unwrap_or(false);
             state.shared_storage_profiles.retain(|p| p.id != profile_id);
+            if was_active {
+                if let Some(first) = state.shared_storage_profiles.first_mut() {
+                    first.active = true;
+                }
+            }
         })
         .await?;
 
@@ -216,6 +271,176 @@ fn build_storage_credentials(
     }
 }
 
+fn failed_test_result(error: String) -> SharedStorageTestResult {
+    SharedStorageTestResult {
+        authenticated: false,
+        can_list: false,
+        can_write: false,
+        can_read: false,
+        can_delete_test_object: false,
+        repository_accessible: false,
+        latency_ms: None,
+        error: Some(error),
+    }
+}
+
+fn profile_reference_to_profile(pref: &ProfileReference) -> SharedStorageProfile {
+    SharedStorageProfile {
+        id: pref.id.clone(),
+        display_name: pref.display_name.clone(),
+        provider: pref
+            .provider
+            .clone()
+            .unwrap_or(StorageProvider::BackblazeB2),
+        provider_label: pref.provider_label.clone(),
+        bucket: pref.bucket.clone(),
+        prefix: pref.prefix.clone(),
+        credential_vault_reference: format!(
+            "state.json:sharedStorageCredentials.profiles.{}",
+            pref.id
+        ),
+        repository_id: String::new(),
+        status: SharedStorageStatus::Connected,
+        last_verified_at: None,
+        protected_bundles_count: 0,
+        total_stored_bytes: 0,
+    }
+}
+
+async fn clear_all_connected_profiles(context: &AppContext) -> Result<(), FrontendError> {
+    let existing_profiles = {
+        let state = context.load_state().await;
+        state.shared_storage_profiles.clone()
+    };
+
+    if existing_profiles.is_empty() {
+        return Ok(());
+    }
+
+    let manager = get_profile_manager();
+    for profile_ref in &existing_profiles {
+        manager
+            .delete_profile_credentials(context, &profile_reference_to_profile(profile_ref))
+            .await?;
+    }
+
+    context
+        .update_state(|state| {
+            state.shared_storage_profiles.clear();
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn clear_oauth_session_artifacts(
+    context: &AppContext,
+    session_id: &str,
+) -> Result<(), FrontendError> {
+    get_profile_manager()
+        .delete_oauth_session_credentials(context, session_id)
+        .await?;
+
+    let mut sessions = get_oauth_sessions().write().await;
+    sessions.remove(session_id);
+    Ok(())
+}
+
+async fn clear_pending_oauth_sessions(context: &AppContext) -> Result<(), FrontendError> {
+    let session_ids = {
+        let sessions = get_oauth_sessions().read().await;
+        sessions.keys().cloned().collect::<Vec<_>>()
+    };
+
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+
+    for session_id in &session_ids {
+        clear_oauth_session_artifacts(context, session_id).await?;
+    }
+
+    Ok(())
+}
+
+async fn ensure_active_profile_reference(context: &AppContext) -> Result<(), FrontendError> {
+    let needs_update = {
+        let state = context.load_state().await;
+        !state.shared_storage_profiles.is_empty()
+            && !state
+                .shared_storage_profiles
+                .iter()
+                .any(|profile| profile.active)
+    };
+
+    if needs_update {
+        context
+            .update_state(|state| {
+                if let Some(first) = state.shared_storage_profiles.first_mut() {
+                    first.active = true;
+                }
+            })
+            .await?;
+    }
+
+    Ok(())
+}
+
+async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec, AppError> {
+    let state = context.load_state().await;
+    let private_key_path = state.ssh.private_key_path.clone();
+    if private_key_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "SSH private key path is empty. Run provisioning first.".to_string(),
+        ));
+    }
+
+    let instance_id = state.instance.instance_id.ok_or_else(|| {
+        AppError::InvalidInput(
+            "No active instance selected. Start or select a server first.".to_string(),
+        )
+    })?;
+
+    let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+        context.config.ssh_user.clone()
+    } else {
+        state.ssh.ssh_username.clone()
+    };
+
+    let api_key = state.credentials.vast_api_key.clone();
+    if api_key.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "Vast API key is missing. Add it in Settings first.".to_string(),
+        ));
+    }
+    drop(state);
+
+    let vast = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        api_key,
+    );
+    let instance = vast.get_instance(instance_id).await?;
+    let ssh_host = if instance.public_ip.trim().is_empty() {
+        instance.ssh_host.clone()
+    } else {
+        instance.public_ip.clone()
+    };
+    if ssh_host.trim().is_empty() || instance.ssh_port == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "Instance {} SSH details are unavailable.",
+            instance_id
+        )));
+    }
+
+    Ok(RemoteExec {
+        ssh_user,
+        ssh_host,
+        ssh_port: instance.ssh_port,
+        private_key_path,
+    })
+}
+
 // ─── Request types ────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -276,11 +501,14 @@ pub struct OAuthCompleteResponse {
 
 #[tauri::command]
 pub async fn begin_oauth_authorization(
+    context: State<'_, AppContext>,
     provider: String,
     display_name: String,
     client_id: String,
     client_secret: Option<String>,
+    provider_fields_json: Option<String>,
 ) -> Result<OAuthBeginResponse, FrontendError> {
+    clear_pending_oauth_sessions(context.inner()).await?;
     let provider: StorageProvider = serde_json::from_str(&format!("\"{}\"", provider))
         .map_err(|e| AppError::InvalidInput(format!("Unknown provider: {e}")))?;
 
@@ -316,7 +544,17 @@ pub async fn begin_oauth_authorization(
                 state,
                 redirect_port: port,
                 oauth_fields: {
-                    let mut fields = HashMap::new();
+                    let mut fields = provider_fields_json
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(|value| serde_json::from_str::<HashMap<String, String>>(value))
+                        .transpose()
+                        .map_err(|error| {
+                            AppError::InvalidInput(format!(
+                                "Invalid OAuth provider fields payload: {error}"
+                            ))
+                        })?
+                        .unwrap_or_default();
                     fields.insert("client_id".to_string(), client_id.clone());
                     if let Some(secret) = client_secret
                         .clone()
@@ -336,8 +574,10 @@ pub async fn begin_oauth_authorization(
     let provider_clone = provider.clone();
     let display_name_clone = display_name.clone();
     let config_clone = config.clone();
+    let app_context = context.inner().clone();
     tokio::spawn(async move {
         if let Err(e) = run_loopback_server(
+            app_context,
             port,
             session_id_clone,
             provider_clone,
@@ -379,11 +619,7 @@ pub async fn complete_oauth_authorization(
             .into());
         }
         Some(OAuthSessionStatus::Failed(reason)) => {
-            // Clean up the failed session
-            {
-                let mut sessions = get_oauth_sessions().write().await;
-                sessions.remove(&session_id);
-            }
+            clear_oauth_session_artifacts(context.inner(), &session_id).await?;
             return Err(AppError::Provisioning(format!(
                 "Authorization failed: {}. Please try again.",
                 reason
@@ -396,42 +632,40 @@ pub async fn complete_oauth_authorization(
         }
     }
 
-    // Session was completed — retrieve stored credentials from vault
-    let vault_key = format!("shared-storage:profile:{}:credentials", session_id);
-    info!("Looking up OAuth credentials in vault: {vault_key}");
+    info!("Looking up OAuth credentials in persisted state for session {session_id}");
 
-    let cred_json = get_vault()
-        .retrieve(&vault_key)
-        .await
-        .map_err(|e| {
-            tracing::warn!("Vault retrieve error for {vault_key}: {e}");
-            FrontendError::from(AppError::NotFound(
-                "No OAuth session found. Please start a new authorization by clicking 'Continue with Google' again.".to_string(),
-            ))
-        })?
-        .ok_or_else(|| {
-            tracing::warn!("Vault key {vault_key} exists but value is empty");
-            FrontendError::from(AppError::NotFound(
-                "No credentials found for this session. Please start a new authorization by clicking 'Continue with Google' again.".to_string(),
-            ))
-        })?;
+    let manager = get_profile_manager();
+    let credentials = match manager
+        .retrieve_oauth_session_credentials(context.inner(), &session_id)
+        .await?
+    {
+        Some(value) => value,
+        None => {
+            tracing::warn!(
+                "No OAuth credentials found in persisted state for session {session_id}"
+            );
+            clear_oauth_session_artifacts(context.inner(), &session_id).await?;
+            return Err(FrontendError::from(AppError::NotFound(
+                "No credentials found for this session. Stale authorization data was cleared; start a new authorization now.".to_string(),
+            )));
+        }
+    };
 
-    let credentials: StorageCredential = serde_json::from_str(&cred_json).map_err(|e| {
-        FrontendError::from(AppError::InvalidInput(format!(
-            "Invalid stored credentials: {e}"
-        )))
-    })?;
-
-    let session = session_snapshot.ok_or_else(|| {
-        FrontendError::from(AppError::NotFound(
-            "No OAuth session metadata found. Please start authorization again.".to_string(),
-        ))
-    })?;
+    let session = match session_snapshot {
+        Some(session) => session,
+        None => {
+            clear_oauth_session_artifacts(context.inner(), &session_id).await?;
+            return Err(FrontendError::from(AppError::NotFound(
+                "No OAuth session metadata found. Stale authorization data was cleared; start authorization again.".to_string(),
+            )));
+        }
+    };
 
     let provider = session.provider.clone();
-    let manager = get_profile_manager();
+    clear_all_connected_profiles(context.inner()).await?;
     let profile = manager
         .save_oauth_credentials(
+            context.inner(),
             &provider,
             &credentials,
             &session.oauth_fields,
@@ -439,12 +673,7 @@ pub async fn complete_oauth_authorization(
         )
         .await?;
 
-    // Clean up temporary vault entry and completed session
-    let _ = get_vault().delete(&vault_key).await;
-    {
-        let mut sessions = get_oauth_sessions().write().await;
-        sessions.remove(&session_id);
-    }
+    clear_oauth_session_artifacts(context.inner(), &session_id).await?;
 
     info!("OAuth profile created successfully for session {session_id}");
 
@@ -455,10 +684,18 @@ pub async fn complete_oauth_authorization(
         provider_label: profile.provider_label.clone(),
         provider: Some(provider),
         bucket: None,
-        prefix: None,
+        prefix: session
+            .oauth_fields
+            .get("folder")
+            .cloned()
+            .or_else(|| session.oauth_fields.get("remote_path").cloned()),
+        active: true,
     };
     context
         .update_state(|state| {
+            for existing in &mut state.shared_storage_profiles {
+                existing.active = false;
+            }
             state.shared_storage_profiles.push(profile_ref);
         })
         .await?;
@@ -470,6 +707,7 @@ pub async fn complete_oauth_authorization(
 }
 
 async fn run_loopback_server(
+    context: AppContext,
     port: u16,
     session_id: String,
     _provider: StorageProvider,
@@ -562,19 +800,15 @@ async fn run_loopback_server(
                         expires_at: now + token.expires_in.unwrap_or(3600),
                     };
 
-                    // Store in vault
-                    let vault_key = format!("shared-storage:profile:{}:credentials", session_id);
-                    let cred_json = serde_json::to_string(&credentials)
-                        .map_err(|e| format!("Serialization: {e}"))?;
-
-                    let vault = get_vault();
-                    vault
-                        .store(&vault_key, &cred_json)
+                    get_profile_manager()
+                        .store_oauth_session_credentials(&context, &session_id, &credentials)
                         .await
-                        .map_err(|e| format!("Vault store: {e}"))?;
+                        .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
 
-                    // Verify it was stored
-                    let verify = vault.retrieve(&vault_key).await.unwrap_or(None);
+                    let verify = get_profile_manager()
+                        .retrieve_oauth_session_credentials(&context, &session_id)
+                        .await
+                        .map_err(|e| format!("Verify persisted OAuth session credentials: {e}"))?;
                     tracing::info!(
                         "OAuth tokens stored for session {session_id}, verified: {}",
                         verify.is_some()

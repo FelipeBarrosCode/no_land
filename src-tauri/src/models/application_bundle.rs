@@ -653,4 +653,6 @@ pub struct ProfileReference {
     pub bucket: Option<String>,
     #[serde(default)]
     pub prefix: Option<String>,
+    #[serde(default)]
+    pub active: bool,
 }

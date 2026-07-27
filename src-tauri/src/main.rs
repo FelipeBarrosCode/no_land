@@ -8,7 +8,10 @@ mod moonlight;
 mod services;
 mod utils;
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use commands::*;
 use services::{
@@ -19,16 +22,32 @@ use services::{
     ssh_keys::normalize_ssh_state_from_disk,
     state_store::{JsonStateStore, StateStore},
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
-    wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
+    wireguard::{
+        maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk,
+        teardown_active_local_wireguard_runtime,
+    },
 };
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 use tracing::{error, info, warn};
 use utils::logging::init_logging;
+
+static APP_EXIT_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
+
+fn run_app_exit_cleanup() {
+    if APP_EXIT_CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    match teardown_active_local_wireguard_runtime() {
+        Ok(()) => info!("Completed best-effort managed GotaTun shutdown during app exit"),
+        Err(error) => warn!("Failed tearing down managed GotaTun runtime during app exit: {error}"),
+    }
+}
 
 fn main() {
     init_logging();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -263,6 +282,7 @@ fn main() {
             save_static_provider_credentials,
             test_shared_storage_connection,
             get_shared_storage_profiles,
+            set_active_shared_storage_profile,
             disconnect_shared_storage_profile,
             begin_oauth_authorization,
             complete_oauth_authorization,
@@ -355,9 +375,15 @@ fn main() {
             moonlight_get_input_debug_state,
             moonlight_get_session_state
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
-            error!("error while running tauri application: {error}");
-            panic!("tauri app failed: {error}");
+            error!("error while building tauri application: {error}");
+            panic!("tauri app failed to build: {error}");
         });
+
+    app.run(|_, event| match event {
+        RunEvent::ExitRequested { .. } => run_app_exit_cleanup(),
+        RunEvent::Exit => run_app_exit_cleanup(),
+        _ => {}
+    });
 }

@@ -10,7 +10,7 @@ pub use self::application_bundles::{
 pub use self::shared_storage::{
     begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
     get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
-    test_shared_storage_connection,
+    set_active_shared_storage_profile, test_shared_storage_connection,
 };
 
 use std::{
@@ -3642,64 +3642,59 @@ async fn build_remote_exec_for_instance(
 
 #[tauri::command]
 pub async fn get_shared_storage_settings(
-    context: State<'_, AppContext>,
+    _context: State<'_, AppContext>,
 ) -> Result<SharedStorageSettingsResponse, FrontendError> {
-    SharedStorageManager::get_settings(context.inner())
-        .await
-        .map_err(Into::into)
+    Err(AppError::InvalidInput(
+        "Legacy shared storage settings are no longer supported. Use provider profiles instead."
+            .to_string(),
+    )
+    .into())
 }
 
 #[tauri::command]
 pub async fn save_shared_storage_settings(
-    payload: SharedStorageSettingsUpdate,
-    context: State<'_, AppContext>,
+    _payload: SharedStorageSettingsUpdate,
+    _context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
-    SharedStorageManager::save_settings(context.inner(), payload).await?;
-    Ok(context.load_state().await)
+    Err(AppError::InvalidInput(
+        "Legacy shared storage settings are no longer supported. Use provider profiles instead."
+            .to_string(),
+    )
+    .into())
 }
 
 #[tauri::command]
 pub async fn test_shared_storage_config(
-    context: State<'_, AppContext>,
+    _context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    SharedStorageManager::test_configuration(context.inner(), &remote, &target_user).await?;
-    Ok("Shared storage provider configuration is valid".to_string())
+    Err(AppError::InvalidInput(
+        "Legacy shared storage config testing is no longer supported. Test the active provider profile instead."
+            .to_string(),
+    )
+    .into())
 }
 
 #[tauri::command]
 pub async fn trigger_instance_backup(
-    context: State<'_, AppContext>,
+    _context: State<'_, AppContext>,
 ) -> Result<BackupStatusResponse, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    let instance_id = {
-        let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| {
-            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
-        })?
-    };
-    SharedStorageManager::trigger_manual_backup(
-        context.inner(),
-        &remote,
-        instance_id,
-        &target_user,
+    Err(AppError::InvalidInput(
+        "Whole-instance shared-storage backup has been removed. Export selected files or folders instead."
+            .to_string(),
     )
-    .await?;
-    SharedStorageManager::get_backup_status(context.inner())
-        .await
-        .map_err(Into::into)
+    .into())
 }
 
 #[tauri::command]
 pub async fn trigger_instance_backup_for(
-    context: State<'_, AppContext>,
-    instance_id: u64,
+    _context: State<'_, AppContext>,
+    _instance_id: u64,
 ) -> Result<BackupStatusResponse, FrontendError> {
-    InstanceLifecycleService::save_instance_to_shared_storage(context.inner(), instance_id)
-        .await
-        .map_err(Into::into)
+    Err(AppError::InvalidInput(
+        "Whole-instance shared-storage backup has been removed. Export selected files or folders instead."
+            .to_string(),
+    )
+    .into())
 }
 
 #[tauri::command]

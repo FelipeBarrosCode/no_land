@@ -24,10 +24,11 @@ interface Props {
     displayName: string,
   ) => Promise<void>;
   onTestConnection: (profileId: string) => Promise<void>;
+  onSetActiveProfile: (profileId: string) => Promise<void>;
   onDisconnect: (profileId: string) => Promise<void>;
   onLoadProviders: () => Promise<void>;
   onLoadProfiles: () => Promise<void>;
-  onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null) => Promise<string | null>;
+  onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null, providerFields?: Record<string, string>) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
   activeInstanceId: number | null;
   onSyncActiveInstance: () => Promise<void>;
@@ -47,6 +48,7 @@ export function SharedStorageSettingsV2({
   oauthSessionId,
   onConnectProvider,
   onTestConnection,
+  onSetActiveProfile,
   onDisconnect,
   onLoadProviders,
   onLoadProfiles,
@@ -67,7 +69,16 @@ export function SharedStorageSettingsV2({
     void onLoadProfiles();
   }, [onLoadProviders, onLoadProfiles]);
 
-  const connectedProfile = profiles.length > 0 ? profiles[0] : null;
+  const connectedProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
+  const selectedProviderFields = selectedProvider?.fields ?? [];
+  const hasDedicatedBucketField = selectedProviderFields.some((field) => field.key === "bucket");
+  const hasDedicatedPrefixField = selectedProviderFields.some((field) => field.key === "prefix");
+  const staticCredentialFields = selectedProviderFields.filter(
+    (field) => !["bucket", "prefix"].includes(field.key),
+  );
+  const oauthProviderFields = selectedProviderFields.filter(
+    (field) => !["client_id", "client_secret"].includes(field.key),
+  );
 
   const categorizedProviders = providers.reduce<Record<string, ProviderDefinition[]>>(
     (acc, p) => {
@@ -110,15 +121,19 @@ export function SharedStorageSettingsV2({
 
   async function handleConnect() {
     if (!selectedProvider) return;
+    const effectiveBucket = (bucket || formValues["bucket"] || "").trim() || null;
+    const effectivePrefix = (prefix || formValues["prefix"] || "").trim() || null;
     await onConnectProvider(
       selectedProvider.provider,
       formValues,
-      bucket,
-      prefix,
+      effectiveBucket,
+      effectivePrefix,
       displayName,
     );
     setSelectedProvider(null);
     setFormValues({});
+    setBucket(null);
+    setPrefix(null);
   }
 
   return (
@@ -182,7 +197,51 @@ All data is encrypted before upload and can only be decrypted with your reposito
               <span className="text-sm text-gray-400">Display Name</span>
               <span className="text-sm text-gray-200">{connectedProfile.displayName}</span>
             </div>
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-gray-400">Active profile</span>
+              <span className="text-sm text-gray-200">{connectedProfile.active ? "Yes" : "No"}</span>
+            </div>
           </div>
+
+          {profiles.length > 1 && (
+            <div className="mb-6 rounded border border-[#3f476c] bg-[#0b0f23]/60 p-3">
+              <p className="text-sm text-gray-200">Connected profiles</p>
+              <div className="mt-3 space-y-2">
+                {profiles.map((profile) => (
+                  <div
+                    key={profile.id}
+                    className="flex items-center justify-between gap-3 rounded border border-[#3f476c] px-3 py-2"
+                  >
+                    <div>
+                      <p className="text-sm text-gray-100">{profile.displayName}</p>
+                      <p className="text-xs text-gray-500">{profile.providerLabel}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {profile.active ? (
+                        <span className="text-xs uppercase tracking-wide text-neon-lime">Active</span>
+                      ) : (
+                        <Button
+                          variant="secondary"
+                          onClick={() => onSetActiveProfile(profile.id)}
+                          disabled={busy}
+                        >
+                          Use This Profile
+                        </Button>
+                      )}
+                      <Button
+                        variant="ghost"
+                        className="text-red-400"
+                        onClick={() => onDisconnect(profile.id)}
+                        disabled={busy}
+                      >
+                        Disconnect
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {testResult && (
             <div className={`mb-4 p-3 rounded border text-sm ${
@@ -290,7 +349,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
       )}
 
       {/* Provider form - static credentials */}
-      {selectedProvider && !connectedProfile && !selectedProvider.isOauth && (
+      {selectedProvider && !selectedProvider.isOauth && (
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -318,30 +377,68 @@ All data is encrypted before upload and can only be decrypted with your reposito
               placeholder="My Backup Storage"
             />
 
-            {selectedProvider.fields.map((field) => (
-              <InputField
-                key={field.key}
-                label={field.label}
-                value={formValues[field.key] || ""}
-                onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
-                placeholder={field.placeholder || ""}
-                type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
-                disabled={busy}
-              />
-            ))}
+            {staticCredentialFields.map((field) => {
+              if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
+                return (
+                  <label key={field.key} className="flex flex-col gap-2 text-base">
+                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{field.label}</span>
+                    <select
+                      className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] outline-none shadow-[inset_0_0_0_2px_#121731] focus:border-neon-cyan"
+                      value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
+                      onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                      disabled={busy}
+                    >
+                      {field.fieldType.options.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                );
+              }
+              if (field.fieldType === "toggle") {
+                return (
+                  <label key={field.key} className="flex items-center justify-between rounded border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-sm text-[#dff8ff]">
+                    <span>{field.label}</span>
+                    <input
+                      type="checkbox"
+                      checked={(formValues[field.key] || "false") === "true"}
+                      onChange={(e) => handleFieldChange(field.key, e.currentTarget.checked ? "true" : "false")}
+                      disabled={busy}
+                    />
+                  </label>
+                );
+              }
+              return (
+                <InputField
+                  key={field.key}
+                  label={field.label}
+                  value={formValues[field.key] || ""}
+                  onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                  placeholder={field.placeholder || ""}
+                  type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
+                  disabled={busy}
+                />
+              );
+            })}
 
-            <InputField
-              label="Bucket (optional)"
-              value={bucket || ""}
-              onChange={(e) => setBucket(e.currentTarget.value || null)}
-              placeholder="Bucket name"
-            />
-            <InputField
-              label="Prefix (optional)"
-              value={prefix || ""}
-              onChange={(e) => setPrefix(e.currentTarget.value || null)}
-              placeholder="repositories/"
-            />
+            {!hasDedicatedBucketField && (
+              <InputField
+                label="Bucket (optional)"
+                value={bucket || ""}
+                onChange={(e) => setBucket(e.currentTarget.value || null)}
+                placeholder="Bucket name"
+              />
+            )}
+            {!hasDedicatedPrefixField && (
+              <InputField
+                label="Prefix (optional)"
+                value={prefix || ""}
+                onChange={(e) => setPrefix(e.currentTarget.value || null)}
+                placeholder="repositories/"
+              />
+            )}
 
             <Button
               variant="primary"
@@ -357,7 +454,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
       )}
 
       {/* Provider form - OAuth */}
-      {selectedProvider && !connectedProfile && selectedProvider.isOauth && (
+      {selectedProvider && selectedProvider.isOauth && (
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
@@ -385,6 +482,12 @@ All data is encrypted before upload and can only be decrypted with your reposito
           {!oauthSessionId && (
             <div className="space-y-4 mb-4">
               <InputField
+                label="Display Name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.currentTarget.value)}
+                placeholder="My Cloud Storage"
+              />
+              <InputField
                 label="Client ID"
                 value={formValues["client_id"] || ""}
                 onChange={(e) => handleFieldChange("client_id", e.currentTarget.value)}
@@ -397,6 +500,17 @@ All data is encrypted before upload and can only be decrypted with your reposito
                 placeholder="Your OAuth Client Secret"
                 type="password"
               />
+              {oauthProviderFields.map((field) => (
+                <InputField
+                  key={field.key}
+                  label={field.label}
+                  value={formValues[field.key] || ""}
+                  onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                  placeholder={field.placeholder || ""}
+                  type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
+                  disabled={busy}
+                />
+              ))}
             </div>
           )}
 
@@ -437,6 +551,9 @@ All data is encrypted before upload and can only be decrypted with your reposito
                   displayName || selectedProvider.label,
                   clientId.trim(),
                   clientSecret?.trim() || null,
+                  Object.fromEntries(
+                    Object.entries(formValues).filter(([key]) => !["client_id", "client_secret"].includes(key)),
+                  ),
                 );
               }}
               disabled={busy || !(formValues["client_id"] || "").trim()}

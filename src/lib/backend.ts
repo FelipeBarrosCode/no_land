@@ -17,9 +17,6 @@ import type {
   RentedInstanceSummary,
   ServerPreferencesUpdate,
   SshCredentialsUpdate,
-  SharedStorageSettingsResponse,
-  SharedStorageSettingsUpdate,
-  BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
   SunshineSettingsResponse,
@@ -504,35 +501,7 @@ export async function subscribeProvisioningEvents(
   };
 }
 
-export async function getSharedStorageSettings(): Promise<SharedStorageSettingsResponse> {
-  return invokeSafe<SharedStorageSettingsResponse>(
-    "get_shared_storage_settings",
-  );
-}
 
-export async function saveSharedStorageSettings(
-  payload: SharedStorageSettingsUpdate,
-): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("save_shared_storage_settings", {
-    payload,
-  });
-}
-
-export async function testSharedStorageConfig(): Promise<string> {
-  return invokeSafe<string>("test_shared_storage_config");
-}
-
-export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
-  return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
-}
-
-export async function triggerInstanceBackupFor(
-  instanceId: number,
-): Promise<BackupStatusResponse> {
-  return invokeSafe<BackupStatusResponse>("trigger_instance_backup_for", {
-    instanceId,
-  });
-}
 
 export async function syncInstanceFromSharedStorage(
   instanceId: number,
@@ -772,6 +741,12 @@ export async function getSharedStorageProfiles(): Promise<ProfileReference[]> {
   return invokeSafe<ProfileReference[]>("get_shared_storage_profiles");
 }
 
+export async function setActiveSharedStorageProfile(
+  profileId: string,
+): Promise<void> {
+  return invokeSafe<void>("set_active_shared_storage_profile", { profileId });
+}
+
 export async function disconnectSharedStorageProfile(
   profileId: string,
 ): Promise<void> {
@@ -796,12 +771,14 @@ export async function beginOauthAuthorization(
   displayName: string,
   clientId: string,
   clientSecret: string | null,
+  providerFieldsJson?: string | null,
 ): Promise<OAuthBeginResponse> {
   return invokeSafe<OAuthBeginResponse>("begin_oauth_authorization", {
     provider,
     displayName,
     clientId,
     clientSecret,
+    providerFieldsJson: providerFieldsJson ?? null,
   });
 }
 

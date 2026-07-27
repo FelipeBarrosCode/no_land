@@ -929,7 +929,7 @@ export interface ProviderDefinition {
 export interface ProviderField {
   key: string;
   label: string;
-  fieldType: string;
+  fieldType: string | { options: { value: string; label: string }[] };
   required: boolean;
   placeholder: string | null;
   helpText: string | null;
@@ -942,4 +942,5 @@ export interface ProfileReference {
   provider?: string | null;
   bucket?: string | null;
   prefix?: string | null;
+  active?: boolean;
 }

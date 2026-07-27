@@ -2,30 +2,32 @@ use tauri::State;
 use tracing::info;
 
 use crate::errors::{AppError, FrontendError};
-use crate::models::application_bundle::{
-    ApplicationBundle, ApplicationBundleId, ApplicationCatalog, ApplicationCatalogEntry,
-    ApplicationKind, BackupStatus, BundleAvailability, BundleComponent, BundleComponentId,
-    BundleComponentKind, BundleRelationship, BundleRelationshipKind, BundleRestoreResult,
-    BundleSnapshot, ComponentSummary, RestoreMode, RestorePlanRequest, SnapshotId,
+use crate::models::{
+    app_state::{BundleIndex, RestoreJob, RestoreRequest},
+    application_bundle::{
+        ApplicationBundle, ApplicationBundleId, ApplicationCatalog, ApplicationCatalogEntry,
+        ApplicationKind, BackupStatus, BundleAvailability, BundleComponent, BundleComponentId,
+        BundleComponentKind, BundleRelationship, BundleRestoreResult, BundleSnapshot, RestoreMode,
+        SnapshotId,
+    },
 };
-use crate::services::app_context::AppContext;
-
-// ─── Bundle Catalog Commands ──────────────────────────────
+use crate::services::{
+    app_context::AppContext, remote_exec::RemoteExec,
+    shared_storage::bundle_restore::BundleRestoreService, vast_api::VastApiClient,
+};
 
 #[tauri::command]
 pub async fn list_application_bundles(
     context: State<'_, AppContext>,
-    _instance_id: Option<u64>,
+    instance_id: Option<u64>,
 ) -> Result<Vec<ApplicationBundle>, FrontendError> {
-    let state = context.load_state().await;
-
-    // Return in-memory catalog if available, otherwise return demo data
-    if !state.application_catalog.is_empty() {
-        return Ok(state.application_catalog.clone());
-    }
-
-    // Return demo bundles for UI development
-    Ok(build_demo_bundles())
+    let bundles = load_real_application_bundles(context.inner(), instance_id).await?;
+    context
+        .update_state(|state| {
+            state.application_catalog = bundles.clone();
+        })
+        .await?;
+    Ok(bundles)
 }
 
 #[tauri::command]
@@ -34,21 +36,43 @@ pub async fn get_application_bundle(
     bundle_id: String,
 ) -> Result<ApplicationBundle, FrontendError> {
     let state = context.load_state().await;
-
-    state
+    Ok(state
         .application_catalog
         .iter()
         .find(|b| b.id.0 == bundle_id)
         .cloned()
-        .ok_or_else(|| AppError::NotFound(format!("Bundle {bundle_id} not found")).into())
+        .ok_or_else(|| AppError::NotFound(format!("Bundle {bundle_id} not found")))?)
 }
 
 #[tauri::command]
 pub async fn list_bundle_snapshots(
+    context: State<'_, AppContext>,
     bundle_id: String,
 ) -> Result<Vec<BundleSnapshot>, FrontendError> {
-    // Return demo snapshots
-    Ok(build_demo_snapshots(&bundle_id))
+    let state = context.load_state().await;
+    let bundle = state
+        .application_catalog
+        .iter()
+        .find(|b| b.id.0 == bundle_id)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("Bundle {bundle_id} not found")))?;
+
+    let snapshot_id = bundle
+        .latest_snapshot_id
+        .clone()
+        .unwrap_or_else(|| "latest".to_string());
+
+    Ok(vec![BundleSnapshot {
+        id: SnapshotId(snapshot_id.clone()),
+        bundle_id: bundle.id.clone(),
+        parent_snapshot_id: None,
+        state: "committed".to_string(),
+        reason: "indexed-from-shared-storage".to_string(),
+        total_logical_size: bundle.components.iter().map(|c| c.logical_size).sum(),
+        new_physical_size: 0,
+        created_at: bundle.updated_at,
+        committed_at: Some(bundle.updated_at),
+    }])
 }
 
 #[tauri::command]
@@ -57,24 +81,18 @@ pub async fn discover_application_bundles(
     instance_id: u64,
 ) -> Result<Vec<ApplicationBundle>, FrontendError> {
     info!("Discovering application bundles for instance {instance_id}");
-
-    let bundles = build_demo_bundles();
-
-    // Persist to in-memory catalog
+    let bundles = load_real_application_bundles(context.inner(), Some(instance_id)).await?;
     context
         .update_state(|state| {
             state.application_catalog = bundles.clone();
         })
         .await?;
-
     Ok(bundles)
 }
 
-// ─── Bundle Restore Commands ──────────────────────────────
-
 #[tauri::command]
 pub async fn restore_application_bundle(
-    _context: State<'_, AppContext>,
+    context: State<'_, AppContext>,
     bundle_id: String,
     snapshot_id: Option<String>,
     restore_mode: String,
@@ -91,59 +109,83 @@ pub async fn restore_application_bundle(
         }
     };
 
-    let plan = RestorePlanRequest {
-        bundle_id: ApplicationBundleId(bundle_id.clone()),
-        snapshot_id: snapshot_id.clone(),
-        restore_mode: mode,
-        selected_components,
+    let instance_id = {
+        let state = context.load_state().await;
+        state
+            .instance
+            .instance_id
+            .ok_or_else(|| AppError::InvalidInput("No active instance selected.".to_string()))?
     };
 
-    info!("Restoring bundle {bundle_id} with mode {restore_mode}");
+    let remote = build_remote_exec_from_state(context.inner(), Some(instance_id)).await?;
+    let target_user = context.config.audio_target_user.clone();
+    let index =
+        BundleRestoreService::list_bundles(context.inner(), &remote, instance_id, &target_user)
+            .await?;
+    let legacy_bundle = index
+        .bundles
+        .iter()
+        .find(|bundle| bundle.id == bundle_id)
+        .ok_or_else(|| AppError::NotFound(format!("Bundle {bundle_id} not found")))?;
 
-    let job_id = uuid::Uuid::new_v4().to_string();
+    let folder_bundle_ids = match mode {
+        RestoreMode::Complete => legacy_bundle
+            .folder_bundles
+            .iter()
+            .map(|folder| folder.id.clone())
+            .collect(),
+        RestoreMode::PersonalState => legacy_bundle
+            .folder_bundles
+            .iter()
+            .filter(|folder| folder.default_selected)
+            .map(|folder| folder.id.clone())
+            .collect(),
+        RestoreMode::Custom => selected_components.unwrap_or_default(),
+    };
 
-    Ok(BundleRestoreResult {
-        job_id: job_id.clone(),
-        bundle_id: plan.bundle_id,
-        snapshot_id: snapshot_id.unwrap_or_else(|| "latest".to_string()),
-        status: "started".to_string(),
-        total_components: 5,
-        completed_components: 0,
-        total_files: 0,
-        restored_files: 0,
-        total_bytes: 0,
-        restored_bytes: 0,
-        started_at: chrono::Utc::now().to_rfc3339(),
-        finished_at: None,
-        error: None,
-    })
+    if folder_bundle_ids.is_empty() {
+        return Err(AppError::InvalidInput(
+            "No bundle components were selected for restore.".to_string(),
+        )
+        .into());
+    }
+
+    let job = BundleRestoreService::restore_bundle(
+        context.inner(),
+        &remote,
+        instance_id,
+        &target_user,
+        RestoreRequest {
+            bundle_id: bundle_id.clone(),
+            folder_bundle_ids,
+            mode: "merge".to_string(),
+        },
+    )
+    .await?;
+
+    Ok(bundle_restore_result_from_job(
+        &job,
+        ApplicationBundleId(bundle_id),
+        snapshot_id.unwrap_or_else(|| index.snapshot_id.clone()),
+    ))
 }
 
 #[tauri::command]
 pub async fn get_restore_job_status(job_id: String) -> Result<BundleRestoreResult, FrontendError> {
-    info!("Checking restore job status: {job_id}");
-
-    Ok(BundleRestoreResult {
-        job_id: job_id.clone(),
-        bundle_id: ApplicationBundleId("steam:1091500".to_string()),
-        snapshot_id: "latest".to_string(),
-        status: "in_progress".to_string(),
-        total_components: 5,
-        completed_components: 3,
-        total_files: 12500,
-        restored_files: 8200,
-        total_bytes: 90_516_439_040,
-        restored_bytes: 62_400_000_000,
-        started_at: chrono::Utc::now().to_rfc3339(),
-        finished_at: None,
-        error: None,
-    })
+    let job = BundleRestoreService::get_job(&job_id).await?;
+    Ok(bundle_restore_result_from_job(
+        &job,
+        ApplicationBundleId(job.bundle_id.clone()),
+        "latest".to_string(),
+    ))
 }
 
 #[tauri::command]
-pub async fn cancel_restore_job(job_id: String) -> Result<(), FrontendError> {
-    info!("Cancelling restore job: {job_id}");
-    Ok(())
+pub async fn cancel_restore_job(_job_id: String) -> Result<(), FrontendError> {
+    Err(
+        AppError::InvalidInput("Restore job cancellation is not implemented yet.".to_string())
+            .into(),
+    )
 }
 
 #[tauri::command]
@@ -176,36 +218,24 @@ pub async fn remove_local_bundle(
 #[tauri::command]
 pub async fn request_cloud_deletion(bundle_id: String) -> Result<(), FrontendError> {
     info!("Cloud deletion requested for bundle: {bundle_id} (delayed GC)");
-    // In production, this creates a delayed garbage-collection marker
     Ok(())
 }
 
 #[tauri::command]
-pub async fn trigger_bundle_backup(bundle_id: String) -> Result<(), FrontendError> {
-    info!("Triggering backup for bundle: {bundle_id}");
-    Ok(())
+pub async fn trigger_bundle_backup(_bundle_id: String) -> Result<(), FrontendError> {
+    Err(AppError::InvalidInput(
+        "Per-bundle backup jobs are not implemented yet. Use the shared storage export flow instead."
+            .to_string(),
+    )
+    .into())
 }
-
-// ─── Catalog Commands ─────────────────────────────────────
 
 #[tauri::command]
 pub async fn get_application_catalog(
     context: State<'_, AppContext>,
 ) -> Result<ApplicationCatalog, FrontendError> {
-    let state = context.load_state().await;
-
-    let mut catalog = ApplicationCatalog {
-        repository_id: "repo_demo".to_string(),
-        generation: 1,
-        generated_at: chrono::Utc::now().timestamp(),
-        bundles: vec![],
-    };
-
-    for bundle in &state.application_catalog {
-        catalog.bundles.push(build_catalog_entry(bundle));
-    }
-
-    Ok(catalog)
+    let bundles = load_real_application_bundles(context.inner(), None).await?;
+    Ok(build_catalog(&bundles))
 }
 
 #[tauri::command]
@@ -213,324 +243,240 @@ pub async fn reload_application_catalog(
     context: State<'_, AppContext>,
 ) -> Result<ApplicationCatalog, FrontendError> {
     info!("Reloading application catalog");
-    // In production, this downloads and decrypts the catalog from cloud storage
-    get_application_catalog(context).await
+    let bundles = load_real_application_bundles(context.inner(), None).await?;
+    context
+        .update_state(|state| {
+            state.application_catalog = bundles.clone();
+        })
+        .await?;
+    Ok(build_catalog(&bundles))
 }
 
-// ─── Demo Data Builders ───────────────────────────────────
+async fn load_real_application_bundles(
+    context: &AppContext,
+    instance_id: Option<u64>,
+) -> Result<Vec<ApplicationBundle>, FrontendError> {
+    let resolved_instance_id = match instance_id {
+        Some(id) => id,
+        None => {
+            let state = context.load_state().await;
+            match state.instance.instance_id {
+                Some(id) => id,
+                None => return Ok(Vec::new()),
+            }
+        }
+    };
 
-fn build_demo_bundles() -> Vec<ApplicationBundle> {
+    let remote = build_remote_exec_from_state(context, Some(resolved_instance_id)).await?;
+    let target_user = context.config.audio_target_user.clone();
+    let index =
+        BundleRestoreService::list_bundles(context, &remote, resolved_instance_id, &target_user)
+            .await
+            .map_err(FrontendError::from)?;
+    Ok(convert_bundle_index(index))
+}
+
+fn convert_bundle_index(index: BundleIndex) -> Vec<ApplicationBundle> {
     let now = chrono::Utc::now().timestamp();
-    vec![
-        ApplicationBundle {
-            id: ApplicationBundleId::new_steam("1091500"),
-            display_name: "Cyberpunk 2077".to_string(),
-            kind: ApplicationKind::SteamProton,
-            store: Some(crate::models::application_bundle::ApplicationStore::Steam),
-            store_application_id: Some("1091500".to_string()),
-            store_metadata: Some(crate::models::application_bundle::StoreMetadata {
-                store: crate::models::application_bundle::ApplicationStore::Steam,
-                application_id: "1091500".to_string(),
-                build_id: Some("13245678".to_string()),
-                branch: Some("public".to_string()),
-                installed_version: Some("2.3".to_string()),
-            }),
-            icon_object_key: None,
-            components: build_cyberpunk_components(),
-            relationships: vec![BundleRelationship {
-                bundle_id: ApplicationBundleId::new_custom("redmod"),
-                relationship_kind: BundleRelationshipKind::ModManager,
-                display_name: "REDmod".to_string(),
-            }],
-            availability: BundleAvailability::Installed,
-            backup_status: BackupStatus::Committed,
-            latest_snapshot_id: Some("snap_001".to_string()),
-            created_at: now - 86400 * 30,
-            updated_at: now,
-        },
-        ApplicationBundle {
-            id: ApplicationBundleId::new_native("blender"),
-            display_name: "Blender".to_string(),
-            kind: ApplicationKind::NativeLinux,
-            store: None,
-            store_application_id: None,
-            store_metadata: None,
-            icon_object_key: None,
-            components: vec![
-                BundleComponent {
-                    id: BundleComponentId("blender-content".to_string()),
-                    bundle_id: ApplicationBundleId::new_native("blender"),
-                    kind: BundleComponentKind::ApplicationContent,
-                    display_name: "Blender Installation".to_string(),
-                    required: true,
-                    selected_by_default: true,
-                    restore_order: 1,
-                    logical_size: 1_800_000_000,
-                    file_count: 5200,
+    index
+        .bundles
+        .into_iter()
+        .map(|bundle| {
+            let bundle_id = ApplicationBundleId(bundle.id.clone());
+            let components = bundle
+                .folder_bundles
+                .iter()
+                .enumerate()
+                .map(|(idx, folder)| BundleComponent {
+                    id: BundleComponentId(folder.id.clone()),
+                    bundle_id: bundle_id.clone(),
+                    kind: bundle_component_kind_from_folder_kind(&folder.kind),
+                    display_name: folder.label.clone(),
+                    required: matches!(folder.kind.as_str(), "file" | "config"),
+                    selected_by_default: folder.default_selected,
+                    restore_order: idx as u32,
+                    logical_size: 0,
+                    file_count: 0,
                     paths: vec![],
-                },
-                BundleComponent {
-                    id: BundleComponentId("blender-config".to_string()),
-                    bundle_id: ApplicationBundleId::new_native("blender"),
-                    kind: BundleComponentKind::UserConfiguration,
-                    display_name: "Blender Preferences".to_string(),
-                    required: false,
-                    selected_by_default: true,
-                    restore_order: 2,
-                    logical_size: 12_000_000,
-                    file_count: 85,
-                    paths: vec![],
-                },
-                BundleComponent {
-                    id: BundleComponentId("blender-projects".to_string()),
-                    bundle_id: ApplicationBundleId::new_native("blender"),
-                    kind: BundleComponentKind::UserDocuments,
-                    display_name: "Recent Projects".to_string(),
-                    required: false,
-                    selected_by_default: true,
-                    restore_order: 3,
-                    logical_size: 2_400_000_000,
-                    file_count: 145,
-                    paths: vec![],
-                },
-                BundleComponent {
-                    id: BundleComponentId("blender-plugins".to_string()),
-                    bundle_id: ApplicationBundleId::new_native("blender"),
-                    kind: BundleComponentKind::Plugins,
-                    display_name: "Add-ons".to_string(),
-                    required: false,
-                    selected_by_default: true,
-                    restore_order: 4,
-                    logical_size: 350_000_000,
-                    file_count: 220,
-                    paths: vec![],
-                },
-            ],
-            relationships: vec![],
-            availability: BundleAvailability::Installed,
-            backup_status: BackupStatus::Committed,
-            latest_snapshot_id: Some("snap_002".to_string()),
-            created_at: now - 86400 * 14,
-            updated_at: now - 3600,
-        },
-        ApplicationBundle {
-            id: ApplicationBundleId::new_steam("1774580"),
-            display_name: "Jedi Survivor".to_string(),
-            kind: ApplicationKind::SteamProton,
-            store: Some(crate::models::application_bundle::ApplicationStore::Steam),
-            store_application_id: Some("1774580".to_string()),
-            store_metadata: Some(crate::models::application_bundle::StoreMetadata {
-                store: crate::models::application_bundle::ApplicationStore::Steam,
-                application_id: "1774580".to_string(),
-                build_id: Some("87654321".to_string()),
-                branch: Some("public".to_string()),
-                installed_version: Some("1.8".to_string()),
-            }),
-            icon_object_key: None,
-            components: vec![
-                BundleComponent {
-                    id: BundleComponentId("jedi-content".to_string()),
-                    bundle_id: ApplicationBundleId::new_steam("1774580"),
-                    kind: BundleComponentKind::ApplicationContent,
-                    display_name: "Game Installation".to_string(),
-                    required: true,
-                    selected_by_default: true,
-                    restore_order: 1,
-                    logical_size: 128_000_000_000,
-                    file_count: 18000,
-                    paths: vec![],
-                },
-                BundleComponent {
-                    id: BundleComponentId("jedi-saves".to_string()),
-                    bundle_id: ApplicationBundleId::new_steam("1774580"),
-                    kind: BundleComponentKind::SaveFiles,
-                    display_name: "Save Files".to_string(),
-                    required: true,
-                    selected_by_default: true,
-                    restore_order: 2,
-                    logical_size: 45_000_000,
-                    file_count: 12,
-                    paths: vec![],
-                },
-                BundleComponent {
-                    id: BundleComponentId("jedi-prefix".to_string()),
-                    bundle_id: ApplicationBundleId::new_steam("1774580"),
-                    kind: BundleComponentKind::RuntimePrefix,
-                    display_name: "Proton Prefix".to_string(),
-                    required: true,
-                    selected_by_default: true,
-                    restore_order: 3,
-                    logical_size: 2_100_000_000,
-                    file_count: 3400,
-                    paths: vec![],
-                },
-            ],
-            relationships: vec![],
-            availability: BundleAvailability::CloudOnly,
-            backup_status: BackupStatus::Committed,
-            latest_snapshot_id: Some("snap_003".to_string()),
-            created_at: now - 86400 * 60,
-            updated_at: now - 86400 * 3,
-        },
-    ]
+                })
+                .collect::<Vec<_>>();
+
+            ApplicationBundle {
+                id: bundle_id,
+                display_name: bundle.name.clone(),
+                kind: ApplicationKind::Custom,
+                store: None,
+                store_application_id: None,
+                store_metadata: None,
+                icon_object_key: None,
+                components,
+                relationships: Vec::<BundleRelationship>::new(),
+                availability: BundleAvailability::CloudOnly,
+                backup_status: BackupStatus::Committed,
+                latest_snapshot_id: Some(index.snapshot_id.clone()),
+                created_at: now,
+                updated_at: now,
+            }
+        })
+        .collect()
 }
 
-fn build_cyberpunk_components() -> Vec<BundleComponent> {
-    let bundle_id = ApplicationBundleId::new_steam("1091500");
-    vec![
-        BundleComponent {
-            id: BundleComponentId("cp-content".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::ApplicationContent,
-            display_name: "Game Installation".to_string(),
-            required: true,
-            selected_by_default: true,
-            restore_order: 1,
-            logical_size: 83_200_000_000,
-            file_count: 14500,
-            paths: vec![],
-        },
-        BundleComponent {
-            id: BundleComponentId("cp-saves".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::SaveFiles,
-            display_name: "Save Files".to_string(),
-            required: true,
-            selected_by_default: true,
-            restore_order: 2,
-            logical_size: 82_000_000,
-            file_count: 28,
-            paths: vec![],
-        },
-        BundleComponent {
-            id: BundleComponentId("cp-config".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::UserConfiguration,
-            display_name: "User Settings".to_string(),
-            required: true,
-            selected_by_default: true,
-            restore_order: 3,
-            logical_size: 4_000_000,
-            file_count: 15,
-            paths: vec![],
-        },
-        BundleComponent {
-            id: BundleComponentId("cp-mods".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::Mods,
-            display_name: "Mods".to_string(),
-            required: false,
-            selected_by_default: true,
-            restore_order: 4,
-            logical_size: 6_700_000_000,
-            file_count: 340,
-            paths: vec![],
-        },
-        BundleComponent {
-            id: BundleComponentId("cp-prefix".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::RuntimePrefix,
-            display_name: "Proton Environment".to_string(),
-            required: true,
-            selected_by_default: true,
-            restore_order: 5,
-            logical_size: 2_100_000_000,
-            file_count: 2800,
-            paths: vec![],
-        },
-        BundleComponent {
-            id: BundleComponentId("cp-shadercache".to_string()),
-            bundle_id: bundle_id.clone(),
-            kind: BundleComponentKind::ShaderCache,
-            display_name: "Shader Cache".to_string(),
-            required: false,
-            selected_by_default: false,
-            restore_order: 6,
-            logical_size: 1_800_000_000,
-            file_count: 1200,
-            paths: vec![],
-        },
-    ]
-}
-
-fn build_demo_snapshots(bundle_id: &str) -> Vec<BundleSnapshot> {
-    let now = chrono::Utc::now().timestamp();
-    let bundle_id = ApplicationBundleId(bundle_id.to_string());
-
-    vec![
-        BundleSnapshot {
-            id: SnapshotId("snap_001".to_string()),
-            bundle_id: bundle_id.clone(),
-            parent_snapshot_id: None,
-            state: "committed".to_string(),
-            reason: "Scheduled backup".to_string(),
-            total_logical_size: 90_516_439_040,
-            new_physical_size: 2_400_000_000,
-            created_at: now - 7200,
-            committed_at: Some(now - 7100),
-        },
-        BundleSnapshot {
-            id: SnapshotId("snap_000".to_string()),
-            bundle_id: bundle_id.clone(),
-            parent_snapshot_id: Some("snap_001".to_string()),
-            state: "committed".to_string(),
-            reason: "Application exited".to_string(),
-            total_logical_size: 90_480_000_000,
-            new_physical_size: 1_800_000_000,
-            created_at: now - 86400,
-            committed_at: Some(now - 86300),
-        },
-    ]
-}
-
-fn build_catalog_entry(bundle: &ApplicationBundle) -> ApplicationCatalogEntry {
-    let total_size: u64 = bundle.components.iter().map(|c| c.logical_size).sum();
-    let required_size: u64 = bundle
-        .components
-        .iter()
-        .filter(|c| c.required)
-        .map(|c| c.logical_size)
-        .sum();
-
-    ApplicationCatalogEntry {
-        bundle_id: bundle.id.clone(),
-        display_name: bundle.display_name.clone(),
-        kind: bundle.kind.clone(),
-        icon_object_key: bundle.icon_object_key.clone(),
-        latest_snapshot_id: bundle.latest_snapshot_id.clone(),
-        total_logical_size: total_size,
-        required_restore_size: required_size,
-        last_backed_up_at: bundle.updated_at,
-        component_summary: ComponentSummary {
-            has_application_content: bundle
-                .components
-                .iter()
-                .any(|c| c.kind == BundleComponentKind::ApplicationContent),
-            has_saves: bundle
-                .components
-                .iter()
-                .any(|c| c.kind == BundleComponentKind::SaveFiles),
-            has_mods: bundle.components.iter().any(|c| {
-                matches!(
-                    c.kind,
-                    BundleComponentKind::Mods | BundleComponentKind::Modifications
-                )
-            }),
-            has_runtime: bundle.components.iter().any(|c| {
-                matches!(
-                    c.kind,
-                    BundleComponentKind::RuntimePrefix | BundleComponentKind::WinePrefix
-                )
-            }),
-            has_configuration: bundle
-                .components
-                .iter()
-                .any(|c| c.kind == BundleComponentKind::UserConfiguration),
-            has_plugins: bundle
-                .components
-                .iter()
-                .any(|c| c.kind == BundleComponentKind::Plugins),
-            component_count: bundle.components.len() as u32,
-        },
+fn build_catalog(bundles: &[ApplicationBundle]) -> ApplicationCatalog {
+    ApplicationCatalog {
+        repository_id: "shared-storage-active-profile".to_string(),
+        generation: 1,
+        generated_at: chrono::Utc::now().timestamp(),
+        bundles: bundles
+            .iter()
+            .map(|bundle| ApplicationCatalogEntry {
+                bundle_id: bundle.id.clone(),
+                display_name: bundle.display_name.clone(),
+                kind: bundle.kind.clone(),
+                icon_object_key: bundle.icon_object_key.clone(),
+                latest_snapshot_id: bundle.latest_snapshot_id.clone(),
+                total_logical_size: bundle.components.iter().map(|c| c.logical_size).sum(),
+                required_restore_size: bundle
+                    .components
+                    .iter()
+                    .filter(|c| c.required)
+                    .map(|c| c.logical_size)
+                    .sum(),
+                last_backed_up_at: bundle.updated_at,
+                component_summary: crate::models::application_bundle::ComponentSummary {
+                    has_application_content: bundle
+                        .components
+                        .iter()
+                        .any(|c| matches!(c.kind, BundleComponentKind::ApplicationContent)),
+                    has_saves: bundle
+                        .components
+                        .iter()
+                        .any(|c| matches!(c.kind, BundleComponentKind::SaveFiles)),
+                    has_mods: bundle.components.iter().any(|c| {
+                        matches!(
+                            c.kind,
+                            BundleComponentKind::Mods | BundleComponentKind::Modifications
+                        )
+                    }),
+                    has_runtime: bundle.components.iter().any(|c| {
+                        matches!(
+                            c.kind,
+                            BundleComponentKind::RuntimePrefix | BundleComponentKind::WinePrefix
+                        )
+                    }),
+                    has_configuration: bundle.components.iter().any(|c| {
+                        matches!(
+                            c.kind,
+                            BundleComponentKind::UserConfiguration
+                                | BundleComponentKind::UserProfile
+                        )
+                    }),
+                    has_plugins: bundle
+                        .components
+                        .iter()
+                        .any(|c| matches!(c.kind, BundleComponentKind::Plugins)),
+                    component_count: bundle.components.len() as u32,
+                },
+            })
+            .collect(),
     }
+}
+
+fn bundle_component_kind_from_folder_kind(kind: &str) -> BundleComponentKind {
+    match kind {
+        "file" => BundleComponentKind::SaveFiles,
+        "config" => BundleComponentKind::UserConfiguration,
+        "data" => BundleComponentKind::UserProfile,
+        "mods" => BundleComponentKind::Mods,
+        "plugin" => BundleComponentKind::Plugins,
+        _ => BundleComponentKind::Custom(kind.to_string()),
+    }
+}
+
+fn bundle_restore_result_from_job(
+    job: &RestoreJob,
+    bundle_id: ApplicationBundleId,
+    snapshot_id: String,
+) -> BundleRestoreResult {
+    let completed_components = job
+        .items
+        .iter()
+        .filter(|item| item.status == "completed")
+        .count() as u32;
+    BundleRestoreResult {
+        job_id: job.job_id.clone(),
+        bundle_id,
+        snapshot_id,
+        status: job.status.clone(),
+        total_components: job.items.len() as u32,
+        completed_components,
+        total_files: 0,
+        restored_files: 0,
+        total_bytes: 0,
+        restored_bytes: 0,
+        started_at: job.started_at.clone(),
+        finished_at: job.finished_at.clone(),
+        error: job.error.clone(),
+    }
+}
+
+async fn build_remote_exec_from_state(
+    context: &AppContext,
+    explicit_instance_id: Option<u64>,
+) -> Result<RemoteExec, FrontendError> {
+    let state = context.load_state().await;
+    let private_key_path = state.ssh.private_key_path.clone();
+    if private_key_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "SSH private key path is empty. Run provisioning first.".to_string(),
+        )
+        .into());
+    }
+
+    let instance_id = explicit_instance_id
+        .or(state.instance.instance_id)
+        .ok_or_else(|| AppError::InvalidInput("No active instance selected.".to_string()))?;
+
+    let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+        context.config.ssh_user.clone()
+    } else {
+        state.ssh.ssh_username.clone()
+    };
+
+    let api_key = state.credentials.vast_api_key.clone();
+    if api_key.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "Vast API key is missing. Add it in Settings first.".to_string(),
+        )
+        .into());
+    }
+    drop(state);
+
+    let vast = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        api_key,
+    );
+    let instance = vast
+        .get_instance(instance_id)
+        .await
+        .map_err(FrontendError::from)?;
+    let ssh_host = if instance.public_ip.trim().is_empty() {
+        instance.ssh_host.clone()
+    } else {
+        instance.public_ip.clone()
+    };
+    if ssh_host.trim().is_empty() || instance.ssh_port == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "Instance {} SSH details are unavailable.",
+            instance_id
+        ))
+        .into());
+    }
+
+    Ok(RemoteExec {
+        ssh_user,
+        ssh_host,
+        ssh_port: instance.ssh_port,
+        private_key_path,
+    })
 }

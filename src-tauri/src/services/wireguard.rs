@@ -1617,41 +1617,141 @@ pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
-    let shell_script = format!(
-        "set -e; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; launchctl bootout system/{label} >/dev/null 2>&1 || true; pkill -f '/Users/felipebarros/Code/noland/no_land/src-tauri/binaries/gotatun utun' >/dev/null 2>&1 || true; pkill -f 'wg-quick up {local_conf}' >/dev/null 2>&1 || true; pkill -f 'wg-quick up {homebrew_conf}' >/dev/null 2>&1 || true; wg-quick down {local_conf} >/dev/null 2>&1 || true; wg-quick down {homebrew_conf} >/dev/null 2>&1 || true; rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name >/dev/null 2>&1 || true; rm -f {plist} {script} {local_conf} {homebrew_conf} >/dev/null 2>&1 || true",
-        label = MACOS_WIREGUARD_HELPER_LABEL,
-        plist = MACOS_WIREGUARD_HELPER_PLIST_PATH,
-        script = MACOS_WIREGUARD_HELPER_SCRIPT_PATH,
-        local_conf = MACOS_LOCAL_CONF_PATH,
-        homebrew_conf = MACOS_HOMEBREW_CONF_PATH,
-    );
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn best_effort_tool_status(tool: &str, args: &[&str]) -> bool {
+    let os = OsDetection::new();
+    let program = os
+        .resolve_command_path(tool)
+        .unwrap_or_else(|| tool.to_string());
+    let mut command = Command::new(program);
+    os.with_augmented_path(&mut command);
+    command
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
 
-    let output = Command::new("sudo")
-        .args(["bash", "-lc", &shell_script])
-        .output()
-        .map_err(|error| {
-            AppError::Command(format!(
-                "Failed running local WireGuard teardown on macOS: {error}"
-            ))
-        })?;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn teardown_managed_gotatun_runtime(
+    config_paths: &[&str],
+    extra_patterns: &[String],
+) -> AppResult<()> {
+    let gotatun_bin = locate_gotatun_binary();
+    let gotatun_env = gotatun_bin
+        .as_ref()
+        .map(|path| format!("WG_QUICK_USERSPACE_IMPLEMENTATION={}", path.display()));
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Err(AppError::Command(format!(
-            "Failed tearing down local WireGuard runtime on macOS (exit {}): stdout: {} | stderr: {}",
-            output.status,
-            stdout,
-            stderr,
-        )));
+    let mut exact_names = gotatun_binary_names();
+    if let Some(file_name) = gotatun_bin
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|value| value.to_str())
+    {
+        exact_names.push(file_name.to_string());
+    }
+    exact_names.sort();
+    exact_names.dedup();
+
+    let mut patterns = extra_patterns.to_vec();
+    if let Some(path) = gotatun_bin.as_ref() {
+        patterns.push(path.display().to_string());
+    }
+    patterns.sort();
+    patterns.dedup();
+
+    let mut attempted = false;
+    let mut any_success = false;
+
+    for config_path in config_paths {
+        let success = if let Some(env_var) = gotatun_env.as_ref() {
+            best_effort_tool_status(
+                "sudo",
+                &[
+                    "-n",
+                    "env",
+                    env_var.as_str(),
+                    "WG_SUDO=1",
+                    "wg-quick",
+                    "down",
+                    config_path,
+                ],
+            )
+        } else {
+            best_effort_tool_status("sudo", &["-n", "wg-quick", "down", config_path])
+        };
+        attempted = true;
+        any_success |= success;
+    }
+
+    for exact_name in &exact_names {
+        attempted = true;
+        any_success |= best_effort_tool_status("sudo", &["-n", "pkill", "-x", exact_name]);
+        any_success |= best_effort_tool_status("pkill", &["-x", exact_name]);
+    }
+
+    for pattern in &patterns {
+        attempted = true;
+        any_success |= best_effort_tool_status("sudo", &["-n", "pkill", "-f", pattern]);
+        any_success |= best_effort_tool_status("pkill", &["-f", pattern]);
+    }
+
+    if attempted && !any_success {
+        warn!(
+            "Managed GotaTun shutdown did not stop any processes; if the tunnel is running as root and sudo credentials are not cached, manual teardown may still be required"
+        );
     }
 
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "macos")]
+pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+    let mut patterns = vec![
+        MACOS_WIREGUARD_HELPER_SCRIPT_PATH.to_string(),
+        MACOS_LOCAL_CONF_PATH.to_string(),
+        MACOS_HOMEBREW_CONF_PATH.to_string(),
+        format!("wg-quick up {MACOS_LOCAL_CONF_PATH}"),
+        format!("wg-quick up {MACOS_HOMEBREW_CONF_PATH}"),
+        "nolandwg0".to_string(),
+    ];
+    patterns.sort();
+    patterns.dedup();
+
+    let helper_stopped = best_effort_tool_status(
+        "sudo",
+        &[
+            "-n",
+            "launchctl",
+            "bootout",
+            "system/com.noland.wireguard.nolandwg0",
+        ],
+    );
+    let _ = helper_stopped;
+
+    teardown_managed_gotatun_runtime(
+        &[MACOS_LOCAL_CONF_PATH, MACOS_HOMEBREW_CONF_PATH],
+        &patterns,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+    let mut patterns = vec![
+        "/etc/wireguard/nolandwg0.conf".to_string(),
+        "wg-quick up /etc/wireguard/nolandwg0.conf".to_string(),
+        "wg-quick down /etc/wireguard/nolandwg0.conf".to_string(),
+        "nolandwg0".to_string(),
+    ];
+    patterns.sort();
+    patterns.dedup();
+
+    teardown_managed_gotatun_runtime(&["/etc/wireguard/nolandwg0.conf"], &patterns)
+}
+
+#[cfg(target_os = "windows")]
 pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
     Ok(())
 }

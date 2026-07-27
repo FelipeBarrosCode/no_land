@@ -14,8 +14,6 @@ import type {
   PlatformCredentialsUpdate,
   PersistedAppState,
   ServerPreferencesUpdate,
-  SharedStorageSettingsResponse,
-  SharedStorageSettingsUpdate,
   SshCredentialsUpdate,
   VastBrowserAutomationStatus,
   VastBrowserBillingAction,
@@ -62,7 +60,6 @@ type ClientForm = {
 interface Props {
   appState: PersistedAppState;
   busy: boolean;
-  sharedStorageSettings: SharedStorageSettingsResponse | null;
   vastAutomationStatus: VastBrowserAutomationStatus | null;
   // New shared storage v2 props
   storageProviders: ProviderDefinition[];
@@ -78,11 +75,12 @@ interface Props {
   ) => Promise<void>;
   onTestStorageConnection: (profileId: string) => Promise<void>;
   onLoadSharedStorageProfiles: () => Promise<void>;
+  onSetActiveStorageProfile: (profileId: string) => Promise<void>;
   onDisconnectStorageProfile: (profileId: string) => Promise<void>;
   onSyncActiveInstanceToSharedStorage: () => Promise<void>;
   // OAuth flow
   oauthSessionId: string | null;
-  onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null) => Promise<string | null>;
+  onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null, providerFields?: Record<string, string>) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
   // Existing props
   onSaveApiKey: (apiKey: string) => Promise<void>;
@@ -106,11 +104,6 @@ interface Props {
     mode: "auto_detect" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
-  onSaveSharedStorageSettings: (
-    payload: SharedStorageSettingsUpdate,
-  ) => Promise<void>;
-  onTestSharedStorageConfig: () => Promise<string | null>;
-  onLoadSharedStorageSettings: () => Promise<void>;
   onSaveConnectionProvider: (payload: {
     connectionProvider: "wireguard";
   }) => Promise<void>;
@@ -213,7 +206,6 @@ function SelectField({
 export function SettingsScreen({
   appState,
   busy,
-  sharedStorageSettings: _sharedStorageSettings,
   vastAutomationStatus,
   storageProviders,
   sharedStorageProfiles,
@@ -222,6 +214,7 @@ export function SettingsScreen({
   onConnectStorageProvider,
   onTestStorageConnection,
   onLoadSharedStorageProfiles,
+  onSetActiveStorageProfile,
   onDisconnectStorageProfile,
   onSyncActiveInstanceToSharedStorage,
   oauthSessionId,
@@ -237,9 +230,6 @@ export function SettingsScreen({
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
   onRegenerateEdid,
-  onSaveSharedStorageSettings: _onSaveSharedStorageSettings,
-  onTestSharedStorageConfig: _onTestSharedStorageConfig,
-  onLoadSharedStorageSettings,
   onSaveConnectionProvider,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
@@ -342,9 +332,7 @@ export function SettingsScreen({
     });
   }, [appState]);
 
-  useEffect(() => {
-    void onLoadSharedStorageSettings();
-  }, []);
+
 
   void vastAutomationStatus;
   void onRefreshVastAutomationStatus;
@@ -1095,6 +1083,7 @@ export function SettingsScreen({
             await onConnectStorageProvider(provider, credentials, bucket, prefix, displayName);
           }}
           onTestConnection={onTestStorageConnection}
+          onSetActiveProfile={onSetActiveStorageProfile}
           onDisconnect={onDisconnectStorageProfile}
           onLoadProviders={onLoadStorageProviders}
           onLoadProfiles={onLoadSharedStorageProfiles}

@@ -31,11 +31,6 @@ import {
   updateVastApiKey,
   updateTailscaleApiKey,
   updateConnectionProvider,
-  getSharedStorageSettings,
-  saveSharedStorageSettings,
-  testSharedStorageConfig,
-  triggerInstanceBackup,
-  triggerInstanceBackupFor,
   getInstanceBackupStatus,
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
@@ -75,6 +70,7 @@ import {
   saveStaticProviderCredentials,
   testSharedStorageConnection,
   getSharedStorageProfiles,
+  setActiveSharedStorageProfile,
   disconnectSharedStorageProfile,
   beginOauthAuthorization,
   completeOauthAuthorization,
@@ -98,8 +94,6 @@ import type {
   RentedInstanceSummary,
   ServerPreferencesUpdate,
   SshCredentialsUpdate,
-  SharedStorageSettingsUpdate,
-  SharedStorageSettingsResponse,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
@@ -211,16 +205,8 @@ interface AppStore {
   sleepPreventionActive: boolean;
   startSleepPrevention: () => Promise<string | null>;
   stopSleepPrevention: () => Promise<string | null>;
-  sharedStorageSettings: SharedStorageSettingsResponse | null;
   backupStatus: BackupStatusResponse | null;
   instanceBackupStatus: SharedStorageInstanceStatus | null;
-  loadSharedStorageSettings: () => Promise<void>;
-  saveSharedStorageSettings: (
-    payload: SharedStorageSettingsUpdate,
-  ) => Promise<void>;
-  testSharedStorageConfig: () => Promise<string | null>;
-  triggerBackup: () => Promise<void>;
-  triggerBackupForInstance: (instanceId: number) => Promise<void>;
   syncInstanceStorage: (
     instanceId: number,
     selectedPaths: string[],
@@ -324,11 +310,12 @@ interface AppStore {
   connectStorageProvider: (provider: string, credentials: Record<string, string>, bucket: string | null, prefix: string | null, displayName: string) => Promise<void>;
   testStorageConnection: (profileId: string) => Promise<void>;
   loadSharedStorageProfiles: () => Promise<void>;
+  setActiveStorageProfile: (profileId: string) => Promise<void>;
   disconnectStorageProfile: (profileId: string) => Promise<void>;
   syncActiveInstanceToSharedStorage: () => Promise<void>;
   // OAuth flow
   oauthSessionId: string | null;
-  beginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null) => Promise<string | null>;
+  beginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null, providerFields?: Record<string, string>) => Promise<string | null>;
   completeOauthFlow: (sessionId: string) => Promise<void>;
   loadApplicationBundles: (instanceId?: number) => Promise<void>;
   selectBundle: (bundleId: string) => void;
@@ -735,7 +722,6 @@ export const useAppStore = create<AppStore>((set, get) => {
     _eventsBound: false,
     vastBrowserAutomationStatus: null,
     vastWalletSummary: null,
-    sharedStorageSettings: null,
     backupStatus: null,
     instanceBackupStatus: null,
     sunshineSettings: null,
@@ -1403,85 +1389,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    loadSharedStorageSettings: async () => {
-      await runBusyTask(
-        {
-          key: "storage.settings.load",
-          label: "Loading shared storage settings",
-          detail: "Fetching your Backblaze and rclone configuration.",
-        },
-        async () => {
-          const settings = await getSharedStorageSettings();
-          set({ sharedStorageSettings: settings });
-        },
-        undefined,
-      );
-    },
-
-    saveSharedStorageSettings: async (payload) => {
-      await runBusyTask(
-        {
-          key: "storage.settings.save",
-          label: "Saving shared storage settings",
-          detail: "Updating backup credentials and destination settings.",
-          blocking: true,
-        },
-        async () => {
-          const appState = await saveSharedStorageSettings(payload);
-          const settings = await getSharedStorageSettings();
-          set({ appState, sharedStorageSettings: settings });
-        },
-        undefined,
-      );
-    },
-
-    testSharedStorageConfig: async () => {
-      return await runBusyTask(
-        {
-          key: "storage.settings.test",
-          label: "Testing shared storage connection",
-          detail: "Checking your Backblaze bucket and remote access.",
-        },
-        async () => await testSharedStorageConfig(),
-        null,
-      );
-    },
-
-    triggerBackup: async () => {
-      set({ busy: true, error: null });
-      try {
-        const status = await triggerInstanceBackup();
-
-        // Refresh bundle index immediately so restore UI reflects selectable bundles
-        // from the latest backup without requiring a manual "Generate Index" action.
-        const currentState = get().appState;
-        const activeInstanceId = currentState?.instance.instanceId;
-        if (activeInstanceId) {
-          try {
-            const index = await getInstanceRestoreBundles(activeInstanceId);
-            set({ backupStatus: status, bundleIndex: index, busy: false });
-            return;
-          } catch {
-            // Backup succeeded even if index retrieval fails; keep success status.
-          }
-        }
-
-        set({ backupStatus: status, busy: false });
-      } catch (error) {
-        set({ busy: false, error: mapError(error) });
-      }
-    },
-
-    triggerBackupForInstance: async (instanceId) => {
-      set({ busy: true, error: null });
-      try {
-        const status = await triggerInstanceBackupFor(instanceId);
-        set({ backupStatus: status, busy: false });
-      } catch (error) {
-        set({ busy: false, error: mapError(error) });
-      }
-    },
-
     syncInstanceStorage: async (instanceId, selectedPaths) => {
       return await runInstanceTask(
         {
@@ -2058,8 +1965,19 @@ export const useAppStore = create<AppStore>((set, get) => {
         const profiles = await getSharedStorageProfiles();
         set({ sharedStorageProfiles: profiles });
       } catch (error) {
-        // It's OK if no profiles yet
+        set({ error: mapError(error) });
       }
+    },
+
+    setActiveStorageProfile: async (profileId) => {
+      await runBusyTask(
+        { key: "storage.profile.activate", label: "Switching storage profile" },
+        async () => {
+          await setActiveSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
     },
 
     disconnectStorageProfile: async (profileId) => {
@@ -2077,8 +1995,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.sync.active-instance",
-          label: "Syncing active instance",
-          detail: "Running the remote save flow now so you can verify this instance uploads into shared storage.",
+          label: "Whole-instance export removed",
+          detail:
+            "Use the shared storage export flow to choose specific files or folders instead of syncing the whole filesystem.",
           blocking: true,
         },
         async () => {
@@ -2086,17 +2005,23 @@ export const useAppStore = create<AppStore>((set, get) => {
           if (!instanceId) {
             throw new Error("No active instance selected. Start or select a server first.");
           }
-          const status = await triggerInstanceBackupFor(instanceId);
-          set({ backupStatus: status });
-          return status;
+          throw new Error(
+            "Whole-instance shared-storage export has been removed. Use Export Selected Files from the dashboard/shared storage UI.",
+          );
         },
-        null as unknown as BackupStatusResponse,
+        null,
       );
     },
 
-    beginOauthFlow: async (provider, displayName, clientId, clientSecret) => {
+    beginOauthFlow: async (provider, displayName, clientId, clientSecret, providerFields) => {
       try {
-        const response = await beginOauthAuthorization(provider, displayName, clientId || "", clientSecret || null);
+        const response = await beginOauthAuthorization(
+          provider,
+          displayName,
+          clientId || "",
+          clientSecret || null,
+          JSON.stringify(providerFields || {}),
+        );
         set({ oauthSessionId: response.sessionId });
         // Open the authorization URL in the browser
         if ("__TAURI_INTERNALS__" in window) {

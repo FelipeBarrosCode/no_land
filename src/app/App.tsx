@@ -300,18 +300,7 @@ export function App() {
   );
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
   const regenerateEdid = useAppStore((state) => state.regenerateEdid);
-  const sharedStorageSettings = useAppStore(
-    (state) => state.sharedStorageSettings,
-  );
-  const saveSharedStorageSettings = useAppStore(
-    (state) => state.saveSharedStorageSettings,
-  );
-  const testSharedStorageConfig = useAppStore(
-    (state) => state.testSharedStorageConfig,
-  );
-  const loadSharedStorageSettings = useAppStore(
-    (state) => state.loadSharedStorageSettings,
-  );
+
   const storageProviders = useAppStore((state) => state.storageProviders);
   const sharedStorageProfiles = useAppStore((state) => state.sharedStorageProfiles);
   const sharedStorageTestResult = useAppStore((state) => state.sharedStorageTestResult);
@@ -319,6 +308,7 @@ export function App() {
   const connectStorageProvider = useAppStore((state) => state.connectStorageProvider);
   const testStorageConnection = useAppStore((state) => state.testStorageConnection);
   const loadSharedStorageProfiles = useAppStore((state) => state.loadSharedStorageProfiles);
+  const setActiveStorageProfile = useAppStore((state) => state.setActiveStorageProfile);
   const disconnectStorageProfile = useAppStore((state) => state.disconnectStorageProfile);
   const syncActiveInstanceToSharedStorage = useAppStore((state) => state.syncActiveInstanceToSharedStorage);
   const oauthSessionId = useAppStore((state) => state.oauthSessionId);
@@ -435,7 +425,7 @@ export function App() {
                 <SettingsScreen
                   appState={appState}
                   busy={busy}
-                  sharedStorageSettings={sharedStorageSettings}
+
                   vastAutomationStatus={vastBrowserAutomationStatus}
                   storageProviders={storageProviders}
                   sharedStorageProfiles={sharedStorageProfiles}
@@ -444,6 +434,7 @@ export function App() {
                   onConnectStorageProvider={connectStorageProvider}
                   onTestStorageConnection={testStorageConnection}
                   onLoadSharedStorageProfiles={loadSharedStorageProfiles}
+                  onSetActiveStorageProfile={setActiveStorageProfile}
                   onDisconnectStorageProfile={disconnectStorageProfile}
                   onSyncActiveInstanceToSharedStorage={syncActiveInstanceToSharedStorage}
                   oauthSessionId={oauthSessionId}
@@ -459,9 +450,7 @@ export function App() {
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
                   onRegenerateEdid={regenerateEdid}
-                  onSaveSharedStorageSettings={saveSharedStorageSettings}
-                  onTestSharedStorageConfig={testSharedStorageConfig}
-                  onLoadSharedStorageSettings={loadSharedStorageSettings}
+
                   onSaveConnectionProvider={saveConnectionProvider}
                 />
               ) : null

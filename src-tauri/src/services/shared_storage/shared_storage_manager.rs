@@ -35,11 +35,19 @@ fn get_listing_ready_cache() -> &'static RwLock<HashSet<String>> {
 struct BackupJobInfo;
 
 #[derive(Debug, Clone)]
-struct ActiveSharedStorageProfile {
-    profile: SharedStorageProfile,
-    credentials: StorageCredential,
-    provider_fields: HashMap<String, String>,
-    remote_name: String,
+pub(crate) struct ActiveSharedStorageProfile {
+    pub profile: SharedStorageProfile,
+    pub credentials: StorageCredential,
+    pub provider_fields: HashMap<String, String>,
+    pub remote_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SharedStorageNamespace {
+    pub root: String,
+    pub metadata_root: String,
+    pub catalogs_root: String,
+    pub healthcheck_root: String,
 }
 
 /// Shared Storage Manager service.
@@ -505,76 +513,222 @@ chmod 600 {path}'"#,
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<()> {
+        let _ = Self::test_profile_connection(context, remote, target_user, None).await?;
+        Ok(())
+    }
+
+    pub async fn test_profile_connection(
+        context: &AppContext,
+        remote: &RemoteExec,
+        target_user: &str,
+        profile_id: Option<&str>,
+    ) -> AppResult<crate::models::application_bundle::SharedStorageTestResult> {
+        let started = Instant::now();
         info!(
             event = "shared_storage_test_start",
             target_user = target_user,
+            profile_id = profile_id.unwrap_or("<active>"),
             "Shared storage configuration test started"
         );
-        let active_profile = Self::resolve_active_profile(context).await?;
+
+        let active_profile = Self::resolve_profile(context, profile_id).await?;
 
         Self::ensure_rclone_installed(remote).await?;
         Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
 
         let source = Self::build_profile_storage_source(&active_profile);
         let list_cmd = format!(
-            "sudo -u {user} rclone lsf {src} --max-depth 1 2>&1 | sed -n '1,5p'",
+            "sudo -u {user} rclone lsf {src} --max-depth 1 2>&1 | sed -n '1,20p'",
             user = target_user,
             src = shell_escape(&source),
         );
 
-        let output = {
+        let list_output = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || remote.ssh(&list_cmd, Duration::from_secs(60)))
                 .await
                 .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
-        let test_stdout = redact_profile_secrets(&output.stdout, &active_profile);
-        let test_stderr = redact_profile_secrets(&output.stderr, &active_profile);
+        let test_stdout = redact_profile_secrets(&list_output.stdout, &active_profile);
+        let test_stderr = redact_profile_secrets(&list_output.stderr, &active_profile);
         info!(
             event = "shared_storage_test_output",
             target_user = target_user,
-            status_code = output.status_code,
+            status_code = list_output.status_code,
             stdout = %test_stdout.trim(),
             stderr = %test_stderr.trim(),
             "Shared storage test command output"
         );
 
-        if output.status_code != 0 {
-            let stderr = redact_profile_secrets(&output.stdout, &active_profile);
-            warn!(
-                event = "shared_storage_test_failure",
-                target_user = target_user,
-                status_code = output.status_code,
-                "Shared storage configuration test failed"
+        if list_output.status_code != 0 {
+            let combined = redact_profile_secrets(
+                &format!("{}\n{}", list_output.stdout, list_output.stderr),
+                &active_profile,
             );
-            return Err(AppError::Provisioning(format!(
-                "{} connection test failed: {}",
-                active_profile.profile.provider.label(),
-                stderr.trim()
-            )));
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
+            return Ok(crate::models::application_bundle::SharedStorageTestResult {
+                authenticated: false,
+                can_list: false,
+                can_write: false,
+                can_read: false,
+                can_delete_test_object: false,
+                repository_accessible: false,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+                error: Some(actionable),
+            });
         }
 
-        info!(
-            event = "shared_storage_test_success",
-            target_user = target_user,
-            "Shared storage configuration test succeeded"
+        let marker = format!(
+            "noland-shared-storage-test-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
         );
-        info!(
-            provider = active_profile.profile.provider.label(),
-            "Shared storage configuration test succeeded"
+        let local_test_path = format!("/tmp/{}.txt", marker);
+        let remote_test_path = format!("{}/.noland-healthcheck/{}.txt", source, marker);
+        let write_local_cmd = format!(
+            "sudo -u {user} bash -lc 'printf %s {marker} > {path} && chmod 600 {path}'",
+            user = target_user,
+            marker = shell_escape(&marker),
+            path = shell_escape(&local_test_path),
         );
-        Ok(())
+        {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_local_cmd, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
+        }
+
+        let upload_cmd = format!(
+            "sudo -u {user} rclone copyto {local} {remote_path} 2>&1",
+            user = target_user,
+            local = shell_escape(&local_test_path),
+            remote_path = shell_escape(&remote_test_path),
+        );
+        let upload_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&upload_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+        if upload_output.status_code != 0 {
+            let combined = redact_profile_secrets(
+                &format!("{}\n{}", upload_output.stdout, upload_output.stderr),
+                &active_profile,
+            );
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
+            return Ok(crate::models::application_bundle::SharedStorageTestResult {
+                authenticated: true,
+                can_list: true,
+                can_write: false,
+                can_read: false,
+                can_delete_test_object: false,
+                repository_accessible: true,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+                error: Some(format!("Write test failed: {actionable}")),
+            });
+        }
+
+        let read_cmd = format!(
+            "sudo -u {user} rclone cat {remote_path} 2>&1",
+            user = target_user,
+            remote_path = shell_escape(&remote_test_path),
+        );
+        let read_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&read_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+        if read_output.status_code != 0 || !read_output.stdout.contains(&marker) {
+            let combined = redact_profile_secrets(
+                &format!("{}\n{}", read_output.stdout, read_output.stderr),
+                &active_profile,
+            );
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
+            return Ok(crate::models::application_bundle::SharedStorageTestResult {
+                authenticated: true,
+                can_list: true,
+                can_write: true,
+                can_read: false,
+                can_delete_test_object: false,
+                repository_accessible: true,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+                error: Some(format!("Read test failed: {actionable}")),
+            });
+        }
+
+        let delete_cmd = format!(
+            "sudo -u {user} rclone deletefile {remote_path} 2>&1",
+            user = target_user,
+            remote_path = shell_escape(&remote_test_path),
+        );
+        let delete_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&delete_cmd, Duration::from_secs(60)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+        if delete_output.status_code != 0 {
+            let combined = redact_profile_secrets(
+                &format!("{}\n{}", delete_output.stdout, delete_output.stderr),
+                &active_profile,
+            );
+            let actionable = extract_actionable_rclone_error(&combined)
+                .unwrap_or_else(|| combined.trim().to_string());
+            return Ok(crate::models::application_bundle::SharedStorageTestResult {
+                authenticated: true,
+                can_list: true,
+                can_write: true,
+                can_read: true,
+                can_delete_test_object: false,
+                repository_accessible: true,
+                latency_ms: Some(started.elapsed().as_millis() as u64),
+                error: Some(format!("Delete test failed: {actionable}")),
+            });
+        }
+
+        let cleanup_cmd = format!(
+            "sudo rm -f {path} >/dev/null 2>&1 || true",
+            path = shell_escape(&local_test_path),
+        );
+        let _ = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&cleanup_cmd, Duration::from_secs(15)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+
+        Ok(crate::models::application_bundle::SharedStorageTestResult {
+            authenticated: true,
+            can_list: true,
+            can_write: true,
+            can_read: true,
+            can_delete_test_object: true,
+            repository_accessible: true,
+            latency_ms: Some(started.elapsed().as_millis() as u64),
+            error: None,
+        })
     }
 
-    /// Trigger a manual backup for the given instance.
+    /// Legacy whole-instance backup entrypoint.
+    ///
+    /// The app now only supports explicit selected-path exports via
+    /// `backup_selected_paths`, so this path is intentionally disabled.
     pub async fn trigger_manual_backup(
-        context: &AppContext,
-        remote: &RemoteExec,
-        instance_id: u64,
-        target_user: &str,
+        _context: &AppContext,
+        _remote: &RemoteExec,
+        _instance_id: u64,
+        _target_user: &str,
     ) -> AppResult<()> {
-        Self::trigger_backup(context, remote, instance_id, target_user, "manual").await
+        Err(AppError::InvalidInput(
+            "Whole-instance shared-storage backup has been removed. Export selected files or folders instead."
+                .to_string(),
+        ))
     }
 
     /// Internal backup trigger with concurrency guard.
@@ -772,17 +926,62 @@ chmod 600 {path}'"#,
         Ok(())
     }
 
-    async fn resolve_active_profile(context: &AppContext) -> AppResult<ActiveSharedStorageProfile> {
+    pub(crate) async fn prepare_active_profile_remote(
+        context: &AppContext,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<ActiveSharedStorageProfile> {
+        let active_profile = Self::resolve_active_profile(context).await?;
+        Self::ensure_rclone_installed(remote).await?;
+        Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
+        Ok(active_profile)
+    }
+
+    pub(crate) fn namespace_for_profile(
+        active_profile: &ActiveSharedStorageProfile,
+    ) -> SharedStorageNamespace {
+        let root = Self::build_profile_storage_source(active_profile);
+        let metadata_root = format!("{}/metadata", root);
+        let catalogs_root = format!("{}/catalogs", root);
+        let healthcheck_root = format!("{}/.noland-healthcheck", root);
+        SharedStorageNamespace {
+            root,
+            metadata_root,
+            catalogs_root,
+            healthcheck_root,
+        }
+    }
+
+    pub(crate) async fn resolve_active_profile(
+        context: &AppContext,
+    ) -> AppResult<ActiveSharedStorageProfile> {
+        Self::resolve_profile(context, None).await
+    }
+
+    pub(crate) async fn resolve_profile(
+        context: &AppContext,
+        profile_id: Option<&str>,
+    ) -> AppResult<ActiveSharedStorageProfile> {
         let state = context.load_state().await;
-        let reference = state
-            .shared_storage_profiles
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                AppError::InvalidInput(
-                    "No shared storage profile connected. Connect a provider first.".to_string(),
-                )
-            })?;
+        let reference = if let Some(profile_id) = profile_id {
+            state
+                .shared_storage_profiles
+                .iter()
+                .find(|profile| profile.id == profile_id)
+                .cloned()
+        } else {
+            state
+                .shared_storage_profiles
+                .iter()
+                .find(|profile| profile.active)
+                .cloned()
+                .or_else(|| state.shared_storage_profiles.first().cloned())
+        }
+        .ok_or_else(|| {
+            AppError::InvalidInput(
+                "No shared storage profile connected. Connect a provider first.".to_string(),
+            )
+        })?;
 
         let provider = reference
             .provider
@@ -803,7 +1002,7 @@ chmod 600 {path}'"#,
             bucket: reference.bucket.clone(),
             prefix: reference.prefix.clone(),
             credential_vault_reference: format!(
-                "shared-storage:profile:{}:credentials",
+                "state.json:sharedStorageCredentials.profiles.{}",
                 reference.id
             ),
             repository_id: String::new(),
@@ -815,8 +1014,16 @@ chmod 600 {path}'"#,
         drop(state);
 
         let manager = shared_profile_manager();
-        let credentials = manager.retrieve_credentials(&profile).await?;
-        let provider_fields = manager.retrieve_provider_fields(&profile).await?;
+        let credentials = manager
+            .retrieve_credentials(context, &profile)
+            .await
+            .map_err(|error| {
+            AppError::State(format!(
+                "Shared storage credentials for '{}' are unavailable. Reconnect this provider. {error}",
+                profile.display_name
+            ))
+        })?;
+        let provider_fields = manager.retrieve_provider_fields(context, &profile).await?;
         let remote_name = format!("noland_{}", profile.id.replace('-', ""));
 
         Ok(ActiveSharedStorageProfile {
@@ -827,7 +1034,7 @@ chmod 600 {path}'"#,
         })
     }
 
-    async fn configure_rclone_remote_for_profile(
+    pub(crate) async fn configure_rclone_remote_for_profile(
         remote: &RemoteExec,
         target_user: &str,
         active_profile: &ActiveSharedStorageProfile,
@@ -1160,7 +1367,9 @@ chmod 600 {path}'"#,
         Ok(lines.join("\n"))
     }
 
-    fn build_profile_storage_source(active_profile: &ActiveSharedStorageProfile) -> String {
+    pub(crate) fn build_profile_storage_source(
+        active_profile: &ActiveSharedStorageProfile,
+    ) -> String {
         match &active_profile.profile.provider {
             StorageProvider::BackblazeB2
             | StorageProvider::AmazonS3

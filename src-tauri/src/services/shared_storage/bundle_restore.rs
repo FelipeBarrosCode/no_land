@@ -13,6 +13,8 @@ use crate::models::app_state::{
 
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
+use super::shared_storage_manager::SharedStorageManager;
+
 /// In-memory restore job tracking.
 static RESTORE_JOBS: std::sync::OnceLock<RwLock<HashMap<String, RestoreJob>>> =
     std::sync::OnceLock::new();
@@ -303,23 +305,10 @@ impl BundleRestoreService {
         Self::validate_source(&item.source)?;
         Self::validate_target(&item.target, &format!("/home/{}", target_user))?;
 
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-
-        let effective_remote = if settings
-            .crypt_password
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            format!("{}-crypt", settings.remote_name)
-        } else {
-            settings.remote_name.clone()
-        };
-        let remote_root = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let active_profile =
+            SharedStorageManager::prepare_active_profile_remote(context, remote, target_user)
+                .await?;
+        let namespace = SharedStorageManager::namespace_for_profile(&active_profile);
 
         let parent_dir = std::path::Path::new(&item.target)
             .parent()
@@ -345,27 +334,24 @@ impl BundleRestoreService {
             );
         }
 
+        let source_path = format!("{}/{}", namespace.root, item.source);
         let cmd = if item.kind == "file" {
             format!(
                 "sudo -u {user} rclone copyto {src} {dst} --checksum --create-empty-src-dirs 2>&1",
                 user = target_user,
-                src = shell_escape(&format!("{}/{}", remote_root, item.source)),
+                src = shell_escape(&source_path),
                 dst = shell_escape(&item.target),
             )
         } else {
             format!(
                 "sudo -u {user} rclone copy {src} {dst} --checksum --create-empty-src-dirs --transfers=8 --checkers=16 2>&1",
                 user = target_user,
-                src = shell_escape(&format!("{}/{}", remote_root, item.source)),
+                src = shell_escape(&source_path),
                 dst = shell_escape(&item.target),
             )
         };
 
-        info!(
-            "Running rclone restore: {}",
-            cmd.replace(&settings.backblaze_application_key, "***")
-                .replace(&settings.backblaze_key_id, "***")
-        );
+        info!("Running rclone restore from {}", source_path);
 
         let output = {
             let r = remote.clone();
@@ -391,36 +377,25 @@ impl BundleRestoreService {
         target_user: &str,
         items: &[RestoreDryRunItem],
     ) -> AppResult<u32> {
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-        let effective_remote = if settings
-            .crypt_password
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            format!("{}-crypt", settings.remote_name)
-        } else {
-            settings.remote_name.clone()
-        };
-        let remote_root = format!(
-            "{}:{}/{}",
-            effective_remote, settings.bucket_name, settings.destination_prefix
-        );
+        let active_profile =
+            SharedStorageManager::prepare_active_profile_remote(context, remote, target_user)
+                .await?;
+        let namespace = SharedStorageManager::namespace_for_profile(&active_profile);
 
         let mut total = 0u32;
         for item in items {
+            let source_path = format!("{}/{}", namespace.root, item.source);
             let cmd = if item.kind == "file" {
                 format!(
                     "sudo -u {user} rclone ls {src} --max-depth 0 --dry-run 2>&1 | wc -l",
                     user = target_user,
-                    src = shell_escape(&format!("{}/{}", remote_root, item.source)),
+                    src = shell_escape(&source_path),
                 )
             } else {
                 format!(
                     "sudo -u {user} rclone ls {src} --max-depth 100 --dry-run 2>&1 | wc -l",
                     user = target_user,
-                    src = shell_escape(&format!("{}/{}", remote_root, item.source)),
+                    src = shell_escape(&source_path),
                 )
             };
 

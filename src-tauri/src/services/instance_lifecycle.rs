@@ -450,47 +450,14 @@ impl InstanceLifecycleService {
         result
     }
 
-    /// Run backup before pause/destroy if shared storage is configured.
-    async fn maybe_run_backup_first(context: &AppContext, instance_id: u64) -> AppResult<()> {
-        let state = context.state.read().await;
-        let profile_connected = !state.shared_storage_profiles.is_empty();
-        let api_key = state.credentials.vast_api_key.clone();
-        drop(state);
-
-        if !profile_connected {
-            info!(
-                instance_id = instance_id,
-                "Shared storage not configured, skipping pre-action backup"
-            );
-            return Ok(());
-        }
-
+    /// Legacy whole-instance shared-storage backup was removed.
+    ///
+    /// Lifecycle operations now skip implicit backup and rely on the explicit
+    /// selected-path export flow instead.
+    async fn maybe_run_backup_first(_context: &AppContext, instance_id: u64) -> AppResult<()> {
         info!(
             instance_id = instance_id,
-            "Running backup before instance lifecycle action"
-        );
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing for pre-action backup.".to_string(),
-            ));
-        }
-
-        // Build RemoteExec for the target instance (not global active instance).
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
-            .await?;
-
-        info!(
-            instance_id = instance_id,
-            "Pre-action backup completed successfully"
+            "Skipping legacy pre-action whole-instance backup; selected-path export is now required"
         );
         Ok(())
     }
@@ -605,31 +572,13 @@ impl InstanceLifecycleService {
     }
 
     pub async fn save_instance_to_shared_storage(
-        context: &AppContext,
-        instance_id: u64,
+        _context: &AppContext,
+        _instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
-            .await?;
-        SharedStorageManager::get_backup_status(context).await
+        Err(AppError::InvalidInput(
+            "Whole-instance shared-storage backup has been removed. Export selected files or folders instead."
+                .to_string(),
+        ))
     }
 
     pub async fn sync_instance_from_shared_storage(

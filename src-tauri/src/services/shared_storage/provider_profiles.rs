@@ -2,51 +2,37 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::application_bundle::{
-    SharedStorageProfile, SharedStorageStatus, StorageProvider,
+use crate::models::{
+    app_state::{SharedStorageOAuthSessionSecret, SharedStorageProfileSecret},
+    application_bundle::{SharedStorageProfile, SharedStorageStatus, StorageProvider},
 };
+use crate::services::app_context::AppContext;
 
-use super::credential_vault::{CredentialVault, InMemoryCredentialVault};
 use super::object_storage::{list_all_providers, StorageCredential};
 
-// ─── Profile Manager ──────────────────────────────────────
+static SHARED_PROFILE_MANAGER: std::sync::OnceLock<Arc<SharedStorageProfileManager>> =
+    std::sync::OnceLock::new();
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct StoredProfileSecrets {
-    credentials: StorageCredential,
-    #[serde(default)]
-    provider_fields: HashMap<String, String>,
-}
-
-static SHARED_VAULT: std::sync::OnceLock<Arc<InMemoryCredentialVault>> = std::sync::OnceLock::new();
-
-pub fn shared_profile_vault() -> Arc<dyn CredentialVault> {
-    SHARED_VAULT
-        .get_or_init(|| Arc::new(InMemoryCredentialVault::new()))
+pub fn shared_profile_manager() -> Arc<SharedStorageProfileManager> {
+    SHARED_PROFILE_MANAGER
+        .get_or_init(|| Arc::new(SharedStorageProfileManager::new()))
         .clone()
 }
 
-pub fn shared_profile_manager() -> Arc<SharedStorageProfileManager> {
-    Arc::new(SharedStorageProfileManager::new(shared_profile_vault()))
-}
-
-pub struct SharedStorageProfileManager {
-    vault: Arc<dyn CredentialVault>,
-}
+pub struct SharedStorageProfileManager;
 
 impl SharedStorageProfileManager {
-    pub fn new(vault: Arc<dyn CredentialVault>) -> Self {
-        Self { vault }
+    pub fn new() -> Self {
+        Self
     }
 
-    /// List all available storage providers for the UI.
     pub fn list_providers(&self) -> Vec<crate::models::application_bundle::ProviderDefinition> {
         list_all_providers()
     }
 
-    /// Save static provider credentials into the OS vault and return a profile.
     pub async fn save_static_credentials(
         &self,
+        context: &AppContext,
         provider: &StorageProvider,
         credentials: &StorageCredential,
         provider_fields: &HashMap<String, String>,
@@ -55,35 +41,37 @@ impl SharedStorageProfileManager {
         display_name: &str,
     ) -> AppResult<SharedStorageProfile> {
         let profile_id = Uuid::new_v4().to_string();
-        let vault_key = format!("shared-storage:profile:{}:credentials", profile_id);
-        let repo_key = format!("shared-storage:profile:{}:repo-key", profile_id);
-
-        let stored = StoredProfileSecrets {
-            credentials: credentials.clone(),
-            provider_fields: provider_fields.clone(),
-        };
-        let cred_json = serde_json::to_string(&stored)?;
-        self.vault.store(&vault_key, &cred_json).await?;
-
-        // Generate repository encryption key
-        let repo_master_key = generate_repository_key();
-        self.vault
-            .store(&repo_key, &hex::encode(&repo_master_key))
-            .await?;
-
         let repository_id = format!(
             "repo_{}",
             Uuid::new_v4().to_string().replace('-', "")[..12].to_string()
         );
 
+        let stored = SharedStorageProfileSecret {
+            credentials: credentials.clone(),
+            provider_fields: provider_fields.clone(),
+            repository_key_hex: hex::encode(generate_repository_key()),
+        };
+
+        context
+            .update_state(|state| {
+                state
+                    .shared_storage_credentials
+                    .profiles
+                    .insert(profile_id.clone(), stored.clone());
+            })
+            .await?;
+
         Ok(SharedStorageProfile {
-            id: profile_id,
+            id: profile_id.clone(),
             display_name: display_name.to_string(),
             provider: provider.clone(),
             provider_label: provider.label().to_string(),
             bucket: bucket.map(String::from),
             prefix: prefix.map(String::from),
-            credential_vault_reference: vault_key,
+            credential_vault_reference: format!(
+                "state.json:sharedStorageCredentials.profiles.{}",
+                profile_id
+            ),
             repository_id,
             status: SharedStorageStatus::Connected,
             last_verified_at: None,
@@ -92,15 +80,16 @@ impl SharedStorageProfileManager {
         })
     }
 
-    /// Save OAuth credentials (after OAuth flow completes).
     pub async fn save_oauth_credentials(
         &self,
+        context: &AppContext,
         provider: &StorageProvider,
         credentials: &StorageCredential,
         provider_fields: &HashMap<String, String>,
         display_name: &str,
     ) -> AppResult<SharedStorageProfile> {
         self.save_static_credentials(
+            context,
             provider,
             credentials,
             provider_fields,
@@ -111,52 +100,46 @@ impl SharedStorageProfileManager {
         .await
     }
 
-    /// Retrieve credentials from vault for a profile.
     pub async fn retrieve_credentials(
         &self,
+        context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<StorageCredential> {
-        let cred_json = self
-            .vault
-            .retrieve(&profile.credential_vault_reference)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Credentials not found in vault".to_string()))?;
-
-        if let Ok(stored) = serde_json::from_str::<StoredProfileSecrets>(&cred_json) {
-            return Ok(stored.credentials);
-        }
-
-        let credentials: StorageCredential = serde_json::from_str(&cred_json)?;
-        Ok(credentials)
+        let state = context.load_state().await;
+        state
+            .shared_storage_credentials
+            .profiles
+            .get(&profile.id)
+            .map(|stored| stored.credentials.clone())
+            .ok_or_else(|| AppError::NotFound("Credentials not found in state".to_string()))
     }
 
     pub async fn retrieve_provider_fields(
         &self,
+        context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<HashMap<String, String>> {
-        let cred_json = self
-            .vault
-            .retrieve(&profile.credential_vault_reference)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Profile secrets not found in vault".to_string()))?;
-
-        if let Ok(stored) = serde_json::from_str::<StoredProfileSecrets>(&cred_json) {
-            return Ok(stored.provider_fields);
-        }
-
-        Ok(HashMap::new())
+        let state = context.load_state().await;
+        state
+            .shared_storage_credentials
+            .profiles
+            .get(&profile.id)
+            .map(|stored| stored.provider_fields.clone())
+            .ok_or_else(|| AppError::NotFound("Profile secrets not found in state".to_string()))
     }
 
-    /// Retrieve repository key.
     pub async fn retrieve_repository_key(
         &self,
+        context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<[u8; 32]> {
-        let repo_key = format!("shared-storage:profile:{}:repo-key", profile.id);
-        let key_hex =
-            self.vault.retrieve(&repo_key).await?.ok_or_else(|| {
-                AppError::NotFound("Repository key not found in vault".to_string())
-            })?;
+        let state = context.load_state().await;
+        let key_hex = state
+            .shared_storage_credentials
+            .profiles
+            .get(&profile.id)
+            .map(|stored| stored.repository_key_hex.clone())
+            .ok_or_else(|| AppError::NotFound("Repository key not found in state".to_string()))?;
 
         let key_bytes: [u8; 32] = hex::decode(&key_hex)
             .map_err(|e| AppError::State(format!("Invalid repository key: {e}")))?
@@ -166,23 +149,73 @@ impl SharedStorageProfileManager {
         Ok(key_bytes)
     }
 
-    /// Delete all vault entries for a profile.
     pub async fn delete_profile_credentials(
         &self,
+        context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<()> {
-        let _ = self.vault.delete(&profile.credential_vault_reference).await;
-        let repo_key = format!("shared-storage:profile:{}:repo-key", profile.id);
-        let _ = self.vault.delete(&repo_key).await;
+        context
+            .update_state(|state| {
+                state
+                    .shared_storage_credentials
+                    .profiles
+                    .remove(&profile.id);
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn store_oauth_session_credentials(
+        &self,
+        context: &AppContext,
+        session_id: &str,
+        credentials: &StorageCredential,
+    ) -> AppResult<()> {
+        context
+            .update_state(|state| {
+                state.shared_storage_credentials.oauth_sessions.insert(
+                    session_id.to_string(),
+                    SharedStorageOAuthSessionSecret {
+                        credentials: credentials.clone(),
+                    },
+                );
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub async fn retrieve_oauth_session_credentials(
+        &self,
+        context: &AppContext,
+        session_id: &str,
+    ) -> AppResult<Option<StorageCredential>> {
+        let state = context.load_state().await;
+        Ok(state
+            .shared_storage_credentials
+            .oauth_sessions
+            .get(session_id)
+            .map(|stored| stored.credentials.clone()))
+    }
+
+    pub async fn delete_oauth_session_credentials(
+        &self,
+        context: &AppContext,
+        session_id: &str,
+    ) -> AppResult<()> {
+        context
+            .update_state(|state| {
+                state
+                    .shared_storage_credentials
+                    .oauth_sessions
+                    .remove(session_id);
+            })
+            .await?;
         Ok(())
     }
 }
 
-// ─── Repository Key Generation ────────────────────────────
-
 fn generate_repository_key() -> [u8; 32] {
     let mut key = [0u8; 32];
-    // Use OS randomness (cryptographically secure)
     use rand_core::RngCore;
     rand_core::OsRng.fill_bytes(&mut key);
     key

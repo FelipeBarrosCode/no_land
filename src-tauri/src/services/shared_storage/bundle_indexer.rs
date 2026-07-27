@@ -1,13 +1,12 @@
 use std::time::Duration;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use reqwest::{header, StatusCode, Url};
-use serde::Deserialize;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
+
+use super::shared_storage_manager::SharedStorageManager;
 
 /// Bundle Indexer service.
 ///
@@ -16,13 +15,6 @@ use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 /// /var/lib/noland/bundle-index.json on the VM and then uploaded to
 /// the remote backup storage via rclone.
 pub struct BundleIndexer;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct B2AuthorizeResponse {
-    authorization_token: String,
-    download_url: String,
-}
 
 impl BundleIndexer {
     /// Generate the bundle index on the VM and upload it to remote storage.
@@ -108,101 +100,88 @@ impl BundleIndexer {
 
         info!("Bundle index generated on VM at {}", index_path);
 
-        // Upload to remote storage (always plain B2 remote for client-side index reads)
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
-        if settings.enabled && !settings.backblaze_application_key.is_empty() {
-            let remote_dest = format!(
-                "{}:{}/{}/metadata/bundle-index.json",
-                settings.remote_name, settings.bucket_name, settings.destination_prefix
-            );
-            let upload_cmd = format!(
-                "sudo -u {user} rclone copyto {src} {dest} --checksum 2>&1",
-                user = target_user,
-                src = shell_escape(index_path),
-                dest = shell_escape(&remote_dest),
-            );
-            let upload_out = {
-                let r = remote.clone();
-                tokio::task::spawn_blocking(move || r.ssh(&upload_cmd, Duration::from_secs(120)))
-                    .await
-                    .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-            };
-            info!(
-                event = "shared_storage_bundle_index_upload_output",
-                instance_id = instance_id,
-                status_code = upload_out.status_code,
-                stdout = %upload_out.stdout.trim(),
-                stderr = %upload_out.stderr.trim(),
-                "Bundle index upload command output"
-            );
-            if upload_out.status_code != 0 {
-                return Err(AppError::Provisioning(format!(
-                    "Bundle index upload failed: {}",
-                    upload_out.stderr.trim()
-                )));
-            }
-            info!("Bundle index uploaded to {}", remote_dest);
+        let active_profile =
+            SharedStorageManager::prepare_active_profile_remote(context, remote, target_user)
+                .await?;
+        let namespace = SharedStorageManager::namespace_for_profile(&active_profile);
+        let remote_dest = format!("{}/bundle-index.json", namespace.catalogs_root);
+        let upload_cmd = format!(
+            "sudo -u {user} rclone copyto {src} {dest} --checksum 2>&1",
+            user = target_user,
+            src = shell_escape(index_path),
+            dest = shell_escape(&remote_dest),
+        );
+        let upload_out = {
+            let r = remote.clone();
+            tokio::task::spawn_blocking(move || r.ssh(&upload_cmd, Duration::from_secs(120)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
+        info!(
+            event = "shared_storage_bundle_index_upload_output",
+            instance_id = instance_id,
+            status_code = upload_out.status_code,
+            stdout = %upload_out.stdout.trim(),
+            stderr = %upload_out.stderr.trim(),
+            "Bundle index upload command output"
+        );
+        if upload_out.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Bundle index upload failed: {}",
+                upload_out.stderr.trim()
+            )));
         }
+        info!("Bundle index uploaded to {}", remote_dest);
 
         Ok(())
     }
 
-    /// Read the bundle index directly from Backblaze B2.
-    ///
-    /// This intentionally avoids SSH/VM dependency so the client can browse
-    /// available bundles directly from shared storage metadata.
     pub async fn read_from_remote(
         context: &AppContext,
-        _remote: &RemoteExec,
+        remote: &RemoteExec,
         instance_id: u64,
-        _target_user: &str,
+        target_user: &str,
     ) -> AppResult<crate::models::app_state::BundleIndex> {
-        let state = context.load_state().await;
-        let settings = &state.shared_storage.settings;
+        let active_profile =
+            SharedStorageManager::prepare_active_profile_remote(context, remote, target_user)
+                .await?;
+        let namespace = SharedStorageManager::namespace_for_profile(&active_profile);
+        let index_path = format!("{}/bundle-index.json", namespace.catalogs_root);
+        let read_cmd = format!(
+            "sudo -u {user} rclone cat {src} 2>&1",
+            user = target_user,
+            src = shell_escape(&index_path),
+        );
 
-        if !settings.enabled {
-            return Err(AppError::Provisioning(
-                "Shared storage backup is not enabled. Configure settings first.".to_string(),
-            ));
-        }
+        let output = {
+            let r = remote.clone();
+            tokio::task::spawn_blocking(move || r.ssh(&read_cmd, Duration::from_secs(120)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        };
 
-        let auth = Self::authorize_b2(settings).await?;
-        let index_url = Self::build_b2_index_url(&auth.download_url, settings)?;
-
-        let client = reqwest::Client::new();
-        let response = client
-            .get(index_url)
-            .header(header::AUTHORIZATION, auth.authorization_token)
-            .send()
-            .await
-            .map_err(|e| {
-                AppError::Provisioning(format!("Failed to read bundle index from B2: {e}"))
-            })?;
-
-        if response.status() == StatusCode::NOT_FOUND {
-            return Err(AppError::NotFound(
-                "No restore index available yet. Run backup first.".to_string(),
-            ));
-        }
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+        if output.status_code != 0 {
+            let stderr = output.stderr.trim();
+            let stdout = output.stdout.trim();
+            let combined = if stderr.is_empty() { stdout } else { stderr };
+            if combined.contains("object not found")
+                || combined.contains("directory not found")
+                || combined.contains("not found")
+            {
+                return Err(AppError::NotFound(
+                    "No restore index available yet. Run backup/export first.".to_string(),
+                ));
+            }
             return Err(AppError::Provisioning(format!(
-                "Failed to read bundle index from B2 ({}): {}",
-                status,
-                body.trim()
+                "Failed to read bundle index from shared storage: {}",
+                combined
             )));
         }
 
-        let json_str = response.text().await.map_err(|e| {
-            AppError::Provisioning(format!("Failed reading bundle index body: {e}"))
-        })?;
-        let json_str = json_str.trim();
+        let json_str = output.stdout.trim();
         if json_str.is_empty() {
             return Err(AppError::NotFound(
-                "No restore index available yet. Run backup first.".to_string(),
+                "No restore index available yet. Run backup/export first.".to_string(),
             ));
         }
 
@@ -222,74 +201,6 @@ impl BundleIndexer {
         }
 
         Ok(index)
-    }
-
-    async fn authorize_b2(
-        settings: &crate::models::app_state::SharedStorageSettings,
-    ) -> AppResult<B2AuthorizeResponse> {
-        if settings.backblaze_key_id.trim().is_empty()
-            || settings.backblaze_application_key.trim().is_empty()
-        {
-            return Err(AppError::Provisioning(
-                "Backblaze credentials are missing. Configure shared storage first.".to_string(),
-            ));
-        }
-
-        let credentials = format!(
-            "{}:{}",
-            settings.backblaze_key_id, settings.backblaze_application_key
-        );
-        let auth_header = format!("Basic {}", STANDARD.encode(credentials));
-
-        let response = reqwest::Client::new()
-            .get("https://api.backblazeb2.com/b2api/v2/b2_authorize_account")
-            .header(header::AUTHORIZATION, auth_header)
-            .send()
-            .await
-            .map_err(|e| AppError::Provisioning(format!("Backblaze authorization failed: {e}")))?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(AppError::Provisioning(format!(
-                "Backblaze authorization failed ({}): {}",
-                status,
-                body.trim()
-            )));
-        }
-
-        response.json::<B2AuthorizeResponse>().await.map_err(|e| {
-            AppError::Serialization(format!("Failed to parse Backblaze auth response: {e}"))
-        })
-    }
-
-    fn build_b2_index_url(
-        download_url: &str,
-        settings: &crate::models::app_state::SharedStorageSettings,
-    ) -> AppResult<Url> {
-        let mut url = Url::parse(download_url)
-            .map_err(|e| AppError::InvalidInput(format!("Invalid Backblaze download URL: {e}")))?;
-
-        {
-            let mut segments = url.path_segments_mut().map_err(|_| {
-                AppError::InvalidInput(
-                    "Backblaze download URL does not support path segments".to_string(),
-                )
-            })?;
-            segments.push("file");
-            segments.push(&settings.bucket_name);
-            for seg in settings
-                .destination_prefix
-                .split('/')
-                .filter(|s| !s.trim().is_empty())
-            {
-                segments.push(seg);
-            }
-            segments.push("metadata");
-            segments.push("bundle-index.json");
-        }
-
-        Ok(url)
     }
 }
 
