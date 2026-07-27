@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
@@ -15,9 +15,11 @@ use crate::{
 };
 
 use super::{
-    app_context::AppContext, remote_exec::RemoteExec,
-    shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
-    wireguard::remove_local_wireguard_config,
+    app_context::AppContext,
+    remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager,
+    vast_api::VastApiClient,
+    wireguard::{remove_local_wireguard_config, teardown_active_local_wireguard_runtime},
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -385,6 +387,34 @@ impl InstanceLifecycleService {
 
             vast.destroy_instance(instance_id).await?;
 
+            if !wireguard_config_path.trim().is_empty() {
+                if let Err(error) = remove_local_wireguard_config(Path::new(&wireguard_config_path)) {
+                    warn!(
+                        instance_id = instance_id,
+                        path = %wireguard_config_path,
+                        "Destroyed remote instance but failed removing local WireGuard config: {}",
+                        error
+                    );
+                }
+            }
+
+            if should_clear_active_wireguard_state {
+                if let Err(error) = teardown_active_local_wireguard_runtime() {
+                    warn!(
+                        instance_id = instance_id,
+                        "Destroyed remote instance but failed tearing down active local WireGuard runtime: {}",
+                        error
+                    );
+                }
+
+                let _ = context
+                    .update_state(|state| {
+                        state.wireguard = crate::models::app_state::WireGuardState::default();
+                        state.moonlight.host_address.clear();
+                    })
+                    .await;
+            }
+
             match vast.list_instances().await {
                 Ok(owned_instances) => {
                     Self::reconcile_owned_instances(context, &owned_instances).await?;
@@ -395,10 +425,6 @@ impl InstanceLifecycleService {
                         "Destroy succeeded but rented-instance refresh failed; falling back to targeted local cleanup: {}",
                         error
                     );
-
-                    if !wireguard_config_path.trim().is_empty() {
-                        remove_local_wireguard_config(Path::new(&wireguard_config_path))?;
-                    }
 
                     let _ = context
                         .update_state(|state| {
@@ -427,23 +453,11 @@ impl InstanceLifecycleService {
     /// Run backup before pause/destroy if shared storage is configured.
     async fn maybe_run_backup_first(context: &AppContext, instance_id: u64) -> AppResult<()> {
         let state = context.state.read().await;
-        let ss_enabled = state.shared_storage.settings.enabled;
-        let has_credentials = !state
-            .shared_storage
-            .settings
-            .backblaze_key_id
-            .trim()
-            .is_empty()
-            && !state
-                .shared_storage
-                .settings
-                .backblaze_application_key
-                .trim()
-                .is_empty();
+        let profile_connected = !state.shared_storage_profiles.is_empty();
         let api_key = state.credentials.vast_api_key.clone();
         drop(state);
 
-        if !ss_enabled || !has_credentials {
+        if !profile_connected {
             info!(
                 instance_id = instance_id,
                 "Shared storage not configured, skipping pre-action backup"
@@ -594,11 +608,28 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
-        let _ = (context, instance_id);
-        Err(AppError::InvalidInput(
-            "Shared storage now only saves files you explicitly select in the interface. Use Export Selected instead of full backup."
-                .to_string(),
-        ))
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Vast API key is missing.".to_string(),
+            ));
+        }
+
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
+            .await?;
+        SharedStorageManager::get_backup_status(context).await
     }
 
     pub async fn sync_instance_from_shared_storage(

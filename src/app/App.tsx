@@ -7,6 +7,7 @@ import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
+import { ApplicationLibraryScreen } from "../features/application-bundles/ApplicationLibraryScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 
@@ -311,6 +312,26 @@ export function App() {
   const loadSharedStorageSettings = useAppStore(
     (state) => state.loadSharedStorageSettings,
   );
+  const storageProviders = useAppStore((state) => state.storageProviders);
+  const sharedStorageProfiles = useAppStore((state) => state.sharedStorageProfiles);
+  const sharedStorageTestResult = useAppStore((state) => state.sharedStorageTestResult);
+  const loadStorageProviders = useAppStore((state) => state.loadStorageProviders);
+  const connectStorageProvider = useAppStore((state) => state.connectStorageProvider);
+  const testStorageConnection = useAppStore((state) => state.testStorageConnection);
+  const loadSharedStorageProfiles = useAppStore((state) => state.loadSharedStorageProfiles);
+  const disconnectStorageProfile = useAppStore((state) => state.disconnectStorageProfile);
+  const syncActiveInstanceToSharedStorage = useAppStore((state) => state.syncActiveInstanceToSharedStorage);
+  const oauthSessionId = useAppStore((state) => state.oauthSessionId);
+  const beginOauthFlow = useAppStore((state) => state.beginOauthFlow);
+  const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
+  const applicationBundles = useAppStore((state) => state.applicationBundles);
+  const bundleSnapshots = useAppStore((state) => state.bundleSnapshots);
+  const selectBundle = useAppStore((state) => state.selectBundle);
+  const loadBundleSnapshots = useAppStore((state) => state.loadBundleSnapshots);
+  const restoreBundleApp = useAppStore((state) => state.restoreBundleApp);
+  const removeBundleLocally = useAppStore((state) => state.removeBundleLocally);
+  const requestBundleCloudDeletion = useAppStore((state) => state.requestBundleCloudDeletion);
+  const selectedBundleIds = useAppStore((state) => state.selectedBundleIds);
 
   useEffect(() => {
     let cancelled = false;
@@ -390,6 +411,24 @@ export function App() {
           <Route path="/" element={<RootRoute />} />
           <Route path="/provisioning" element={<ProvisioningRoute />} />
           <Route
+            path="/bundles"
+            element={
+              <ApplicationLibraryScreen
+                bundles={applicationBundles}
+                selectedIds={selectedBundleIds}
+                busy={busy}
+                onToggleSelect={selectBundle}
+                onRestore={async (bundleId, mode, components) => {
+                  await restoreBundleApp(bundleId, mode, components);
+                }}
+                onRemoveLocal={removeBundleLocally}
+                onRequestCloudDeletion={requestBundleCloudDeletion}
+                onLoadSnapshots={loadBundleSnapshots}
+                snapshots={bundleSnapshots}
+              />
+            }
+          />
+          <Route
             path="/settings"
             element={
               appState ? (
@@ -398,6 +437,18 @@ export function App() {
                   busy={busy}
                   sharedStorageSettings={sharedStorageSettings}
                   vastAutomationStatus={vastBrowserAutomationStatus}
+                  storageProviders={storageProviders}
+                  sharedStorageProfiles={sharedStorageProfiles}
+                  sharedStorageTestResult={sharedStorageTestResult}
+                  onLoadStorageProviders={loadStorageProviders}
+                  onConnectStorageProvider={connectStorageProvider}
+                  onTestStorageConnection={testStorageConnection}
+                  onLoadSharedStorageProfiles={loadSharedStorageProfiles}
+                  onDisconnectStorageProfile={disconnectStorageProfile}
+                  onSyncActiveInstanceToSharedStorage={syncActiveInstanceToSharedStorage}
+                  oauthSessionId={oauthSessionId}
+                  onBeginOauthFlow={beginOauthFlow}
+                  onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
                   onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
                   onConnectVastBrowser={connectVastBrowserSession}

@@ -1,8 +1,31 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Configure Shared Storage for backups
 
-Role: Act as a helpful cloud gaming assistant.
+Shared Storage keeps your applications, saves, settings, and mods available across instances.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+### Connecting a provider
 
-Noland Facts for this feature:
-Step 11 of onboarding: Noland will display a Moonlight pairing PIN. The user must enter this PIN into Moonlight to securely link their local computer to the remote gaming server.
+1. Go to **Settings → Shared Storage**
+2. Click **"Connect Storage Provider"**
+3. Choose a provider from the list:
+
+**Object Storage** (pay per GB, no egress fees on R2/Wasabi):
+- Backblaze B2 — $6/TB/month, S3-compatible
+- Amazon S3 — standard cloud storage
+- Cloudflare R2 — zero egress fees
+- Wasabi — $7/TB/month, no egress
+- DigitalOcean Spaces — $5/month for 250 GB
+
+**Cloud Drives** (use your existing account):
+- Google Drive, OneDrive, Dropbox, Box
+
+**Enterprise / Self-hosted:**
+- Azure Blob, Google Cloud Storage, SFTP, WebDAV
+
+4. Click the robot icon (🤖) next to any provider for a detailed setup guide
+5. For OAuth providers (Google, Microsoft, Dropbox, Box), click Continue to authorize in your browser
+6. For API key providers (S3, B2, R2), enter your credentials
+
+### After connecting
+- Test your connection to verify everything works
+- Your repository ID is shown on the connected state
+- All application data is encrypted before upload with your repository master key

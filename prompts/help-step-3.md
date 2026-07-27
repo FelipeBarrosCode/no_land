@@ -1,8 +1,17 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Add billing to Vast.ai
 
-Role: Act as a helpful cloud gaming assistant.
+Before you can rent a server, you need to add a payment method.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+Steps:
+1. Go to https://cloud.vast.ai/billing/
+2. Click "Add Credit" to add funds to your account
+3. Choose an amount — $5-10 is enough to get started and test servers
+4. Complete payment through Stripe (credit card, Apple Pay, Google Pay)
 
-Noland Facts for this feature:
-Step 3 of onboarding: The user must create an account on Vast.ai so they have access to rent the GPU servers.
+Vast.ai uses a prepaid credit system. You are charged per hour from your balance. Unused credits stay in your account.
+
+Typical costs:
+- RTX 3060: $0.10-0.20/hour
+- RTX 3080: $0.15-0.30/hour
+- RTX 4090: $0.35-0.55/hour
+- A6000: $0.50-0.70/hour

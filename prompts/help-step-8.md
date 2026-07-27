@@ -1,8 +1,20 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Choose your server and storage size
 
-Role: Act as a helpful cloud gaming assistant.
+Once you have filtered the offers:
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+1. Browse the ranked server cards
+2. Hover over a card to see full details
+3. **Storage size** — set how much disk space your cloud machine gets. Minimum recommendation:
+   - 100 GB for a few games
+   - 250 GB for a moderate library
+   - 500+ GB for many large games
 
-Noland Facts for this feature:
-Step 8 of onboarding now focuses on choosing a server after installing Moonlight and GotaTun. The user no longer needs to generate or paste a Tailscale auth key for the primary provisioning pipeline.
+4. Click on a server card to select it. It appears in the "Selected Server" section on the dashboard.
+
+### Tips
+- Closer servers = lower streaming latency. Check the distance in km.
+- Verified hosts are more reliable and less likely to disappear mid-session.
+- Check the GPU name — RTX 3080/4080/4090 are ideal for 4K streaming, RTX 3060/4060 for 1080p.
+- On-demand instances run until you stop them manually. Interruptible ones may be reclaimed.
+
+After selecting, click **"Play"** (the Provisioning button) to start your cloud machine.

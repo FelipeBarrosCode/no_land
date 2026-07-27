@@ -7,7 +7,8 @@ import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { SharedStorageSettings } from "../shared-storage-manager/SharedStorageSettings";
+
+import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import type {
   MoonlightPreferences,
   PlatformCredentialsUpdate,
@@ -19,6 +20,9 @@ import type {
   VastBrowserAutomationStatus,
   VastBrowserBillingAction,
   VastBrowserGeneratedApiKeyResult,
+  ProviderDefinition,
+  ProfileReference,
+  SharedStorageTestResult,
 } from "../../lib/types";
 import {
   VAST_API_KEY_URL,
@@ -60,6 +64,27 @@ interface Props {
   busy: boolean;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
   vastAutomationStatus: VastBrowserAutomationStatus | null;
+  // New shared storage v2 props
+  storageProviders: ProviderDefinition[];
+  sharedStorageProfiles: ProfileReference[];
+  sharedStorageTestResult: SharedStorageTestResult | null;
+  onLoadStorageProviders: () => Promise<void>;
+  onConnectStorageProvider: (
+    provider: string,
+    credentials: Record<string, string>,
+    bucket: string | null,
+    prefix: string | null,
+    displayName: string,
+  ) => Promise<void>;
+  onTestStorageConnection: (profileId: string) => Promise<void>;
+  onLoadSharedStorageProfiles: () => Promise<void>;
+  onDisconnectStorageProfile: (profileId: string) => Promise<void>;
+  onSyncActiveInstanceToSharedStorage: () => Promise<void>;
+  // OAuth flow
+  oauthSessionId: string | null;
+  onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null) => Promise<string | null>;
+  onCompleteOauthFlow: (sessionId: string) => Promise<void>;
+  // Existing props
   onSaveApiKey: (apiKey: string) => Promise<void>;
   onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
   onConnectVastBrowser: () => Promise<unknown>;
@@ -188,8 +213,20 @@ function SelectField({
 export function SettingsScreen({
   appState,
   busy,
-  sharedStorageSettings,
+  sharedStorageSettings: _sharedStorageSettings,
   vastAutomationStatus,
+  storageProviders,
+  sharedStorageProfiles,
+  sharedStorageTestResult,
+  onLoadStorageProviders,
+  onConnectStorageProvider,
+  onTestStorageConnection,
+  onLoadSharedStorageProfiles,
+  onDisconnectStorageProfile,
+  onSyncActiveInstanceToSharedStorage,
+  oauthSessionId,
+  onBeginOauthFlow,
+  onCompleteOauthFlow,
   onSaveApiKey,
   onRefreshVastAutomationStatus,
   onConnectVastBrowser,
@@ -200,8 +237,8 @@ export function SettingsScreen({
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
   onRegenerateEdid,
-  onSaveSharedStorageSettings,
-  onTestSharedStorageConfig,
+  onSaveSharedStorageSettings: _onSaveSharedStorageSettings,
+  onTestSharedStorageConfig: _onTestSharedStorageConfig,
   onLoadSharedStorageSettings,
   onSaveConnectionProvider,
 }: Props) {
@@ -1048,11 +1085,23 @@ export function SettingsScreen({
         Shared Storage
       </h2>
       <div className="mt-4">
-        <SharedStorageSettings
-          settings={sharedStorageSettings}
+        <SharedStorageSettingsV2
           busy={busy}
-          onSave={onSaveSharedStorageSettings}
-          onTest={onTestSharedStorageConfig}
+          providers={storageProviders}
+          profiles={sharedStorageProfiles}
+          testResult={sharedStorageTestResult}
+          oauthSessionId={oauthSessionId}
+          onConnectProvider={async (provider, credentials, bucket, prefix, displayName) => {
+            await onConnectStorageProvider(provider, credentials, bucket, prefix, displayName);
+          }}
+          onTestConnection={onTestStorageConnection}
+          onDisconnect={onDisconnectStorageProfile}
+          onLoadProviders={onLoadStorageProviders}
+          onLoadProfiles={onLoadSharedStorageProfiles}
+          onBeginOauthFlow={onBeginOauthFlow}
+          onCompleteOauthFlow={onCompleteOauthFlow}
+          activeInstanceId={appState.instance.instanceId ?? null}
+          onSyncActiveInstance={onSyncActiveInstanceToSharedStorage}
         />
       </div>
     </Card>

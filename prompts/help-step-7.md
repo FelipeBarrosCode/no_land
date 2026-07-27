@@ -1,8 +1,26 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Adjust server filters
 
-Role: Act as a helpful cloud gaming assistant.
+Narrow down your search with these filters in the Server Picker:
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+### Country / Region
+Select a country to show only servers in that region. Available: US, Canada, UK, Germany, France, Netherlands, Sweden, Norway, Spain, Italy, Poland, Japan, Singapore, Australia, Brazil.
 
-Noland Facts for this feature:
-Step 7 of onboarding: The user should install GotaTun on their desktop so Noland can activate a managed WireGuard-compatible userspace tunnel during provisioning. This replaces the older choice between manual WireGuard imports and Tailscale.
+### Price Range
+- **Minimum price**: Filter out free-tier or suspiciously cheap offers
+- **Maximum price**: Set your hourly budget cap (e.g., $0.50/hour)
+
+### Performance Filters
+- **Minimum GPU RAM (GB)**: E.g., set 8 to require at least RTX 3060 Ti / 3070 class GPU
+- **Minimum CPU cores**: For CPU-heavy workloads
+- **Minimum internet speed**: Down/up Mbps filters
+
+### Offer Types
+- **On-demand**: Standard rental, runs until you stop it
+- **Interruptible**: Cheaper but can be stopped by the host at any time
+- **Reserved**: Pre-paid longer term, not always available
+
+### Additional Filters
+- **Require verified hosts**: Only show hosts with proven reliability history
+- **Require AVX**: Needed for some modern games
+
+Click **"Find Offers"** after setting your filters to refresh results.

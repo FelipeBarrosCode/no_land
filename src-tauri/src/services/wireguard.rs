@@ -798,6 +798,7 @@ exit 0"#
         self.validate_network_tuning(remote, &primary_interface)
             .await?;
 
+        let client_config = canonicalize_wireguard_client_config_text(&client_config)?;
         fs::write(&local_config_path, client_config).await?;
 
         Ok(WireGuardProvisionResult {
@@ -1231,18 +1232,29 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         endpoint_port: u16,
         allowed_ips: &str,
     ) -> String {
-        format!(
-            "[Interface]\nAddress = {}\nPrivateKey = {}\nListenPort = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
-            self.defaults.client_tunnel_ip,
-            client_private,
-            self.defaults.client_listen_port,
-            self.defaults.tunnel_mtu,
-            server_public,
-            endpoint_host,
-            endpoint_port,
-            allowed_ips,
-            self.defaults.persistent_keepalive_secs,
-        )
+        let mut lines = vec![
+            "[Interface]".to_string(),
+            format!("Address = {}", self.defaults.client_tunnel_ip),
+            format!("PrivateKey = {}", client_private),
+        ];
+
+        #[cfg(not(target_os = "macos"))]
+        lines.push(format!("ListenPort = {}", self.defaults.client_listen_port));
+
+        lines.push(format!("MTU = {}", self.defaults.tunnel_mtu));
+        lines.push(String::new());
+        lines.push("[Peer]".to_string());
+        lines.push(format!("PublicKey = {}", server_public));
+        lines.push(format!("Endpoint = {}:{}", endpoint_host, endpoint_port));
+        lines.push(format!("AllowedIPs = {}", allowed_ips));
+        lines.push(format!(
+            "PersistentKeepalive = {}",
+            self.defaults.persistent_keepalive_secs
+        ));
+
+        let mut rendered = lines.join("\n");
+        rendered.push('\n');
+        rendered
     }
 
     async fn cleanup_existing_wireguard(&self, remote: &RemoteExec) -> AppResult<()> {
@@ -1602,6 +1614,45 @@ pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
         })?;
     }
 
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+    let shell_script = format!(
+        "set -e; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; launchctl bootout system/{label} >/dev/null 2>&1 || true; pkill -f '/Users/felipebarros/Code/noland/no_land/src-tauri/binaries/gotatun utun' >/dev/null 2>&1 || true; pkill -f 'wg-quick up {local_conf}' >/dev/null 2>&1 || true; pkill -f 'wg-quick up {homebrew_conf}' >/dev/null 2>&1 || true; wg-quick down {local_conf} >/dev/null 2>&1 || true; wg-quick down {homebrew_conf} >/dev/null 2>&1 || true; rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name >/dev/null 2>&1 || true; rm -f {plist} {script} {local_conf} {homebrew_conf} >/dev/null 2>&1 || true",
+        label = MACOS_WIREGUARD_HELPER_LABEL,
+        plist = MACOS_WIREGUARD_HELPER_PLIST_PATH,
+        script = MACOS_WIREGUARD_HELPER_SCRIPT_PATH,
+        local_conf = MACOS_LOCAL_CONF_PATH,
+        homebrew_conf = MACOS_HOMEBREW_CONF_PATH,
+    );
+
+    let output = Command::new("sudo")
+        .args(["bash", "-lc", &shell_script])
+        .output()
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed running local WireGuard teardown on macOS: {error}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(AppError::Command(format!(
+            "Failed tearing down local WireGuard runtime on macOS (exit {}): stdout: {} | stderr: {}",
+            output.status,
+            stdout,
+            stderr,
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
     Ok(())
 }
 
@@ -2023,9 +2074,79 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
     ))
 }
 
-fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
+fn canonicalize_wireguard_client_config_text(original: &str) -> AppResult<String> {
     const SCOPED_ALLOWED_IPS: &str = "10.77.0.1/32";
 
+    let interface_address = parse_wireguard_config_value(original, "Interface", "Address")
+        .ok_or_else(|| {
+            AppError::InvalidInput(
+                "WireGuard client config is missing [Interface] Address".to_string(),
+            )
+        })?;
+    let interface_private_key = parse_wireguard_config_value(original, "Interface", "PrivateKey")
+        .ok_or_else(|| {
+        AppError::InvalidInput(
+            "WireGuard client config is missing [Interface] PrivateKey".to_string(),
+        )
+    })?;
+    let peer_public_key =
+        parse_wireguard_config_value(original, "Peer", "PublicKey").ok_or_else(|| {
+            AppError::InvalidInput(
+                "WireGuard client config is missing [Peer] PublicKey".to_string(),
+            )
+        })?;
+    let peer_endpoint =
+        parse_wireguard_config_value(original, "Peer", "Endpoint").ok_or_else(|| {
+            AppError::InvalidInput("WireGuard client config is missing [Peer] Endpoint".to_string())
+        })?;
+
+    let listen_port = parse_wireguard_config_value(original, "Interface", "ListenPort");
+    let mtu = parse_wireguard_config_value(original, "Interface", "MTU");
+    let keepalive = parse_wireguard_config_value(original, "Peer", "PersistentKeepalive");
+
+    let mut normalized_lines = vec![
+        "[Interface]".to_string(),
+        format!("Address = {}", interface_address.trim()),
+        format!("PrivateKey = {}", interface_private_key.trim()),
+    ];
+
+    #[cfg(not(target_os = "macos"))]
+    if let Some(value) = listen_port
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        normalized_lines.push(format!("ListenPort = {value}"));
+    }
+
+    if let Some(value) = mtu
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        normalized_lines.push(format!("MTU = {value}"));
+    }
+
+    normalized_lines.push(String::new());
+    normalized_lines.push("[Peer]".to_string());
+    normalized_lines.push(format!("PublicKey = {}", peer_public_key.trim()));
+    normalized_lines.push(format!("Endpoint = {}", peer_endpoint.trim()));
+    normalized_lines.push(format!("AllowedIPs = {SCOPED_ALLOWED_IPS}"));
+
+    if let Some(value) = keepalive
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        normalized_lines.push(format!("PersistentKeepalive = {value}"));
+    }
+
+    let mut normalized = normalized_lines.join("\n");
+    normalized.push('\n');
+    Ok(normalized)
+}
+
+fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
     let original = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading WireGuard client config {}: {error}",
@@ -2033,42 +2154,13 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
         ))
     })?;
 
-    let mut in_peer_section = false;
-    let mut in_interface_section = false;
-    let mut replaced = false;
-    let mut normalized_lines = Vec::with_capacity(original.lines().count() + 2);
-
-    for line in original.lines() {
-        let trimmed = line.trim();
-        let lower = trimmed.to_ascii_lowercase();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            in_peer_section = trimmed.eq_ignore_ascii_case("[Peer]");
-            in_interface_section = trimmed.eq_ignore_ascii_case("[Interface]");
-        }
-
-        if in_interface_section && lower.starts_with("dns") {
-            continue;
-        }
-
-        if in_peer_section && lower.starts_with("allowedips") {
-            normalized_lines.push(format!("AllowedIPs = {SCOPED_ALLOWED_IPS}"));
-            replaced = true;
-        } else {
-            normalized_lines.push(line.to_string());
-        }
-    }
-
-    if !replaced {
-        return Err(AppError::InvalidInput(format!(
-            "WireGuard client config {} is missing AllowedIPs in [Peer] section",
-            config_path.display()
-        )));
-    }
-
-    let mut normalized = normalized_lines.join("\n");
-    if original.ends_with('\n') {
-        normalized.push('\n');
-    }
+    let normalized = canonicalize_wireguard_client_config_text(&original).map_err(|error| {
+        AppError::InvalidInput(format!(
+            "WireGuard client config {} is invalid: {}",
+            config_path.display(),
+            error
+        ))
+    })?;
 
     if normalized != original {
         std::fs::write(config_path, normalized).map_err(|error| {

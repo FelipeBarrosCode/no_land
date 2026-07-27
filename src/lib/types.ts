@@ -719,3 +719,227 @@ export interface MicSessionResponse {
 export interface MicSettingsUpdate {
   qualityProfile?: MicQualityProfile;
 }
+
+// ============================================================
+// Application Bundle types (new product abstraction)
+// ============================================================
+
+export type ApplicationKind =
+  | "steam-proton"
+  | "steam-linux"
+  | "steam-windows"
+  | "epic-proton"
+  | "gog-proton"
+  | "heroic-proton"
+  | "bottles"
+  | "wine-prefix"
+  | "native-linux"
+  | "native-windows"
+  | "app-image"
+  | "flatpak"
+  | "custom";
+
+export type BundleAvailability =
+  | "installed"
+  | "partially-installed"
+  | "restoring"
+  | "cloud-only"
+  | "backup-pending"
+  | "backup-failed"
+  | "corrupted-local-state";
+
+export type BackupStatus =
+  | "no-backup"
+  | "uploading"
+  | "committed"
+  | "verification-failed";
+
+export type BundleComponentKind =
+  | "application-content"
+  | "save-files"
+  | "user-configuration"
+  | "user-profile"
+  | "modifications"
+  | "mods"
+  | "plugins"
+  | "runtime-prefix"
+  | "wine-prefix"
+  | "launcher-metadata"
+  | "installation-recipe"
+  | "user-documents"
+  | "optional-cache"
+  | "system-overlay"
+  | "workshop-content"
+  | "screenshots"
+  | "crash-logs"
+  | "shader-cache";
+
+export type RestoreMode = "complete" | "personal_state" | "custom";
+
+// ─── Core Bundle Types ───────────────────────────────────
+
+export interface ApplicationBundle {
+  id: string;
+  displayName: string;
+  kind: ApplicationKind;
+  store: string | null;
+  storeApplicationId: string | null;
+  storeMetadata: StoreMetadata | null;
+  iconObjectKey: string | null;
+  components: BundleComponent[];
+  relationships: BundleRelationship[];
+  availability: BundleAvailability;
+  backupStatus: BackupStatus;
+  latestSnapshotId: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface StoreMetadata {
+  store: string;
+  applicationId: string;
+  buildId: string | null;
+  branch: string | null;
+  installedVersion: string | null;
+}
+
+export interface BundleComponent {
+  id: string;
+  bundleId: string;
+  kind: BundleComponentKind;
+  displayName: string;
+  required: boolean;
+  selectedByDefault: boolean;
+  restoreOrder: number;
+  logicalSize: number;
+  fileCount: number;
+  paths: ComponentPath[];
+}
+
+export interface ComponentPath {
+  componentId: string;
+  logicalRoot: string;
+  relativePath: string;
+  actualPath: string | null;
+  discoverySource: string;
+  confidence: number;
+  includePolicy: string;
+}
+
+export interface BundleRelationship {
+  bundleId: string;
+  relationshipKind: string;
+  displayName: string;
+}
+
+export interface BundleSnapshot {
+  id: string;
+  bundleId: string;
+  parentSnapshotId: string | null;
+  state: string;
+  reason: string;
+  totalLogicalSize: number;
+  newPhysicalSize: number;
+  createdAt: number;
+  committedAt: number | null;
+}
+
+export interface BundleRestoreResult {
+  jobId: string;
+  bundleId: string;
+  snapshotId: string;
+  status: string;
+  totalComponents: number;
+  completedComponents: number;
+  totalFiles: number;
+  restoredFiles: number;
+  totalBytes: number;
+  restoredBytes: number;
+  startedAt: string;
+  finishedAt: string | null;
+  error: string | null;
+}
+
+export interface ApplicationCatalogEntry {
+  bundleId: string;
+  displayName: string;
+  kind: ApplicationKind;
+  iconObjectKey: string | null;
+  latestSnapshotId: string | null;
+  totalLogicalSize: number;
+  requiredRestoreSize: number;
+  lastBackedUpAt: number;
+  componentSummary: ComponentSummary;
+}
+
+export interface ComponentSummary {
+  hasApplicationContent: boolean;
+  hasSaves: boolean;
+  hasMods: boolean;
+  hasRuntime: boolean;
+  hasConfiguration: boolean;
+  hasPlugins: boolean;
+  componentCount: number;
+}
+
+export interface ApplicationCatalog {
+  repositoryId: string;
+  generation: number;
+  generatedAt: number;
+  bundles: ApplicationCatalogEntry[];
+}
+
+// ─── Shared Storage Types ────────────────────────────────
+
+export interface SharedStorageProfile {
+  id: string;
+  displayName: string;
+  provider: string;
+  providerLabel: string;
+  bucket: string | null;
+  prefix: string | null;
+  credentialVaultReference: string;
+  repositoryId: string;
+  status: string;
+  lastVerifiedAt: number | null;
+  protectedBundlesCount: number;
+  totalStoredBytes: number;
+}
+
+export interface SharedStorageTestResult {
+  authenticated: boolean;
+  canList: boolean;
+  canWrite: boolean;
+  canRead: boolean;
+  canDeleteTestObject: boolean;
+  repositoryAccessible: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface ProviderDefinition {
+  provider: string;
+  label: string;
+  category: string;
+  isOauth: boolean;
+  description: string;
+  fields: ProviderField[];
+}
+
+export interface ProviderField {
+  key: string;
+  label: string;
+  fieldType: string;
+  required: boolean;
+  placeholder: string | null;
+  helpText: string | null;
+}
+
+export interface ProfileReference {
+  id: string;
+  displayName: string;
+  providerLabel: string;
+  provider?: string | null;
+  bucket?: string | null;
+  prefix?: string | null;
+}

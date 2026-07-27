@@ -1,8 +1,12 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Complete onboarding in Noland Connect
 
-Role: Act as a helpful cloud gaming assistant.
+After setting up your Vast.ai account and getting your API key, return to Noland Connect.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+Fields to fill in:
+- **Platform Username**: Choose any username (e.g., "player1"). Used to log into your cloud machine.
+- **Platform Password**: Choose a password (minimum 6 characters). Used for your cloud machine login.
+- **Vast.ai API Key**: Paste the API key you copied from Vast.ai.
 
-Noland Facts for this feature:
-Step 5 of onboarding: The user needs to find their Vast.ai API key in their Vast.ai account settings and paste it into Noland. This key is what gives Noland permission to automatically search for and rent servers for the user.
+Click Submit. Noland validates your credentials, generates SSH keys if needed, and uploads your public key to Vast.ai so you can connect to servers.
+
+Once onboarding completes, you will see the dashboard with your rented servers and the option to select a new server.

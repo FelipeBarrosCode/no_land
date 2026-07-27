@@ -1,3 +1,18 @@
+pub mod application_bundles;
+pub mod shared_storage;
+
+pub use self::application_bundles::{
+    cancel_restore_job, discover_application_bundles, get_application_bundle,
+    get_application_catalog, get_restore_job_status, list_application_bundles,
+    list_bundle_snapshots, reload_application_catalog, remove_local_bundle, request_cloud_deletion,
+    restore_application_bundle, trigger_bundle_backup,
+};
+pub use self::shared_storage::{
+    begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
+    get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
+    test_shared_storage_connection,
+};
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -3650,7 +3665,7 @@ pub async fn test_shared_storage_config(
     let remote = build_remote_exec_from_state(context.inner()).await?;
     let target_user = context.config.audio_target_user.clone();
     SharedStorageManager::test_configuration(context.inner(), &remote, &target_user).await?;
-    Ok("Backblaze B2 configuration is valid".to_string())
+    Ok("Shared storage provider configuration is valid".to_string())
 }
 
 #[tauri::command]

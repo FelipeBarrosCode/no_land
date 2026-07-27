@@ -48,7 +48,7 @@ import {
   getInstanceRestoreBundles,
   dryRunRestore,
   restoreBundle,
-  getRestoreJob,
+  getRestoreJob as legacyGetRestoreJob,
   getInstanceMicConfig,
   updateInstanceMicSettings,
   enableInstanceMic,
@@ -71,6 +71,19 @@ import {
   openVastBillingBrowserSession as openVastBillingBrowserSessionCommand,
   startVastBrowserAuthSession as startVastBrowserAuthSessionCommand,
   getVastWalletSummary as getVastWalletSummaryCommand,
+  listStorageProviders,
+  saveStaticProviderCredentials,
+  testSharedStorageConnection,
+  getSharedStorageProfiles,
+  disconnectSharedStorageProfile,
+  beginOauthAuthorization,
+  completeOauthAuthorization,
+  listApplicationBundles,
+  listBundleSnapshots,
+  restoreApplicationBundle,
+  removeLocalBundle,
+  requestCloudDeletion,
+  reloadApplicationCatalog,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -114,6 +127,14 @@ import type {
   VastBrowserBillingSessionResult,
   VastBrowserGeneratedApiKeyResult,
   VastWalletSummary,
+  ProviderDefinition,
+  SharedStorageProfile,
+  SharedStorageTestResult,
+  ProfileReference,
+  ApplicationBundle,
+  ApplicationCatalog,
+  BundleSnapshot,
+  BundleRestoreResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -288,6 +309,35 @@ interface AppStore {
   reconnectMic: (instanceId: number) => Promise<MicSessionResponse | null>;
   recreateMicDevice: (instanceId: number) => Promise<void>;
   loadMicStatus: (instanceId: number) => Promise<void>;
+  // ─── Application Bundle state ───────────────────────────
+  applicationBundles: ApplicationBundle[];
+  selectedBundleIds: string[];
+  bundleCatalog: ApplicationCatalog | null;
+  bundleRestoreResult: BundleRestoreResult | null;
+  bundleSnapshots: BundleSnapshot[];
+  // ─── Shared Storage v2 state ────────────────────────────
+  storageProviders: ProviderDefinition[];
+  sharedStorageProfiles: ProfileReference[];
+  sharedStorageTestResult: SharedStorageTestResult | null;
+  // ─── Application Bundle actions ─────────────────────────
+  loadStorageProviders: () => Promise<void>;
+  connectStorageProvider: (provider: string, credentials: Record<string, string>, bucket: string | null, prefix: string | null, displayName: string) => Promise<void>;
+  testStorageConnection: (profileId: string) => Promise<void>;
+  loadSharedStorageProfiles: () => Promise<void>;
+  disconnectStorageProfile: (profileId: string) => Promise<void>;
+  syncActiveInstanceToSharedStorage: () => Promise<void>;
+  // OAuth flow
+  oauthSessionId: string | null;
+  beginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null) => Promise<string | null>;
+  completeOauthFlow: (sessionId: string) => Promise<void>;
+  loadApplicationBundles: (instanceId?: number) => Promise<void>;
+  selectBundle: (bundleId: string) => void;
+  deselectBundle: (bundleId: string) => void;
+  loadBundleSnapshots: (bundleId: string) => Promise<void>;
+  restoreBundleApp: (bundleId: string, restoreMode: string, selectedComponents?: string[]) => Promise<void>;
+  removeBundleLocally: (bundleId: string) => Promise<void>;
+  requestBundleCloudDeletion: (bundleId: string) => Promise<void>;
+  reloadCatalog: () => Promise<void>;
   clearError: () => void;
 }
 
@@ -698,6 +748,15 @@ export const useAppStore = create<AppStore>((set, get) => {
     micStatus: null,
     micSession: null,
     sleepPreventionActive: false,
+    applicationBundles: [],
+    selectedBundleIds: [],
+    bundleCatalog: null,
+    bundleRestoreResult: null,
+    bundleSnapshots: [],
+    storageProviders: [],
+    sharedStorageProfiles: [],
+    sharedStorageTestResult: null,
+    oauthSessionId: null,
 
     initialize: async () => {
       set({ loading: true, error: null });
@@ -1878,7 +1937,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     pollRestoreJob: async (jobId) => {
       try {
-        const job = await getRestoreJob(jobId);
+        const job = await legacyGetRestoreJob(jobId);
         set({ restoreJob: job });
       } catch (error) {
         set({ error: mapError(error) });
@@ -1953,6 +2012,193 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         const status = await getInstanceMicStatus(instanceId);
         set({ micStatus: status });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    // ─── Application Bundle methods ─────────────────────────
+
+    loadStorageProviders: async () => {
+      try {
+        const providers = await listStorageProviders();
+        set({ storageProviders: providers });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    connectStorageProvider: async (provider, credentials, bucket, prefix, displayName) => {
+      await runBusyTask(
+        { key: "storage.connect", label: "Connecting storage", blocking: true },
+        async () => {
+          const credJson = JSON.stringify(credentials);
+          const profile = await saveStaticProviderCredentials(provider, credJson, bucket, prefix, displayName);
+          await get().loadSharedStorageProfiles();
+          return profile;
+        },
+        null as unknown as SharedStorageProfile,
+      );
+    },
+
+    testStorageConnection: async (profileId) => {
+      await runBusyTask(
+        { key: "storage.test", label: "Testing connection" },
+        async () => {
+          const result = await testSharedStorageConnection(profileId);
+          set({ sharedStorageTestResult: result });
+          return result;
+        },
+        null as unknown as SharedStorageTestResult,
+      );
+    },
+
+    loadSharedStorageProfiles: async () => {
+      try {
+        const profiles = await getSharedStorageProfiles();
+        set({ sharedStorageProfiles: profiles });
+      } catch (error) {
+        // It's OK if no profiles yet
+      }
+    },
+
+    disconnectStorageProfile: async (profileId) => {
+      await runBusyTask(
+        { key: "storage.disconnect", label: "Disconnecting storage" },
+        async () => {
+          await disconnectSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
+    },
+
+    syncActiveInstanceToSharedStorage: async () => {
+      await runBusyTask(
+        {
+          key: "storage.sync.active-instance",
+          label: "Syncing active instance",
+          detail: "Running the remote save flow now so you can verify this instance uploads into shared storage.",
+          blocking: true,
+        },
+        async () => {
+          const instanceId = get().appState?.instance.instanceId;
+          if (!instanceId) {
+            throw new Error("No active instance selected. Start or select a server first.");
+          }
+          const status = await triggerInstanceBackupFor(instanceId);
+          set({ backupStatus: status });
+          return status;
+        },
+        null as unknown as BackupStatusResponse,
+      );
+    },
+
+    beginOauthFlow: async (provider, displayName, clientId, clientSecret) => {
+      try {
+        const response = await beginOauthAuthorization(provider, displayName, clientId || "", clientSecret || null);
+        set({ oauthSessionId: response.sessionId });
+        // Open the authorization URL in the browser
+        if ("__TAURI_INTERNALS__" in window) {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(response.authorizationUrl);
+        } else {
+          window.open(response.authorizationUrl, "_blank", "noopener,noreferrer");
+        }
+        return response.sessionId;
+      } catch (error) {
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
+    completeOauthFlow: async (sessionId) => {
+      await runBusyTask(
+        { key: "storage.oauth.complete", label: "Completing authorization" },
+        async () => {
+          const result = await completeOauthAuthorization(sessionId);
+          set({ oauthSessionId: null });
+          await get().loadSharedStorageProfiles();
+          return result;
+        },
+        null as never,
+      );
+      // Always reset session on error so user can retry
+      if (get().error) {
+        set({ oauthSessionId: null });
+      }
+    },
+
+    loadApplicationBundles: async (instanceId) => {
+      try {
+        const bundles = await listApplicationBundles(instanceId);
+        set({ applicationBundles: bundles });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    selectBundle: (bundleId) => {
+      set((state) => {
+        const ids = state.selectedBundleIds.includes(bundleId)
+          ? state.selectedBundleIds.filter((id) => id !== bundleId)
+          : [...state.selectedBundleIds, bundleId];
+        return { selectedBundleIds: ids };
+      });
+    },
+
+    deselectBundle: (bundleId) => {
+      set((state) => ({
+        selectedBundleIds: state.selectedBundleIds.filter((id) => id !== bundleId),
+      }));
+    },
+
+    loadBundleSnapshots: async (bundleId) => {
+      try {
+        const snapshots = await listBundleSnapshots(bundleId);
+        set({ bundleSnapshots: snapshots });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    restoreBundleApp: async (bundleId, restoreMode, selectedComponents) => {
+      await runBusyTask(
+        { key: "bundle.restore", label: "Restoring application", blocking: true },
+        async () => {
+          const result = await restoreApplicationBundle(bundleId, null, restoreMode, selectedComponents || null);
+          set({ bundleRestoreResult: result });
+          return result;
+        },
+        null as unknown as BundleRestoreResult,
+      );
+    },
+
+    removeBundleLocally: async (bundleId) => {
+      await runInstanceTask(
+        { key: "bundle.remove_local", label: "Removing local copy" },
+        async () => {
+          await removeLocalBundle(bundleId);
+          await get().loadApplicationBundles();
+        },
+        undefined,
+      );
+    },
+
+    requestBundleCloudDeletion: async (bundleId) => {
+      await runInstanceTask(
+        { key: "bundle.delete_cloud", label: "Requesting cloud deletion" },
+        async () => {
+          await requestCloudDeletion(bundleId);
+        },
+        undefined,
+      );
+    },
+
+    reloadCatalog: async () => {
+      try {
+        const catalog = await reloadApplicationCatalog();
+        set({ bundleCatalog: catalog });
       } catch (error) {
         set({ error: mapError(error) });
       }

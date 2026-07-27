@@ -279,8 +279,11 @@ export function DashboardScreen({
             <Button variant="ghost" onClick={() => navigate("/settings")}>
               Settings
             </Button>
-            <Button variant="secondary" onClick={() => setPickerOpen(true)}>
+            <Button variant="ghost" onClick={() => setPickerOpen(true)}>
               Select Server
+            </Button>
+            <Button variant="secondary" onClick={() => navigate("/bundles")}>
+              Applications
             </Button>
             <ArcadeSoundToggle />
           </div>

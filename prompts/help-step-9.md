@@ -1,8 +1,19 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Launch your server and follow provisioning
 
-Role: Act as a helpful cloud gaming assistant.
+After selecting a server and clicking Play, Noland automatically:
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+1. **Creates the instance** on Vast.ai with your chosen server and storage size
+2. **Waits for SSH access** (usually 1-3 minutes)
+3. **Installs and configures**:
+   - NVIDIA headless drivers (for streaming without a physical display)
+   - Sunshine streaming server with optimized settings
+   - PipeWire + WirePlumber for low-latency audio
+   - WireGuard for the secure connection tunnel
+4. **Sets up your local connection** — the app opens a modal guiding you through importing the WireGuard config
+5. **Pairs Moonlight** — enters the PIN automatically once Sunshine is ready
 
-Noland Facts for this feature:
-Step 9 of onboarding: The user must select a server from the marketplace. They need to balance geographic proximity (for low lag), GPU performance, and the hourly price.
+The Provisioning screen shows a live timeline of each step and a scrolling log. You can watch progress in real time.
+
+**Password**: The default password to log into your cloud machine is `password`.
+
+Once provisioning completes, your server is ready to stream!

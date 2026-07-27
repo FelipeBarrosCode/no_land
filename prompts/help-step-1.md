@@ -1,8 +1,12 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Welcome to Noland Connect
 
-Role: Act as a helpful cloud gaming assistant.
+Noland Connect gets you from zero to your own cloud gaming server in minutes. This guide walks you through every step.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+What Noland does for you:
+- Finds and rents GPU servers from Vast.ai
+- Automatically installs and configures Sunshine streaming, PipeWire audio, and NVIDIA drivers
+- Sets up the secure connection between your machine and the cloud server
+- Handles Moonlight pairing automatically
+- Provides on-screen progress and logs during setup
 
-Noland Facts for this feature:
-Step 1 of onboarding: The user must open Noland Connect. Noland acts as the central control deck that bridges their local computer with the remote cloud gaming hardware.
+You are in control of server selection, pricing filters, and streaming preferences.

@@ -1,8 +1,12 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Create your Vast.ai account
 
-Role: Act as a helpful cloud gaming assistant.
+Vast.ai is a marketplace where people rent out GPU servers. Noland connects to Vast.ai to find and rent machines for you.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+Steps:
+1. Go to https://cloud.vast.ai
+2. Click Sign Up if you are new, or Log In if you have an account
+3. Complete registration with email verification
 
-Noland Facts for this feature:
-Step 2 of onboarding: The user must go to Vast.ai. Vast.ai is the marketplace that provides the raw server power and cloud GPUs that Noland will rent on the user's behalf for their gaming sessions.
+Vast.ai gives you access to thousands of GPU servers worldwide — everything from budget RTX 3060s to enterprise A6000s and H100s.
+
+No commitment — you only pay hourly for the time your machine is running.

@@ -1,8 +1,28 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Manage your applications with Application Bundles
 
-Role: Act as a helpful cloud gaming assistant.
+The Applications page (accessible from the dashboard toolbar) shows all your backed-up applications.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+### What is an Application Bundle?
+An Application Bundle is everything related to one installed game or app — binaries, saves, settings, mods, runtime prefix, and more. Each bundle gets backed up as a single unit so you can restore it completely onto any new instance.
 
-Noland Facts for this feature:
-Step 12 of onboarding: Once connected, the user will see a Windows login screen. The default password for the remote streaming desktop is simply 'password'.
+### Viewing your applications
+- **Installed** — applications currently on your instance
+- **Available in Cloud** — applications backed up but not on this machine
+- Each card shows the app name, size, component count, backup status, and last backup time
+
+### Restoring an application
+Click **Restore** on any application card and choose a mode:
+- **Complete Restore** — everything: game files, saves, settings, mods, runtime
+- **Personal Data Only** — saves, settings, mods. Re-download the game from Steam/Epic/GOG
+- **Custom Selection** — pick specific components to restore
+
+### Managing snapshots
+Expand a bundle card to see:
+- All components and their sizes
+- Related applications (mod managers, companion apps)
+- Backup history with timestamps
+- Restore and Delete actions
+
+### Safe deletion
+- **Remove Local Copy** — removes the app from this instance only. Cloud backup stays available.
+- **Delete Cloud Backup** — permanently deletes the backup after confirmation. This cannot be undone.

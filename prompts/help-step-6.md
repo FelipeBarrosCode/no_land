@@ -1,8 +1,23 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Select a server in Noland Connect
 
-Role: Act as a helpful cloud gaming assistant.
+After onboarding, you are on the Dashboard. Here is how to pick a server:
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+1. Click the **"Select Server"** button in the top toolbar
+2. The Server Picker modal opens, showing available GPU offers
+3. Servers are ranked by a combined score of:
+   - **Distance** — closer servers have lower latency
+   - **Reliability** — host uptime history
+   - **Price** — lower cost gets higher score
+   - **GPU power** — more VRAM gets higher score
 
-Noland Facts for this feature:
-Step 6 of onboarding: The user needs to download and install Moonlight, which is the high-quality, low-latency video player client they will use to actually see and play the games running on the remote server.
+Each offer card shows:
+- Host name and location
+- GPU model and VRAM
+- CPU cores
+- Internet speed (down/up)
+- Hourly price
+- Distance from you
+- Reliability percentage
+- Time remaining (for interruptible instances)
+
+Pick the server that best fits your needs, set your desired storage size, and select it.

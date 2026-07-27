@@ -18,6 +18,10 @@ pub struct PersistedAppState {
     pub moonlight: MoonlightState,
     pub moonlight_preferences: MoonlightPreferences,
     pub shared_storage: SharedStorageState,
+    #[serde(default)]
+    pub shared_storage_profiles: Vec<crate::models::application_bundle::ProfileReference>,
+    #[serde(default)]
+    pub application_catalog: Vec<crate::models::application_bundle::ApplicationBundle>,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
@@ -44,6 +48,8 @@ impl Default for PersistedAppState {
             moonlight: MoonlightState::default(),
             moonlight_preferences: MoonlightPreferences::default(),
             shared_storage: SharedStorageState::default(),
+            shared_storage_profiles: Vec::new(),
+            application_catalog: Vec::new(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,

@@ -24,6 +24,22 @@ import helpStep11 from '../../prompts/help-step-11.md?raw';
 import helpStep12 from '../../prompts/help-step-12.md?raw';
 import settingsPage from '../../prompts/settings-page.md?raw';
 
+// Storage provider setup tutorials
+import storageBackblazeB2 from '../../prompts/storage-backblaze-b2.md?raw';
+import storageAmazonS3 from '../../prompts/storage-amazon-s3.md?raw';
+import storageCloudflareR2 from '../../prompts/storage-cloudflare-r2.md?raw';
+import storageWasabi from '../../prompts/storage-wasabi.md?raw';
+import storageDigitaloceanSpaces from '../../prompts/storage-digitalocean-spaces.md?raw';
+import storageGenericS3 from '../../prompts/storage-generic-s3.md?raw';
+import storageGoogleDrive from '../../prompts/storage-google-drive.md?raw';
+import storageGoogleCloud from '../../prompts/storage-google-cloud.md?raw';
+import storageOnedrive from '../../prompts/storage-onedrive.md?raw';
+import storageDropbox from '../../prompts/storage-dropbox.md?raw';
+import storageBox from '../../prompts/storage-box.md?raw';
+import storageAzure from '../../prompts/storage-azure.md?raw';
+import storageSftp from '../../prompts/storage-sftp.md?raw';
+import storageWebdav from '../../prompts/storage-webdav.md?raw';
+
 export const APP_PROMPTS = {
   moonlightCard,
   wireguardCard,
@@ -49,7 +65,21 @@ export const APP_PROMPTS = {
   helpStep10,
   helpStep11,
   helpStep12,
-  settingsPage
+  settingsPage,
+  storageBackblazeB2,
+  storageAmazonS3,
+  storageCloudflareR2,
+  storageWasabi,
+  storageDigitaloceanSpaces,
+  storageGenericS3,
+  storageGoogleDrive,
+  storageGoogleCloud,
+  storageOnedrive,
+  storageDropbox,
+  storageBox,
+  storageAzure,
+  storageSftp,
+  storageWebdav,
 };
 
 export type AppPromptKey = keyof typeof APP_PROMPTS;

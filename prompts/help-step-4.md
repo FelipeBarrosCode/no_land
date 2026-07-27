@@ -1,8 +1,16 @@
-Context: The user is currently using 'Noland' (or Noland Connect), a platform that automates the process of renting cloud GPUs (via Vast.ai) and seamlessly connecting them for high-end remote game streaming.
+## Get your Vast.ai API key
 
-Role: Act as a helpful cloud gaming assistant.
+The API key lets Noland search for servers and manage instances on your behalf. Keep this key secure — it has full account access.
 
-Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
+Steps:
+1. Go to https://cloud.vast.ai/account/
+2. Find the API Key section
+3. Click "Create API Key" or copy your existing key
+4. The key looks like a long string of letters and numbers
 
-Noland Facts for this feature:
-Step 4 of onboarding: The user must add billing details to Vast.ai. Servers are rented on a pay-as-you-go hourly basis, so a payment method is required to start renting compute hours.
+Alternatively, use Noland's browser automation to create the key automatically:
+- In the onboarding screen, click "Connect Browser Session"
+- Follow the prompts to authenticate
+- Click "Generate API Key" to create one automatically
+
+The API key is stored locally on your machine. Noland never sends it to any server other than Vast.ai.
