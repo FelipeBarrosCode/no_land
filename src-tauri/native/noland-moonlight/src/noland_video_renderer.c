@@ -77,6 +77,14 @@ void nl_video_renderer_init(nl_video_renderer_t* renderer) {
   memset(renderer, 0, sizeof(*renderer));
 }
 
+void nl_video_renderer_set_frame_processor(nl_video_renderer_t* renderer, nl_video_frame_callback processor, void* user_data) {
+  if (renderer == NULL) {
+    return;
+  }
+  renderer->frame_processor = processor;
+  renderer->frame_processor_user_data = user_data;
+}
+
 void nl_video_renderer_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
   if (renderer == NULL) {
     return;
@@ -144,6 +152,8 @@ void nl_video_renderer_cleanup(nl_video_renderer_t* renderer) {
 }
 
 int nl_video_renderer_submit_frame(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame) {
+  int result;
+
   if (renderer == NULL || frame == NULL) {
     return -1;
   }
@@ -154,9 +164,10 @@ int nl_video_renderer_submit_frame(nl_video_renderer_t* renderer, const void* de
   }
 
   renderer->last_frame = *frame;
-  if (nl_video_renderer_platform_submit_frame(renderer, decode_unit, frame) != DR_OK) {
+  result = nl_video_renderer_platform_submit_frame(renderer, decode_unit, frame);
+  if (result != DR_OK) {
     renderer->dropped_frame_count += 1U;
-    return DR_OK;
+    return result;
   }
   renderer->submitted_frame_count += 1U;
   return DR_OK;

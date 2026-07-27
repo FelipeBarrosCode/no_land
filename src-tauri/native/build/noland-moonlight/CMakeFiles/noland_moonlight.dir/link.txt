@@ -1,2 +1,2 @@
-/usr/bin/ar qc libnoland_moonlight.a CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o
+/usr/bin/ar qc libnoland_moonlight.a CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o
 /usr/bin/ranlib libnoland_moonlight.a

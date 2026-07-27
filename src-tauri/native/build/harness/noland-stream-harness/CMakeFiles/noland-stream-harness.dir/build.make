@@ -99,6 +99,7 @@ harness/noland-stream-harness/noland-stream-harness: noland-moonlight/libnoland_
 harness/noland-stream-harness/noland-stream-harness: moonlight-common-c/libmoonlight-common-c.a
 harness/noland-stream-harness/noland-stream-harness: moonlight-common-c/enet/libenet.a
 harness/noland-stream-harness/noland-stream-harness: /opt/homebrew/Cellar/openssl@3/3.6.2/lib/libcrypto.dylib
+harness/noland-stream-harness/noland-stream-harness: /opt/homebrew/lib/libopus.dylib
 harness/noland-stream-harness/noland-stream-harness: harness/noland-stream-harness/CMakeFiles/noland-stream-harness.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking C executable noland-stream-harness"
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/harness/noland-stream-harness && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/noland-stream-harness.dir/link.txt --verbose=$(VERBOSE)

@@ -23,6 +23,8 @@ typedef struct nl_video_frame_metadata {
   uint8_t colorspace;
 } nl_video_frame_metadata_t;
 
+typedef int (*nl_video_frame_callback)(void* user_data, const void* decode_unit, const nl_video_frame_metadata_t* frame);
+
 typedef struct nl_video_renderer {
   bool configured;
   bool started;
@@ -36,6 +38,8 @@ typedef struct nl_video_renderer {
   uint64_t submitted_frame_count;
   uint64_t dropped_frame_count;
   void* platform_context;
+  nl_video_frame_callback frame_processor;
+  void* frame_processor_user_data;
 } nl_video_renderer_t;
 
 void nl_video_renderer_init(nl_video_renderer_t* renderer);
@@ -45,6 +49,7 @@ int nl_video_renderer_setup(nl_video_renderer_t* renderer, int video_format, int
 void nl_video_renderer_start(nl_video_renderer_t* renderer);
 void nl_video_renderer_stop(nl_video_renderer_t* renderer);
 void nl_video_renderer_cleanup(nl_video_renderer_t* renderer);
+void nl_video_renderer_set_frame_processor(nl_video_renderer_t* renderer, nl_video_frame_callback processor, void* user_data);
 int nl_video_renderer_submit_frame(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame);
 bool nl_video_renderer_is_ready(const nl_video_renderer_t* renderer);
 bool nl_video_renderer_is_session_active(const nl_video_renderer_t* renderer);

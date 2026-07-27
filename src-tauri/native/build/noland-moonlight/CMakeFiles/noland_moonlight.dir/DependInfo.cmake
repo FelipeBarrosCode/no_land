@@ -8,7 +8,11 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_controller_manager.c" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o" "gcc" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o.d"
   "/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_moonlight.c" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o" "gcc" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o.d"
+  "/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer.c" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o" "gcc" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o.d"
+  "/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_audio_renderer_macos.m" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o" "gcc" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o.d"
+  "/Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer_macos.m" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o" "gcc" "noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.

@@ -199,6 +199,38 @@ noland_moonlight_smoke_test/fast:
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight_smoke_test.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight_smoke_test.dir/build
 .PHONY : noland_moonlight_smoke_test/fast
 
+src/noland_audio_renderer_macos.o: src/noland_audio_renderer_macos.m.o
+.PHONY : src/noland_audio_renderer_macos.o
+
+# target to build an object file
+src/noland_audio_renderer_macos.m.o:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o
+.PHONY : src/noland_audio_renderer_macos.m.o
+
+src/noland_controller_manager.o: src/noland_controller_manager.c.o
+.PHONY : src/noland_controller_manager.o
+
+# target to build an object file
+src/noland_controller_manager.c.o:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o
+.PHONY : src/noland_controller_manager.c.o
+
+src/noland_controller_manager.i: src/noland_controller_manager.c.i
+.PHONY : src/noland_controller_manager.i
+
+# target to preprocess a source file
+src/noland_controller_manager.c.i:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.i
+.PHONY : src/noland_controller_manager.c.i
+
+src/noland_controller_manager.s: src/noland_controller_manager.c.s
+.PHONY : src/noland_controller_manager.s
+
+# target to generate assembly for a file
+src/noland_controller_manager.c.s:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.s
+.PHONY : src/noland_controller_manager.c.s
+
 src/noland_moonlight.o: src/noland_moonlight.c.o
 .PHONY : src/noland_moonlight.o
 
@@ -222,6 +254,38 @@ src/noland_moonlight.s: src/noland_moonlight.c.s
 src/noland_moonlight.c.s:
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.s
 .PHONY : src/noland_moonlight.c.s
+
+src/noland_video_renderer.o: src/noland_video_renderer.c.o
+.PHONY : src/noland_video_renderer.o
+
+# target to build an object file
+src/noland_video_renderer.c.o:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o
+.PHONY : src/noland_video_renderer.c.o
+
+src/noland_video_renderer.i: src/noland_video_renderer.c.i
+.PHONY : src/noland_video_renderer.i
+
+# target to preprocess a source file
+src/noland_video_renderer.c.i:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.i
+.PHONY : src/noland_video_renderer.c.i
+
+src/noland_video_renderer.s: src/noland_video_renderer.c.s
+.PHONY : src/noland_video_renderer.s
+
+# target to generate assembly for a file
+src/noland_video_renderer.c.s:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.s
+.PHONY : src/noland_video_renderer.c.s
+
+src/noland_video_renderer_macos.o: src/noland_video_renderer_macos.m.o
+.PHONY : src/noland_video_renderer_macos.o
+
+# target to build an object file
+src/noland_video_renderer_macos.m.o:
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build && $(MAKE) $(MAKESILENT) -f noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o
+.PHONY : src/noland_video_renderer_macos.m.o
 
 tests/smoke_test.o: tests/smoke_test.c.o
 .PHONY : tests/smoke_test.o
@@ -262,9 +326,17 @@ help:
 	@echo "... test"
 	@echo "... noland_moonlight"
 	@echo "... noland_moonlight_smoke_test"
+	@echo "... src/noland_audio_renderer_macos.o"
+	@echo "... src/noland_controller_manager.o"
+	@echo "... src/noland_controller_manager.i"
+	@echo "... src/noland_controller_manager.s"
 	@echo "... src/noland_moonlight.o"
 	@echo "... src/noland_moonlight.i"
 	@echo "... src/noland_moonlight.s"
+	@echo "... src/noland_video_renderer.o"
+	@echo "... src/noland_video_renderer.i"
+	@echo "... src/noland_video_renderer.s"
+	@echo "... src/noland_video_renderer_macos.o"
 	@echo "... tests/smoke_test.o"
 	@echo "... tests/smoke_test.i"
 	@echo "... tests/smoke_test.s"

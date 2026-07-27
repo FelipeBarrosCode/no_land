@@ -86,17 +86,81 @@ noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.s: cmake
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.s"
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_moonlight.c -o CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.s
 
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/flags.make
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o: /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_controller_manager.c
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Building C object noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o -MF CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o.d -o CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o -c /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_controller_manager.c
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing C source to CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.i"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -E /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_controller_manager.c > CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.i
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.s"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_controller_manager.c -o CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.s
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/flags.make
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o: /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer.c
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_3) "Building C object noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -MD -MT noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o -MF CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o.d -o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o -c /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer.c
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing C source to CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.i"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -E /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer.c > CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.i
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling C source to assembly CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.s"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/cc $(C_DEFINES) $(C_INCLUDES) $(C_FLAGS) -S /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer.c -o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.s
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/flags.make
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o: /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer_macos.m
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_4) "Building OBJC object noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) -x objective-c $(OBJC_FLAGS) -fobjc-arc -MD -MT noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o -MF CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o.d -o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o -c /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer_macos.m
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing OBJC source to CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.i"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) $(OBJC_FLAGS) -fobjc-arc -E /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer_macos.m > CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.i
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling OBJC source to assembly CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.s"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) $(OBJC_FLAGS) -fobjc-arc -S /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_video_renderer_macos.m -o CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.s
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/flags.make
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o: /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_audio_renderer_macos.m
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o: noland-moonlight/CMakeFiles/noland_moonlight.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_5) "Building OBJC object noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) -x objective-c $(OBJC_FLAGS) -fobjc-arc -MD -MT noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o -MF CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o.d -o CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o -c /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_audio_renderer_macos.m
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing OBJC source to CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.i"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) $(OBJC_FLAGS) -fobjc-arc -E /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_audio_renderer_macos.m > CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.i
+
+noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling OBJC source to assembly CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.s"
+	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && /usr/bin/clang $(OBJC_DEFINES) $(OBJC_INCLUDES) $(OBJC_FLAGS) -fobjc-arc -S /Users/felipebarros/Code/noland/no_land/src-tauri/native/noland-moonlight/src/noland_audio_renderer_macos.m -o CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.s
+
 # Object files for target noland_moonlight
 noland_moonlight_OBJECTS = \
-"CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o"
+"CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o" \
+"CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o" \
+"CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o" \
+"CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o" \
+"CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o"
 
 # External object files for target noland_moonlight
 noland_moonlight_EXTERNAL_OBJECTS =
 
 noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_moonlight.c.o
+noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_controller_manager.c.o
+noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer.c.o
+noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_video_renderer_macos.m.o
+noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/src/noland_audio_renderer_macos.m.o
 noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/build.make
 noland-moonlight/libnoland_moonlight.a: noland-moonlight/CMakeFiles/noland_moonlight.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking C static library libnoland_moonlight.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_6) "Linking C static library libnoland_moonlight.a"
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && $(CMAKE_COMMAND) -P CMakeFiles/noland_moonlight.dir/cmake_clean_target.cmake
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/noland_moonlight.dir/link.txt --verbose=$(VERBOSE)
 

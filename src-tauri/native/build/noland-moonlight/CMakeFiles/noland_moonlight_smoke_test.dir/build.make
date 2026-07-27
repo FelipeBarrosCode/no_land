@@ -99,6 +99,7 @@ noland-moonlight/noland_moonlight_smoke_test: noland-moonlight/libnoland_moonlig
 noland-moonlight/noland_moonlight_smoke_test: moonlight-common-c/libmoonlight-common-c.a
 noland-moonlight/noland_moonlight_smoke_test: moonlight-common-c/enet/libenet.a
 noland-moonlight/noland_moonlight_smoke_test: /opt/homebrew/Cellar/openssl@3/3.6.2/lib/libcrypto.dylib
+noland-moonlight/noland_moonlight_smoke_test: /opt/homebrew/lib/libopus.dylib
 noland-moonlight/noland_moonlight_smoke_test: noland-moonlight/CMakeFiles/noland_moonlight_smoke_test.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/Users/felipebarros/Code/noland/no_land/src-tauri/native/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking C executable noland_moonlight_smoke_test"
 	cd /Users/felipebarros/Code/noland/no_land/src-tauri/native/build/noland-moonlight && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/noland_moonlight_smoke_test.dir/link.txt --verbose=$(VERBOSE)

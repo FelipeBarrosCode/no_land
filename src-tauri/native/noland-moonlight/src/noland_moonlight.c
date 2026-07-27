@@ -425,6 +425,8 @@ static void nl_connection_set_adaptive_triggers(uint16_t controllerNumber, uint8
   nl_controller_manager_set_adaptive_triggers(runtime->controller_manager, controllerNumber, &report);
 }
 
+static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit, const nl_video_frame_metadata_t* frame);
+
 static int nl_video_setup(int videoFormat, int width, int height, int redrawRate, void* context, int drFlags) {
   nl_runtime_t* runtime = (nl_runtime_t*)context;
   char message[256];
@@ -436,6 +438,7 @@ static int nl_video_setup(int videoFormat, int width, int height, int redrawRate
   nl_runtime_lock(runtime);
   runtime->video_setup_count += 1U;
   result = nl_video_renderer_setup(&runtime->renderer, videoFormat, width, height, redrawRate);
+  nl_video_renderer_set_frame_processor(&runtime->renderer, nl_video_frame_processor, runtime);
   snprintf(message, sizeof(message), "video setup %dx%d fmt=%d", width, height, videoFormat);
   nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, result, message);
   nl_runtime_unlock(runtime);
@@ -475,39 +478,27 @@ static void nl_video_cleanup(void) {
   nl_runtime_unlock(runtime);
 }
 
-static int nl_video_submit_decode_unit(PDECODE_UNIT decodeUnit) {
-  nl_runtime_t* runtime = nl_get_active_runtime();
+static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit, const nl_video_frame_metadata_t* frame) {
+  nl_runtime_t* runtime = (nl_runtime_t*)user_data;
   char message[256];
-  if (runtime != NULL && decodeUnit != NULL) {
-    nl_video_frame_metadata_t frame;
+  if (runtime != NULL && frame != NULL) {
     int renderer_result;
-    memset(&frame, 0, sizeof(frame));
-    frame.frame_number = decodeUnit->frameNumber;
-    frame.frame_type = decodeUnit->frameType;
-    frame.full_length = decodeUnit->fullLength;
-    frame.host_processing_latency = decodeUnit->frameHostProcessingLatency;
-    frame.receive_time_us = decodeUnit->receiveTimeUs;
-    frame.enqueue_time_us = decodeUnit->enqueueTimeUs;
-    frame.presentation_time_us = decodeUnit->presentationTimeUs;
-    frame.rtp_timestamp = decodeUnit->rtpTimestamp;
-    frame.hdr_active = decodeUnit->hdrActive ? 1U : 0U;
-    frame.colorspace = decodeUnit->colorspace;
 
     nl_runtime_lock(runtime);
     runtime->video_frame_count += 1U;
-    runtime->last_video_frame_number = frame.frame_number;
-    runtime->last_video_frame_type = frame.frame_type;
-    runtime->last_video_frame_length = frame.full_length;
-    runtime->last_video_host_processing_latency = frame.host_processing_latency;
-    runtime->last_video_receive_time_us = frame.receive_time_us;
-    runtime->last_video_enqueue_time_us = frame.enqueue_time_us;
-    runtime->last_video_presentation_time_us = frame.presentation_time_us;
-    runtime->last_video_rtp_timestamp = frame.rtp_timestamp;
-    runtime->last_video_hdr_active = frame.hdr_active;
-    runtime->last_video_colorspace = frame.colorspace;
-    renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, decodeUnit, &frame);
-    snprintf(message, sizeof(message), "video frame #%d len=%d", frame.frame_number, frame.full_length);
-    nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame.frame_number, message);
+    runtime->last_video_frame_number = frame->frame_number;
+    runtime->last_video_frame_type = frame->frame_type;
+    runtime->last_video_frame_length = frame->full_length;
+    runtime->last_video_host_processing_latency = frame->host_processing_latency;
+    runtime->last_video_receive_time_us = frame->receive_time_us;
+    runtime->last_video_enqueue_time_us = frame->enqueue_time_us;
+    runtime->last_video_presentation_time_us = frame->presentation_time_us;
+    runtime->last_video_rtp_timestamp = frame->rtp_timestamp;
+    runtime->last_video_hdr_active = frame->hdr_active;
+    runtime->last_video_colorspace = frame->colorspace;
+    renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, raw_decode_unit, frame);
+    snprintf(message, sizeof(message), "video frame #%d len=%d", frame->frame_number, frame->full_length);
+    nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame->frame_number, message);
     nl_runtime_unlock(runtime);
     return renderer_result;
   }
@@ -689,7 +680,9 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   videoCallbacks.start = nl_video_start;
   videoCallbacks.stop = nl_video_stop;
   videoCallbacks.cleanup = nl_video_cleanup;
-  videoCallbacks.submitDecodeUnit = nl_video_submit_decode_unit;
+  videoCallbacks.capabilities = CAPABILITY_PULL_RENDERER |
+                                CAPABILITY_REFERENCE_FRAME_INVALIDATION_HEVC |
+                                CAPABILITY_REFERENCE_FRAME_INVALIDATION_AV1;
 
   audioCallbacks.init = nl_audio_init;
   audioCallbacks.start = nl_audio_start;
