@@ -1,11 +1,15 @@
-use std::{path::Path, process::Command, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    errors::{AppError, FrontendError},
+    errors::{AppError, AppResult, FrontendError},
     input::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
@@ -100,6 +104,299 @@ pub struct LocalEnvironmentCheck {
     pub arch: String,
     pub ok: bool,
     pub checks: Vec<ToolCheck>,
+}
+
+#[derive(Debug, Clone)]
+struct VastBrowserAutomationPaths {
+    repo_root: PathBuf,
+    storage_state_path: PathBuf,
+    artifact_dir: PathBuf,
+    session_metadata_path: PathBuf,
+    api_key_result_path: PathBuf,
+    billing_result_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastBrowserAutomationStatus {
+    pub available: bool,
+    pub node_found: bool,
+    pub script_root: String,
+    pub storage_state_path: String,
+    pub artifact_dir: String,
+    pub session_connected: bool,
+    pub session_metadata_path: Option<String>,
+    pub api_key_result_path: Option<String>,
+    pub billing_result_path: Option<String>,
+    pub saved_at: Option<String>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastBrowserAuthSessionResult {
+    #[serde(flatten)]
+    pub status: VastBrowserAutomationStatus,
+    pub page_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastBrowserGeneratedApiKeyResult {
+    #[serde(flatten)]
+    pub status: VastBrowserAutomationStatus,
+    pub api_key: Option<String>,
+    pub api_key_name: String,
+    pub discovered_secret_masked: Option<String>,
+    pub result_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastBrowserBillingSessionResult {
+    #[serde(flatten)]
+    pub status: VastBrowserAutomationStatus,
+    pub action: String,
+    pub page_url: Option<String>,
+    pub result_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VastWalletSummary {
+    pub available: bool,
+    pub balance_usd: Option<f64>,
+    pub display_amount: String,
+    pub source: String,
+    pub last_updated_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastGenerateApiKeyPayload {
+    pub api_key_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct VastBillingBrowserPayload {
+    pub action: Option<String>,
+}
+
+fn browser_automation_repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
+        .to_path_buf()
+}
+
+fn detect_node_found() -> bool {
+    Command::new("node")
+        .arg("--version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn resolve_vast_browser_automation_paths(
+    context: &AppContext,
+) -> AppResult<VastBrowserAutomationPaths> {
+    let app_data_root = context
+        .state_store
+        .path()
+        .parent()
+        .ok_or_else(|| AppError::State("Unable to resolve app data directory".to_string()))?
+        .to_path_buf();
+    let automation_root = app_data_root.join("vast-browser-automation");
+    let artifact_dir = automation_root.join("artifacts");
+    let storage_state_path = automation_root.join("playwright/.auth/vast-ai.json");
+
+    Ok(VastBrowserAutomationPaths {
+        repo_root: browser_automation_repo_root(),
+        storage_state_path,
+        artifact_dir: artifact_dir.clone(),
+        session_metadata_path: artifact_dir.join("vast-ai-authenticated-session.json"),
+        api_key_result_path: artifact_dir.join("vast-ai-api-key-result.json"),
+        billing_result_path: artifact_dir.join("vast-ai-billing-result.json"),
+    })
+}
+
+fn extract_string_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+}
+
+fn read_json_file(path: &Path) -> Option<Value> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn build_vast_browser_automation_status(
+    context: &AppContext,
+    last_error: Option<String>,
+) -> VastBrowserAutomationStatus {
+    let paths = resolve_vast_browser_automation_paths(context).ok();
+    let repo_root = browser_automation_repo_root();
+    let script_root = repo_root.join("scripts");
+    let node_found = detect_node_found();
+    let playwright_package_present = repo_root.join("node_modules/playwright").exists()
+        || repo_root.join("node_modules/@playwright/test").exists();
+
+    let session_json = paths
+        .as_ref()
+        .and_then(|resolved| read_json_file(&resolved.session_metadata_path));
+
+    VastBrowserAutomationStatus {
+        available: node_found
+            && playwright_package_present
+            && script_root.join("vast-ai-bootstrap-session.mjs").exists()
+            && script_root.join("vast-ai-create-api-key.mjs").exists()
+            && script_root
+                .join("vast-ai-open-billing-session.mjs")
+                .exists(),
+        node_found,
+        script_root: script_root.display().to_string(),
+        storage_state_path: paths
+            .as_ref()
+            .map(|resolved| resolved.storage_state_path.display().to_string())
+            .unwrap_or_default(),
+        artifact_dir: paths
+            .as_ref()
+            .map(|resolved| resolved.artifact_dir.display().to_string())
+            .unwrap_or_default(),
+        session_connected: paths
+            .as_ref()
+            .map(|resolved| {
+                resolved.storage_state_path.exists() && resolved.session_metadata_path.exists()
+            })
+            .unwrap_or(false),
+        session_metadata_path: paths.as_ref().and_then(|resolved| {
+            resolved
+                .session_metadata_path
+                .exists()
+                .then(|| resolved.session_metadata_path.display().to_string())
+        }),
+        api_key_result_path: paths.as_ref().and_then(|resolved| {
+            resolved
+                .api_key_result_path
+                .exists()
+                .then(|| resolved.api_key_result_path.display().to_string())
+        }),
+        billing_result_path: paths.as_ref().and_then(|resolved| {
+            resolved
+                .billing_result_path
+                .exists()
+                .then(|| resolved.billing_result_path.display().to_string())
+        }),
+        saved_at: session_json
+            .as_ref()
+            .and_then(|json| extract_string_field(json, "savedAt")),
+        last_error,
+    }
+}
+
+fn unavailable_vast_wallet_summary() -> VastWalletSummary {
+    VastWalletSummary {
+        available: false,
+        balance_usd: None,
+        display_amount: "--".to_string(),
+        source: "unavailable".to_string(),
+        last_updated_at: None,
+    }
+}
+
+fn build_vast_wallet_summary(balance_usd: Option<f64>) -> VastWalletSummary {
+    VastWalletSummary {
+        available: balance_usd.is_some(),
+        balance_usd,
+        display_amount: balance_usd
+            .map(|value| format!("${value:.2}"))
+            .unwrap_or_else(|| "--".to_string()),
+        source: if balance_usd.is_some() {
+            "vast_api".to_string()
+        } else {
+            "unavailable".to_string()
+        },
+        last_updated_at: Some(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|duration| duration.as_secs().to_string())
+                .unwrap_or_default(),
+        ),
+    }
+}
+
+fn default_generated_api_key_name() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    format!("noland-{now}")
+}
+
+fn validate_billing_action(raw: Option<String>) -> AppResult<String> {
+    let action = raw.unwrap_or_else(|| "snapshot".to_string());
+    match action.as_str() {
+        "snapshot" | "open-add-credit" | "open-auto-topup" => Ok(action),
+        _ => Err(AppError::InvalidInput(format!(
+            "Unsupported Vast billing action: {action}"
+        ))),
+    }
+}
+
+fn run_vast_browser_script(
+    context: &AppContext,
+    script_name: &str,
+    extra_env: &[(&str, String)],
+) -> AppResult<VastBrowserAutomationPaths> {
+    let paths = resolve_vast_browser_automation_paths(context)?;
+    let script_path = paths.repo_root.join("scripts").join(script_name);
+    if !script_path.exists() {
+        return Err(AppError::State(format!(
+            "Vast browser automation script not found: {}",
+            script_path.display()
+        )));
+    }
+    if !detect_node_found() {
+        return Err(AppError::Command(
+            "Node.js is required for Vast.ai browser automation but was not found on PATH."
+                .to_string(),
+        ));
+    }
+
+    if let Some(parent) = paths.storage_state_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir_all(&paths.artifact_dir)?;
+
+    let mut command = Command::new("node");
+    command
+        .arg(&script_path)
+        .current_dir(&paths.repo_root)
+        .env("VAST_AI_STORAGE_STATE_PATH", &paths.storage_state_path)
+        .env("VAST_AI_ARTIFACT_DIR", &paths.artifact_dir)
+        .env("VAST_AI_HEADLESS", "false");
+
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+
+    let output = command.output()?;
+    if !output.status.success() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AppError::Command(format!(
+            "Vast browser automation failed running {script_name}. stdout: {} stderr: {}",
+            stdout.trim(),
+            stderr.trim()
+        )));
+    }
+
+    Ok(paths)
 }
 
 #[derive(Debug, Deserialize)]
@@ -2445,6 +2742,134 @@ pub async fn get_rented_instances(
 
     instances.sort_by(|left, right| right.instance_id.cmp(&left.instance_id));
     Ok(instances)
+}
+
+#[tauri::command]
+pub async fn get_vast_browser_automation_status(
+    context: State<'_, AppContext>,
+) -> Result<VastBrowserAutomationStatus, FrontendError> {
+    Ok(build_vast_browser_automation_status(context.inner(), None))
+}
+
+#[tauri::command]
+pub async fn get_vast_wallet_summary(
+    context: State<'_, AppContext>,
+) -> Result<VastWalletSummary, FrontendError> {
+    let state = context.state.read().await.clone();
+    if state.credentials.vast_api_key.trim().is_empty() {
+        return Ok(unavailable_vast_wallet_summary());
+    }
+
+    let vast = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        state.credentials.vast_api_key,
+    );
+
+    match vast.get_wallet_summary().await {
+        Ok(summary) => Ok(build_vast_wallet_summary(summary.balance_usd)),
+        Err(error) => {
+            warn!("get_vast_wallet_summary failed: {}", error);
+            Ok(unavailable_vast_wallet_summary())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn start_vast_browser_auth_session(
+    context: State<'_, AppContext>,
+) -> Result<VastBrowserAuthSessionResult, FrontendError> {
+    let app_context = context.inner().clone();
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        run_vast_browser_script(&app_context, "vast-ai-bootstrap-session.mjs", &[])
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("Vast browser auth task failed: {error}")))??;
+
+    let status = build_vast_browser_automation_status(context.inner(), None);
+    let metadata = read_json_file(&paths.session_metadata_path);
+    Ok(VastBrowserAuthSessionResult {
+        status,
+        page_url: metadata
+            .as_ref()
+            .and_then(|json| extract_string_field(json, "pageUrl")),
+    })
+}
+
+#[tauri::command]
+pub async fn generate_vast_api_key_from_browser_session(
+    payload: Option<VastGenerateApiKeyPayload>,
+    context: State<'_, AppContext>,
+) -> Result<VastBrowserGeneratedApiKeyResult, FrontendError> {
+    let requested_name = payload
+        .and_then(|value| value.api_key_name)
+        .unwrap_or_else(default_generated_api_key_name);
+    let app_context = context.inner().clone();
+    let requested_name_for_task = requested_name.clone();
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        run_vast_browser_script(
+            &app_context,
+            "vast-ai-create-api-key.mjs",
+            &[
+                ("VAST_AI_HEADLESS", "true".to_string()),
+                ("VAST_AI_API_KEY_NAME", requested_name_for_task),
+            ],
+        )
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("Vast API key task failed: {error}")))??;
+
+    let result_json = read_json_file(&paths.api_key_result_path).unwrap_or(Value::Null);
+    let api_key = extract_string_field(&result_json, "apiKey");
+    if let Some(secret) = api_key.clone() {
+        context
+            .update_state(|state| {
+                state.credentials.vast_api_key = secret;
+                state.last_error = None;
+            })
+            .await?;
+    }
+
+    let status = build_vast_browser_automation_status(context.inner(), None);
+    Ok(VastBrowserGeneratedApiKeyResult {
+        status,
+        api_key,
+        api_key_name: extract_string_field(&result_json, "apiKeyName").unwrap_or(requested_name),
+        discovered_secret_masked: extract_string_field(&result_json, "discoveredSecretMasked"),
+        result_path: paths.api_key_result_path.display().to_string(),
+    })
+}
+
+#[tauri::command]
+pub async fn open_vast_billing_browser_session(
+    payload: Option<VastBillingBrowserPayload>,
+    context: State<'_, AppContext>,
+) -> Result<VastBrowserBillingSessionResult, FrontendError> {
+    let action = validate_billing_action(payload.and_then(|value| value.action))?;
+    let action_for_task = action.clone();
+    let app_context = context.inner().clone();
+    let paths = tauri::async_runtime::spawn_blocking(move || {
+        run_vast_browser_script(
+            &app_context,
+            "vast-ai-open-billing-session.mjs",
+            &[
+                ("VAST_AI_HEADLESS", "false".to_string()),
+                ("VAST_AI_KEEP_OPEN", "true".to_string()),
+                ("VAST_AI_BILLING_ACTION", action_for_task),
+            ],
+        )
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("Vast billing browser task failed: {error}")))??;
+
+    let result_json = read_json_file(&paths.billing_result_path).unwrap_or(Value::Null);
+    let status = build_vast_browser_automation_status(context.inner(), None);
+    Ok(VastBrowserBillingSessionResult {
+        status,
+        action,
+        page_url: extract_string_field(&result_json, "pageUrl"),
+        result_path: paths.billing_result_path.display().to_string(),
+    })
 }
 
 #[tauri::command]

@@ -8,6 +8,11 @@ use crate::{
     models::vast::{VastInstance, VastOffer, VastSshKey},
 };
 
+#[derive(Debug, Clone)]
+pub struct VastWalletSummary {
+    pub balance_usd: Option<f64>,
+}
+
 #[derive(Clone)]
 pub struct VastApiClient {
     http: reqwest::Client,
@@ -352,6 +357,29 @@ impl VastApiClient {
         Ok(keys)
     }
 
+    pub async fn get_wallet_summary(&self) -> AppResult<VastWalletSummary> {
+        let url = format!(
+            "{}/api/v0/users/current/",
+            self.base_url.trim_end_matches('/')
+        );
+
+        info!("Vast request get_wallet_summary endpoint={}", url);
+        let started = Instant::now();
+
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| map_send_error("GET", &url, error))?;
+
+        let body = parse_response(response, "GET", &url, started).await?;
+        Ok(VastWalletSummary {
+            balance_usd: extract_wallet_balance_usd(&body),
+        })
+    }
+
     pub async fn upload_ssh_key(&self, public_key: &str) -> AppResult<()> {
         let url = format!("{}/api/v0/ssh/", self.base_url.trim_end_matches('/'));
         let payload = json!({ "ssh_key": public_key });
@@ -434,6 +462,44 @@ impl VastApiClient {
             instance_id
         );
         Ok(())
+    }
+}
+
+fn extract_wallet_balance_usd(body: &Value) -> Option<f64> {
+    let candidates = [
+        body.pointer("/credit"),
+        body.pointer("/credit_balance"),
+        body.pointer("/balance"),
+        body.pointer("/balance_usd"),
+        body.pointer("/wallet/balance"),
+        body.pointer("/wallet/balance_usd"),
+        body.pointer("/wallet/credit"),
+        body.pointer("/billing/balance"),
+        body.pointer("/billing/credit"),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(value) = parse_wallet_number(candidate) {
+            return Some(value);
+        }
+    }
+
+    None
+}
+
+fn parse_wallet_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        Value::Object(map) => {
+            for key in ["usd", "amount", "balance", "credit", "value"] {
+                if let Some(parsed) = map.get(key).and_then(parse_wallet_number) {
+                    return Some(parsed);
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }
 

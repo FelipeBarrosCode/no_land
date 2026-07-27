@@ -3,14 +3,32 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { VAST_API_KEY_URL } from "../../lib/constants";
-import type { OnboardingPayload } from "../../lib/types";
+import {
+  VAST_API_KEY_URL,
+  VAST_BILLING_URL,
+  VAST_LOGIN_URL,
+} from "../../lib/constants";
+import type {
+  OnboardingPayload,
+  VastBrowserAutomationStatus,
+  VastBrowserGeneratedApiKeyResult,
+  VastBrowserBillingAction,
+} from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
 
 interface Props {
   busy: boolean;
   onSubmit: (payload: OnboardingPayload) => Promise<void>;
+  vastAutomationStatus: VastBrowserAutomationStatus | null;
+  onConnectVastBrowser: () => Promise<unknown>;
+  onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
+  onGenerateVastApiKey: (
+    apiKeyName?: string,
+  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
+  onOpenVastBillingBrowser: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<unknown>;
 }
 
 interface FormState {
@@ -19,7 +37,15 @@ interface FormState {
   vastApiKey: string;
 }
 
-export function OnboardingScreen({ busy, onSubmit }: Props) {
+export function OnboardingScreen({
+  busy,
+  onSubmit,
+  vastAutomationStatus,
+  onConnectVastBrowser,
+  onRefreshVastAutomationStatus,
+  onGenerateVastApiKey,
+  onOpenVastBillingBrowser,
+}: Props) {
   const [tutorialOpen, setTutorialOpen] = useState(true);
   const [tutorialCompleted, setTutorialCompleted] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -33,6 +59,13 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     appPassword: false,
     vastApiKey: false,
   });
+  const [automationNote] = useState<string | null>(null);
+
+  void vastAutomationStatus;
+  void onConnectVastBrowser;
+  void onRefreshVastAutomationStatus;
+  void onGenerateVastApiKey;
+  void onOpenVastBillingBrowser;
 
   const errors = useMemo(() => {
     return {
@@ -65,12 +98,24 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     });
   }
 
-  async function openApiKeyPage() {
+  async function openExternalUrl(url: string) {
     try {
-      await openUrl(VAST_API_KEY_URL);
+      await openUrl(url);
     } catch {
-      window.open(VAST_API_KEY_URL, "_blank", "noopener,noreferrer");
+      window.open(url, "_blank", "noopener,noreferrer");
     }
+  }
+
+  async function openApiKeyPage() {
+    await openExternalUrl(VAST_API_KEY_URL);
+  }
+
+  async function openBillingPage() {
+    await openExternalUrl(VAST_BILLING_URL);
+  }
+
+  async function openLoginPage() {
+    await openExternalUrl(VAST_LOGIN_URL);
   }
 
   function openTutorial() {
@@ -118,13 +163,37 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                   Vast.ai API key
                 </a>
                 . We will generate an SSH key pair, prepare the remote machine,
-                and use the managed GotaTun tunnel flow during provisioning.
+                and handle the connection flow during provisioning.
               </p>
             </div>
 
             <Button variant="ghost" onClick={openTutorial}>
               Help
             </Button>
+          </div>
+
+          <div className="mt-6 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.1rem] text-[#b4d7f4]">
+            <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+              Vast.ai Account Setup
+            </p>
+            <p className="mt-2 leading-snug">
+              Use your normal browser to log in to Vast.ai, add billing, and create an API key. Then paste that API key into Noland below.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-3">
+              <Button variant="secondary" disabled={busy} onClick={() => void openLoginPage()}>
+                Open Vast.ai Login
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void openBillingPage()}>
+                Open Vast.ai Billing
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void openApiKeyPage()}>
+                Open API Key Page
+              </Button>
+            </div>
+            <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
+              <p>Sign in in your normal browser, then come back here and paste the API key.</p>
+              {automationNote ? <p className="text-neon-cyan">{automationNote}</p> : null}
+            </div>
           </div>
 
           <div className="mt-8 grid gap-4">
@@ -220,6 +289,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
         onNext={goToNextTutorialStep}
         onClose={() => setTutorialOpen(false)}
       />
+
+
     </main>
   );
 }

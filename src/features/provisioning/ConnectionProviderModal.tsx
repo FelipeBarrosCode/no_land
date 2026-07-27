@@ -36,19 +36,15 @@ export function ConnectionProviderModal({
         </h3>
 
         <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
-          Noland uses a managed GotaTun userspace tunnel for the desktop
-          connection flow. We generate the config, activate the tunnel, and
-          verify connectivity before moving on to Moonlight pairing.
+          Noland uses a managed secure connection flow for desktop access. We generate the config, activate the link, and verify connectivity before moving on to streaming setup.
         </p>
 
         <div className="mt-6 border border-[#3d426f] bg-[#10152f] p-5">
           <h4 className="font-display text-[12px] uppercase tracking-[0.12em] text-neon-lime">
-            Managed GotaTun / WireGuard Tunnel
+            Managed Secure Tunnel
           </h4>
           <p className="mt-2 text-[1.05rem] leading-snug text-[#cfe7ff]">
-            Direct secure tunnel between your device and the remote instance.
-            On macOS and Linux, Noland activates the WireGuard-compatible tunnel
-            using GotaTun instead of relying on a separate manual import flow.
+            Direct secure tunnel between your device and the remote instance. Noland activates it for you instead of relying on a separate manual import flow.
           </p>
           <div className="mt-4">
             <Button onClick={() => onSelectWireguard()} disabled={busy}>

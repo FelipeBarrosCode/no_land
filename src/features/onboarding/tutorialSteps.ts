@@ -1,7 +1,6 @@
 import {
-  MOONLIGHT_DOWNLOAD_URL,
   VAST_API_KEY_URL,
-  WIREGUARD_DOWNLOAD_URL,
+  VAST_BILLING_URL,
 } from "../../lib/constants";
 
 export interface TutorialStep {
@@ -40,9 +39,9 @@ export const tutorialSteps: TutorialStep[] = [
     eyebrow: "Step 4",
     title: "Add billing",
     description:
-      "Add a payment card in Vast.ai billing so you can rent a server when you are ready to launch.",
-    linkLabel: "Open Vast.ai",
-    linkUrl: VAST_API_KEY_URL,
+      "Add payment in Vast.ai billing so you can rent a server when you are ready to launch.",
+    linkLabel: "Open Vast.ai Billing",
+    linkUrl: VAST_BILLING_URL,
   },
   {
     eyebrow: "Step 5",
@@ -54,39 +53,24 @@ export const tutorialSteps: TutorialStep[] = [
   },
   {
     eyebrow: "Step 6",
-    title: "Download Moonlight",
+    title: "Return to Noland",
     description:
-      "Install Moonlight on your computer. That is the app you will use to stream into your cloud gaming machine.",
-    linkLabel: "Download Moonlight",
-    linkUrl: MOONLIGHT_DOWNLOAD_URL,
+      "After billing and API key setup, return to Noland Connect and paste your Vast.ai API key into onboarding.",
   },
   {
     eyebrow: "Step 7",
-    title: "Install the managed tunnel dependency",
-    description:
-      "Install GotaTun on your computer. Noland uses it to bring up the local managed WireGuard-compatible userspace tunnel during provisioning.",
-    links: [{ label: "Download GotaTun", url: WIREGUARD_DOWNLOAD_URL }],
-  },
-  {
-    eyebrow: "Step 8",
     title: "Select a server",
     description:
       "After setup, pick a server inside Noland Connect. Choose the one that fits your location, budget, and performance needs.",
   },
   {
-    eyebrow: "Step 9",
-    title: "Start the managed tunnel when asked",
-    description:
-      "When the app reaches tunnel setup, let Noland start the managed GotaTun tunnel. You may need to approve elevation so routing and the tunnel interface can be configured locally.",
-  },
-  {
-    eyebrow: "Step 10",
+    eyebrow: "Step 8",
     title: "Follow the instructions",
     description:
       "Keep following the on-screen instructions during setup. The app will guide you through the remaining pairing steps for Sunshine and Moonlight.",
   },
   {
-    eyebrow: "Final Step",
+    eyebrow: "Step 9",
     title: "Computer password",
     description:
       'The password to get into the computer is "password". Use that exact password when the remote computer asks for it.',

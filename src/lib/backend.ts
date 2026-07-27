@@ -8,6 +8,11 @@ import type {
   PlatformCredentialsUpdate,
   PersistedAppState,
   ProvisioningEvent,
+  VastBrowserAuthSessionResult,
+  VastBrowserAutomationStatus,
+  VastBrowserBillingAction,
+  VastBrowserBillingSessionResult,
+  VastBrowserGeneratedApiKeyResult,
   MoonlightConfigureResult,
   RentedInstanceSummary,
   ServerPreferencesUpdate,
@@ -34,6 +39,7 @@ import type {
   ReachabilityResult,
   SetupStage,
   SunshineVerificationResult,
+  VastWalletSummary,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -217,6 +223,40 @@ export async function updateVastApiKey(
   apiKey: string,
 ): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("update_vast_api_key", { apiKey });
+}
+
+export async function getVastBrowserAutomationStatus(): Promise<VastBrowserAutomationStatus> {
+  return invokeSafe<VastBrowserAutomationStatus>(
+    "get_vast_browser_automation_status",
+  );
+}
+
+export async function startVastBrowserAuthSession(): Promise<VastBrowserAuthSessionResult> {
+  return invokeSafe<VastBrowserAuthSessionResult>(
+    "start_vast_browser_auth_session",
+  );
+}
+
+export async function generateVastApiKeyFromBrowserSession(payload?: {
+  apiKeyName?: string;
+}): Promise<VastBrowserGeneratedApiKeyResult> {
+  return invokeSafe<VastBrowserGeneratedApiKeyResult>(
+    "generate_vast_api_key_from_browser_session",
+    { payload: payload ?? null },
+  );
+}
+
+export async function openVastBillingBrowserSession(payload?: {
+  action?: VastBrowserBillingAction;
+}): Promise<VastBrowserBillingSessionResult> {
+  return invokeSafe<VastBrowserBillingSessionResult>(
+    "open_vast_billing_browser_session",
+    { payload: payload ?? null },
+  );
+}
+
+export async function getVastWalletSummary(): Promise<VastWalletSummary> {
+  return invokeSafe<VastWalletSummary>("get_vast_wallet_summary");
 }
 
 export async function updateTailscaleApiKey(

@@ -312,6 +312,50 @@ export interface PlatformCredentialsUpdate {
   appPassword: string;
 }
 
+export type VastBrowserBillingAction =
+  | "snapshot"
+  | "open-add-credit"
+  | "open-auto-topup";
+
+export interface VastBrowserAutomationStatus {
+  available: boolean;
+  nodeFound: boolean;
+  scriptRoot: string;
+  storageStatePath: string;
+  artifactDir: string;
+  sessionConnected: boolean;
+  sessionMetadataPath: string | null;
+  apiKeyResultPath: string | null;
+  billingResultPath: string | null;
+  savedAt: string | null;
+  lastError: string | null;
+}
+
+export interface VastBrowserAuthSessionResult extends VastBrowserAutomationStatus {
+  pageUrl: string | null;
+}
+
+export interface VastBrowserGeneratedApiKeyResult extends VastBrowserAutomationStatus {
+  apiKey: string | null;
+  apiKeyName: string;
+  discoveredSecretMasked: string | null;
+  resultPath: string;
+}
+
+export interface VastBrowserBillingSessionResult extends VastBrowserAutomationStatus {
+  action: VastBrowserBillingAction;
+  pageUrl: string | null;
+  resultPath: string;
+}
+
+export interface VastWalletSummary {
+  available: boolean;
+  balanceUsd: number | null;
+  displayAmount: string;
+  source: "vast_api" | "browser_artifact" | "unavailable";
+  lastUpdatedAt: string | null;
+}
+
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;

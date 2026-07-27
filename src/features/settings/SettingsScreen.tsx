@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -15,7 +16,15 @@ import type {
   SharedStorageSettingsResponse,
   SharedStorageSettingsUpdate,
   SshCredentialsUpdate,
+  VastBrowserAutomationStatus,
+  VastBrowserBillingAction,
+  VastBrowserGeneratedApiKeyResult,
 } from "../../lib/types";
+import {
+  VAST_API_KEY_URL,
+  VAST_BILLING_URL,
+  VAST_LOGIN_URL,
+} from "../../lib/constants";
 
 type SettingsSection =
   | "profile"
@@ -50,7 +59,16 @@ interface Props {
   appState: PersistedAppState;
   busy: boolean;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
+  vastAutomationStatus: VastBrowserAutomationStatus | null;
   onSaveApiKey: (apiKey: string) => Promise<void>;
+  onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
+  onConnectVastBrowser: () => Promise<unknown>;
+  onGenerateVastApiKey: (
+    apiKeyName?: string,
+  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
+  onOpenVastBillingBrowser: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<unknown>;
   onSavePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
@@ -171,7 +189,12 @@ export function SettingsScreen({
   appState,
   busy,
   sharedStorageSettings,
+  vastAutomationStatus,
   onSaveApiKey,
+  onRefreshVastAutomationStatus,
+  onConnectVastBrowser,
+  onGenerateVastApiKey,
+  onOpenVastBillingBrowser,
   onSavePlatformCredentials,
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
@@ -184,6 +207,7 @@ export function SettingsScreen({
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
+  const [vastAutomationMessage] = useState<string | null>(null);
   const [connectionProvider, setConnectionProvider] = useState<"wireguard">(
     "wireguard",
   );
@@ -285,6 +309,20 @@ export function SettingsScreen({
     void onLoadSharedStorageSettings();
   }, []);
 
+  void vastAutomationStatus;
+  void onRefreshVastAutomationStatus;
+  void onConnectVastBrowser;
+  void onGenerateVastApiKey;
+  void onOpenVastBillingBrowser;
+
+  async function openExternalUrl(url: string) {
+    try {
+      await openUrl(url);
+    } catch {
+      window.open(url, "_blank", "noopener,noreferrer");
+    }
+  }
+
   const profilePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
@@ -357,6 +395,42 @@ export function SettingsScreen({
           </Button>
         </div>
       </div>
+      <div className="mt-4 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.05rem] text-[#b4d7f4]">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          Vast.ai Links
+        </h3>
+        <p className="mt-2 leading-snug">
+          Use your normal browser for Vast.ai account access. Log in there, manage billing, create an API key, and then paste that API key into Noland.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-3">
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void openExternalUrl(VAST_LOGIN_URL)}
+          >
+            Open Vast.ai Login
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() => void openExternalUrl(VAST_BILLING_URL)}
+          >
+            Open Vast.ai Billing
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
+          >
+            Open API Key Page
+          </Button>
+        </div>
+        <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
+          <p>Use the normal browser pages above, then save the API key here.</p>
+          {vastAutomationMessage ? <p className="text-neon-cyan">{vastAutomationMessage}</p> : null}
+        </div>
+      </div>
+
       <div className="mt-4 grid gap-3">
         <InputField
           label="Vast API Key"
@@ -364,12 +438,19 @@ export function SettingsScreen({
           type="password"
           onChange={(event) => setApiKey(event.target.value)}
         />
-        <div>
+        <div className="flex flex-wrap gap-3">
           <Button
             disabled={busy || apiKey.trim().length < 16}
             onClick={() => onSaveApiKey(apiKey.trim())}
           >
             Save API Key
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
+          >
+            Open API Key Page
           </Button>
         </div>
       </div>
@@ -983,9 +1064,7 @@ export function SettingsScreen({
         Connection Provider
       </h2>
       <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
-        Noland now uses a managed GotaTun-backed WireGuard-compatible tunnel
-        for the desktop connection flow. The app brings the tunnel up locally
-        and verifies it before continuing to Moonlight pairing.
+        Noland now uses a managed secure tunnel for the desktop connection flow. The app brings the connection up locally and verifies it before continuing to streaming setup.
       </p>
 
       <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
@@ -993,12 +1072,10 @@ export function SettingsScreen({
           Active Desktop Tunnel Mode
         </h3>
         <p className="mt-2 text-[1.15rem] text-white">
-          Managed GotaTun / WireGuard-compatible tunnel
+          Managed secure tunnel
         </p>
         <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
-          Tailscale is retired from the provisioning pipeline. Keep this set to
-          the managed tunnel option so Noland can configure the local desktop
-          connection automatically.
+          Keep this set to the managed tunnel option so Noland can configure the local desktop connection automatically.
         </p>
       </div>
 

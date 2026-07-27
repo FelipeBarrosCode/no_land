@@ -3,10 +3,7 @@ import { Button } from "../../components/ui/Button";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
-import {
-  MOONLIGHT_DOWNLOAD_URL,
-  WIREGUARD_DOWNLOAD_URL,
-} from "../../lib/constants";
+
 import type {
   OrchestrationState,
   PersistedAppState,
@@ -116,12 +113,8 @@ export function PostWireguardModal({
     setup.lastError?.stage === "moonlight_pin_received" ||
     setup.lastError?.stage === "sunshine_pin_submitting";
   const pairingSession = activeMoonlightPairing;
-  const installLinkClass =
-    "inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white";
-
   const instructions = useMemo(
     () => [
-      "Install GotaTun on this computer if it is not already available.",
       "Click Start Managed Tunnel below.",
       "Approve elevation if your operating system prompts for it.",
       "Let Noland verify tunnel connectivity automatically before continuing.",
@@ -195,37 +188,15 @@ export function PostWireguardModal({
         {isWireguardPhase ? (
           <>
             <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
-              Noland is ready to bring up your managed local tunnel. Start the
-              GotaTun-backed tunnel flow below and the app will verify
-              connectivity before moving on to Moonlight setup.
+              Noland is ready to bring up the managed local tunnel and will verify connectivity before moving on to streaming setup.
             </p>
             <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
               <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
-                What to install first
+                Managed by Noland
               </h4>
               <p className="mt-2">
-                Install GotaTun on this computer. Noland uses it as the local
-                WireGuard-compatible userspace tunnel backend and will keep using
-                the generated config automatically.
+                The secure connection flow is handled by Noland inside the app. You only need to approve local permissions if your operating system asks.
               </p>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <a
-                  href={WIREGUARD_DOWNLOAD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={installLinkClass}
-                >
-                  Download GotaTun
-                </a>
-                <a
-                  href={MOONLIGHT_DOWNLOAD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                  className={installLinkClass}
-                >
-                  Download Moonlight
-                </a>
-              </div>
             </div>
 
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-[1.08rem] leading-snug text-[#cfe7ff]">
@@ -309,31 +280,20 @@ export function PostWireguardModal({
                 </p>
                 <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
                   <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
-                    Moonlight setup checklist
+                    Streaming setup checklist
                   </h4>
                   <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
                     <li>
-                      Install Moonlight on this computer if you have not already.
-                    </li>
-                    <li>
-                      Open Moonlight and add the PC at{" "}
+                      Keep Noland open while the secure connection finishes on{" "}
                       <span className="text-neon-cyan">{moonlightHost}</span>.
                     </li>
                     <li>
-                      When the pairing handoff unlocks, let Noland generate the
-                      pairing PIN automatically here.
+                      Wait for the pairing handoff to unlock inside the app.
+                    </li>
+                    <li>
+                      Let Noland generate the pairing PIN automatically here.
                     </li>
                   </ol>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    <a
-                      href={MOONLIGHT_DOWNLOAD_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className={installLinkClass}
-                    >
-                      Download Moonlight
-                    </a>
-                  </div>
                 </div>
               </>
             ) : (
@@ -349,10 +309,8 @@ export function PostWireguardModal({
                   </h4>
                   <p className="mt-2">
                     {moonlightChecked
-                      ? setup.moonlightInstalled
-                        ? "Moonlight was detected on this machine. Use the pairing handoff below."
-                        : "Moonlight was not detected on this machine. You can still use the pairing handoff below, or install Moonlight locally if you want the fallback client available."
-                      : "Moonlight setup is still in progress."}
+                      ? "Streaming setup is ready. Use the pairing handoff below."
+                      : "Streaming setup is still in progress."}
                   </p>
                 </div>
               </>

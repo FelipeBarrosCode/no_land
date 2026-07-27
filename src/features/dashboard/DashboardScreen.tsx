@@ -10,10 +10,9 @@ import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { resolveMoonlightDownloadUrl } from "../../lib/backend";
 import {
-  MOONLIGHT_DOWNLOAD_URL,
-  WIREGUARD_DOWNLOAD_URL,
+  VAST_BILLING_URL,
+  VAST_API_KEY_URL,
 } from "../../lib/constants";
 import type {
   OfferCandidate,
@@ -22,6 +21,8 @@ import type {
   ServerPreferences,
   SharedStorageObjectEntry,
   EmbeddedMoonlightInstanceStatus,
+  VastBrowserBillingAction,
+  VastWalletSummary,
 } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
@@ -36,6 +37,7 @@ interface Props {
   offers: OfferCandidate[];
   rentedInstances: RentedInstanceSummary[];
   embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null;
+  vastWalletSummary: VastWalletSummary | null;
   searchingOffers: boolean;
   offersPage: number;
   offersHasNextPage: boolean;
@@ -53,6 +55,10 @@ interface Props {
     longitude: number;
   }) => Promise<void>;
   onLoadRentedInstances: () => Promise<void>;
+  onRefreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
+  onOpenVastBillingBrowser: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<unknown>;
   onStartPlayExisting: (instanceId: number) => Promise<string | null>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
@@ -94,6 +100,7 @@ export function DashboardScreen({
   offers,
   rentedInstances,
   embeddedMoonlightStatus,
+  vastWalletSummary,
   searchingOffers,
   offersPage,
   offersHasNextPage,
@@ -105,6 +112,8 @@ export function DashboardScreen({
   onPreviousOffersPage,
   onManualLocationSave,
   onLoadRentedInstances,
+  onRefreshVastWalletSummary,
+  onOpenVastBillingBrowser,
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
@@ -124,6 +133,7 @@ export function DashboardScreen({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [connectionInfoModalType, setConnectionInfoModalType] = useState<
@@ -134,12 +144,15 @@ export function DashboardScreen({
   const blockingDetail = blockingAction?.detail ?? null;
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
 
-  async function handleMoonlightDownload() {
-    const downloadUrl = await resolveMoonlightDownloadUrl();
+  void onOpenVastBillingBrowser;
+
+  const walletAmountLabel = vastWalletSummary?.displayAmount || "--";
+
+  async function openExternalUrl(url: string) {
     try {
-      await openUrl(downloadUrl);
+      await openUrl(url);
     } catch {
-      window.open(downloadUrl, "_blank", "noopener,noreferrer");
+      window.open(url, "_blank", "noopener,noreferrer");
     }
   }
 
@@ -213,6 +226,14 @@ export function DashboardScreen({
     setExportInstanceId(null);
   }
 
+  async function handleOpenWalletBilling(action?: VastBrowserBillingAction) {
+    if (action === "open-auto-topup") {
+      await openExternalUrl(VAST_BILLING_URL);
+      return;
+    }
+    await openExternalUrl(VAST_BILLING_URL);
+  }
+
   function openTutorial() {
     setTutorialStep(0);
     setTutorialOpen(true);
@@ -248,6 +269,9 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={() => setWalletModalOpen(true)}>
+              Wallet {walletAmountLabel}
+            </Button>
             <Button variant="ghost" onClick={openTutorial}>
               <SpriteIcon icon="help" />
               <span className="ml-1">Help</span>
@@ -265,8 +289,6 @@ export function DashboardScreen({
         {showDashboardGuidance ? (
           <section className="grid gap-4 md:grid-cols-3">
             <Card
-              interactive
-              onClick={handleMoonlightDownload}
               className="pixel-frame min-h-40 flex flex-col justify-center p-4"
             >
               <div className="flex items-center justify-between">
@@ -283,28 +305,10 @@ export function DashboardScreen({
                 </div>
               </div>
               <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-                <a
-                  href={MOONLIGHT_DOWNLOAD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Download Moonlight
-                </a>
+                Managed Streaming
               </h2>
               <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
-                Download and install the official client for your OS to stream
-                remote gameplay with ultra-low latency. Noland Connect
-                automatically updates{" "}
-                <a
-                  className="text-neon-cyan underline underline-offset-2 hover:text-white"
-                  href={MOONLIGHT_DOWNLOAD_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Moonlight
-                </a>{" "}
-                host configuration details and optimises streaming protocols
-                after provisioning.
+                Noland now handles the streaming and connection flow inside the app. Just complete Vast.ai billing and API key setup, then continue from the dashboard.
               </p>
             </Card>
 
@@ -329,12 +333,10 @@ export function DashboardScreen({
                     </div>
                   </div>
                   <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
-                    Managed GotaTun Tunnel
+                    Managed Secure Connection
                   </h2>
                   <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
-                    Noland activates and verifies a local WireGuard-compatible
-                    userspace tunnel for you instead of relying on a manual app
-                    import flow.
+                    Noland activates and verifies the secure connection flow for you inside the app before moving on to streaming setup.
                   </p>
                 </div>
               </Card>
@@ -663,6 +665,81 @@ export function DashboardScreen({
         onUpdateServerPreferences={onSaveServerPreferences}
       />
 
+      {walletModalOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
+          <div className="glass-panel pixel-frame crt-surface w-full max-w-lg p-6">
+            <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-3">
+              <div>
+                <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
+                  Vast.ai Wallet
+                </p>
+                <h3 className="mt-1 font-display text-lg text-white">
+                  {walletAmountLabel}
+                </h3>
+              </div>
+              <Button variant="ghost" onClick={() => setWalletModalOpen(false)}>
+                Close
+              </Button>
+            </div>
+
+            <p className="text-[1.15rem] leading-snug text-[#bfd3ee]">
+              Open the correct Vast.ai page in your normal browser to add account credit, configure automatic top-ups, or manage API keys.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              <Button
+                className="w-full justify-center"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("open-add-credit")}
+              >
+                Add More Credits
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("open-auto-topup")}
+              >
+                Add Credits at a Limit
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("snapshot")}
+              >
+                Open Billing Overview
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
+              >
+                Open API Key Page
+              </Button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#3e4270] pt-4 text-[1rem] text-[#8db7d8]">
+              <div className="space-y-1">
+                <p>Amount in account: {walletAmountLabel}</p>
+                <p>
+                  Source: {vastWalletSummary?.source === "vast_api" ? "Vast API" : "Unavailable"}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void onRefreshVastWalletSummary()}
+              >
+                Refresh Balance
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <SharedStorageSyncModal
         open={syncInstanceId !== null}
         busy={busy || instanceActionRunning}
@@ -700,18 +777,14 @@ export function DashboardScreen({
 
             <div className="space-y-4 text-[1.2rem] leading-relaxed text-[#c5d8ec]">
               <p>
-                <strong>GotaTun</strong> is the local userspace tunnel backend
-                Noland uses for the desktop connection flow. It brings up a
-                WireGuard-compatible tunnel directly from the generated config.
+                Noland manages the secure desktop connection flow for you inside the app.
               </p>
               <div>
                 <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
                   How it works
                 </p>
                 <p className="text-[1.15rem] text-[#b9cce2]">
-                  Noland generates the tunnel config, starts the managed tunnel
-                  locally, verifies connectivity to the remote instance, and
-                  then continues into Sunshine and Moonlight pairing.
+                  Noland generates the connection config, starts the managed link locally, verifies connectivity to the remote instance, and then continues into streaming setup.
                 </p>
               </div>
               <div>
@@ -719,28 +792,19 @@ export function DashboardScreen({
                   Requirements
                 </p>
                 <p className="text-[1.15rem] text-[#b9cce2]">
-                  Install GotaTun on this machine. On macOS and Linux you may be
-                  prompted for elevation so the tunnel interface and routes can
-                  be configured.
+                  No separate tunnel, Moonlight, Tailscale, or WireGuard setup is required from you. If macOS or Linux asks for elevation, just approve it so Noland can finish local configuration.
                 </p>
               </div>
             </div>
 
             <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-[#3e4270] pt-4">
-              <a
-                href={WIREGUARD_DOWNLOAD_URL}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white"
-              >
-                Download GotaTun
-              </a>
               <Button
                 variant="secondary"
                 onClick={() => setConnectionInfoModalType(null)}
               >
-                Close
+                Got it
               </Button>
+
             </div>
           </div>
         </div>

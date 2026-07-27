@@ -27,6 +27,25 @@ function RootRoute() {
 
   const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
+  const vastBrowserAutomationStatus = useAppStore(
+    (state) => state.vastBrowserAutomationStatus,
+  );
+  const connectVastBrowserSession = useAppStore(
+    (state) => state.connectVastBrowserSession,
+  );
+  const refreshVastBrowserAutomationStatus = useAppStore(
+    (state) => state.refreshVastBrowserAutomationStatus,
+  );
+  const generateVastApiKeyViaBrowserSession = useAppStore(
+    (state) => state.generateVastApiKeyViaBrowserSession,
+  );
+  const openVastBillingBrowserSession = useAppStore(
+    (state) => state.openVastBillingBrowserSession,
+  );
+  const vastWalletSummary = useAppStore((state) => state.vastWalletSummary);
+  const refreshVastWalletSummary = useAppStore(
+    (state) => state.refreshVastWalletSummary,
+  );
   const discoverOffers = useAppStore((state) => state.discoverOffers);
   const nextOffersPage = useAppStore((state) => state.nextOffersPage);
   const previousOffersPage = useAppStore((state) => state.previousOffersPage);
@@ -86,7 +105,17 @@ function RootRoute() {
   }
 
   if (!appState.onboardingCompleted) {
-    return <OnboardingScreen busy={busy} onSubmit={runOnboarding} />;
+    return (
+      <OnboardingScreen
+        busy={busy}
+        onSubmit={runOnboarding}
+        vastAutomationStatus={vastBrowserAutomationStatus}
+        onConnectVastBrowser={connectVastBrowserSession}
+        onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
+        onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
+        onOpenVastBillingBrowser={openVastBillingBrowserSession}
+      />
+    );
   }
 
   return (
@@ -101,11 +130,14 @@ function RootRoute() {
       busy={busy}
       instanceActionRunning={instanceActionRunning}
       blockingAction={blockingAction}
+      vastWalletSummary={vastWalletSummary}
       onSearchOffers={discoverOffers}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
       onManualLocationSave={saveManualLocation}
       onLoadRentedInstances={loadRentedInstances}
+      onRefreshVastWalletSummary={refreshVastWalletSummary}
+      onOpenVastBillingBrowser={openVastBillingBrowserSession}
       onStartPlayExisting={startPlayExisting}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
@@ -238,6 +270,21 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
+  const vastBrowserAutomationStatus = useAppStore(
+    (state) => state.vastBrowserAutomationStatus,
+  );
+  const refreshVastBrowserAutomationStatus = useAppStore(
+    (state) => state.refreshVastBrowserAutomationStatus,
+  );
+  const connectVastBrowserSession = useAppStore(
+    (state) => state.connectVastBrowserSession,
+  );
+  const generateVastApiKeyViaBrowserSession = useAppStore(
+    (state) => state.generateVastApiKeyViaBrowserSession,
+  );
+  const openVastBillingBrowserSession = useAppStore(
+    (state) => state.openVastBillingBrowserSession,
+  );
   const saveConnectionProvider = useAppStore(
     (state) => state.saveConnectionProvider,
   );
@@ -350,7 +397,12 @@ export function App() {
                   appState={appState}
                   busy={busy}
                   sharedStorageSettings={sharedStorageSettings}
+                  vastAutomationStatus={vastBrowserAutomationStatus}
                   onSaveApiKey={saveVastApiKey}
+                  onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
+                  onConnectVastBrowser={connectVastBrowserSession}
+                  onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
+                  onOpenVastBillingBrowser={openVastBillingBrowserSession}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}

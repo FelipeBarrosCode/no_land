@@ -66,6 +66,11 @@ import {
   getInstanceMoonlightPipelineStatus,
   prepareInstanceMoonlightPairing,
   completeInstanceMoonlightPairing,
+  generateVastApiKeyFromBrowserSession as generateVastApiKeyFromBrowserSessionCommand,
+  getVastBrowserAutomationStatus as getVastBrowserAutomationStatusCommand,
+  openVastBillingBrowserSession as openVastBillingBrowserSessionCommand,
+  startVastBrowserAuthSession as startVastBrowserAuthSessionCommand,
+  getVastWalletSummary as getVastWalletSummaryCommand,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -103,6 +108,12 @@ import type {
   ReachabilityResult,
   SetupStage,
   SunshineVerificationResult,
+  VastBrowserAuthSessionResult,
+  VastBrowserAutomationStatus,
+  VastBrowserBillingAction,
+  VastBrowserBillingSessionResult,
+  VastBrowserGeneratedApiKeyResult,
+  VastWalletSummary,
 } from "../lib/types";
 
 interface AppStore {
@@ -121,6 +132,8 @@ interface AppStore {
   serverPickerOpen: boolean;
   error: string | null;
   _eventsBound: boolean;
+  vastBrowserAutomationStatus: VastBrowserAutomationStatus | null;
+  vastWalletSummary: VastWalletSummary | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
   setServerPickerOpen: (open: boolean) => void;
@@ -134,6 +147,15 @@ interface AppStore {
   startPlayExisting: (instanceId: number) => Promise<string | null>;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
+  refreshVastBrowserAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
+  connectVastBrowserSession: () => Promise<VastBrowserAuthSessionResult | null>;
+  generateVastApiKeyViaBrowserSession: (
+    apiKeyName?: string,
+  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
+  openVastBillingBrowserSession: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<VastBrowserBillingSessionResult | null>;
+  refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
   saveTailscaleApiKey: (apiKey: string) => Promise<void>;
   saveConnectionProvider: (payload: {
     connectionProvider: "wireguard" | "tailscale";
@@ -661,6 +683,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     serverPickerOpen: false,
     error: null,
     _eventsBound: false,
+    vastBrowserAutomationStatus: null,
+    vastWalletSummary: null,
     sharedStorageSettings: null,
     backupStatus: null,
     instanceBackupStatus: null,
@@ -678,17 +702,25 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const [appState, logs, postWireguardSetup] = await Promise.all([
-          getAppState(),
-          getProvisioningLogs(),
-          getSetupStatus(),
-        ]);
+        const [appState, logs, postWireguardSetup, vastBrowserAutomationStatus] =
+          await Promise.all([
+            getAppState(),
+            getProvisioningLogs(),
+            getSetupStatus(),
+            getVastBrowserAutomationStatusCommand().catch(() => null),
+          ]);
         let rentedInstances: RentedInstanceSummary[] = [];
+        let vastWalletSummary: VastWalletSummary | null = null;
         if (
           appState.onboardingCompleted &&
           appState.credentials.vastApiKey.trim().length > 0
         ) {
-          rentedInstances = await getRentedInstances();
+          const [instances, wallet] = await Promise.all([
+            getRentedInstances(),
+            getVastWalletSummaryCommand().catch(() => null),
+          ]);
+          rentedInstances = instances;
+          vastWalletSummary = wallet;
         }
 
         set({
@@ -698,6 +730,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           },
           logs,
           rentedInstances,
+          vastBrowserAutomationStatus,
+          vastWalletSummary,
           loading: false,
         });
       } catch (error) {
@@ -856,11 +890,122 @@ export const useAppStore = create<AppStore>((set, get) => {
       set({ busy: true, error: null });
       try {
         const appState = await updateVastApiKey(apiKey);
-        const rentedInstances = await getRentedInstances();
-        set({ appState, rentedInstances, busy: false });
+        const [rentedInstances, vastWalletSummary] = await Promise.all([
+          getRentedInstances(),
+          getVastWalletSummaryCommand().catch(() => null),
+        ]);
+        set({ appState, rentedInstances, vastWalletSummary, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
       }
+    },
+
+    refreshVastBrowserAutomationStatus: async () => {
+      return runBusyTask(
+        {
+          key: "vast.browser.status",
+          label: "Checking Vast browser automation",
+          detail: "Refreshing reusable Vast.ai browser-session status.",
+          blocking: false,
+        },
+        async () => {
+          const status = await getVastBrowserAutomationStatusCommand();
+          set({ vastBrowserAutomationStatus: status });
+          return status;
+        },
+        null,
+      );
+    },
+
+    connectVastBrowserSession: async () => {
+      return runBusyTask(
+        {
+          key: "vast.browser.connect",
+          label: "Connecting Vast.ai account",
+          detail:
+            "Launching a managed Chrome session. Complete Vast.ai login, then close the browser window when finished.",
+          blocking: true,
+        },
+        async () => {
+          const result = await startVastBrowserAuthSessionCommand();
+          set({ vastBrowserAutomationStatus: result });
+          return result;
+        },
+        null,
+      );
+    },
+
+    generateVastApiKeyViaBrowserSession: async (apiKeyName) => {
+      return runBusyTask(
+        {
+          key: "vast.browser.apiKey",
+          label: "Generating Vast.ai API key",
+          detail:
+            "Reusing the saved Vast.ai browser session to create an API key.",
+          blocking: true,
+        },
+        async () => {
+          const result = await generateVastApiKeyFromBrowserSessionCommand(
+            apiKeyName ? { apiKeyName } : undefined,
+          );
+          const appState = await getAppState();
+          const [rentedInstances, vastWalletSummary] = appState.credentials.vastApiKey.trim()
+            ? await Promise.all([
+                getRentedInstances().catch(() => []),
+                getVastWalletSummaryCommand().catch(() => null),
+              ])
+            : [[], null];
+          set({
+            appState,
+            rentedInstances,
+            vastBrowserAutomationStatus: result,
+            vastWalletSummary,
+          });
+          return result;
+        },
+        null,
+      );
+    },
+
+    openVastBillingBrowserSession: async (action) => {
+      return runBusyTask(
+        {
+          key: "vast.browser.billing",
+          label: "Opening Vast.ai billing",
+          detail:
+            "Launching a saved-session Vast.ai billing browser. Close that browser window when you are done.",
+          blocking: true,
+        },
+        async () => {
+          const result = await openVastBillingBrowserSessionCommand(
+            action ? { action } : undefined,
+          );
+          const appState = get().appState;
+          const vastWalletSummary = appState?.credentials.vastApiKey.trim()
+            ? await getVastWalletSummaryCommand().catch(() => null)
+            : null;
+          set({ vastBrowserAutomationStatus: result, vastWalletSummary });
+          return result;
+        },
+        null,
+      );
+    },
+
+    refreshVastWalletSummary: async () => {
+      return runBusyTask(
+        {
+          key: "vast.wallet.summary",
+          label: "Refreshing Vast.ai wallet",
+          detail: "Fetching your current Vast.ai account balance.",
+          blocking: false,
+        },
+        async () => {
+          const summary = await getVastWalletSummaryCommand();
+          set({ vastWalletSummary: summary });
+          return summary;
+        },
+        null,
+      );
     },
 
     saveTailscaleApiKey: async (apiKey) => {
