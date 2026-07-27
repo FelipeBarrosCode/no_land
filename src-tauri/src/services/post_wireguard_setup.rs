@@ -29,6 +29,7 @@ use super::{
     remote_exec::RemoteExec,
     ssh_keys::SshKeyService,
     tailscale::TailscaleService,
+    wireguard::setup_local_wireguard_client,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -197,7 +198,7 @@ pub async fn initialize_post_wireguard_flow(
             OrchestrationState::WireGuardConfigGenerated,
             "New instance detected",
             Some(
-                "This is a different instance. WireGuard app setup and verification are required again before Sunshine/Moonlight setup."
+                "This is a different instance. The managed secure tunnel must be re-applied and verified again before Sunshine/Moonlight setup."
                     .to_string(),
             ),
             false,
@@ -212,24 +213,9 @@ pub async fn setup_wireguard_app_handoff(
     app: &AppHandle,
     context: &AppContext,
 ) -> AppResult<PostWireGuardSetupState> {
-    let os = OsDetection::new();
-    open_wireguard_app()?;
-
-    let next_state = if os.is_macos() {
-        OrchestrationState::WireGuardWaitingForImport
-    } else {
-        OrchestrationState::WireGuardWaitingForActivation
-    };
-    let next_stage = if os.is_macos() {
-        SetupStage::WireguardWaitingForImport
-    } else {
-        SetupStage::WireguardWaitingForActivation
-    };
-    let next_status = if os.is_macos() {
-        WireGuardSetupStatus::WaitingForUserImport
-    } else {
-        WireGuardSetupStatus::WaitingForUserActivation
-    };
+    let config_path = active_wireguard_config_path(context).await?;
+    let instance_id = active_instance_id(context).await?;
+    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
 
     context
         .update_state(|state| {
@@ -246,35 +232,37 @@ pub async fn setup_wireguard_app_handoff(
         app,
         context,
         OrchestrationState::WireGuardAppHandoffStarted,
-        "Opening WireGuard app",
-        None,
+        "Starting managed secure tunnel",
+        Some(format!(
+            "Applying the generated config with Noland's GotaTun-backed userspace tunnel runner: {}",
+            config_path.display()
+        )),
         false,
     )
     .await;
 
-    let app_state = context
+    let activation_message = setup_local_wireguard_client(&config_path)?;
+
+    context
         .update_state(|state| {
-            state.post_wireguard_setup.stage = next_stage;
-            state.post_wireguard_setup.wireguard_setup_status = next_status;
-            state.orchestration_state = next_state;
+            state.post_wireguard_setup.stage = SetupStage::WireguardVerifying;
+            state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Verifying;
+            state.orchestration_state = OrchestrationState::WireGuardVerifying;
         })
         .await?;
 
     emit_post_wireguard_event(
         app,
         context,
-        next_state,
-        if os.is_macos() {
-            "Import the generated tunnel into WireGuard, then activate it"
-        } else {
-            "Activate the imported WireGuard tunnel in the WireGuard app"
-        },
-        Some(format!("Target host: {}", TUNNEL_HOST)),
+        OrchestrationState::WireGuardVerifying,
+        "Managed tunnel activated",
+        Some(activation_message),
         false,
     )
     .await;
 
-    Ok(app_state.post_wireguard_setup)
+    let _ = verify_wireguard_connection(app, context).await?;
+    Ok(context.state.read().await.post_wireguard_setup.clone())
 }
 
 pub async fn verify_wireguard_connection(
@@ -345,7 +333,7 @@ pub async fn verify_wireguard_connection(
             SetupStage::WireguardWaitingForActivation,
             OrchestrationState::WireGuardWaitingForActivation,
             "wireguard_unreachable",
-            "We could not reach 10.77.0.1 yet. Make sure the WireGuard tunnel is imported and active.",
+            "We could not reach 10.77.0.1 yet. Make sure the managed tunnel is active, then retry activation or verification.",
             result.error.clone(),
             true,
         )
@@ -607,7 +595,7 @@ pub async fn setup_moonlight_sunshine(
     };
 
     if setup_instance_id.is_none() || active_instance_id != setup_instance_id {
-        let error = "WireGuard setup context is for a different instance. Run WireGuard app setup again for this new provisioned instance.".to_string();
+        let error = "WireGuard setup context is for a different instance. Re-apply the managed tunnel for this new provisioned instance.".to_string();
         set_setup_failure(
             context,
             SetupStage::WireguardConfigGenerated,

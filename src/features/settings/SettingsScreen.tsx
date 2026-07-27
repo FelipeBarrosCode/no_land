@@ -69,9 +69,8 @@ interface Props {
   onTestSharedStorageConfig: () => Promise<string | null>;
   onLoadSharedStorageSettings: () => Promise<void>;
   onSaveConnectionProvider: (payload: {
-    connectionProvider: "wireguard" | "tailscale";
+    connectionProvider: "wireguard";
   }) => Promise<void>;
-  onSaveTailscaleApiKey: (apiKey: string) => Promise<void>;
 }
 
 function toNumber(value: string, fallback: number): number {
@@ -182,16 +181,12 @@ export function SettingsScreen({
   onTestSharedStorageConfig,
   onLoadSharedStorageSettings,
   onSaveConnectionProvider,
-  onSaveTailscaleApiKey,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
-  const [tailscaleApiKey, setTailscaleApiKey] = useState(
-    appState.credentials.tailscaleApiKey,
+  const [connectionProvider, setConnectionProvider] = useState<"wireguard">(
+    "wireguard",
   );
-  const [connectionProvider, setConnectionProvider] = useState<
-    "wireguard" | "tailscale"
-  >(appState.connectionProvider || "wireguard");
   const [platformUsername, setPlatformUsername] = useState(
     appState.credentials.appUsername,
   );
@@ -244,8 +239,7 @@ export function SettingsScreen({
 
   useEffect(() => {
     setApiKey(appState.credentials.vastApiKey);
-    setTailscaleApiKey(appState.credentials.tailscaleApiKey);
-    setConnectionProvider(appState.connectionProvider || "wireguard");
+    setConnectionProvider("wireguard");
     setPlatformUsername(appState.credentials.appUsername);
     setPlatformPassword(appState.credentials.appPassword);
     setSshUsername(
@@ -989,34 +983,23 @@ export function SettingsScreen({
         Connection Provider
       </h2>
       <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
-        Choose how to connect to your remote instance. WireGuard creates a
-        direct VPN tunnel. Tailscale uses your Tailscale mesh network for
-        simpler setup.
+        Noland now uses a managed GotaTun-backed WireGuard-compatible tunnel
+        for the desktop connection flow. The app brings the tunnel up locally
+        and verifies it before continuing to Moonlight pairing.
       </p>
 
-      <div className="mt-4 space-y-3">
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="radio"
-            name="connectionProvider"
-            value="wireguard"
-            checked={connectionProvider === "wireguard"}
-            onChange={() => setConnectionProvider("wireguard")}
-            className="text-neon-cyan"
-          />
-          <span className="text-[1.15rem] text-white">WireGuard</span>
-        </label>
-        <label className="flex items-center gap-3 cursor-pointer">
-          <input
-            type="radio"
-            name="connectionProvider"
-            value="tailscale"
-            checked={connectionProvider === "tailscale"}
-            onChange={() => setConnectionProvider("tailscale")}
-            className="text-neon-cyan"
-          />
-          <span className="text-[1.15rem] text-white">Tailscale</span>
-        </label>
+      <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          Active Desktop Tunnel Mode
+        </h3>
+        <p className="mt-2 text-[1.15rem] text-white">
+          Managed GotaTun / WireGuard-compatible tunnel
+        </p>
+        <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
+          Tailscale is retired from the provisioning pipeline. Keep this set to
+          the managed tunnel option so Noland can configure the local desktop
+          connection automatically.
+        </p>
       </div>
 
       <div className="mt-4">
@@ -1028,40 +1011,8 @@ export function SettingsScreen({
             })
           }
         >
-          Save Connection Provider
+          Save Managed Tunnel Preference
         </Button>
-      </div>
-
-      <div className="mt-4 border-t border-[#3b4067] pt-4">
-        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Tailscale Auth Key
-        </h3>
-        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Required if using Tailscale.{" "}
-          <a
-            className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
-            href="https://login.tailscale.com/admin/settings/keys"
-            target="_blank"
-            rel="noreferrer"
-          >
-            Get your Tailscale auth key
-          </a>
-          .
-        </p>
-        <InputField
-          label="Tailscale Auth Key"
-          type="password"
-          value={tailscaleApiKey}
-          onChange={(event) => setTailscaleApiKey(event.target.value)}
-        />
-        <div className="mt-3">
-          <Button
-            disabled={busy}
-            onClick={() => onSaveTailscaleApiKey(tailscaleApiKey.trim())}
-          >
-            Save Tailscale Auth Key
-          </Button>
-        </div>
       </div>
     </Card>
   );

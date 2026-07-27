@@ -3,7 +3,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { TAILSCALE_API_KEY_URL, VAST_API_KEY_URL } from "../../lib/constants";
+import { VAST_API_KEY_URL } from "../../lib/constants";
 import type { OnboardingPayload } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
@@ -17,7 +17,6 @@ interface FormState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
-  tailscaleApiKey: string;
 }
 
 export function OnboardingScreen({ busy, onSubmit }: Props) {
@@ -28,13 +27,11 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     appUsername: "",
     appPassword: "",
     vastApiKey: "",
-    tailscaleApiKey: "",
   });
   const [touched, setTouched] = useState<Record<keyof FormState, boolean>>({
     appUsername: false,
     appPassword: false,
     vastApiKey: false,
-    tailscaleApiKey: false,
   });
 
   const errors = useMemo(() => {
@@ -55,7 +52,6 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
       appUsername: true,
       appPassword: true,
       vastApiKey: true,
-      tailscaleApiKey: true,
     });
     if (hasErrors) {
       return;
@@ -65,7 +61,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
       appUsername: form.appUsername.trim(),
       appPassword: form.appPassword,
       vastApiKey: form.vastApiKey.trim(),
-      tailscaleApiKey: form.tailscaleApiKey.trim(),
+      tailscaleApiKey: "",
     });
   }
 
@@ -121,8 +117,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 >
                   Vast.ai API key
                 </a>
-                . We will generate an SSH key pair and connect your account
-                automatically.
+                . We will generate an SSH key pair, prepare the remote machine,
+                and use the managed GotaTun tunnel flow during provisioning.
               </p>
             </div>
 
@@ -191,36 +187,6 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 setTouched((prev) => ({ ...prev, vastApiKey: true }))
               }
               error={touched.vastApiKey ? errors.vastApiKey : undefined}
-            />
-            <InputField
-              label={
-                <span>
-                  <a
-                    className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
-                    href={TAILSCALE_API_KEY_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Tailscale
-                  </a>{" "}
-                  Auth Key
-                  <span className="ml-1 text-[1.0rem] text-[#8fb4d4]">
-                    (Optional)
-                  </span>
-                </span>
-              }
-              type="password"
-              placeholder="tskey-auth-xxxxx"
-              value={form.tailscaleApiKey}
-              onChange={(event) =>
-                setForm((prev) => ({
-                  ...prev,
-                  tailscaleApiKey: event.target.value,
-                }))
-              }
-              onBlur={() =>
-                setTouched((prev) => ({ ...prev, tailscaleApiKey: true }))
-              }
             />
           </div>
 

@@ -72,7 +72,10 @@ use crate::{
         ssh_keys::SshKeyService,
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
-        wireguard::read_local_wireguard_show_output,
+        wireguard::{
+            locate_gotatun_binary, read_local_wireguard_show_output,
+            reconnect_local_wireguard_client, setup_local_wireguard_client,
+        },
     },
     utils::redact::redact_secret,
 };
@@ -328,11 +331,29 @@ fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
             tool: "wireguard.exe".to_string(),
             found: os.command_exists("wireguard.exe"),
             path: os.resolve_command_path("wireguard.exe"),
-            required_for: "WireGuard service integration on Windows".to_string(),
+            required_for:
+                "legacy WireGuard runtime on Windows until the GotaTun/Wintun service is bundled"
+                    .to_string(),
             install_hint: os.install_hint_for_tool("wireguard.exe"),
             install_attempted,
             install_error,
         });
+    } else {
+        let gotatun_path = locate_gotatun_binary().map(|path| path.display().to_string());
+        checks.push(ToolCheck {
+            tool: "gotatun".to_string(),
+            found: gotatun_path.is_some(),
+            path: gotatun_path,
+            required_for: "managed userspace WireGuard tunnel runtime".to_string(),
+            install_hint: os.install_hint_for_tool("gotatun"),
+            install_attempted: false,
+            install_error: None,
+        });
+        checks.push(build_check("wg", "WireGuard control-plane configuration"));
+        checks.push(build_check(
+            "wg-quick",
+            "managed userspace tunnel activation",
+        ));
     }
 
     if os.is_linux() {
@@ -1833,9 +1854,9 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    open_wireguard_app()?;
+    let message = setup_local_wireguard_client(Path::new(&config_path))?;
 
-    Ok("WireGuard app opened. Import and activate the generated tunnel there.".to_string())
+    Ok(message)
 }
 
 #[tauri::command]
@@ -1891,9 +1912,9 @@ pub async fn reconnect_local_wireguard_client_quick(
         .into());
     }
 
-    open_wireguard_app()?;
+    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
 
-    Ok("WireGuard app opened. Use it to reconnect or toggle the tunnel.".to_string())
+    Ok(message)
 }
 
 #[tauri::command]
@@ -2474,8 +2495,14 @@ pub async fn update_connection_provider(
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
     let provider = match payload.connection_provider.as_str() {
-        "wireguard" => ConnectionProvider::Wireguard,
-        "tailscale" => ConnectionProvider::Tailscale,
+        "wireguard" | "gotatun" => ConnectionProvider::Wireguard,
+        "tailscale" => {
+            return Err(AppError::InvalidInput(
+                "Tailscale provisioning has been retired in this build. Noland now uses the managed GotaTun/WireGuard tunnel path."
+                    .to_string(),
+            )
+            .into());
+        }
         _ => {
             return Err(AppError::InvalidInput(format!(
                 "Unknown connection provider: {}",
@@ -3039,7 +3066,7 @@ fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), Fronte
     if payload.vast_api_key.trim().len() < 16 {
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
-    validate_tailscale_auth_key(payload.tailscale_api_key.trim())?;
+
     Ok(())
 }
 

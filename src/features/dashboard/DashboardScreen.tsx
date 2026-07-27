@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useNavigate } from "react-router-dom";
@@ -14,7 +14,6 @@ import { resolveMoonlightDownloadUrl } from "../../lib/backend";
 import {
   MOONLIGHT_DOWNLOAD_URL,
   WIREGUARD_DOWNLOAD_URL,
-  TAILSCALE_DOWNLOAD_URL,
 } from "../../lib/constants";
 import type {
   OfferCandidate,
@@ -88,10 +87,6 @@ interface Props {
   onListExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
-  onSaveConnectionProvider: (payload: {
-    connectionProvider: "wireguard" | "tailscale";
-  }) => Promise<void>;
-  onSaveTailscaleApiKey: (apiKey: string) => Promise<void>;
 }
 
 export function DashboardScreen({
@@ -125,8 +120,6 @@ export function DashboardScreen({
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
-  onSaveConnectionProvider,
-  onSaveTailscaleApiKey,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
@@ -134,15 +127,8 @@ export function DashboardScreen({
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [connectionInfoModalType, setConnectionInfoModalType] = useState<
-    "wireguard" | "tailscale" | null
+    "wireguard" | null
   >(null);
-  const [localTailscaleKey, setLocalTailscaleKey] = useState("");
-
-  useEffect(() => {
-    if (appState?.credentials?.tailscaleApiKey) {
-      setLocalTailscaleKey(appState.credentials.tailscaleApiKey);
-    }
-  }, [appState?.credentials?.tailscaleApiKey]);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -335,7 +321,7 @@ export function DashboardScreen({
                     </p>
                     <div className="flex items-center gap-2">
                       <AIPromptHelper
-                        topic="WireGuard Connection Option"
+                        topic="Managed Tunnel Connection Option"
                         promptText={APP_PROMPTS.wireguardCard}
                         variant="icon"
                       />
@@ -343,40 +329,12 @@ export function DashboardScreen({
                     </div>
                   </div>
                   <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
-                    WireGuard
+                    Managed GotaTun Tunnel
                   </h2>
                   <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
-                    Bare-bones process that manually requires setting up the
-                    connection.
-                  </p>
-                </div>
-              </Card>
-
-              <Card
-                interactive
-                onClick={() => setConnectionInfoModalType("tailscale")}
-                className="pixel-frame flex-1 flex flex-col justify-between p-4"
-              >
-                <div>
-                  <div className="flex items-center justify-between">
-                    <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                      Connection Type
-                    </p>
-                    <div className="flex items-center gap-2">
-                      <AIPromptHelper
-                        topic="Tailscale Connection Option"
-                        promptText={APP_PROMPTS.tailscaleCard}
-                        variant="icon"
-                      />
-                      <SpriteIcon icon="settings" />
-                    </div>
-                  </div>
-                  <h2 className="mt-2 font-display text-base text-neon-lime md:text-lg">
-                    Tailscale
-                  </h2>
-                  <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
-                    Requires downloading the Tailscale app and adding the API
-                    key.
+                    Noland activates and verifies a local WireGuard-compatible
+                    userspace tunnel for you instead of relying on a manual app
+                    import flow.
                   </p>
                 </div>
               </Card>
@@ -726,139 +684,56 @@ export function DashboardScreen({
       {connectionInfoModalType && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
           <div className="glass-panel pixel-frame crt-surface w-full max-w-xl p-6">
-            <div className="flex items-center justify-between mb-4 gap-2 border-b border-[#3e4270] pb-2">
+            <div className="mb-4 flex items-center justify-between gap-2 border-b border-[#3e4270] pb-2">
               <h3
                 className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-                data-text={
-                  connectionInfoModalType === "wireguard"
-                    ? "WireGuard Connection Info"
-                    : "Tailscale Connection Info"
-                }
+                data-text="Managed Tunnel Info"
               >
-                {connectionInfoModalType === "wireguard"
-                  ? "WireGuard Connection Info"
-                  : "Tailscale Connection Info"}
+                Managed Tunnel Info
               </h3>
               <AIPromptHelper
-                topic={
-                  connectionInfoModalType === "wireguard"
-                    ? "WireGuard VPN Connection"
-                    : "Tailscale VPN Connection"
-                }
-                promptText={
-                  connectionInfoModalType === "wireguard"
-                    ? APP_PROMPTS.wireguardModalInfo
-                    : APP_PROMPTS.tailscaleModalInfo
-                }
+                topic="Managed WireGuard-Compatible Tunnel"
+                promptText={APP_PROMPTS.wireguardModalInfo}
                 variant="both"
               />
             </div>
 
-            <div className="text-[1.2rem] leading-relaxed text-[#c5d8ec] space-y-4">
-              {connectionInfoModalType === "wireguard" ? (
-                <>
-                  <p>
-                    <strong>WireGuard</strong> is a bare-bones, high-performance
-                    VPN protocol that creates a secure direct tunnel to your
-                    instance.
-                  </p>
-                  <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">
-                      How it works
-                    </p>
-                    <p className="text-[1.15rem] text-[#b9cce2]">
-                      It requires manual setup: Noland generates a config
-                      profile which you download and manually import/activate
-                      inside your local WireGuard application.
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime mb-0.5">
-                      Requirements
-                    </p>
-                    <p className="text-[1.15rem] text-[#b9cce2]">
-                      Requires installing the official WireGuard client app on
-                      your system and importing the generated `.conf` files.
-                    </p>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <p>
-                    <strong>Tailscale</strong> is a configuration-free mesh VPN
-                    that connects your machines securely with zero port
-                    forwarding or manual config files.
-                  </p>
-                  <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">
-                      How it works
-                    </p>
-                    <p className="text-[1.15rem] text-[#b9cce2]">
-                      Download the Tailscale client app on your system, then
-                      save your Tailscale auth key. Noland handles the rest of
-                      the configuration automatically.
-                    </p>
-                  </div>
-                  <div>
-                    <p className="font-display text-[10px] uppercase tracking-[0.1em] text-neon-cyan mb-0.5">
-                      Requirements
-                    </p>
-                    <p className="text-[1.15rem] text-[#b9cce2]">
-                      Requires installing the Tailscale client application and
-                      configuring a Tailscale auth key in Noland.
-                    </p>
-                  </div>
-                </>
-              )}
-            </div>
-
-            {connectionInfoModalType === "tailscale" && (
-              <div className="mt-4 border-t border-[#3e4270] pt-4">
-                <p className="font-display text-[10px] uppercase tracking-[0.1em] text-white mb-2">
-                  Add Auth Key & Set Preferred
+            <div className="space-y-4 text-[1.2rem] leading-relaxed text-[#c5d8ec]">
+              <p>
+                <strong>GotaTun</strong> is the local userspace tunnel backend
+                Noland uses for the desktop connection flow. It brings up a
+                WireGuard-compatible tunnel directly from the generated config.
+              </p>
+              <div>
+                <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
+                  How it works
                 </p>
-                <div className="flex gap-2">
-                  <input
-                    type="password"
-                    placeholder="Enter Tailscale auth key (tskey-auth-...)"
-                    value={localTailscaleKey}
-                    onChange={(e) => setLocalTailscaleKey(e.target.value)}
-                    className="flex-1 border border-[#3d426f] bg-[#0f1430] px-3 py-1.5 text-[1.15rem] text-white outline-none focus:border-neon-cyan"
-                  />
-                  <Button
-                    disabled={busy}
-                    onClick={async () => {
-                      if (localTailscaleKey.trim()) {
-                        await onSaveTailscaleApiKey(localTailscaleKey.trim());
-                        await onSaveConnectionProvider({
-                          connectionProvider: "tailscale",
-                        });
-                        setConnectionInfoModalType(null);
-                      }
-                    }}
-                  >
-                    Save & Prefer
-                  </Button>
-                </div>
+                <p className="text-[1.15rem] text-[#b9cce2]">
+                  Noland generates the tunnel config, starts the managed tunnel
+                  locally, verifies connectivity to the remote instance, and
+                  then continues into Sunshine and Moonlight pairing.
+                </p>
               </div>
-            )}
+              <div>
+                <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
+                  Requirements
+                </p>
+                <p className="text-[1.15rem] text-[#b9cce2]">
+                  Install GotaTun on this machine. On macOS and Linux you may be
+                  prompted for elevation so the tunnel interface and routes can
+                  be configured.
+                </p>
+              </div>
+            </div>
 
             <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-[#3e4270] pt-4">
               <a
-                href={
-                  connectionInfoModalType === "wireguard"
-                    ? WIREGUARD_DOWNLOAD_URL
-                    : TAILSCALE_DOWNLOAD_URL
-                }
+                href={WIREGUARD_DOWNLOAD_URL}
                 target="_blank"
                 rel="noreferrer"
                 className="inline-flex items-center justify-center border border-[#61f7ff] bg-[#1b2f4d] px-4 py-2 font-display text-[11px] uppercase tracking-[0.12em] text-[#7cf8ff] transition duration-100 hover:bg-[#22466e] hover:text-white"
               >
-                Download{" "}
-                {connectionInfoModalType === "wireguard"
-                  ? "WireGuard"
-                  : "Tailscale"}{" "}
-                App
+                Download GotaTun
               </a>
               <Button
                 variant="secondary"

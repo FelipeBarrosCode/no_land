@@ -254,14 +254,10 @@ export function ProvisioningScreen({
         appState={appState}
         busy={busy}
         onSelectWireguard={onSetupWireguardAppHandoff}
-        onSelectTailscale={onSetupWireguardAppHandoff}
       />
 
       <PostWireguardModal
         open={
-          appState.orchestrationState === "ConfiguringTailscale" ||
-          appState.orchestrationState === "TailscaleConfigGenerated" ||
-          appState.orchestrationState === "TailscaleConnected" ||
           appState.orchestrationState === "WireGuardConfigGenerated" ||
           appState.orchestrationState === "WireGuardAppHandoffStarted" ||
           appState.orchestrationState === "WireGuardWaitingForImport" ||

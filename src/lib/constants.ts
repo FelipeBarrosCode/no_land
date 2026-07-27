@@ -5,8 +5,7 @@ export const TAILSCALE_API_KEY_URL =
   "https://login.tailscale.com/admin/settings/keys";
 export const MOONLIGHT_DOWNLOAD_URL =
   "https://github.com/moonlight-stream/moonlight-qt/releases";
-export const WIREGUARD_DOWNLOAD_URL = "https://www.wireguard.com/install/";
-export const TAILSCALE_DOWNLOAD_URL = "https://tailscale.com/download";
+export const WIREGUARD_DOWNLOAD_URL = "https://github.com/mullvad/gotatun";
 
 export const MOONLIGHT_DOWNLOADS: Record<string, string> = {
   windows: MOONLIGHT_DOWNLOAD_URL,
@@ -26,9 +25,6 @@ export const PROVISIONING_ORDER = [
   "ConfiguringWireGuard",
   "ConfiguringNvidiaHeadless",
   "SelectingConnectionProvider",
-  "ConfiguringTailscale",
-  "TailscaleConfigGenerated",
-  "TailscaleConnected",
   "WireGuardConfigGenerated",
   "WireGuardAppHandoffStarted",
   "WireGuardWaitingForImport",

@@ -33,7 +33,6 @@ use super::{
     sleep_inhibit::SleepInhibitService,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
-    tailscale::TailscaleService,
     vast_api::VastApiClient,
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
@@ -1319,84 +1318,23 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     // so orchestration should branch from the disk-backed snapshot rather than
     // relying only on the current in-memory lock state.
     let persisted_state = context.reload_state_from_disk().await?;
-    let connection_provider = persisted_state.connection_provider;
-
-    if connection_provider == ConnectionProvider::Tailscale {
-        let tailscale_api_key = persisted_state.credentials.tailscale_api_key.clone();
-
-        if tailscale_api_key.is_empty() {
-            return Err(AppError::Provisioning(format!(
-                "Tailscale API key is not configured. Add it in Settings > Connection or on the onboarding screen."
-            )));
-        }
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringTailscale,
-            "Setting up Tailscale on remote instance",
-            Some(format!("Instance {}", instance.id)),
-            false,
-        )
-        .await;
-
-        let result =
-            TailscaleService::provision_remote(&remote, &tailscale_api_key, instance.id).await?;
-
-        let tailscale_ip = result.remote_tailscale_ip.clone();
-
+    if persisted_state.connection_provider == ConnectionProvider::Tailscale {
+        warn!(
+            instance_id = instance.id,
+            "Tailscale selection is deprecated; continuing with the managed GotaTun/WireGuard provisioning path"
+        );
         context
             .update_state(|state| {
-                state.moonlight.host_address = tailscale_ip.clone();
-                state.moonlight.configured = true;
-                state.sunshine.configured = true;
-                state.connection_provider = ConnectionProvider::Tailscale;
-                // Also update provisioned_servers record
-                let index = state
+                state.connection_provider = ConnectionProvider::Wireguard;
+                if let Some(record) = state
                     .provisioned_servers
-                    .iter()
-                    .position(|r| r.instance_id == instance.id)
-                    .unwrap_or_else(|| {
-                        state
-                            .provisioned_servers
-                            .push(ProvisionedServerState::new(instance.id));
-                        state.provisioned_servers.len() - 1
-                    });
-                let record = &mut state.provisioned_servers[index];
-                record.moonlight_host_address = tailscale_ip.clone();
-                record.tailscale_client_ip = tailscale_ip.clone();
-                record.connection_provider = ConnectionProvider::Tailscale;
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance.id)
+                {
+                    record.connection_provider = ConnectionProvider::Wireguard;
+                }
             })
             .await?;
-
-        ensure_not_cancelled(&context)?;
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::TailscaleConfigGenerated,
-            "Tailscale configured successfully",
-            Some(format!("Remote IP: {}", tailscale_ip)),
-            false,
-        )
-        .await;
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::TailscaleConnected,
-            "Tailscale connected",
-            None,
-            false,
-        )
-        .await;
-
-        ensure_not_cancelled(&context)?;
-
-        // Proceed to Moonlight/Sunshine pairing instead of WireGuard handoff
-        initialize_post_tailscale_flow(&app, &context, instance.id, &tailscale_ip).await?;
-
-        return Ok(());
     }
 
     match vast.get_instance(instance.id).await {
@@ -2255,41 +2193,22 @@ async fn run_existing_instance_orchestration(
     };
 
     if existing_connection_provider == ConnectionProvider::Tailscale {
-        let mut tailscale_host =
-            load_moonlight_host_from_server_record(&context, instance.id).await;
-        if tailscale_host.is_none() {
-            let snapshot = context.state.read().await;
-            tailscale_host = snapshot
-                .provisioned_servers
-                .iter()
-                .find(|record| record.instance_id == instance.id)
-                .and_then(|record| {
-                    if record.tailscale_client_ip.trim().is_empty() {
-                        None
-                    } else {
-                        Some(record.tailscale_client_ip.clone())
-                    }
-                });
-        }
-        let tailscale_host = tailscale_host.ok_or_else(|| {
-            AppError::Provisioning(format!(
-                "Instance {} is marked as using Tailscale, but no saved Tailscale host was found in state.json.",
-                instance.id
-            ))
-        })?;
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::TailscaleConnected,
-            "Reusing saved Tailscale connection",
-            Some(format!("Remote IP: {}", tailscale_host)),
-            false,
-        )
-        .await;
-
-        initialize_post_tailscale_flow(&app, &context, instance.id, &tailscale_host).await?;
-        return Ok(());
+        warn!(
+            instance_id = instance.id,
+            "Existing instance was marked as Tailscale-backed; continuing with the managed GotaTun/WireGuard path"
+        );
+        context
+            .update_state(|state| {
+                state.connection_provider = ConnectionProvider::Wireguard;
+                if let Some(record) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance.id)
+                {
+                    record.connection_provider = ConnectionProvider::Wireguard;
+                }
+            })
+            .await?;
     }
 
     match vast.get_instance(instance.id).await {

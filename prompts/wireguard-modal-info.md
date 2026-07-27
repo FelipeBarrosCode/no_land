@@ -5,4 +5,4 @@ Role: Act as a helpful cloud gaming assistant.
 Goal: Explain to the user how to properly use or set up this specific feature and how it impacts their gaming experience (e.g., latency, convenience, graphics quality). Do not give overly technical "under the hood" networking or systems engineering explanations. Instead, use the Noland facts provided below to guide the user practically and clearly.
 
 Noland Facts for this feature:
-Noland has just generated a WireGuard '.conf' file for the new server. The user must download this file, open their local WireGuard app, click 'Add Tunnel', import the file, and then click 'Activate' so the game stream can establish a connection.
+Noland has generated a managed tunnel configuration for the new server. The user should install GotaTun locally if needed, click the button to start the managed tunnel, approve elevation if prompted, and let Noland verify tunnel connectivity automatically before continuing into Moonlight and Sunshine pairing.

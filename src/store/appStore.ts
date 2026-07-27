@@ -8,6 +8,7 @@ import {
   selectOffer,
   setManualLocation,
   setupWireguardClient,
+  reconnectLocalWireguardClientQuick,
   setupWireguardAppHandoff,
   startPlayExistingInstance,
   startPlayFlow,
@@ -480,10 +481,10 @@ const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   ConfiguringTailscale: "Configuring Tailscale",
   TailscaleConfigGenerated: "Tailscale config generated",
   TailscaleConnected: "Tailscale connected",
-  WireGuardConfigGenerated: "WireGuard config generated",
-  WireGuardAppHandoffStarted: "Opening WireGuard app",
-  WireGuardWaitingForImport: "Waiting for WireGuard import",
-  WireGuardWaitingForActivation: "Waiting for WireGuard activation",
+  WireGuardConfigGenerated: "Managed tunnel config generated",
+  WireGuardAppHandoffStarted: "Starting managed tunnel",
+  WireGuardWaitingForImport: "Preparing managed tunnel",
+  WireGuardWaitingForActivation: "Waiting for managed tunnel activation",
   WireGuardVerifying: "Verifying secure tunnel",
   WireGuardConnected: "Secure tunnel connected",
   MoonlightSunshineReadyToSetup: "Ready to set up Moonlight and Sunshine",
@@ -1014,12 +1015,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runBusyTask(
         {
           key: "wireguard.local.reconnect",
-          label: "Opening WireGuard",
-          detail: "Open the WireGuard app and manage the tunnel manually.",
+          label: "Reconnecting managed tunnel",
+          detail: "Restarting the local GotaTun-backed tunnel.",
         },
         async () => {
-          await openWireguardApp();
-          return "Opened WireGuard app.";
+          return await reconnectLocalWireguardClientQuick();
         },
         null,
       );
@@ -1029,8 +1029,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "wireguard.appHandoff",
-          label: "Opening WireGuard app",
-          detail: "Preparing your generated tunnel for the WireGuard app.",
+          label: "Starting managed tunnel",
+          detail: "Applying the generated config through the local GotaTun-backed tunnel flow.",
           blocking: true,
         },
         async () => {
@@ -1065,8 +1065,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "wireguard.open",
-          label: "Opening WireGuard",
-          detail: "Generating client config and launching the WireGuard app.",
+          label: "Exporting managed tunnel config",
+          detail: "Preparing the client config file for manual inspection or fallback use.",
         },
         async () => {
           await downloadWireguardConfig();
@@ -1614,9 +1614,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.wireguard.reconnect",
-          label: "Opening WireGuard / Tailscale",
+          label: "Reconnecting managed tunnel",
           detail:
-            "Open the WireGuard or Tailscale app and manage the tunnel manually.",
+            "Refreshing the remote tunnel state and local managed tunnel flow.",
           blocking: true,
         },
         async () => await reconnectInstanceWireguard(instanceId),

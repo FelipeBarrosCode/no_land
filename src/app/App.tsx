@@ -80,10 +80,6 @@ function RootRoute() {
   const listExportableStorageObjects = useAppStore(
     (state) => state.listExportableStorageObjects,
   );
-  const saveConnectionProvider = useAppStore(
-    (state) => state.saveConnectionProvider,
-  );
-  const saveTailscaleApiKey = useAppStore((state) => state.saveTailscaleApiKey);
 
   if (!appState) {
     return null;
@@ -125,8 +121,6 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
-      onSaveConnectionProvider={saveConnectionProvider}
-      onSaveTailscaleApiKey={saveTailscaleApiKey}
     />
   );
 }
@@ -244,7 +238,6 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
-  const saveTailscaleApiKey = useAppStore((state) => state.saveTailscaleApiKey);
   const saveConnectionProvider = useAppStore(
     (state) => state.saveConnectionProvider,
   );
@@ -367,7 +360,6 @@ export function App() {
                   onTestSharedStorageConfig={testSharedStorageConfig}
                   onLoadSharedStorageSettings={loadSharedStorageSettings}
                   onSaveConnectionProvider={saveConnectionProvider}
-                  onSaveTailscaleApiKey={saveTailscaleApiKey}
                 />
               ) : null
             }

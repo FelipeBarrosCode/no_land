@@ -1,7 +1,5 @@
 import {
   MOONLIGHT_DOWNLOAD_URL,
-  TAILSCALE_API_KEY_URL,
-  TAILSCALE_DOWNLOAD_URL,
   VAST_API_KEY_URL,
   WIREGUARD_DOWNLOAD_URL,
 } from "../../lib/constants";
@@ -64,36 +62,25 @@ export const tutorialSteps: TutorialStep[] = [
   },
   {
     eyebrow: "Step 7",
-    title: "Install your connection app",
+    title: "Install the managed tunnel dependency",
     description:
-      "Install WireGuard or Tailscale. WireGuard creates a direct VPN tunnel. Tailscale uses your Tailscale mesh network for an even simpler setup.",
-    links: [
-      { label: "Download WireGuard", url: WIREGUARD_DOWNLOAD_URL },
-      { label: "Download Tailscale", url: TAILSCALE_DOWNLOAD_URL },
-    ],
+      "Install GotaTun on your computer. Noland uses it to bring up the local managed WireGuard-compatible userspace tunnel during provisioning.",
+    links: [{ label: "Download GotaTun", url: WIREGUARD_DOWNLOAD_URL }],
   },
   {
-    eyebrow: "Step 8 (Optional)",
-    title: "Get a Tailscale auth key",
-    description:
-      "If you want to use Tailscale instead of WireGuard, grab your Tailscale auth key. Paste it in the optional field on the setup screen or in Settings > Connection later.",
-    linkLabel: "Tailscale Admin Keys",
-    linkUrl: TAILSCALE_API_KEY_URL,
-  },
-  {
-    eyebrow: "Step 9",
+    eyebrow: "Step 8",
     title: "Select a server",
     description:
       "After setup, pick a server inside Noland Connect. Choose the one that fits your location, budget, and performance needs.",
   },
   {
-    eyebrow: "Step 10",
-    title: "Connect when asked",
+    eyebrow: "Step 9",
+    title: "Start the managed tunnel when asked",
     description:
-      "When the app prompts you to choose a connection method, pick WireGuard or Tailscale. WireGuard requires importing a config file. Tailscale connects your devices through your mesh network automatically.",
+      "When the app reaches tunnel setup, let Noland start the managed GotaTun tunnel. You may need to approve elevation so routing and the tunnel interface can be configured locally.",
   },
   {
-    eyebrow: "Step 11",
+    eyebrow: "Step 10",
     title: "Follow the instructions",
     description:
       "Keep following the on-screen instructions during setup. The app will guide you through the remaining pairing steps for Sunshine and Moonlight.",
