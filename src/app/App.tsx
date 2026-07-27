@@ -100,6 +100,7 @@ function RootRoute() {
   const listExportableStorageObjects = useAppStore(
     (state) => state.listExportableStorageObjects,
   );
+  const applicationBundles = useAppStore((state) => state.applicationBundles);
 
   if (!appState) {
     return null;
@@ -154,6 +155,7 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
+      applicationBundles={applicationBundles}
     />
   );
 }

@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
-import type { SharedStorageObjectEntry } from "../../lib/types";
+import type { ApplicationBundle, SharedStorageObjectEntry } from "../../lib/types";
 
 interface Props {
   open: boolean;
   busy: boolean;
   instanceId: number | null;
+  bundles: ApplicationBundle[];
   onClose: () => void;
   onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onConfirmSync: (selectedPaths: string[]) => Promise<void>;
@@ -35,6 +36,7 @@ export function SharedStorageSyncModal({
   open,
   busy,
   instanceId,
+  bundles,
   onClose,
   onLoadObjects,
   onConfirmSync
@@ -153,13 +155,14 @@ export function SharedStorageSyncModal({
   };
 
   const roots = childrenMap.get("/") ?? [];
+  const committedBundles = bundles.filter((bundle) => bundle.backupStatus === "committed");
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame max-h-[90vh] w-full max-w-3xl overflow-hidden">
         <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">Sync From Blackblaze</h2>
+            <h2 className="font-display text-base text-white">Sync From Shared Storage</h2>
             <p className="text-[1.2rem] text-[#b4c8de]">Choose folders or files to sync to the remote machine.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
@@ -168,6 +171,39 @@ export function SharedStorageSyncModal({
         </div>
 
         <div className="max-h-[65vh] overflow-y-auto px-5 py-4">
+          <div className="mb-4 rounded border border-[#30365d] bg-[#11162a] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
+                  High-level bundles
+                </p>
+                <p className="mt-1 text-[1.05rem] text-[#9ec0e4]">
+                  These are the detected application bundles currently available from the shared-storage catalog.
+                </p>
+              </div>
+              <span className="text-[1.05rem] text-[#d7e8ff]">
+                {committedBundles.length} available
+              </span>
+            </div>
+            {committedBundles.length > 0 ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {committedBundles.map((bundle) => (
+                  <span
+                    key={bundle.id}
+                    className="rounded border border-[#3f476c] bg-[#0d1326] px-2 py-1 text-[1rem] text-[#d7e8ff]"
+                    title={`${bundle.components.length} components`}
+                  >
+                    {bundle.displayName}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-[1.05rem] text-[#8aa1ba]">
+                No committed application bundles are visible yet.
+              </p>
+            )}
+          </div>
+
           {loading ? (
             pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
           ) : loadError ? (

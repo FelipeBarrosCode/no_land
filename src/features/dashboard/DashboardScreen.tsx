@@ -15,6 +15,7 @@ import {
   VAST_API_KEY_URL,
 } from "../../lib/constants";
 import type {
+  ApplicationBundle,
   OfferCandidate,
   PersistedAppState,
   RentedInstanceSummary,
@@ -93,6 +94,7 @@ interface Props {
   onListExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
+  applicationBundles: ApplicationBundle[];
 }
 
 export function DashboardScreen({
@@ -129,6 +131,7 @@ export function DashboardScreen({
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
+  applicationBundles,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
@@ -747,6 +750,7 @@ export function DashboardScreen({
         open={syncInstanceId !== null}
         busy={busy || instanceActionRunning}
         instanceId={syncInstanceId}
+        bundles={applicationBundles}
         onClose={() => setSyncInstanceId(null)}
         onLoadObjects={onListSyncableStorageObjects}
         onConfirmSync={handleSyncSelection}

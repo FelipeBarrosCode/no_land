@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import type { ApplicationBundle, BundleSnapshot } from "../../lib/types";
@@ -52,6 +53,7 @@ export function ApplicationLibraryScreen({
   onRequestCloudDeletion,
   onLoadSnapshots,
 }: Props) {
+  const navigate = useNavigate();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [showRestoreModal, setShowRestoreModal] = useState<string | null>(null);
   const [showRemoveConfirmation, setShowRemoveConfirmation] = useState<string | null>(null);
@@ -84,7 +86,7 @@ export function ApplicationLibraryScreen({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <div>
           <h2 className="font-display text-sm uppercase tracking-wider text-neon-cyan">
             Application Library
@@ -94,6 +96,9 @@ export function ApplicationLibraryScreen({
             {bundles.filter((b) => b.backupStatus === "committed").length} protected
           </p>
         </div>
+        <Button variant="ghost" onClick={() => navigate("/")}>
+          Back to Dashboard
+        </Button>
       </div>
 
       {/* Installed section */}
