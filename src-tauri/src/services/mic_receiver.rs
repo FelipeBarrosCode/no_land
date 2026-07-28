@@ -53,14 +53,32 @@ impl MicReceiverProvisioner {
 
         let build_command = r#"sudo bash -lc 'set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+export RUSTUP_HOME=/root/.rustup
+export CARGO_HOME=/root/.cargo
+export PATH="$CARGO_HOME/bin:$PATH"
 apt-get update -y
-apt-get install -y build-essential pkg-config cmake curl clang cargo rustc
+apt-get install -y build-essential pkg-config cmake curl clang ca-certificates
+if ! command -v rustup >/dev/null 2>&1; then
+  curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+fi
+rustup toolchain install stable --profile minimal >/tmp/noland-rustup.stdout.log 2>/tmp/noland-rustup.stderr.log || true
+rustup default stable >/tmp/noland-rustup-default.stdout.log 2>/tmp/noland-rustup-default.stderr.log
+cargo --version >/tmp/noland-cargo-version.log 2>&1
+rustc --version >/tmp/noland-rustc-version.log 2>&1
 rm -rf /tmp/noland-mic-build
 mkdir -p /tmp/noland-mic-build
 cd /tmp/noland-mic-build
 tar -xzf /tmp/noland-mic-agent-src.tgz 2>/tmp/noland-mic-tar.log
 rm -f /tmp/noland-mic-build/vm-cloud-mic-agent/Cargo.lock
 if ! cargo build --release --manifest-path /tmp/noland-mic-build/vm-cloud-mic-agent/Cargo.toml >/tmp/noland-mic-build.stdout.log 2>/tmp/noland-mic-build.stderr.log; then
+  echo "=== RUSTUP STDOUT ==="
+  tail -n 60 /tmp/noland-rustup.stdout.log || true
+  echo "=== RUSTUP STDERR ==="
+  tail -n 60 /tmp/noland-rustup.stderr.log || true
+  echo "=== CARGO VERSION ==="
+  cat /tmp/noland-cargo-version.log || true
+  echo "=== RUSTC VERSION ==="
+  cat /tmp/noland-rustc-version.log || true
   echo "=== TAR STDERR ==="
   tail -n 40 /tmp/noland-mic-tar.log || true
   echo "=== CARGO STDOUT ==="
