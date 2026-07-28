@@ -88,6 +88,10 @@ const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iprout
 const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 180;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+const LOCAL_WIREGUARD_TUNNEL_NAME: &str = "nolandwg0";
+#[cfg(target_os = "linux")]
+const LINUX_LOCAL_WIREGUARD_CONF_PATH: &str = "/etc/wireguard/nolandwg0.conf";
 #[cfg(target_os = "macos")]
 const MACOS_HELPER_SUCCESS_GRACE_SECS: u64 = 300;
 const MACOS_LOCAL_CONF_PATH: &str = "/usr/local/etc/wireguard/nolandwg0.conf";
@@ -1560,6 +1564,25 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
     }
 }
 
+pub fn teardown_local_wireguard_client(config_path: &Path) -> AppResult<String> {
+    ensure_local_wireguard_tools()?;
+
+    #[cfg(target_os = "macos")]
+    {
+        teardown_local_wireguard_client_macos(config_path)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        teardown_local_wireguard_client_linux()
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        teardown_local_wireguard_client_windows(config_path)
+    }
+}
+
 pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
     let Some(parent) = config_path.parent() else {
         return Ok(());
@@ -2151,6 +2174,45 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
 }
 
 #[cfg(target_os = "macos")]
+fn teardown_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
+    let path = config_path.display().to_string().replace('"', "\\\"");
+    let request_path = macos_helper_request_path(config_path)
+        .display()
+        .to_string()
+        .replace('"', "\\\"");
+    let status_path = macos_helper_status_path(config_path)
+        .display()
+        .to_string()
+        .replace('"', "\\\"");
+
+    let shell_script = format!(
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if command -v wg-quick >/dev/null 2>&1; then wg-quick down {MACOS_LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {MACOS_HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; fi; rm -f \"{request_path}\" \"{status_path}\" \"{path}\""
+    );
+    let applescript = format!(
+        "do shell script \"{}\" with administrator privileges",
+        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+
+    let output = Command::new("osascript")
+        .current_dir("/")
+        .arg("-e")
+        .arg(applescript)
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to run osascript: {error}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "Failed to stop local WireGuard client on macOS (exit {}): stdout: {} | stderr: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok("Managed GotaTun tunnel stopped on this Mac".to_string())
+}
+
+#[cfg(target_os = "macos")]
 fn hard_reconnect_local_wireguard_client_macos(
     config_path: &Path,
     is_setup: bool,
@@ -2641,13 +2703,12 @@ fn enforce_single_control_plane_macos(config_path: &Path) -> AppResult<()> {
 
 #[cfg(target_os = "linux")]
 fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
-    const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
     let expected = load_expected_local_tunnel(config_path)?;
     let gotatun_bin = resolve_gotatun_binary()?;
 
-    let destination = "/etc/wireguard/nolandwg0.conf";
+    let destination = LINUX_LOCAL_WIREGUARD_CONF_PATH;
     let interface_exists = Command::new("sudo")
-        .args(["wg", "show", LOCAL_TUNNEL_NAME])
+        .args(["wg", "show", LOCAL_WIREGUARD_TUNNEL_NAME])
         .status()
         .map(|status| status.success())
         .unwrap_or(false);
@@ -2709,7 +2770,7 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
 fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     let expected = load_expected_local_tunnel(config_path)?;
     let gotatun_bin = resolve_gotatun_binary()?;
-    let destination = "/etc/wireguard/nolandwg0.conf";
+    let destination = LINUX_LOCAL_WIREGUARD_CONF_PATH;
 
     let copy = Command::new("sudo")
         .args([
@@ -2770,12 +2831,31 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
     Ok("Managed GotaTun tunnel reconnected on this Linux machine".to_string())
 }
 
+#[cfg(target_os = "linux")]
+fn teardown_local_wireguard_client_linux() -> AppResult<String> {
+    let output = Command::new("sudo")
+        .args(["wg-quick", "down", LINUX_LOCAL_WIREGUARD_CONF_PATH])
+        .output()
+        .map_err(|error| AppError::Command(format!("Failed to stop local WireGuard: {error}")))?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "Failed to stop local WireGuard tunnel with sudo wg-quick down {} (exit {}). stderr: {}",
+            LINUX_LOCAL_WIREGUARD_CONF_PATH,
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok("WireGuard client tunnel stopped on this Linux machine".to_string())
+}
+
 #[cfg(target_os = "windows")]
 fn setup_local_wireguard_client_windows(config_path: &Path) -> AppResult<String> {
-    const LOCAL_TUNNEL_NAME: &str = "nolandwg0";
     let expected = load_expected_local_tunnel(config_path)?;
     let config = config_path.display().to_string();
-    let already_active = match resolved_command_status("wg", &["show", LOCAL_TUNNEL_NAME]) {
+    let already_active = match resolved_command_status("wg", &["show", LOCAL_WIREGUARD_TUNNEL_NAME])
+    {
         Ok(status) => status.success(),
         Err(_) => false,
     };
@@ -2805,7 +2885,10 @@ fn reconnect_local_wireguard_client_windows(config_path: &Path) -> AppResult<Str
     let expected = load_expected_local_tunnel(config_path)?;
     let config = config_path.display().to_string();
 
-    let _ = resolved_command_status("wireguard.exe", &["/uninstalltunnelservice", "nolandwg0"]);
+    let _ = resolved_command_status(
+        "wireguard.exe",
+        &["/uninstalltunnelservice", LOCAL_WIREGUARD_TUNNEL_NAME],
+    );
 
     let output = resolved_command_output("wireguard.exe", &["/installtunnelservice", &config])?;
 
@@ -2819,6 +2902,22 @@ fn reconnect_local_wireguard_client_windows(config_path: &Path) -> AppResult<Str
     wait_for_local_tunnel_health(&expected, Duration::from_secs(25), Duration::from_secs(1))?;
 
     Ok("WireGuard client tunnel reconnected on this Windows machine".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn teardown_local_wireguard_client_windows(_config_path: &Path) -> AppResult<String> {
+    let output = resolved_command_output(
+        "wireguard.exe",
+        &["/uninstalltunnelservice", LOCAL_WIREGUARD_TUNNEL_NAME],
+    )?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format_wireguard_windows_failure(
+            "teardown", &output,
+        )));
+    }
+
+    Ok("WireGuard client tunnel removed from Windows service manager".to_string())
 }
 
 fn parse_default_route_dev(line: &str) -> Option<String> {

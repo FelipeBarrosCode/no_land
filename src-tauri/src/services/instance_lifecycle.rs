@@ -7,7 +7,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
@@ -15,9 +15,11 @@ use crate::{
 };
 
 use super::{
-    app_context::AppContext, remote_exec::RemoteExec,
-    shared_storage::shared_storage_manager::SharedStorageManager, vast_api::VastApiClient,
-    wireguard::remove_local_wireguard_config,
+    app_context::AppContext,
+    remote_exec::RemoteExec,
+    shared_storage::shared_storage_manager::SharedStorageManager,
+    vast_api::VastApiClient,
+    wireguard::{remove_local_wireguard_config, teardown_local_wireguard_client},
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -183,7 +185,17 @@ impl InstanceLifecycleService {
                 continue;
             }
 
-            remove_local_wireguard_config(Path::new(&record.wireguard_config_path))?;
+            let config_path = Path::new(&record.wireguard_config_path);
+            if let Err(error) = teardown_local_wireguard_client(config_path) {
+                warn!(
+                    instance_id = record.instance_id,
+                    config_path = %config_path.display(),
+                    "Failed to stop local WireGuard tunnel during owned-instance reconciliation cleanup: {}",
+                    error
+                );
+            }
+
+            remove_local_wireguard_config(config_path)?;
         }
 
         if removed_records.is_empty() && !should_clear_active_instance {
@@ -397,7 +409,17 @@ impl InstanceLifecycleService {
                     );
 
                     if !wireguard_config_path.trim().is_empty() {
-                        remove_local_wireguard_config(Path::new(&wireguard_config_path))?;
+                        let config_path = Path::new(&wireguard_config_path);
+                        if let Err(error) = teardown_local_wireguard_client(config_path) {
+                            warn!(
+                                instance_id = instance_id,
+                                config_path = %config_path.display(),
+                                "Failed to stop local WireGuard tunnel during destroy cleanup: {}",
+                                error
+                            );
+                        }
+
+                        remove_local_wireguard_config(config_path)?;
                     }
 
                     let _ = context
