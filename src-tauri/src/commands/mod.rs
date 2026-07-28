@@ -1,3 +1,11 @@
+pub mod shared_storage;
+
+pub use self::shared_storage::{
+    begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
+    get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
+    set_active_shared_storage_profile, test_shared_storage_connection,
+};
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -14,6 +22,7 @@ use crate::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
     },
+    mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -4013,7 +4022,7 @@ pub async fn update_instance_mic_settings(
     instance_id: u64,
     payload: MicSettingsUpdate,
 ) -> Result<InstanceMicConfig, FrontendError> {
-    MicPassthroughService::update_settings(context.inner(), instance_id, payload.quality_profile)
+    MicPassthroughService::update_settings(context.inner(), instance_id, payload)
         .await
         .map_err(Into::into)
 }
@@ -4067,6 +4076,11 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
+    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]

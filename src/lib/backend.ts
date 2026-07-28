@@ -19,6 +19,10 @@ import type {
   SshCredentialsUpdate,
   SharedStorageSettingsResponse,
   SharedStorageSettingsUpdate,
+  SharedStorageProfile,
+  SharedStorageTestResult,
+  ProviderDefinition,
+  ProfileReference,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
@@ -32,6 +36,7 @@ import type {
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
+  MicrophoneDevice,
   MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
   EmbeddedMoonlightInstanceStatus,
@@ -514,6 +519,85 @@ export async function testSharedStorageConfig(): Promise<string> {
   return invokeSafe<string>("test_shared_storage_config");
 }
 
+export async function listStorageProviders(): Promise<ProviderDefinition[]> {
+  return invokeSafe<ProviderDefinition[]>("list_storage_providers");
+}
+
+export async function saveStaticProviderCredentials(
+  provider: string,
+  credentialsJson: string,
+  bucket: string | null,
+  prefix: string | null,
+  displayName: string,
+): Promise<SharedStorageProfile> {
+  return invokeSafe<SharedStorageProfile>("save_static_provider_credentials", {
+    provider,
+    credentialsJson,
+    bucket,
+    prefix,
+    displayName,
+  });
+}
+
+export async function testSharedStorageConnection(
+  profileId: string,
+): Promise<SharedStorageTestResult> {
+  return invokeSafe<SharedStorageTestResult>("test_shared_storage_connection", {
+    profileId,
+  });
+}
+
+export async function getSharedStorageProfiles(): Promise<ProfileReference[]> {
+  return invokeSafe<ProfileReference[]>("get_shared_storage_profiles");
+}
+
+export async function setActiveSharedStorageProfile(
+  profileId: string,
+): Promise<void> {
+  return invokeSafe<void>("set_active_shared_storage_profile", { profileId });
+}
+
+export async function disconnectSharedStorageProfile(
+  profileId: string,
+): Promise<void> {
+  return invokeSafe<void>("disconnect_shared_storage_profile", { profileId });
+}
+
+export interface OAuthBeginResponse {
+  sessionId: string;
+  authorizationUrl: string;
+  providerLabel: string;
+}
+
+export interface OAuthCompleteResponse {
+  profile: SharedStorageProfile;
+  accountEmail: string | null;
+}
+
+export async function beginOauthAuthorization(
+  provider: string,
+  displayName: string,
+  clientId: string,
+  clientSecret: string | null,
+  providerFieldsJson?: string | null,
+): Promise<OAuthBeginResponse> {
+  return invokeSafe<OAuthBeginResponse>("begin_oauth_authorization", {
+    provider,
+    displayName,
+    clientId,
+    clientSecret,
+    providerFieldsJson: providerFieldsJson ?? null,
+  });
+}
+
+export async function completeOauthAuthorization(
+  sessionId: string,
+): Promise<OAuthCompleteResponse> {
+  return invokeSafe<OAuthCompleteResponse>("complete_oauth_authorization", {
+    sessionId,
+  });
+}
+
 export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
   return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
 }
@@ -726,4 +810,8 @@ export async function getInstanceMicStatus(
   return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", {
     instanceId,
   });
+}
+
+export async function listMicrophones(): Promise<MicrophoneDevice[]> {
+  return invokeSafe<MicrophoneDevice[]>("list_microphones");
 }

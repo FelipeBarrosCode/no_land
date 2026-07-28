@@ -218,6 +218,7 @@ export interface ProvisionedServerSteps {
   nvidiaHeadlessConfigured: boolean;
   sunshineConfigured: boolean;
   lowLatencyAudioConfigured: boolean;
+  micReceiverInstalled: boolean;
   wireguardConfigured: boolean;
   moonlightConfigured: boolean;
   awaitingPairPin: boolean;
@@ -242,6 +243,9 @@ export interface ProvisionedServerState {
   embeddedMoonlightPipelineEnabled: boolean;
   embeddedMoonlightHostId: string;
   embeddedMoonlightPaired: boolean;
+  micDeviceId: string;
+  micDeviceName: string;
+  micQualityProfile: MicQualityProfile;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -371,6 +375,7 @@ export interface PersistedAppState {
   moonlight: MoonlightState;
   moonlightPreferences: MoonlightPreferences;
   sharedStorage: SharedStorageState;
+  sharedStorageProfiles?: ProfileReference[];
   provisionedServers: ProvisionedServerState[];
   postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;
@@ -525,6 +530,88 @@ export interface SharedStorageSettingsUpdate {
   cryptPassword?: string;
 }
 
+export type StorageProvider =
+  | "amazon_s3"
+  | "backblaze_b2"
+  | "cloudflare_r2"
+  | "wasabi"
+  | "digital_ocean_spaces"
+  | "generic_s3"
+  | "google_drive"
+  | "google_cloud_storage"
+  | "microsoft_one_drive"
+  | "dropbox"
+  | "box"
+  | "azure_blob"
+  | "sftp"
+  | "webdav";
+
+export interface SharedStorageProfile {
+  id: string;
+  displayName: string;
+  provider: StorageProvider;
+  providerLabel: string;
+  bucket: string | null;
+  prefix: string | null;
+  credentialVaultReference: string;
+  repositoryId: string;
+  status: string;
+  lastVerifiedAt: number | null;
+  protectedBundlesCount: number;
+  totalStoredBytes: number;
+}
+
+export interface SharedStorageTestResult {
+  authenticated: boolean;
+  canList: boolean;
+  canWrite: boolean;
+  canRead: boolean;
+  canDeleteTestObject: boolean;
+  repositoryAccessible: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface ProviderSelectOption {
+  value: string;
+  label: string;
+}
+
+export type ProviderFieldType =
+  | "text"
+  | "password"
+  | "number"
+  | "toggle"
+  | { options: ProviderSelectOption[] };
+
+export interface ProviderField {
+  key: string;
+  label: string;
+  fieldType: ProviderFieldType;
+  required: boolean;
+  placeholder: string | null;
+  helpText: string | null;
+}
+
+export interface ProviderDefinition {
+  provider: StorageProvider;
+  label: string;
+  category: string;
+  isOauth: boolean;
+  description: string;
+  fields: ProviderField[];
+}
+
+export interface ProfileReference {
+  id: string;
+  displayName: string;
+  providerLabel: string;
+  provider?: StorageProvider | null;
+  bucket?: string | null;
+  prefix?: string | null;
+  active?: boolean;
+}
+
 export interface BackupStatusResponse {
   lastBackupStartedAt: string | null;
   lastBackupFinishedAt: string | null;
@@ -662,6 +749,7 @@ export interface InstanceMicConfig {
   channels: number;
   vmWireguardIp: string;
   rtpPort: number;
+  deviceId: string;
   deviceName: string;
   qualityProfile: MicQualityProfile;
   sessionId: string | null;
@@ -717,5 +805,14 @@ export interface MicSessionResponse {
 }
 
 export interface MicSettingsUpdate {
+  deviceId?: string;
   qualityProfile?: MicQualityProfile;
+}
+
+export interface MicrophoneDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  sampleRates: number[];
+  channels: number;
 }

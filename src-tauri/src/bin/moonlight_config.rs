@@ -6,6 +6,9 @@ mod errors;
 #[path = "../models/app_state.rs"]
 pub mod app_state_mod;
 
+#[path = "../models/application_bundle.rs"]
+pub mod application_bundle_mod;
+
 #[path = "../services/os_detection.rs"]
 pub mod os_detection_mod;
 
@@ -14,6 +17,7 @@ pub mod moonlight_mod;
 
 mod models {
     pub use crate::app_state_mod as app_state;
+    pub use crate::application_bundle_mod as application_bundle;
 }
 
 mod services {

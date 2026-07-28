@@ -114,7 +114,7 @@ export function SharedStorageExportModal({
       <div className="glass-panel pixel-frame max-h-[90vh] w-full max-w-3xl overflow-hidden">
         <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">Export To Blackblaze</h2>
+            <h2 className="font-display text-base text-white">Export To Shared Storage</h2>
             <p className="text-[1.2rem] text-[#b4c8de]">Choose local files/folders to export to shared storage.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Close</Button>

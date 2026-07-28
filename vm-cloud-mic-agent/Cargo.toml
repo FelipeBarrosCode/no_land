@@ -1,0 +1,22 @@
+[package]
+name = "noland-mic-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "Noland remote microphone receiver — PipeWire virtual source for cloud VMs"
+
+[[bin]]
+name = "noland-mic-receiver"
+path = "src/main.rs"
+
+[dependencies]
+noland-mic-protocol = { path = "../src-tauri/crates/noland-mic-protocol" }
+audiopus = "0.3.0-rc.0"
+ring = "0.17"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+thiserror = "2.0"
+signal-hook = "0.3"
