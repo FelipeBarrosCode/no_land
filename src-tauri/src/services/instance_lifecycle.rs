@@ -397,6 +397,18 @@ impl InstanceLifecycleService {
 
             vast.destroy_instance(instance_id).await?;
 
+            if !wireguard_config_path.trim().is_empty() {
+                let config_path = Path::new(&wireguard_config_path);
+                if let Err(error) = teardown_local_wireguard_client(config_path) {
+                    warn!(
+                        instance_id = instance_id,
+                        config_path = %config_path.display(),
+                        "Failed to stop local WireGuard tunnel immediately after destroy: {}",
+                        error
+                    );
+                }
+            }
+
             match vast.list_instances().await {
                 Ok(owned_instances) => {
                     Self::reconcile_owned_instances(context, &owned_instances).await?;

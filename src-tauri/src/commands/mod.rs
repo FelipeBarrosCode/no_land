@@ -79,6 +79,7 @@ use crate::{
         wireguard::{
             locate_gotatun_binary, read_local_wireguard_show_output,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
+            teardown_local_wireguard_client,
         },
     },
     utils::redact::redact_secret,
@@ -2210,6 +2211,41 @@ pub async fn reconnect_local_wireguard_client_quick(
     }
 
     let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
+
+    Ok(message)
+}
+
+#[tauri::command]
+pub async fn disconnect_local_wireguard_client_command(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let config_path = {
+        let state = context.state.read().await;
+        if let Some(instance_id) = state.instance.instance_id {
+            if let Some(path) = state
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance_id)
+                .map(|record| record.wireguard_config_path.clone())
+                .filter(|path| std::path::Path::new(path).exists())
+            {
+                path
+            } else {
+                state.wireguard.config_path.clone()
+            }
+        } else {
+            state.wireguard.config_path.clone()
+        }
+    };
+
+    if config_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "WireGuard client config path is empty. Nothing to disconnect.".to_string(),
+        )
+        .into());
+    }
+
+    let message = teardown_local_wireguard_client(Path::new(&config_path))?;
 
     Ok(message)
 }

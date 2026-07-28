@@ -1520,20 +1520,30 @@ pub fn setup_local_wireguard_client(config_path: &Path) -> AppResult<String> {
 
     normalize_wireguard_client_allowed_ips(config_path)?;
 
+    let result = setup_local_wireguard_client_inner(config_path);
+
     #[cfg(target_os = "macos")]
     {
-        setup_local_wireguard_client_macos(config_path)
+        if let Err(error) = &result {
+            if should_retry_after_local_teardown(error) {
+                warn!(
+                    config_path = %config_path.display(),
+                    "WireGuard setup hit a recoverable local tunnel state; tearing down local tunnel and retrying once: {}",
+                    error
+                );
+                if let Err(teardown_error) = teardown_local_wireguard_client_macos(config_path) {
+                    warn!(
+                        config_path = %config_path.display(),
+                        "Local WireGuard teardown before setup retry failed: {}",
+                        teardown_error
+                    );
+                }
+                return setup_local_wireguard_client_inner(config_path);
+            }
+        }
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        setup_local_wireguard_client_linux(config_path)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        setup_local_wireguard_client_windows(config_path)
-    }
+    result
 }
 
 pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String> {
@@ -1548,20 +1558,30 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
 
     normalize_wireguard_client_allowed_ips(config_path)?;
 
+    let result = reconnect_local_wireguard_client_inner(config_path);
+
     #[cfg(target_os = "macos")]
     {
-        reconnect_local_wireguard_client_macos(config_path)
+        if let Err(error) = &result {
+            if should_retry_after_local_teardown(error) {
+                warn!(
+                    config_path = %config_path.display(),
+                    "WireGuard reconnect hit a recoverable local tunnel state; tearing down local tunnel and retrying once: {}",
+                    error
+                );
+                if let Err(teardown_error) = teardown_local_wireguard_client_macos(config_path) {
+                    warn!(
+                        config_path = %config_path.display(),
+                        "Local WireGuard teardown before reconnect retry failed: {}",
+                        teardown_error
+                    );
+                }
+                return reconnect_local_wireguard_client_inner(config_path);
+            }
+        }
     }
 
-    #[cfg(target_os = "linux")]
-    {
-        reconnect_local_wireguard_client_linux(config_path)
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        reconnect_local_wireguard_client_windows(config_path)
-    }
+    result
 }
 
 pub fn teardown_local_wireguard_client(config_path: &Path) -> AppResult<String> {
@@ -1581,6 +1601,48 @@ pub fn teardown_local_wireguard_client(config_path: &Path) -> AppResult<String> 
     {
         teardown_local_wireguard_client_windows(config_path)
     }
+}
+
+fn setup_local_wireguard_client_inner(config_path: &Path) -> AppResult<String> {
+    #[cfg(target_os = "macos")]
+    {
+        return setup_local_wireguard_client_macos(config_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return setup_local_wireguard_client_linux(config_path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return setup_local_wireguard_client_windows(config_path);
+    }
+}
+
+fn reconnect_local_wireguard_client_inner(config_path: &Path) -> AppResult<String> {
+    #[cfg(target_os = "macos")]
+    {
+        return reconnect_local_wireguard_client_macos(config_path);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        return reconnect_local_wireguard_client_linux(config_path);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return reconnect_local_wireguard_client_windows(config_path);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn should_retry_after_local_teardown(error: &AppError) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("unable to modify interface")
+        || message.contains("unknown error: -22")
+        || message.contains("failed to reconnect local wireguard client")
 }
 
 pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
@@ -2175,7 +2237,6 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
 
 #[cfg(target_os = "macos")]
 fn teardown_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
-    let path = config_path.display().to_string().replace('"', "\\\"");
     let request_path = macos_helper_request_path(config_path)
         .display()
         .to_string()
@@ -2186,7 +2247,7 @@ fn teardown_local_wireguard_client_macos(config_path: &Path) -> AppResult<String
         .replace('"', "\\\"");
 
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if command -v wg-quick >/dev/null 2>&1; then wg-quick down {MACOS_LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {MACOS_HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; fi; rm -f \"{request_path}\" \"{status_path}\" \"{path}\""
+        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; if command -v wg-quick >/dev/null 2>&1; then wg-quick down {MACOS_LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {MACOS_HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; fi; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 1; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill -9 \"$pid\" >/dev/null 2>&1 || true; done; rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name; rm -f \"{request_path}\" \"{status_path}\" {MACOS_LOCAL_CONF_PATH} {MACOS_HOMEBREW_CONF_PATH}"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",

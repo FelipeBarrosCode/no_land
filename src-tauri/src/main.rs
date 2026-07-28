@@ -240,6 +240,7 @@ fn main() {
             local_environment_preflight,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
+            disconnect_local_wireguard_client_command,
             setup_wireguard_app_handoff_command,
             verify_wireguard,
             open_wireguard_app_command,
