@@ -76,6 +76,15 @@ import {
   completeOauthAuthorization,
   listApplicationBundles,
   listBundleSnapshots,
+  listBundleManualAttachments,
+  listBundleTrackingSessions,
+  listBundleLearningSuggestions,
+  startBundleTracking,
+  stopBundleTracking,
+  acceptBundleLearningSuggestion,
+  rejectBundleLearningSuggestion,
+  attachPathToBundle,
+  detachPathFromBundle,
   restoreApplicationBundle,
   removeLocalBundle,
   requestCloudDeletion,
@@ -129,6 +138,9 @@ import type {
   ApplicationCatalog,
   BundleSnapshot,
   BundleRestoreResult,
+  BundleManualAttachment,
+  BundleTrackingSession,
+  BundleLearningSuggestion,
 } from "../lib/types";
 
 interface AppStore {
@@ -301,6 +313,9 @@ interface AppStore {
   bundleCatalog: ApplicationCatalog | null;
   bundleRestoreResult: BundleRestoreResult | null;
   bundleSnapshots: BundleSnapshot[];
+  bundleManualAttachments: Record<string, BundleManualAttachment[]>;
+  bundleTrackingSessions: Record<string, BundleTrackingSession | null>;
+  bundleLearningSuggestions: Record<string, BundleLearningSuggestion[]>;
   // ─── Shared Storage v2 state ────────────────────────────
   storageProviders: ProviderDefinition[];
   sharedStorageProfiles: ProfileReference[];
@@ -321,6 +336,15 @@ interface AppStore {
   selectBundle: (bundleId: string) => void;
   deselectBundle: (bundleId: string) => void;
   loadBundleSnapshots: (bundleId: string) => Promise<void>;
+  loadBundleManualAttachments: (bundleId: string) => Promise<void>;
+  loadBundleTrackingSession: (bundleId: string) => Promise<void>;
+  loadBundleLearningSuggestions: (bundleId: string) => Promise<void>;
+  startBundleTracking: (bundleId: string) => Promise<void>;
+  stopBundleTracking: (bundleId: string) => Promise<void>;
+  acceptBundleLearningSuggestion: (bundleId: string, path: string, label?: string, kind?: string) => Promise<void>;
+  rejectBundleLearningSuggestion: (bundleId: string, path: string) => Promise<void>;
+  attachBundlePath: (bundleId: string, path: string, label?: string, kind?: string) => Promise<void>;
+  detachBundlePath: (bundleId: string, path: string) => Promise<void>;
   restoreBundleApp: (bundleId: string, restoreMode: string, selectedComponents?: string[]) => Promise<void>;
   removeBundleLocally: (bundleId: string) => Promise<void>;
   requestBundleCloudDeletion: (bundleId: string) => Promise<void>;
@@ -739,6 +763,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     bundleCatalog: null,
     bundleRestoreResult: null,
     bundleSnapshots: [],
+    bundleManualAttachments: {},
+    bundleTrackingSessions: {},
+    bundleLearningSuggestions: {},
     storageProviders: [],
     sharedStorageProfiles: [],
     sharedStorageTestResult: null,
@@ -2085,6 +2112,133 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (error) {
         set({ error: mapError(error) });
       }
+    },
+
+    loadBundleManualAttachments: async (bundleId) => {
+      try {
+        const attachments = await listBundleManualAttachments(bundleId);
+        set((state) => ({
+          bundleManualAttachments: {
+            ...state.bundleManualAttachments,
+            [bundleId]: attachments,
+          },
+        }));
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    loadBundleTrackingSession: async (bundleId) => {
+      try {
+        const sessions = await listBundleTrackingSessions(bundleId);
+        set((state) => ({
+          bundleTrackingSessions: {
+            ...state.bundleTrackingSessions,
+            [bundleId]: sessions[0] ?? null,
+          },
+        }));
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    loadBundleLearningSuggestions: async (bundleId) => {
+      try {
+        const suggestions = await listBundleLearningSuggestions(bundleId);
+        set((state) => ({
+          bundleLearningSuggestions: {
+            ...state.bundleLearningSuggestions,
+            [bundleId]: suggestions,
+          },
+        }));
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    startBundleTracking: async (bundleId) => {
+      await runInstanceTask(
+        { key: "bundle.start_tracking", label: "Starting bundle tracking" },
+        async () => {
+          const session = await startBundleTracking(bundleId);
+          set((state) => ({
+            bundleTrackingSessions: {
+              ...state.bundleTrackingSessions,
+              [bundleId]: session,
+            },
+          }));
+          await get().loadBundleLearningSuggestions(bundleId);
+        },
+        undefined,
+      );
+    },
+
+    stopBundleTracking: async (bundleId) => {
+      await runInstanceTask(
+        { key: "bundle.stop_tracking", label: "Stopping bundle tracking" },
+        async () => {
+          const suggestions = await stopBundleTracking(bundleId, null);
+          set((state) => ({
+            bundleTrackingSessions: {
+              ...state.bundleTrackingSessions,
+              [bundleId]: null,
+            },
+            bundleLearningSuggestions: {
+              ...state.bundleLearningSuggestions,
+              [bundleId]: suggestions,
+            },
+          }));
+        },
+        undefined,
+      );
+    },
+
+    acceptBundleLearningSuggestion: async (bundleId, path, label, kind) => {
+      await runInstanceTask(
+        { key: "bundle.accept_suggestion", label: "Attaching learned path" },
+        async () => {
+          await acceptBundleLearningSuggestion(bundleId, path, label || null, kind || null);
+          await get().loadBundleManualAttachments(bundleId);
+          await get().loadBundleLearningSuggestions(bundleId);
+          await get().loadApplicationBundles();
+        },
+        undefined,
+      );
+    },
+
+    rejectBundleLearningSuggestion: async (bundleId, path) => {
+      await runInstanceTask(
+        { key: "bundle.reject_suggestion", label: "Rejecting learned path" },
+        async () => {
+          await rejectBundleLearningSuggestion(bundleId, path);
+          await get().loadBundleLearningSuggestions(bundleId);
+        },
+        undefined,
+      );
+    },
+
+    attachBundlePath: async (bundleId, path, label, kind) => {
+      await runInstanceTask(
+        { key: "bundle.attach_path", label: "Attaching path to bundle" },
+        async () => {
+          await attachPathToBundle(bundleId, path, label || null, kind || null, true);
+          await get().loadBundleManualAttachments(bundleId);
+          await get().loadApplicationBundles();
+        },
+        undefined,
+      );
+    },
+
+    detachBundlePath: async (bundleId, path) => {
+      await runInstanceTask(
+        { key: "bundle.detach_path", label: "Detaching path from bundle" },
+        async () => {
+          await detachPathFromBundle(bundleId, path);
+          await get().loadBundleManualAttachments(bundleId);
+          await get().loadApplicationBundles();
+        },
+        undefined,
+      );
     },
 
     restoreBundleApp: async (bundleId, restoreMode, selectedComponents) => {

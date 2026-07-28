@@ -59,6 +59,9 @@ export type SetupStage =
   | "failed";
 
 export type WireGuardSetupMode =
+  | "gotatun_managed_windows"
+  | "gotatun_managed_linux"
+  | "gotatun_managed_macos"
   | "wireguard_app_windows"
   | "wireguard_app_linux"
   | "wireguard_app_macos_manual";
@@ -720,6 +723,14 @@ export interface MicSettingsUpdate {
   qualityProfile?: MicQualityProfile;
 }
 
+export interface MicrophoneDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  sampleRates: number[];
+  channels: number;
+}
+
 // ============================================================
 // Application Bundle types (new product abstraction)
 // ============================================================
@@ -887,6 +898,31 @@ export interface ApplicationCatalog {
   generation: number;
   generatedAt: number;
   bundles: ApplicationCatalogEntry[];
+}
+
+export interface BundleManualAttachment {
+  id: string;
+  label: string;
+  source: string;
+  target: string;
+  kind: string;
+  defaultSelected: boolean;
+}
+
+export interface BundleTrackingSession {
+  sessionId: string;
+  bundleId: string;
+  instanceId: number;
+  startedAt: string;
+  startedAtEpoch: number;
+}
+
+export interface BundleLearningSuggestion {
+  bundleId: string;
+  folderBundle: BundleManualAttachment;
+  discoveredAt: string;
+  source: string;
+  trackingSessionId: string | null;
 }
 
 // ─── Shared Storage Types ────────────────────────────────

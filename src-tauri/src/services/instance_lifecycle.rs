@@ -19,7 +19,7 @@ use super::{
     remote_exec::RemoteExec,
     shared_storage::shared_storage_manager::SharedStorageManager,
     vast_api::VastApiClient,
-    wireguard::{remove_local_wireguard_config, teardown_active_local_wireguard_runtime},
+    wireguard::{remove_local_wireguard_config, teardown_local_wireguard_runtime_for_path},
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
@@ -399,7 +399,7 @@ impl InstanceLifecycleService {
             }
 
             if should_clear_active_wireguard_state {
-                if let Err(error) = teardown_active_local_wireguard_runtime() {
+                if let Err(error) = teardown_local_wireguard_runtime_for_path(Path::new(&wireguard_config_path)) {
                     warn!(
                         instance_id = instance_id,
                         "Destroyed remote instance but failed tearing down active local WireGuard runtime: {}",

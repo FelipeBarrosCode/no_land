@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/noland-mic-protocol"]
+resolver = "2"
+
 [package]
 name = "noland-connect"
 version = "0.1.0"
@@ -45,6 +49,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "tim
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x25519-dalek = "2.0.1"
 x509-parser = "0.16.0"
+noland-mic-protocol = { path = "crates/noland-mic-protocol" }
+audiopus = "0.3.0-rc.0"
+cpal = "0.15"
 
 [features]
 default = ["custom-protocol"]

@@ -24,6 +24,7 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
+    mic_receiver::MicReceiverProvisioner,
     moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
@@ -1596,6 +1597,65 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         .await?;
     ensure_not_cancelled(&context)?;
 
+    // ── Microphone receiver installation ──
+    let mic_step_completed = server_step_is_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+    )
+    .await;
+
+    if !mic_step_completed {
+        emit_transition(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringRemote,
+            "Installing Noland microphone receiver",
+            Some(format!("target_user={}", context.config.audio_target_user)),
+            false,
+        )
+        .await;
+
+        let mic_result =
+            MicReceiverProvisioner::install(&remote, &context.config.audio_target_user).await;
+
+        match mic_result {
+            Ok(output) => {
+                info!(
+                    instance_id = instance.id,
+                    "Mic receiver installed: {}",
+                    &output[..output.len().min(200)]
+                );
+                mark_server_step_completed(
+                    &context,
+                    instance.id,
+                    ProvisionStepMarker::MicReceiverInstalled,
+                    OrchestrationState::ConfiguringRemote,
+                    &instance.status,
+                    &instance.ssh_host,
+                    instance.ssh_port,
+                    Some(offer.id),
+                )
+                .await?;
+            }
+            Err(e) => {
+                warn!(
+                    instance_id = instance.id,
+                    "Mic receiver install failed (non-fatal): {e}"
+                );
+            }
+        }
+    } else {
+        emit_step_skipped(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringRemote,
+            "Mic receiver already installed",
+            instance.id,
+        )
+        .await;
+    }
+
     if !wireguard_step_completed {
         emit_transition(
             &app,
@@ -2469,6 +2529,65 @@ async fn run_existing_instance_orchestration(
         })
         .await?;
     ensure_not_cancelled(&context)?;
+
+    // ── Microphone receiver installation ──
+    let mic_step_completed = server_step_is_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+    )
+    .await;
+
+    if !mic_step_completed {
+        emit_transition(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringRemote,
+            "Installing Noland microphone receiver",
+            Some(format!("target_user={}", context.config.audio_target_user)),
+            false,
+        )
+        .await;
+
+        let mic_result =
+            MicReceiverProvisioner::install(&remote, &context.config.audio_target_user).await;
+
+        match mic_result {
+            Ok(output) => {
+                info!(
+                    instance_id = instance.id,
+                    "Mic receiver installed: {}",
+                    &output[..output.len().min(200)]
+                );
+                mark_server_step_completed(
+                    &context,
+                    instance.id,
+                    ProvisionStepMarker::MicReceiverInstalled,
+                    OrchestrationState::ConfiguringRemote,
+                    &instance.status,
+                    &instance.ssh_host,
+                    instance.ssh_port,
+                    offer_id,
+                )
+                .await?;
+            }
+            Err(e) => {
+                warn!(
+                    instance_id = instance.id,
+                    "Mic receiver install failed (non-fatal): {e}"
+                );
+            }
+        }
+    } else {
+        emit_step_skipped(
+            &app,
+            &context,
+            OrchestrationState::ConfiguringRemote,
+            "Mic receiver already installed",
+            instance.id,
+        )
+        .await;
+    }
 
     if !wireguard_step_completed {
         emit_transition(
@@ -3353,6 +3472,7 @@ pub(crate) enum ProvisionStepMarker {
     PostNvidiaRebootCompleted,
     SunshineConfigured,
     LowLatencyAudioConfigured,
+    MicReceiverInstalled,
     WireguardConfigured,
     MoonlightConfigured,
     AwaitingPairPin,
@@ -3371,6 +3491,7 @@ fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> 
         ProvisionStepMarker::PostNvidiaRebootCompleted => steps.post_nvidia_reboot_completed,
         ProvisionStepMarker::SunshineConfigured => steps.sunshine_configured,
         ProvisionStepMarker::LowLatencyAudioConfigured => steps.low_latency_audio_configured,
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin,
@@ -3394,6 +3515,7 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::LowLatencyAudioConfigured => {
             steps.low_latency_audio_configured = value
         }
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed = value,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured = value,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured = value,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin = value,
@@ -3428,6 +3550,11 @@ fn determine_resume_step(steps: &ProvisionedServerSteps) -> (OrchestrationState,
         (
             OrchestrationState::ConfiguringWireGuard,
             "Resuming: Starting from WireGuard config".to_string(),
+        )
+    } else if steps.mic_receiver_installed {
+        (
+            OrchestrationState::ConfiguringWireGuard,
+            "Resuming: Mic receiver installed, need WireGuard setup".to_string(),
         )
     } else if steps.low_latency_audio_configured {
         (
@@ -3931,7 +4058,7 @@ async fn initialize_post_tailscale_flow(
         .update_state(|state| {
             state.post_wireguard_setup = PostWireGuardSetupState {
                 stage: SetupStage::WireguardConnected,
-                wireguard_setup_mode: WireGuardSetupMode::WireguardAppLinux,
+                wireguard_setup_mode: WireGuardSetupMode::GotatunManagedLinux,
                 wireguard_setup_status: WireGuardSetupStatus::Connected,
                 current_instance_id: Some(instance_id),
                 wireguard_export_path: String::new(),

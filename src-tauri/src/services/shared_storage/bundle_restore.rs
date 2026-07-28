@@ -34,13 +34,15 @@ impl BundleRestoreService {
         instance_id: u64,
         target_user: &str,
     ) -> AppResult<BundleIndex> {
-        super::bundle_indexer::BundleIndexer::read_from_remote(
+        let mut index = super::bundle_indexer::BundleIndexer::read_from_remote(
             context,
             remote,
             instance_id,
             target_user,
         )
-        .await
+        .await?;
+        Self::merge_manual_attachments(context, &mut index).await;
+        Ok(index)
     }
 
     /// Perform a dry-run restore and return what would be restored.
@@ -198,6 +200,34 @@ impl BundleRestoreService {
     // ------------------------------------------------------------------
     // Internal helpers
     // ------------------------------------------------------------------
+
+    async fn merge_manual_attachments(context: &AppContext, index: &mut BundleIndex) {
+        let state = context.load_state().await;
+        for attachment in &state.bundle_learning.manual_attachments {
+            let Some(bundle) = index
+                .bundles
+                .iter_mut()
+                .find(|b| b.id == attachment.bundle_id)
+            else {
+                continue;
+            };
+            let already_present = bundle.folder_bundles.iter().any(|existing| {
+                existing.id == attachment.folder_bundle.id
+                    || existing.target == attachment.folder_bundle.target
+            });
+            if !already_present {
+                bundle.folder_bundles.push(attachment.folder_bundle.clone());
+                if !bundle
+                    .signals
+                    .iter()
+                    .any(|signal| signal == "manual_attachment")
+                {
+                    bundle.signals.push("manual_attachment".to_string());
+                }
+                bundle.confidence = bundle.confidence.max(0.95);
+            }
+        }
+    }
 
     fn find_bundle<'a>(index: &'a BundleIndex, bundle_id: &str) -> AppResult<&'a AppBundle> {
         index

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import type { ApplicationBundle, BundleSnapshot } from "../../lib/types";
+import type { ApplicationBundle, BundleManualAttachment, BundleSnapshot } from "../../lib/types";
 
 interface Props {
   bundles: ApplicationBundle[];
@@ -13,6 +13,10 @@ interface Props {
   onRemoveLocal: (bundleId: string) => Promise<void>;
   onRequestCloudDeletion: (bundleId: string) => Promise<void>;
   onLoadSnapshots: (bundleId: string) => Promise<void>;
+  onLoadManualAttachments: (bundleId: string) => Promise<void>;
+  onAttachPath: (bundleId: string, path: string, label?: string, kind?: string) => Promise<void>;
+  onDetachPath: (bundleId: string, path: string) => Promise<void>;
+  manualAttachments: Record<string, BundleManualAttachment[]>;
   snapshots: BundleSnapshot[];
 }
 
@@ -52,6 +56,10 @@ export function ApplicationLibraryScreen({
   onRemoveLocal,
   onRequestCloudDeletion,
   onLoadSnapshots,
+  onLoadManualAttachments,
+  onAttachPath,
+  onDetachPath,
+  manualAttachments,
 }: Props) {
   const navigate = useNavigate();
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -118,11 +126,17 @@ export function ApplicationLibraryScreen({
                 onToggleSelect={() => onToggleSelect(bundle.id)}
                 onToggleExpand={() => {
                   setExpandedId(expandedId === bundle.id ? null : bundle.id);
-                  if (expandedId !== bundle.id) void onLoadSnapshots(bundle.id);
+                  if (expandedId !== bundle.id) {
+                    void onLoadSnapshots(bundle.id);
+                    void onLoadManualAttachments(bundle.id);
+                  }
                 }}
                 onRestore={() => setShowRestoreModal(bundle.id)}
                 onRemoveLocal={() => setShowRemoveConfirmation(bundle.id)}
                 onRequestCloudDeletion={() => setShowDeleteCloudConfirmation(bundle.id)}
+                manualAttachments={manualAttachments[bundle.id] ?? []}
+                onAttachPath={onAttachPath}
+                onDetachPath={onDetachPath}
               />
             ))}
           </div>
@@ -144,10 +158,19 @@ export function ApplicationLibraryScreen({
                 expanded={expandedId === bundle.id}
                 busy={busy}
                 onToggleSelect={() => onToggleSelect(bundle.id)}
-                onToggleExpand={() => setExpandedId(expandedId === bundle.id ? null : bundle.id)}
+                onToggleExpand={() => {
+                  setExpandedId(expandedId === bundle.id ? null : bundle.id);
+                  if (expandedId !== bundle.id) {
+                    void onLoadSnapshots(bundle.id);
+                    void onLoadManualAttachments(bundle.id);
+                  }
+                }}
                 onRestore={() => setShowRestoreModal(bundle.id)}
                 onRemoveLocal={() => {}}
                 onRequestCloudDeletion={() => setShowDeleteCloudConfirmation(bundle.id)}
+                manualAttachments={manualAttachments[bundle.id] ?? []}
+                onAttachPath={onAttachPath}
+                onDetachPath={onDetachPath}
               />
             ))}
           </div>
@@ -169,10 +192,19 @@ export function ApplicationLibraryScreen({
                 expanded={expandedId === bundle.id}
                 busy={busy}
                 onToggleSelect={() => onToggleSelect(bundle.id)}
-                onToggleExpand={() => setExpandedId(expandedId === bundle.id ? null : bundle.id)}
+                onToggleExpand={() => {
+                  setExpandedId(expandedId === bundle.id ? null : bundle.id);
+                  if (expandedId !== bundle.id) {
+                    void onLoadSnapshots(bundle.id);
+                    void onLoadManualAttachments(bundle.id);
+                  }
+                }}
                 onRestore={() => setShowRestoreModal(bundle.id)}
                 onRemoveLocal={() => setShowRemoveConfirmation(bundle.id)}
                 onRequestCloudDeletion={() => setShowDeleteCloudConfirmation(bundle.id)}
+                manualAttachments={manualAttachments[bundle.id] ?? []}
+                onAttachPath={onAttachPath}
+                onDetachPath={onDetachPath}
               />
             ))}
           </div>
@@ -343,11 +375,14 @@ interface BundleRowProps {
   selected: boolean;
   expanded: boolean;
   busy: boolean;
+  manualAttachments: BundleManualAttachment[];
   onToggleSelect: () => void;
   onToggleExpand: () => void;
   onRestore: () => void;
   onRemoveLocal: () => void;
   onRequestCloudDeletion: () => void;
+  onAttachPath: (bundleId: string, path: string, label?: string, kind?: string) => Promise<void>;
+  onDetachPath: (bundleId: string, path: string) => Promise<void>;
 }
 
 function BundleRow({
@@ -355,15 +390,20 @@ function BundleRow({
   selected,
   expanded,
   busy,
+  manualAttachments,
   onToggleSelect,
   onToggleExpand,
   onRestore,
   onRemoveLocal,
   onRequestCloudDeletion,
+  onAttachPath,
+  onDetachPath,
 }: BundleRowProps) {
   const avail = availabilityLabel(bundle.availability);
   const backup = backupStatusLabel(bundle.backupStatus);
   const totalSize = bundle.components.reduce((sum, c) => sum + c.logicalSize, 0);
+  const [manualPath, setManualPath] = useState("");
+  const [manualLabel, setManualLabel] = useState("");
 
   return (
     <div className="border border-[#3f476c] rounded bg-[#0b0f23]/60">
@@ -453,6 +493,71 @@ function BundleRow({
               </div>
             </>
           )}
+
+          <div className="mt-3 rounded border border-[#3f476c] bg-[#11162a] p-3">
+            <p className="text-xs font-display uppercase tracking-wider text-gray-500">
+              Automatic learning
+            </p>
+            <p className="mt-1 text-[11px] text-gray-500">
+              Noland automatically learns related app data paths in the background and attaches confident matches to this bundle.
+            </p>
+          </div>
+
+
+          <p className="text-xs font-display uppercase tracking-wider text-gray-500 mt-3 mb-2">
+            Manual attachments
+          </p>
+          {manualAttachments.length > 0 ? (
+            <div className="space-y-2 mb-3">
+              {manualAttachments.map((attachment) => (
+                <div key={`${attachment.id}-${attachment.target}`} className="flex items-center gap-2 rounded border border-[#3f476c] bg-[#11162a] px-2 py-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-xs text-gray-200">{attachment.label}</p>
+                    <p className="truncate text-[10px] text-gray-500">{attachment.target}</p>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    className="text-xs text-red-400"
+                    disabled={busy}
+                    onClick={() => {
+                      void onDetachPath(bundle.id, attachment.target);
+                    }}
+                  >
+                    Remove
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="mb-3 text-xs text-gray-500">No manual paths attached yet.</p>
+          )}
+
+          <div className="mb-3 grid gap-2 md:grid-cols-[minmax(0,1fr)_160px_auto]">
+            <input
+              value={manualPath}
+              onChange={(event) => setManualPath(event.target.value)}
+              placeholder="/home/user/path/to/data"
+              className="rounded border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-xs text-[#dff8ff] outline-none"
+            />
+            <input
+              value={manualLabel}
+              onChange={(event) => setManualLabel(event.target.value)}
+              placeholder="Optional label"
+              className="rounded border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-xs text-[#dff8ff] outline-none"
+            />
+            <Button
+              variant="secondary"
+              className="text-xs"
+              disabled={busy || manualPath.trim().length === 0}
+              onClick={async () => {
+                await onAttachPath(bundle.id, manualPath.trim(), manualLabel.trim() || undefined, "folder");
+                setManualPath("");
+                setManualLabel("");
+              }}
+            >
+              Attach Path
+            </Button>
+          </div>
 
           <div className="flex gap-2 mt-3">
             <Button variant="secondary" className="text-xs" onClick={onRestore} disabled={busy}>

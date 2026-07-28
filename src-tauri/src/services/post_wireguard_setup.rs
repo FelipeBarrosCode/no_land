@@ -29,7 +29,7 @@ use super::{
     remote_exec::RemoteExec,
     ssh_keys::SshKeyService,
     tailscale::TailscaleService,
-    wireguard::setup_local_wireguard_client,
+    wireguard::{local_wireguard_client_runtime_ready, setup_local_wireguard_client},
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -38,6 +38,10 @@ const REACHABILITY_PORTS: [u16; 3] = [47990, 47989, 47984];
 const IMPORT_FILENAME: &str = "wireguard-app-import.conf";
 const SUNSHINE_API_READY_RETRIES: usize = 15;
 const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const WIREGUARD_LOCAL_ACTIVATION_RETRIES: usize = 12;
+const WIREGUARD_LOCAL_ACTIVATION_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const WIREGUARD_REACHABILITY_RETRIES: usize = 10;
+const WIREGUARD_REACHABILITY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
 const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
 const SUNSHINE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -265,6 +269,20 @@ pub async fn setup_wireguard_app_handoff(
     Ok(context.state.read().await.post_wireguard_setup.clone())
 }
 
+async fn wait_for_local_wireguard_activation(config_path: &Path) -> bool {
+    for attempt in 0..WIREGUARD_LOCAL_ACTIVATION_RETRIES {
+        if local_wireguard_client_runtime_ready(config_path).unwrap_or(false) {
+            return true;
+        }
+
+        if attempt + 1 < WIREGUARD_LOCAL_ACTIVATION_RETRIES {
+            sleep(WIREGUARD_LOCAL_ACTIVATION_POLL_INTERVAL).await;
+        }
+    }
+
+    false
+}
+
 pub async fn verify_wireguard_connection(
     app: &AppHandle,
     context: &AppContext,
@@ -279,20 +297,65 @@ pub async fn verify_wireguard_connection(
         })
         .await?;
 
+    let config_path = active_wireguard_config_path(context).await?;
+    let local_client_active = wait_for_local_wireguard_activation(&config_path).await;
+
     emit_post_wireguard_event(
         app,
         context,
         OrchestrationState::WireGuardVerifying,
         "Verifying secure tunnel reachability",
         Some(format!(
-            "Checking {} on ports {:?}",
+            "Checking local tunnel state and {} on ports {:?}",
             TUNNEL_HOST, REACHABILITY_PORTS
         )),
         false,
     )
     .await;
 
-    let result = tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
+    if !local_client_active {
+        let result = ReachabilityResult {
+            reachable: false,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: Vec::new(),
+            error: Some(
+                "Local WireGuard/GotaTun tunnel is not active on this computer yet. Re-apply the managed tunnel and retry."
+                    .to_string(),
+            ),
+        };
+
+        set_setup_failure(
+            context,
+            SetupStage::WireguardWaitingForActivation,
+            OrchestrationState::WireGuardWaitingForActivation,
+            "wireguard_local_inactive",
+            "The local managed tunnel is not active yet.",
+            result.error.clone(),
+            true,
+        )
+        .await?;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::WireGuardWaitingForActivation,
+            "Local tunnel is not active",
+            result.error.clone(),
+            true,
+        )
+        .await;
+
+        return Ok(result);
+    }
+
+    let result = tcp_reachability_with_retries(
+        TUNNEL_HOST,
+        &REACHABILITY_PORTS,
+        Duration::from_secs(2),
+        WIREGUARD_REACHABILITY_RETRIES,
+        WIREGUARD_REACHABILITY_POLL_INTERVAL,
+    );
     if result.reachable {
         context
             .update_state(|state| {
@@ -332,8 +395,8 @@ pub async fn verify_wireguard_connection(
             context,
             SetupStage::WireguardWaitingForActivation,
             OrchestrationState::WireGuardWaitingForActivation,
-            "wireguard_unreachable",
-            "We could not reach 10.77.0.1 yet. Make sure the managed tunnel is active, then retry activation or verification.",
+            "sunshine_ports_unreachable_over_wireguard",
+            "The WireGuard tunnel appears active, but the app could not reach Sunshine ports on 10.77.0.1 yet.",
             result.error.clone(),
             true,
         )
@@ -343,7 +406,7 @@ pub async fn verify_wireguard_connection(
             app,
             context,
             OrchestrationState::WireGuardWaitingForActivation,
-            "WireGuard verification failed",
+            "Tunnel active but service ports not reachable yet",
             result.error.clone(),
             true,
         )
@@ -1124,11 +1187,11 @@ pub async fn retry_setup_stage(
 fn platform_wireguard_mode() -> WireGuardSetupMode {
     let os = OsDetection::new();
     if os.is_macos() {
-        WireGuardSetupMode::WireguardAppMacosManual
+        WireGuardSetupMode::GotatunManagedMacos
     } else if os.is_windows() {
-        WireGuardSetupMode::WireguardAppWindows
+        WireGuardSetupMode::GotatunManagedWindows
     } else {
-        WireGuardSetupMode::WireguardAppLinux
+        WireGuardSetupMode::GotatunManagedLinux
     }
 }
 
@@ -1292,6 +1355,31 @@ fn tcp_reachability(host: &str, ports: &[u16], timeout: Duration) -> Reachabilit
         reachable_ports,
         error: last_error,
     }
+}
+
+fn tcp_reachability_with_retries(
+    host: &str,
+    ports: &[u16],
+    timeout: Duration,
+    attempts: usize,
+    poll_interval: Duration,
+) -> ReachabilityResult {
+    let attempts = attempts.max(1);
+    let mut last_result = tcp_reachability(host, ports, timeout);
+
+    if last_result.reachable {
+        return last_result;
+    }
+
+    for _ in 1..attempts {
+        std::thread::sleep(poll_interval);
+        last_result = tcp_reachability(host, ports, timeout);
+        if last_result.reachable {
+            return last_result;
+        }
+    }
+
+    last_result
 }
 
 fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
@@ -1731,13 +1819,8 @@ fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\\''")
 }
 
-fn recovery_stage_for_mode(mode: WireGuardSetupMode) -> SetupStage {
-    match mode {
-        WireGuardSetupMode::WireguardAppMacosManual => SetupStage::WireguardWaitingForImport,
-        WireGuardSetupMode::WireguardAppWindows | WireGuardSetupMode::WireguardAppLinux => {
-            SetupStage::WireguardWaitingForActivation
-        }
-    }
+fn recovery_stage_for_mode(_mode: WireGuardSetupMode) -> SetupStage {
+    SetupStage::WireguardWaitingForActivation
 }
 
 fn recovery_status_for_stage(stage: SetupStage) -> WireGuardSetupStatus {

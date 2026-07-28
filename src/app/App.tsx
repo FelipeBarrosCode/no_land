@@ -90,10 +90,6 @@ function RootRoute() {
   );
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
-  const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
-  const listSyncableStorageObjects = useAppStore(
-    (state) => state.listSyncableStorageObjects,
-  );
   const saveInstanceStorageSelected = useAppStore(
     (state) => state.saveInstanceStorageSelected,
   );
@@ -101,6 +97,8 @@ function RootRoute() {
     (state) => state.listExportableStorageObjects,
   );
   const applicationBundles = useAppStore((state) => state.applicationBundles);
+  const loadApplicationBundles = useAppStore((state) => state.loadApplicationBundles);
+  const restoreBundleApp = useAppStore((state) => state.restoreBundleApp);
 
   if (!appState) {
     return null;
@@ -152,10 +150,10 @@ function RootRoute() {
       onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
       onSaveInstanceStorageSelected={saveInstanceStorageSelected}
-      onSyncInstanceStorage={syncInstanceStorage}
-      onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
       applicationBundles={applicationBundles}
+      onLoadApplicationBundles={loadApplicationBundles}
+      onRestoreBundle={restoreBundleApp}
     />
   );
 }
@@ -318,8 +316,12 @@ export function App() {
   const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
   const applicationBundles = useAppStore((state) => state.applicationBundles);
   const bundleSnapshots = useAppStore((state) => state.bundleSnapshots);
+  const bundleManualAttachments = useAppStore((state) => state.bundleManualAttachments);
   const selectBundle = useAppStore((state) => state.selectBundle);
   const loadBundleSnapshots = useAppStore((state) => state.loadBundleSnapshots);
+  const loadBundleManualAttachments = useAppStore((state) => state.loadBundleManualAttachments);
+  const attachBundlePath = useAppStore((state) => state.attachBundlePath);
+  const detachBundlePath = useAppStore((state) => state.detachBundlePath);
   const restoreBundleApp = useAppStore((state) => state.restoreBundleApp);
   const removeBundleLocally = useAppStore((state) => state.removeBundleLocally);
   const requestBundleCloudDeletion = useAppStore((state) => state.requestBundleCloudDeletion);
@@ -416,6 +418,10 @@ export function App() {
                 onRemoveLocal={removeBundleLocally}
                 onRequestCloudDeletion={requestBundleCloudDeletion}
                 onLoadSnapshots={loadBundleSnapshots}
+                onLoadManualAttachments={loadBundleManualAttachments}
+                onAttachPath={attachBundlePath}
+                onDetachPath={detachBundlePath}
+                manualAttachments={bundleManualAttachments}
                 snapshots={bundleSnapshots}
               />
             }

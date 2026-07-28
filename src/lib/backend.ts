@@ -29,6 +29,7 @@ import type {
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
+  MicrophoneDevice,
   MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
   EmbeddedMoonlightInstanceStatus,
@@ -45,6 +46,9 @@ import type {
   ApplicationCatalog,
   BundleSnapshot,
   BundleRestoreResult,
+  BundleManualAttachment,
+  BundleTrackingSession,
+  BundleLearningSuggestion,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -705,6 +709,10 @@ export async function getInstanceMicStatus(
   });
 }
 
+export async function listMicrophones(): Promise<MicrophoneDevice[]> {
+  return invokeSafe<MicrophoneDevice[]>("list_microphones");
+}
+
 // ============================================================
 // Shared Storage v2 commands (Application Bundle system)
 // ============================================================
@@ -808,6 +816,92 @@ export async function listBundleSnapshots(
   bundleId: string,
 ): Promise<BundleSnapshot[]> {
   return invokeSafe<BundleSnapshot[]>("list_bundle_snapshots", { bundleId });
+}
+
+export async function listBundleManualAttachments(
+  bundleId: string,
+): Promise<BundleManualAttachment[]> {
+  return invokeSafe<BundleManualAttachment[]>("list_bundle_manual_attachments", { bundleId });
+}
+
+export async function listBundleTrackingSessions(
+  bundleId?: string | null,
+): Promise<BundleTrackingSession[]> {
+  return invokeSafe<BundleTrackingSession[]>("list_bundle_tracking_sessions", {
+    bundleId: bundleId ?? null,
+  });
+}
+
+export async function startBundleTracking(
+  bundleId: string,
+): Promise<BundleTrackingSession> {
+  return invokeSafe<BundleTrackingSession>("start_bundle_tracking", { bundleId });
+}
+
+export async function stopBundleTracking(
+  bundleId?: string | null,
+  sessionId?: string | null,
+): Promise<BundleLearningSuggestion[]> {
+  return invokeSafe<BundleLearningSuggestion[]>("stop_bundle_tracking", {
+    bundleId: bundleId ?? null,
+    sessionId: sessionId ?? null,
+  });
+}
+
+export async function listBundleLearningSuggestions(
+  bundleId: string,
+): Promise<BundleLearningSuggestion[]> {
+  return invokeSafe<BundleLearningSuggestion[]>("list_bundle_learning_suggestions", { bundleId });
+}
+
+export async function acceptBundleLearningSuggestion(
+  bundleId: string,
+  path: string,
+  label?: string | null,
+  kind?: string | null,
+): Promise<void> {
+  return invokeSafe<void>("accept_bundle_learning_suggestion", {
+    bundleId,
+    path,
+    label: label ?? null,
+    kind: kind ?? null,
+  });
+}
+
+export async function rejectBundleLearningSuggestion(
+  bundleId: string,
+  path: string,
+): Promise<void> {
+  return invokeSafe<void>("reject_bundle_learning_suggestion", {
+    bundleId,
+    path,
+  });
+}
+
+export async function attachPathToBundle(
+  bundleId: string,
+  path: string,
+  label?: string | null,
+  kind?: string | null,
+  defaultSelected?: boolean | null,
+): Promise<void> {
+  return invokeSafe<void>("attach_path_to_bundle", {
+    bundleId,
+    path,
+    label: label ?? null,
+    kind: kind ?? null,
+    defaultSelected: defaultSelected ?? null,
+  });
+}
+
+export async function detachPathFromBundle(
+  bundleId: string,
+  path: string,
+): Promise<void> {
+  return invokeSafe<void>("detach_path_from_bundle", {
+    bundleId,
+    path,
+  });
 }
 
 export async function discoverApplicationBundles(

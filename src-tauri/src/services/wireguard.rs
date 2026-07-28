@@ -1635,14 +1635,10 @@ fn best_effort_tool_status(tool: &str, args: &[&str]) -> bool {
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn teardown_managed_gotatun_runtime(
-    config_paths: &[&str],
+fn managed_gotatun_exact_names_and_patterns(
     extra_patterns: &[String],
-) -> AppResult<()> {
+) -> (Vec<String>, Vec<String>, Option<PathBuf>) {
     let gotatun_bin = locate_gotatun_binary();
-    let gotatun_env = gotatun_bin
-        .as_ref()
-        .map(|path| format!("WG_QUICK_USERSPACE_IMPLEMENTATION={}", path.display()));
 
     let mut exact_names = gotatun_binary_names();
     if let Some(file_name) = gotatun_bin
@@ -1662,6 +1658,31 @@ fn teardown_managed_gotatun_runtime(
     patterns.sort();
     patterns.dedup();
 
+    (exact_names, patterns, gotatun_bin)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn managed_gotatun_processes_running(exact_names: &[String], patterns: &[String]) -> bool {
+    exact_names.iter().any(|exact_name| {
+        best_effort_tool_status("pgrep", &["-x", exact_name])
+            || best_effort_tool_status("sudo", &["-n", "pgrep", "-x", exact_name])
+    }) || patterns.iter().any(|pattern| {
+        best_effort_tool_status("pgrep", &["-f", pattern])
+            || best_effort_tool_status("sudo", &["-n", "pgrep", "-f", pattern])
+    })
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn teardown_managed_gotatun_runtime(
+    config_paths: &[String],
+    extra_patterns: &[String],
+) -> AppResult<()> {
+    let (exact_names, patterns, gotatun_bin) =
+        managed_gotatun_exact_names_and_patterns(extra_patterns);
+    let gotatun_env = gotatun_bin
+        .as_ref()
+        .map(|path| format!("WG_QUICK_USERSPACE_IMPLEMENTATION={}", path.display()));
+
     let mut attempted = false;
     let mut any_success = false;
 
@@ -1676,11 +1697,11 @@ fn teardown_managed_gotatun_runtime(
                     "WG_SUDO=1",
                     "wg-quick",
                     "down",
-                    config_path,
+                    config_path.as_str(),
                 ],
             )
         } else {
-            best_effort_tool_status("sudo", &["-n", "wg-quick", "down", config_path])
+            best_effort_tool_status("sudo", &["-n", "wg-quick", "down", config_path.as_str()])
         };
         attempted = true;
         any_success |= success;
@@ -1700,7 +1721,7 @@ fn teardown_managed_gotatun_runtime(
 
     if attempted && !any_success {
         warn!(
-            "Managed GotaTun shutdown did not stop any processes; if the tunnel is running as root and sudo credentials are not cached, manual teardown may still be required"
+            "Managed GotaTun shutdown did not stop any processes during non-interactive teardown; an interactive privileged teardown may still be required"
         );
     }
 
@@ -1708,17 +1729,133 @@ fn teardown_managed_gotatun_runtime(
 }
 
 #[cfg(target_os = "macos")]
-pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+fn interactive_teardown_managed_gotatun_runtime(
+    config_paths: &[String],
+    extra_patterns: &[String],
+) -> AppResult<()> {
+    let (exact_names, patterns, gotatun_bin) =
+        managed_gotatun_exact_names_and_patterns(extra_patterns);
+
+    if !managed_gotatun_processes_running(&exact_names, &patterns) {
+        return Ok(());
+    }
+
+    let config_down_lines = config_paths
+        .iter()
+        .map(|config_path| {
+            let escaped = config_path.replace('"', "\\\"");
+            format!("wg-quick down \"{escaped}\" >/dev/null 2>&1 || true")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pkill_exact_lines = exact_names
+        .iter()
+        .map(|name| {
+            format!(
+                "pkill -x \"{}\" >/dev/null 2>&1 || true",
+                name.replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pkill_pattern_lines = patterns
+        .iter()
+        .map(|pattern| {
+            format!(
+                "pkill -f \"{}\" >/dev/null 2>&1 || true",
+                pattern.replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let export_gotatun = gotatun_bin
+        .as_ref()
+        .map(|path| {
+            format!(
+                "export WG_QUICK_USERSPACE_IMPLEMENTATION=\"{}\"",
+                path.display().to_string().replace('"', "\\\"")
+            )
+        })
+        .unwrap_or_default();
+
+    let shell_script = format!(
+        r#"set -euo pipefail
+cd /
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+{export_gotatun}
+export WG_SUDO=1
+launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true
+{pkill_exact_lines}
+{pkill_pattern_lines}
+{config_down_lines}
+sleep 1
+{pkill_exact_lines}
+{pkill_pattern_lines}
+exit 0"#
+    );
+    let applescript = format!(
+        "do shell script \"{}\" with administrator privileges",
+        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+    );
+
+    let output = Command::new("osascript")
+        .current_dir("/")
+        .arg("-e")
+        .arg(applescript)
+        .output()
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed to run interactive GotaTun teardown via osascript: {error}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        return Err(AppError::Command(format!(
+            "Interactive GotaTun teardown failed (exit {}): stdout: {} | stderr: {}",
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_teardown_targets(config_path: Option<&Path>) -> (Vec<String>, Vec<String>) {
+    let mut config_paths = vec![
+        MACOS_LOCAL_CONF_PATH.to_string(),
+        MACOS_HOMEBREW_CONF_PATH.to_string(),
+    ];
     let mut patterns = vec![
         MACOS_WIREGUARD_HELPER_SCRIPT_PATH.to_string(),
         MACOS_LOCAL_CONF_PATH.to_string(),
         MACOS_HOMEBREW_CONF_PATH.to_string(),
         format!("wg-quick up {MACOS_LOCAL_CONF_PATH}"),
+        format!("wg-quick down {MACOS_LOCAL_CONF_PATH}"),
         format!("wg-quick up {MACOS_HOMEBREW_CONF_PATH}"),
+        format!("wg-quick down {MACOS_HOMEBREW_CONF_PATH}"),
         "nolandwg0".to_string(),
     ];
+
+    if let Some(config_path) = config_path {
+        let config_path_string = config_path.display().to_string();
+        config_paths.push(config_path_string.clone());
+        patterns.push(config_path_string);
+        patterns.push(macos_helper_request_path(config_path).display().to_string());
+        patterns.push(macos_helper_status_path(config_path).display().to_string());
+    }
+
+    config_paths.sort();
+    config_paths.dedup();
     patterns.sort();
     patterns.dedup();
+    (config_paths, patterns)
+}
+
+#[cfg(target_os = "macos")]
+fn teardown_local_wireguard_runtime_for_config(config_path: Option<&Path>) -> AppResult<()> {
+    let (config_paths, patterns) = macos_teardown_targets(config_path);
 
     let helper_stopped = best_effort_tool_status(
         "sudo",
@@ -1731,29 +1868,74 @@ pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
     );
     let _ = helper_stopped;
 
-    teardown_managed_gotatun_runtime(
-        &[MACOS_LOCAL_CONF_PATH, MACOS_HOMEBREW_CONF_PATH],
-        &patterns,
-    )
+    teardown_managed_gotatun_runtime(&config_paths, &patterns)
 }
 
 #[cfg(target_os = "linux")]
-pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+fn teardown_local_wireguard_runtime_for_config(config_path: Option<&Path>) -> AppResult<()> {
+    let mut config_paths = vec!["/etc/wireguard/nolandwg0.conf".to_string()];
     let mut patterns = vec![
         "/etc/wireguard/nolandwg0.conf".to_string(),
         "wg-quick up /etc/wireguard/nolandwg0.conf".to_string(),
         "wg-quick down /etc/wireguard/nolandwg0.conf".to_string(),
         "nolandwg0".to_string(),
     ];
+
+    if let Some(config_path) = config_path {
+        let config_path_string = config_path.display().to_string();
+        config_paths.push(config_path_string.clone());
+        patterns.push(config_path_string);
+    }
+
+    config_paths.sort();
+    config_paths.dedup();
     patterns.sort();
     patterns.dedup();
 
-    teardown_managed_gotatun_runtime(&["/etc/wireguard/nolandwg0.conf"], &patterns)
+    teardown_managed_gotatun_runtime(&config_paths, &patterns)
 }
 
 #[cfg(target_os = "windows")]
-pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+fn teardown_local_wireguard_runtime_for_config(_config_path: Option<&Path>) -> AppResult<()> {
     Ok(())
+}
+
+pub fn teardown_active_local_wireguard_runtime() -> AppResult<()> {
+    teardown_local_wireguard_runtime_for_config(None)
+}
+
+pub fn teardown_local_wireguard_runtime_for_path(config_path: &Path) -> AppResult<()> {
+    teardown_local_wireguard_runtime_for_config(Some(config_path))
+}
+
+pub async fn teardown_managed_runtime_for_context(context: &AppContext) -> AppResult<()> {
+    let state = context.load_state().await;
+    if let Some(config_path) = resolve_active_wireguard_config_path(&state) {
+        return teardown_local_wireguard_runtime_for_path(&config_path);
+    }
+
+    teardown_active_local_wireguard_runtime()
+}
+
+#[cfg(target_os = "macos")]
+pub async fn teardown_managed_runtime_for_context_interactive(
+    context: &AppContext,
+) -> AppResult<()> {
+    let state = context.load_state().await;
+    let config_path = resolve_active_wireguard_config_path(&state);
+    let config_path_ref = config_path.as_deref();
+
+    teardown_local_wireguard_runtime_for_config(config_path_ref)?;
+
+    let (config_paths, patterns) = macos_teardown_targets(config_path_ref);
+    interactive_teardown_managed_gotatun_runtime(&config_paths, &patterns)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub async fn teardown_managed_runtime_for_context_interactive(
+    context: &AppContext,
+) -> AppResult<()> {
+    teardown_managed_runtime_for_context(context).await
 }
 
 pub fn read_local_wireguard_show_output() -> AppResult<String> {
@@ -1773,11 +1955,22 @@ pub fn read_local_wireguard_show_output() -> AppResult<String> {
         .output()
         .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
 
-    if !output.status.success() {
-        return Ok(String::new());
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout).to_string());
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    #[cfg(target_os = "macos")]
+    {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if stderr.contains("permission denied") {
+            let sudo_output = resolved_command_output("sudo", &["-n", "wg", "show"])?;
+            if sudo_output.status.success() {
+                return Ok(String::from_utf8_lossy(&sudo_output.stdout).to_string());
+            }
+        }
+    }
+
+    Ok(String::new())
 }
 
 pub fn normalize_wireguard_state_from_disk(
@@ -1941,6 +2134,12 @@ pub fn normalize_wireguard_state_from_disk(
     Ok(changed)
 }
 
+#[cfg(target_os = "macos")]
+pub async fn maintain_persisted_local_tunnel(_context: &AppContext) -> AppResult<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
 pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<()> {
     if context.wireguard_mutation_in_progress() {
         return Ok(());
@@ -1957,11 +2156,6 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
 
     cleanup_stale_wireguard_artifacts(&config_path);
 
-    #[cfg(target_os = "macos")]
-    if !Path::new(MACOS_WIREGUARD_HELPER_PLIST_PATH).exists() {
-        return Ok(());
-    }
-
     let expected = load_expected_local_tunnel(&config_path)?;
     let runtime_before = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
     let handshake_ok = has_recent_handshake(&runtime_before.latest_handshake);
@@ -1972,31 +2166,7 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         && runtime_before.allowed_ips.trim().is_empty()
         && runtime_before.latest_handshake.trim().is_empty();
 
-    #[cfg(target_os = "macos")]
-    let helper_status = read_macos_helper_status(&config_path);
-    #[cfg(target_os = "macos")]
-    if matches!(
-        macos_helper_generation(),
-        Some(MacosHelperGeneration::WatchRequests)
-    ) {
-        if helper_status
-            .as_ref()
-            .is_some_and(helper_status_recently_succeeded)
-        {
-            let _ = note_monitor_conflict_candidate(false);
-            clear_macos_monitor_repair_cooldown();
-            let _ = context
-                .update_state(|state| {
-                    state.wireguard.config_path = config_path.display().to_string();
-                    apply_expected_tunnel_to_state(state, &expected);
-                })
-                .await;
-            return Ok(());
-        }
-    }
-
-    let tunnel_healthy = !config_mismatch
-        && (handshake_ok || (ping_ok && !runtime_before.interface_name.trim().is_empty()));
+    let tunnel_healthy = local_tunnel_runtime_is_healthy(&expected);
 
     if tunnel_healthy {
         let _ = note_monitor_repair_health(true);
@@ -2017,24 +2187,31 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         return Ok(());
     }
 
-    let connectivity_missing = !tunnel_healthy;
-    let hard_mismatch = config_mismatch;
-    #[cfg(target_os = "macos")]
-    let helper_generation = macos_helper_generation();
-    #[cfg(target_os = "macos")]
-    let needs_repair = match helper_generation {
-        Some(MacosHelperGeneration::WatchRequests) => config_mismatch || connectivity_missing,
-        Some(MacosHelperGeneration::Legacy) => false,
-        None => config_mismatch || connectivity_missing,
-    };
-    #[cfg(not(target_os = "macos"))]
-    let needs_repair = config_mismatch || connectivity_missing;
-
-    #[cfg(target_os = "macos")]
-    if matches!(helper_generation, Some(MacosHelperGeneration::Legacy)) && config_mismatch {
-        if can_attempt_macos_monitor_repair(false) {
+    let failure_streak = note_monitor_repair_health(false);
+    let conflict_candidate = config_mismatch && !runtime_empty && !handshake_ok && ping_ok;
+    let conflict_streak = note_monitor_conflict_candidate(conflict_candidate);
+    if runtime_empty {
+        let _ = note_monitor_conflict_candidate(false);
+    }
+    if let Some(streak) = conflict_streak {
+        if streak >= MONITOR_CONFLICT_WARN_EVERY && streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
             warn!(
-                "Legacy Noland WireGuard helper detected. Noland no longer auto-manages local WireGuard; open the WireGuard app and manage the tunnel manually (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                "Managed tunnel health monitor sees an active local tunnel that does not match the saved Noland identity. Another controller may own the interface. streak={} expected_peer={} active_peer={} expected_allowed_ips={} active_allowed_ips={}",
+                streak,
+                expected.peer_public_key,
+                runtime_before.peer_public_key,
+                expected.allowed_ips,
+                runtime_before.allowed_ips
+            );
+        }
+    }
+
+    if !config_mismatch && failure_streak < MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD {
+        if failure_streak == 1 || failure_streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
+            warn!(
+                "Managed tunnel health check failed; waiting briefly before auto-repair (streak={}/{}, peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+                failure_streak,
+                MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD,
                 runtime_before.peer_public_key == expected.peer_public_key,
                 runtime_before.allowed_ips == expected.allowed_ips,
                 !handshake_ok,
@@ -2044,84 +2221,42 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         return Ok(());
     }
 
-    if needs_repair {
-        let failure_streak = note_monitor_repair_health(false);
-        if !hard_mismatch && failure_streak < MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD {
-            if failure_streak == 1 || failure_streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
-                warn!(
-                    "WireGuard health monitor observed an unhealthy check. Noland no longer auto-repairs the local tunnel; open the WireGuard app and manage the tunnel manually if needed (streak={}/{}, peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
-                    failure_streak,
-                    MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD,
-                    runtime_before.peer_public_key == expected.peer_public_key,
-                    runtime_before.allowed_ips == expected.allowed_ips,
-                    !handshake_ok,
-                    ping_ok
-                );
-            }
-            return Ok(());
-        }
+    warn!(
+        "Managed tunnel is unhealthy; reapplying Noland-managed GotaTun tunnel (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
+        runtime_before.peer_public_key == expected.peer_public_key,
+        runtime_before.allowed_ips == expected.allowed_ips,
+        !handshake_ok,
+        ping_ok
+    );
 
-        let conflict_candidate = config_mismatch && !runtime_empty && !handshake_ok && ping_ok;
-        let conflict_streak = note_monitor_conflict_candidate(conflict_candidate);
-        if runtime_empty {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
+    match reconnect_local_wireguard_client(&config_path) {
+        Ok(message) => {
+            info!("Managed tunnel auto-repair succeeded: {message}");
+            let _ = note_monitor_repair_health(true);
             let _ = note_monitor_conflict_candidate(false);
-        }
-        if let Some(streak) = conflict_streak {
-            if streak >= MONITOR_CONFLICT_WARN_EVERY && streak % MONITOR_CONFLICT_WARN_EVERY == 0 {
-                warn!(
-                    "WireGuard health monitor repeatedly sees reachability to the tunnel host but the active local tunnel does not match the saved Noland identity. This usually means another tunnel/controller owns the interface (for example WireGuard.app). streak={} expected_peer={} active_peer={} expected_allowed_ips={} active_allowed_ips={}",
-                    streak,
-                    expected.peer_public_key,
-                    runtime_before.peer_public_key,
-                    expected.allowed_ips,
-                    runtime_before.allowed_ips
-                );
-            }
-        }
-
-        if runtime_empty {
             #[cfg(target_os = "macos")]
-            if let Some(status) = helper_status.as_ref() {
-                match status.kind {
-                    MacosHelperStatusKind::Error => warn!(
-                        "WireGuard health monitor cannot see local WireGuard runtime from app context and the installed helper last reported an error. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually: {}",
-                        if status.message.trim().is_empty() {
-                            "WireGuard helper did not report a specific failure."
-                        } else {
-                            status.message.as_str()
+            clear_macos_monitor_repair_cooldown();
+
+            if let Ok(runtime_after) =
+                collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))
+            {
+                let _ = context
+                    .update_state(|state| {
+                        state.wireguard.config_path = config_path.display().to_string();
+                        apply_expected_tunnel_to_state(state, &expected);
+                        if !runtime_after.interface_name.trim().is_empty() {
+                            state.wireguard.last_runtime_interface =
+                                runtime_after.interface_name.clone();
                         }
-                    ),
-                    MacosHelperStatusKind::Invalid => warn!(
-                        "WireGuard health monitor cannot see local WireGuard runtime from app context, and the helper status file is invalid or incomplete. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually."
-                    ),
-                    _ => {}
-                }
+                    })
+                    .await;
             }
-            #[cfg(not(target_os = "macos"))]
-            warn!(
-                "WireGuard health monitor cannot see any local WireGuard runtime yet. Noland will not auto-repair; open the WireGuard app and manage the tunnel manually."
-            );
         }
-
-        warn!(
-            "WireGuard health monitor detected stale local tunnel state, but Noland no longer auto-manages local WireGuard. Open the WireGuard app and manage the tunnel manually (peer_match={}, allowed_ips_match={}, handshake_missing={}, ping_ok={})",
-            runtime_before.peer_public_key == expected.peer_public_key,
-            runtime_before.allowed_ips == expected.allowed_ips,
-            !handshake_ok,
-            ping_ok
-        );
-        return Ok(());
+        Err(error) => {
+            warn!("Managed tunnel auto-repair failed: {error}");
+        }
     }
-
-    let _ = context
-        .update_state(|state| {
-            state.wireguard.config_path = config_path.display().to_string();
-            apply_expected_tunnel_to_state(state, &expected);
-            if !runtime_before.interface_name.trim().is_empty() {
-                state.wireguard.last_runtime_interface = runtime_before.interface_name.clone();
-            }
-        })
-        .await;
 
     Ok(())
 }
@@ -2200,6 +2335,7 @@ fn canonicalize_wireguard_client_config_text(original: &str) -> AppResult<String
             AppError::InvalidInput("WireGuard client config is missing [Peer] Endpoint".to_string())
         })?;
 
+    #[cfg(not(target_os = "macos"))]
     let listen_port = parse_wireguard_config_value(original, "Interface", "ListenPort");
     let mtu = parse_wireguard_config_value(original, "Interface", "MTU");
     let keepalive = parse_wireguard_config_value(original, "Peer", "PersistentKeepalive");
@@ -2286,25 +2422,6 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
         );
     }
 
-    if matches!(
-        macos_helper_generation(),
-        Some(MacosHelperGeneration::WatchRequests)
-    ) {
-        match request_macos_helper_repair(config_path, "setup-local-wireguard-client") {
-            Ok(()) => {
-                if local_tunnel_runtime_is_healthy(&expected) {
-                    return Ok(
-                        "WireGuard client tunnel repaired on this Mac using the installed Noland helper"
-                            .to_string(),
-                    );
-                }
-            }
-            Err(error) => {
-                warn!("WireGuard helper setup failed; falling back to hard reconnect: {error}");
-            }
-        }
-    }
-
     hard_reconnect_local_wireguard_client_macos(config_path, true)
 }
 
@@ -2320,25 +2437,6 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
         );
     }
 
-    if matches!(
-        macos_helper_generation(),
-        Some(MacosHelperGeneration::WatchRequests)
-    ) {
-        match request_macos_helper_repair(config_path, "reconnect-local-wireguard-client") {
-            Ok(()) => {
-                if local_tunnel_runtime_is_healthy(&expected) {
-                    return Ok(
-                        "WireGuard client tunnel reconnected on this Mac using the installed Noland helper"
-                            .to_string(),
-                    );
-                }
-            }
-            Err(error) => {
-                warn!("WireGuard helper reconnect failed; falling back to hard reconnect: {error}");
-            }
-        }
-    }
-
     hard_reconnect_local_wireguard_client_macos(config_path, false)
 }
 
@@ -2351,222 +2449,111 @@ fn hard_reconnect_local_wireguard_client_macos(
     let gotatun_bin = resolve_gotatun_binary()?;
 
     let path = config_path.display().to_string().replace('"', "\\\"");
-    let request_path = macos_helper_request_path(config_path)
-        .display()
-        .to_string()
-        .replace('"', "\\\"");
-    let status_path = macos_helper_status_path(config_path)
-        .display()
-        .to_string()
-        .replace('"', "\\\"");
     let expected_peer = expected.peer_public_key.replace('"', "\\\"");
     let expected_allowed_ips = expected.allowed_ips.replace('"', "\\\"");
     let expected_server_ip = expected.server_ip.replace('"', "\\\"");
-    let expected_endpoint_host = expected.endpoint_host.replace('"', "\\\"");
-    let expected_endpoint_port = expected.endpoint_port;
     let gotatun_bin = gotatun_bin.replace('"', "\\\"");
-    let repair_script = format!(
-        r#"#!/bin/sh
-set -eu
 
+    let script_path = std::env::temp_dir().join(format!(
+        "noland-gotatun-reconnect-{}-{}.sh",
+        std::process::id(),
+        current_unix_timestamp().unwrap_or(0)
+    ));
+    let script_path_string = script_path.display().to_string();
+    let shell_script = format!(
+        r#"#!/bin/bash
+set -euo pipefail
+cd /
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-
 SOURCE_CONF_PATH="{path}"
 LOCAL_CONF_PATH="{MACOS_LOCAL_CONF_PATH}"
 HOMEBREW_CONF_PATH="{MACOS_HOMEBREW_CONF_PATH}"
-REQUEST_PATH="{request_path}"
-STATUS_PATH="{status_path}"
 EXPECTED_PEER="{expected_peer}"
 EXPECTED_ALLOWED_IPS="{expected_allowed_ips}"
 EXPECTED_SERVER_IP="{expected_server_ip}"
-EXPECTED_ENDPOINT_HOST="{expected_endpoint_host}"
-EXPECTED_ENDPOINT_PORT="{expected_endpoint_port}"
-APP_OWNER=$(stat -f '%Su' "$SOURCE_CONF_PATH" 2>/dev/null || true)
-APP_GROUP=$(stat -f '%Sg' "$SOURCE_CONF_PATH" 2>/dev/null || true)
 GOTATUN_BIN="{gotatun_bin}"
 export WG_QUICK_USERSPACE_IMPLEMENTATION="$GOTATUN_BIN"
 export WG_SUDO=1
 
-fix_app_data_ownership() {{
-  target_path="$1"
-  [ -n "$APP_OWNER" ] || return 0
-  [ -n "$APP_GROUP" ] || return 0
-  [ -e "$target_path" ] || return 0
-  chown "$APP_OWNER:$APP_GROUP" "$target_path" 2>/dev/null || true
-}}
+if ! command -v wg-quick >/dev/null 2>&1; then
+  echo 'wg-quick not found. Install wireguard-tools first.' >&2
+  exit 1
+fi
 
-write_status() {{
-  status="$1"
-  message="$2"
-  mkdir -p "$(dirname "$STATUS_PATH")"
-  fix_app_data_ownership "$(dirname "$STATUS_PATH")"
-  printf 'status=%s\ntimestamp=%s\nmessage=%s\n' "$status" "$(date +%s)" "$message" > "$STATUS_PATH"
-  chmod 644 "$STATUS_PATH" 2>/dev/null || true
-  fix_app_data_ownership "$STATUS_PATH"
-}}
-
-compact_output() {{
-  printf '%s' "$1" | tr '\n' ' ' | tr '\r' ' '
-}}
-
-has_recent_handshake() {{
-  latest_handshake="$1"
-  [ -n "$latest_handshake" ] && ! printf '%s' "$latest_handshake" | grep -qi 'never'
-}}
-
-source_config_matches_expected() {{
-  source_path="$1"
-  [ -f "$source_path" ] || return 1
-
-  source_peer=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^PublicKey[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
-  source_allowed=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^AllowedIPs[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
-  source_endpoint=$(grep -A 12 '^\[Peer\]' "$source_path" | grep '^Endpoint[[:space:]]*=' | head -n 1 | cut -d= -f2- | tr -d ' \r')
-
-  [ "$source_peer" = "$EXPECTED_PEER" ] || return 1
-  [ "$source_allowed" = "$EXPECTED_ALLOWED_IPS" ] || return 1
-
-  expected_endpoint="$EXPECTED_ENDPOINT_HOST:$EXPECTED_ENDPOINT_PORT"
-  [ -n "$source_endpoint" ] || return 1
-  [ "$source_endpoint" = "$expected_endpoint" ] || return 1
-
-  return 0
-}}
-
-tunnel_matches_expected() {{
-  wg_output="$1"
-  [ -n "$wg_output" ] \
-    && printf '%s\n' "$wg_output" | grep -F "peer: $EXPECTED_PEER" >/dev/null 2>&1 \
-    && printf '%s\n' "$wg_output" | grep -F "allowed ips: $EXPECTED_ALLOWED_IPS" >/dev/null 2>&1
-}}
-
-tunnel_freshness_status() {{
-  wg_output="$1"
-
-  if ! tunnel_matches_expected "$wg_output"; then
-    printf 'peer_or_allowed_ips_mismatch'
-    return
-  fi
-
-  latest_handshake=$(printf '%s\n' "$wg_output" | sed -n 's/^  latest handshake: //p' | head -n 1)
-  if has_recent_handshake "$latest_handshake"; then
-    printf 'ok'
-    return
-  fi
-
-  if [ -z "$EXPECTED_SERVER_IP" ] || ping -c 1 -t 3 "$EXPECTED_SERVER_IP" >/dev/null 2>&1; then
-    printf 'ok'
-  else
-    printf 'handshake_missing_and_ping_failed'
-  fi
-}}
-
-mkdir -p "$(dirname "$REQUEST_PATH")"
-fix_app_data_ownership "$(dirname "$REQUEST_PATH")"
 if [ ! -f "$SOURCE_CONF_PATH" ]; then
-  write_status "error" "Missing source WireGuard config at $SOURCE_CONF_PATH"
+  echo "Missing source WireGuard config at $SOURCE_CONF_PATH" >&2
   exit 1
 fi
 
-if ! source_config_matches_expected "$SOURCE_CONF_PATH"; then
-  write_status "error" "Source WireGuard config does not match expected peer/allowedIPs/endpoint; refusing to patch helper config"
-  exit 1
-fi
-
+mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard
 install -m 600 "$SOURCE_CONF_PATH" "$LOCAL_CONF_PATH"
 install -m 600 "$SOURCE_CONF_PATH" "$HOMEBREW_CONF_PATH"
-
 CONF_PATH="$LOCAL_CONF_PATH"
 if [ ! -f "$CONF_PATH" ] && [ -f "$HOMEBREW_CONF_PATH" ]; then
   CONF_PATH="$HOMEBREW_CONF_PATH"
 fi
 
-if [ ! -f "$CONF_PATH" ]; then
-  write_status "error" "Missing saved WireGuard config at $LOCAL_CONF_PATH and $HOMEBREW_CONF_PATH"
-  exit 1
-fi
-
-CURRENT_SHOW=$(wg show 2>/dev/null || true)
-CURRENT_STATUS=$(tunnel_freshness_status "$CURRENT_SHOW")
-if [ "$CURRENT_STATUS" = "ok" ]; then
-  rm -f "$REQUEST_PATH" 2>/dev/null || true
-  write_status "healthy" "WireGuard tunnel already healthy"
-  exit 0
-fi
-
+launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true
+pkill -x gotatun >/dev/null 2>&1 || true
+pkill -f "$GOTATUN_BIN" >/dev/null 2>&1 || true
 wg-quick down "$LOCAL_CONF_PATH" >/dev/null 2>&1 || true
 wg-quick down "$HOMEBREW_CONF_PATH" >/dev/null 2>&1 || true
 sleep 1
-if ! UP_OUTPUT=$(wg-quick up "$CONF_PATH" 2>&1); then
-  SUMMARY=$(compact_output "$UP_OUTPUT")
-  rm -f "$REQUEST_PATH" 2>/dev/null || true
-  write_status "error" "wg-quick up failed: $SUMMARY"
-  printf '%s\n' "$UP_OUTPUT"
-  exit 1
-fi
-SHOW_OUTPUT=$(wg show 2>/dev/null || true)
-rm -f "$REQUEST_PATH" 2>/dev/null || true
+wg-quick up "$CONF_PATH"
 
-ATTEMPTS=10
-while [ "$ATTEMPTS" -gt 0 ]; do
-  CURRENT_STATUS=$(tunnel_freshness_status "$SHOW_OUTPUT")
-  if [ "$CURRENT_STATUS" = "ok" ]; then
-    write_status "repaired" "WireGuard tunnel applied successfully"
-    printf '%s\n' "$SHOW_OUTPUT"
+for _ in $(seq 1 20); do
+  WG_OUTPUT=$(wg show 2>/dev/null || true)
+  if printf '%s\n' "$WG_OUTPUT" | grep -F "peer: $EXPECTED_PEER" >/dev/null 2>&1 \
+    && printf '%s\n' "$WG_OUTPUT" | grep -F "allowed ips: $EXPECTED_ALLOWED_IPS" >/dev/null 2>&1; then
+    printf '%s\n' "$WG_OUTPUT"
     exit 0
   fi
 
-  ATTEMPTS=$((ATTEMPTS - 1))
-  [ "$ATTEMPTS" -gt 0 ] || break
+  if ping -c 1 -t 1 "$EXPECTED_SERVER_IP" >/dev/null 2>&1; then
+    printf '%s\n' "$WG_OUTPUT"
+    echo "Managed tunnel became reachable via $EXPECTED_SERVER_IP before wg output fully settled."
+    exit 0
+  fi
+
   sleep 1
-  SHOW_OUTPUT=$(wg show 2>/dev/null || true)
 done
 
-SUMMARY=$(compact_output "$SHOW_OUTPUT")
-write_status "error" "WireGuard helper freshness check failed (${{CURRENT_STATUS:-unknown}}) after reconnect; wg show: $SUMMARY"
-printf '%s\n' "$SHOW_OUTPUT"
-exit 1
+WG_OUTPUT=$(wg show 2>/dev/null || true)
+printf '%s\n' "$WG_OUTPUT"
+echo 'Managed tunnel started, but runtime verification did not match expected peer/allowed IPs and the tunnel host never became reachable.' >&2
+exit 1"#
+    );
 
-"#
-    );
-    let launchd_plist = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
-<plist version=\"1.0\">
-<dict>
-  <key>Label</key>
-  <string>{MACOS_WIREGUARD_HELPER_LABEL}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{MACOS_WIREGUARD_HELPER_SCRIPT_PATH}</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>NetworkState</key>
-    <true/>
-  </dict>
-  <key>WatchPaths</key>
-  <array>
-    <string>{path}</string>
-    <string>{request_path}</string>
-  </array>
-  <key>StartInterval</key>
-  <integer>60</integer>
-  <key>StandardOutPath</key>
-  <string>/var/log/noland-wireguard.log</string>
-  <key>StandardErrorPath</key>
-  <string>/var/log/noland-wireguard.log</string>
-</dict>
-</plist>
-"#
-    );
-    let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; if [ ! -x \"{gotatun_bin}\" ] && ! command -v \"{gotatun_bin}\" >/dev/null 2>&1; then echo 'gotatun not found. Install gotatun first or set NOLAND_GOTATUN_BIN.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; wg show"
-    );
+    std::fs::write(&script_path, shell_script).map_err(|error| {
+        AppError::Command(format!(
+            "Failed to write macOS reconnect helper script {}: {error}",
+            script_path.display()
+        ))
+    })?;
+    #[cfg(unix)]
+    {
+        let mut permissions = std::fs::metadata(&script_path)
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "Failed to stat macOS reconnect helper script {}: {error}",
+                    script_path.display()
+                ))
+            })?
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&script_path, permissions).map_err(|error| {
+            AppError::Command(format!(
+                "Failed to chmod macOS reconnect helper script {}: {error}",
+                script_path.display()
+            ))
+        })?;
+    }
+
     let applescript = format!(
-        "do shell script \"{}\" with administrator privileges",
-        shell_script.replace('\\', "\\\\").replace('"', "\\\"")
+        "do shell script \"/bin/bash {}\" with administrator privileges",
+        script_path_string
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
     );
 
     let output = Command::new("osascript")
@@ -2576,12 +2563,20 @@ exit 1
         .output()
         .map_err(|error| AppError::Command(format!("Failed to run osascript: {error}")))?;
 
+    let _ = std::fs::remove_file(&script_path);
+
     if !output.status.success() {
+        let exit_code = output
+            .status
+            .code()
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "terminated by signal".to_string());
         return Err(AppError::Command(format!(
-            "Failed to reconnect local WireGuard client (exit {}): stdout: {} | stderr: {}",
-            output.status.code().unwrap_or(-1),
+            "Failed to reconnect local WireGuard client (exit {}): stdout: {} | stderr: {} | helper_script: {}",
+            exit_code,
             String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&output.stderr).trim(),
+            script_path_string,
         )));
     }
 
@@ -3300,15 +3295,32 @@ fn local_tunnel_runtime_is_healthy(expected: &ExpectedLocalTunnel) -> bool {
         return false;
     };
 
-    if !local_tunnel_runtime_matches_expected(&runtime, expected) {
-        return false;
+    if local_tunnel_runtime_matches_expected(&runtime, expected) {
+        if has_recent_handshake(&runtime.latest_handshake) {
+            return true;
+        }
+
+        if can_ping_tunnel_host(&expected.server_ip) {
+            return true;
+        }
     }
 
-    if has_recent_handshake(&runtime.latest_handshake) {
-        return true;
+    #[cfg(target_os = "macos")]
+    {
+        let (exact_names, patterns, _) = managed_gotatun_exact_names_and_patterns(&[]);
+        if managed_gotatun_processes_running(&exact_names, &patterns)
+            && can_ping_tunnel_host(&expected.server_ip)
+        {
+            return true;
+        }
     }
 
-    can_ping_tunnel_host(&expected.server_ip)
+    false
+}
+
+pub fn local_wireguard_client_runtime_ready(config_path: &Path) -> AppResult<bool> {
+    let expected = load_expected_local_tunnel(config_path)?;
+    Ok(local_tunnel_runtime_is_healthy(&expected))
 }
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]

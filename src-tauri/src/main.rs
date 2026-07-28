@@ -3,6 +3,7 @@
 mod commands;
 mod errors;
 mod input;
+mod mic_client;
 mod models;
 mod moonlight;
 mod services;
@@ -22,10 +23,7 @@ use services::{
     ssh_keys::normalize_ssh_state_from_disk,
     state_store::{JsonStateStore, StateStore},
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
-    wireguard::{
-        maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk,
-        teardown_active_local_wireguard_runtime,
-    },
+    wireguard::{normalize_wireguard_state_from_disk, teardown_active_local_wireguard_runtime},
 };
 use tauri::{Manager, RunEvent, WindowEvent};
 use tracing::{error, info, warn};
@@ -33,12 +31,23 @@ use utils::logging::init_logging;
 
 static APP_EXIT_CLEANUP_STARTED: AtomicBool = AtomicBool::new(false);
 
-fn run_app_exit_cleanup() {
+fn run_app_exit_cleanup(app: Option<&tauri::AppHandle>) {
     if APP_EXIT_CLEANUP_STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
 
-    match teardown_active_local_wireguard_runtime() {
+    let cleanup_result = if let Some(app) = app {
+        match app.try_state::<AppContext>() {
+            Some(context) => tauri::async_runtime::block_on(
+                services::wireguard::teardown_managed_runtime_for_context_interactive(&context),
+            ),
+            None => teardown_active_local_wireguard_runtime(),
+        }
+    } else {
+        teardown_active_local_wireguard_runtime()
+    };
+
+    match cleanup_result {
         Ok(()) => info!("Completed best-effort managed GotaTun shutdown during app exit"),
         Err(error) => warn!("Failed tearing down managed GotaTun runtime during app exit: {error}"),
     }
@@ -196,17 +205,6 @@ fn main() {
                 OrchestrationService::resume_if_needed(&app_handle, &resume_context).await;
             });
 
-            let monitor_context = context.clone();
-            tauri::async_runtime::spawn(async move {
-                let interval = std::time::Duration::from_secs(30);
-                loop {
-                    tokio::time::sleep(interval).await;
-                    if let Err(error) = maintain_persisted_local_tunnel(&monitor_context).await {
-                        error!("WireGuard tunnel health monitor failed: {error}");
-                    }
-                }
-            });
-
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -240,6 +238,18 @@ fn main() {
                 input.end_capture();
                 if let Ok(mut active_preferences) = active_session_preferences.lock() {
                     *active_preferences = None;
+                }
+                // Tear down the managed GoTun/WireGuard tunnel for the active instance so no orphaned processes remain
+                let context = app.state::<AppContext>();
+                match services::wireguard::teardown_managed_runtime_for_context_interactive(
+                    &context,
+                )
+                .await
+                {
+                    Ok(()) => info!("GotaTun tunnel torn down after stream window close"),
+                    Err(e) => {
+                        warn!("GotaTun teardown after stream window close failed (non-fatal): {e}")
+                    }
                 }
                 let _ = moonlight::platform::close_stream_window(&app);
             });
@@ -290,6 +300,15 @@ fn main() {
             list_application_bundles,
             get_application_bundle,
             list_bundle_snapshots,
+            list_bundle_manual_attachments,
+            list_bundle_tracking_sessions,
+            list_bundle_learning_suggestions,
+            start_bundle_tracking,
+            stop_bundle_tracking,
+            accept_bundle_learning_suggestion,
+            reject_bundle_learning_suggestion,
+            attach_path_to_bundle,
+            detach_path_from_bundle,
             discover_application_bundles,
             restore_application_bundle,
             get_restore_job_status,
@@ -349,6 +368,7 @@ fn main() {
             reconnect_instance_mic,
             recreate_instance_mic_device,
             get_instance_mic_status,
+            list_microphones,
             moonlight_get_configuration,
             moonlight_register_host,
             moonlight_refresh_host,
@@ -381,9 +401,9 @@ fn main() {
             panic!("tauri app failed to build: {error}");
         });
 
-    app.run(|_, event| match event {
-        RunEvent::ExitRequested { .. } => run_app_exit_cleanup(),
-        RunEvent::Exit => run_app_exit_cleanup(),
+    app.run(|app, event| match event {
+        RunEvent::ExitRequested { .. } => run_app_exit_cleanup(Some(app)),
+        RunEvent::Exit => run_app_exit_cleanup(Some(app)),
         _ => {}
     });
 }

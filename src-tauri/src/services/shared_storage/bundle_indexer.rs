@@ -210,10 +210,10 @@ fn shell_escape(input: &str) -> String {
 
 /// Self-contained Python bundle indexer script.
 const INDEXER_PYTHON_SCRIPT: &str = r#"#!/usr/bin/env python3
-"""Noland Connect Bundle Indexer MVP
+"""Noland Connect Bundle Indexer
 
-Scans an Ubuntu home directory and generates a bundle-index.json that
-groups user files into app bundles, project bundles, and folder bundles.
+Builds software-centric bundles by grouping a software anchor with the related
+paths it writes across the machine.
 """
 
 import argparse
@@ -221,12 +221,10 @@ import json
 import os
 import re
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ------------------------------------------------------------------
-# Alias map
-# ------------------------------------------------------------------
 ALIAS_MAP = {
     "code": "vscode",
     "visual-studio-code": "vscode",
@@ -237,287 +235,439 @@ ALIAS_MAP = {
     "google-chrome": "chrome",
 }
 
-# ------------------------------------------------------------------
-# Name normalisation
-# ------------------------------------------------------------------
-COMMON_EXTS = (".desktop", ".appimage", ".deb", ".zip", ".tar.gz",
-               ".tar.bz2", ".tar.xz", ".7z", ".rar", ".tgz")
+COMMON_EXTS = (
+    ".desktop",
+    ".appimage",
+    ".deb",
+    ".zip",
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".7z",
+    ".rar",
+    ".tgz",
+)
+
+
+class BundleBuilder:
+    def __init__(self, bundle_id: str, name: str, bundle_type: str, normalized_key: str):
+        self.id = bundle_id
+        self.name = name
+        self.bundle_type = bundle_type
+        self.normalized_key = normalized_key
+        self.signals = set()
+        self.folder_bundles = []
+        self.seen_targets = set()
+        self.confidence = 0.0
+
+    def add_path(self, *, component_id: str, label: str, source: str, target: str, kind: str,
+                 signal: str, default_selected: bool = True, confidence_boost: float = 0.0):
+        if not target.startswith("/home/"):
+            return
+        if target in self.seen_targets:
+            return
+        self.seen_targets.add(target)
+        self.signals.add(signal)
+        self.confidence += confidence_boost
+        self.folder_bundles.append({
+            "id": component_id,
+            "label": label,
+            "source": source,
+            "target": target,
+            "kind": kind,
+            "default_selected": default_selected,
+        })
+
+    def to_json(self):
+        confidence = min(0.99, max(0.35, self.confidence))
+        return {
+            "id": self.id,
+            "name": self.name,
+            "type": self.bundle_type,
+            "confidence": round(confidence, 2),
+            "signals": sorted(self.signals),
+            "folder_bundles": self.folder_bundles,
+        }
 
 
 def normalize_name(raw: str) -> str:
     s = raw.strip().lower()
-    # Remove common extensions
     for ext in sorted(COMMON_EXTS, key=len, reverse=True):
         if s.endswith(ext):
             s = s[: -len(ext)]
             break
-    # Remove obvious version suffixes like -4.2, _v4.2, .4.2
     s = re.sub(r"[-_.]v?\d+(\.\d+)*(-stable|-beta|-alpha)?$", "", s)
-    # Replace spaces/underscores/dots with hyphens
     s = re.sub(r"[\s_.]+", "-", s)
-    # Remove common prefixes com-, org-, io- when useful
     s = re.sub(r"^(com|org|io|net|app)-", "", s)
     s = s.strip("-")
-    # Apply alias map
     return ALIAS_MAP.get(s, s)
 
 
-# ------------------------------------------------------------------
-# Desktop file parser
-# ------------------------------------------------------------------
+def tokenize_name(raw: str) -> set:
+    normalized = normalize_name(raw)
+    parts = [part for part in normalized.split("-") if len(part) > 2]
+    tokens = set(parts)
+    if normalized:
+        tokens.add(normalized)
+    return tokens
+
+
 def parse_desktop_file(path: Path) -> dict:
-    data = {"name": None, "exec": None, "icon": None,
-            "categories": None, "startup_wm_class": None}
+    data = {"name": None, "exec": None, "icon": None, "categories": None, "startup_wm_class": None}
     try:
         text = path.read_text(encoding="utf-8", errors="ignore")
     except Exception:
         return data
     for line in text.splitlines():
         line = line.strip()
-        if line.lower().startswith("name=") and data["name"] is None:
+        lower = line.lower()
+        if lower.startswith("name=") and data["name"] is None:
             data["name"] = line.split("=", 1)[1].strip()
-        elif line.lower().startswith("exec="):
+        elif lower.startswith("exec="):
             data["exec"] = line.split("=", 1)[1].strip()
-        elif line.lower().startswith("icon="):
+        elif lower.startswith("icon="):
             data["icon"] = line.split("=", 1)[1].strip()
-        elif line.lower().startswith("categories="):
+        elif lower.startswith("categories="):
             data["categories"] = line.split("=", 1)[1].strip()
-        elif line.lower().startswith("startupwmclass="):
+        elif lower.startswith("startupwmclass="):
             data["startup_wm_class"] = line.split("=", 1)[1].strip()
     return data
 
 
-# ------------------------------------------------------------------
-# Detectors
-# ------------------------------------------------------------------
-def detect_launchers(home: Path, user: str) -> list:
-    """Detect .desktop launchers."""
-    results = []
+def parse_steam_acf(path: Path) -> dict:
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return {}
+    appid = None
+    name = None
+    for line in text.splitlines():
+        parts = re.findall(r'"([^"]+)"', line)
+        if len(parts) >= 2:
+            if parts[0] == "appid":
+                appid = parts[1]
+            elif parts[0] == "name":
+                name = parts[1]
+    return {"appid": appid, "name": name}
+
+
+def rel_source(path: Path, home: Path, user: str) -> str:
+    return f"home/{user}/{os.path.relpath(path, home)}"
+
+
+def create_component_id(role: str, unique_hint: str = None) -> str:
+    suffix = normalize_name(unique_hint or role or "component")
+    return f"{role}-{suffix}"
+
+
+def build_steam_bundles(home: Path, user: str) -> tuple[list, set]:
+    steam_root = home / ".local" / "share" / "Steam"
+    steamapps = steam_root / "steamapps"
+    common_dir = steamapps / "common"
+    compatdata_dir = steamapps / "compatdata"
+    userdata_dir = steam_root / "userdata"
+    shadercache_dir = steamapps / "shadercache"
+    workshop_dir = steamapps / "workshop" / "content"
+    bundles = []
+    used_paths = set()
+
+    if not steamapps.exists():
+        return bundles, used_paths
+
+    for manifest in sorted(steamapps.glob("appmanifest_*.acf")):
+        meta = parse_steam_acf(manifest)
+        appid = meta.get("appid")
+        name = meta.get("name")
+        if not appid or not name:
+            continue
+        normalized = normalize_name(name)
+        bundle = BundleBuilder(f"steam.{appid}", name, "game", normalized)
+        bundle.add_path(
+            component_id="steam-manifest",
+            label="Steam manifest",
+            source=rel_source(manifest, home, user),
+            target=str(manifest),
+            kind="file",
+            signal="steam_manifest",
+            default_selected=True,
+            confidence_boost=0.25,
+        )
+        used_paths.add(str(manifest))
+
+        install_dir = common_dir / name
+        if install_dir.exists():
+            bundle.add_path(
+                component_id="install-content",
+                label="Game install",
+                source=rel_source(install_dir, home, user),
+                target=str(install_dir),
+                kind="folder",
+                signal="steam_install",
+                default_selected=True,
+                confidence_boost=0.35,
+            )
+            used_paths.add(str(install_dir))
+
+        compat_dir = compatdata_dir / appid
+        if compat_dir.exists():
+            bundle.add_path(
+                component_id="runtime-prefix",
+                label="Proton runtime",
+                source=rel_source(compat_dir, home, user),
+                target=str(compat_dir),
+                kind="runtime-prefix",
+                signal="steam_compatdata",
+                default_selected=True,
+                confidence_boost=0.30,
+            )
+            used_paths.add(str(compat_dir))
+
+        shader_dir = shadercache_dir / appid
+        if shader_dir.exists():
+            bundle.add_path(
+                component_id="shader-cache",
+                label="Shader cache",
+                source=rel_source(shader_dir, home, user),
+                target=str(shader_dir),
+                kind="shader-cache",
+                signal="steam_shadercache",
+                default_selected=True,
+                confidence_boost=0.18,
+            )
+            used_paths.add(str(shader_dir))
+
+        workshop_app_dir = workshop_dir / appid
+        if workshop_app_dir.exists():
+            bundle.add_path(
+                component_id="workshop-content",
+                label="Workshop content",
+                source=rel_source(workshop_app_dir, home, user),
+                target=str(workshop_app_dir),
+                kind="mods",
+                signal="steam_workshop",
+                default_selected=True,
+                confidence_boost=0.18,
+            )
+            used_paths.add(str(workshop_app_dir))
+
+        if userdata_dir.exists():
+            for user_dir in userdata_dir.iterdir():
+                app_userdata = user_dir / appid
+                if app_userdata.exists():
+                    bundle.add_path(
+                        component_id=create_component_id("steam-userdata", f"{appid}-{user_dir.name}"),
+                        label="Steam userdata",
+                        source=rel_source(app_userdata, home, user),
+                        target=str(app_userdata),
+                        kind="data",
+                        signal="steam_userdata",
+                        default_selected=True,
+                        confidence_boost=0.22,
+                    )
+                    used_paths.add(str(app_userdata))
+
+        bundles.append({
+            "builder": bundle,
+            "tokens": tokenize_name(name) | {appid},
+        })
+
+    return bundles, used_paths
+
+
+def build_desktop_anchors(home: Path, user: str) -> tuple[list, set]:
     user_apps = home / ".local" / "share" / "applications"
-    system_apps = Path("/usr/share/applications")
+    bundles = []
+    used_paths = set()
+    if not user_apps.exists():
+        return bundles, used_paths
 
-    for src_dir, is_user in [(user_apps, True), (system_apps, False)]:
-        if not src_dir.exists():
+    for desktop_file in sorted(user_apps.glob("*.desktop")):
+        info = parse_desktop_file(desktop_file)
+        name = info.get("name") or desktop_file.stem
+        normalized = normalize_name(name)
+        if not normalized:
             continue
-        for f in src_dir.iterdir():
-            if not f.is_file() or not f.suffix == ".desktop":
+        bundle = BundleBuilder(f"app.{normalized}", name, "app", normalized)
+        bundle.add_path(
+            component_id="launcher",
+            label="Launcher",
+            source=rel_source(desktop_file, home, user),
+            target=str(desktop_file),
+            kind="file",
+            signal="desktop_launcher",
+            default_selected=True,
+            confidence_boost=0.35,
+        )
+        used_paths.add(str(desktop_file))
+        extra_tokens = set()
+        for value in [desktop_file.stem, info.get("icon"), info.get("startup_wm_class"), info.get("exec")]:
+            if value:
+                extra_tokens |= tokenize_name(str(value))
+        bundles.append({
+            "builder": bundle,
+            "tokens": tokenize_name(name) | extra_tokens,
+        })
+
+    return bundles, used_paths
+
+
+def detect_home_data_entries(home: Path, user: str) -> list:
+    entries = []
+    roots = [
+        (home / ".config", "config_folder", "Settings", 0.22, "config"),
+        (home / ".local" / "share", "local_share_folder", "App data", 0.22, "data"),
+        (home / ".local" / "state", "local_state_folder", "App state", 0.20, "data"),
+        (home / ".cache", "cache_folder", "Cache", 0.10, "folder"),
+        (home / ".var" / "app", "flatpak_folder", "Flatpak app data", 0.24, "data"),
+        (home / ".wine", "wine_folder", "Wine prefix", 0.24, "runtime-prefix"),
+        (home / "Applications", "application_folder", "Application folder", 0.25, "folder"),
+        (home / "Games", "games_folder", "Game folder", 0.25, "folder"),
+    ]
+    for base, signal, label, confidence, kind in roots:
+        if not base.exists():
+            continue
+        for entry in base.iterdir():
+            if not entry.is_dir():
                 continue
-            info = parse_desktop_file(f)
-            name = info.get("name") or f.stem
-            norm = normalize_name(name)
-            rel_source = f"home/{user}/.local/share/applications/{f.name}" if is_user else f"usr/share/applications/{f.name}"
-            target = f"/home/{user}/.local/share/applications/{f.name}" if is_user else str(f)
-            results.append({
-                "normalized_key": norm,
-                "name": name,
-                "signal": "desktop_launcher",
-                "source": rel_source,
-                "target": target,
-                "kind": "file",
-                "default_selected": is_user,
-                "is_user": is_user,
-                "confidence_boost": 0.30,
+            if entry.name in {"applications", "Steam"}:
+                continue
+            entries.append({
+                "normalized_key": normalize_name(entry.name),
+                "tokens": tokenize_name(entry.name),
+                "name": entry.name,
+                "signal": signal,
+                "label": label,
+                "source": rel_source(entry, home, user),
+                "target": str(entry),
+                "kind": kind,
+                "confidence_boost": confidence,
             })
-    return results
-
-
-def detect_config_folders(home: Path, user: str) -> list:
-    """Detect ~/.config/* folders."""
-    results = []
-    config_dir = home / ".config"
-    if not config_dir.exists():
-        return results
-    for entry in config_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        norm = normalize_name(entry.name)
-        results.append({
-            "normalized_key": norm,
-            "name": entry.name,
-            "signal": "config_folder",
-            "source": f"home/{user}/.config/{entry.name}",
-            "target": f"/home/{user}/.config/{entry.name}",
-            "kind": "folder",
-            "default_selected": True,
-            "confidence_boost": 0.25,
-        })
-    return results
-
-
-def detect_local_share(home: Path, user: str) -> list:
-    """Detect ~/.local/share/* folders (excluding applications)."""
-    results = []
-    share_dir = home / ".local" / "share"
-    if not share_dir.exists():
-        return results
-    for entry in share_dir.iterdir():
-        if not entry.is_dir():
-            continue
-        if entry.name == "applications":
-            continue
-        norm = normalize_name(entry.name)
-        results.append({
-            "normalized_key": norm,
-            "name": entry.name,
-            "signal": "local_share_folder",
-            "source": f"home/{user}/.local/share/{entry.name}",
-            "target": f"/home/{user}/.local/share/{entry.name}",
-            "kind": "folder",
-            "default_selected": True,
-            "confidence_boost": 0.25,
-        })
-    return results
+    return entries
 
 
 def detect_downloaded_apps(home: Path, user: str) -> list:
-    """Detect AppImages, .deb, archives under ~/Applications and ~/Downloads."""
     results = []
-    app_exts = {".appimage", ".deb", ".tar.gz", ".tgz", ".zip", ".7z", ".rar"}
-
-    for scan_dir in [home / "Applications", home / "Downloads"]:
+    scan_dirs = [home / "Applications", home / "Downloads"]
+    for scan_dir in scan_dirs:
         if not scan_dir.exists():
             continue
         for entry in scan_dir.iterdir():
+            if not entry.exists():
+                continue
             if entry.is_file():
-                if entry.suffix.lower() in app_exts or any(str(entry).lower().endswith(e) for e in app_exts):
-                    norm = normalize_name(entry.name)
-                    rel = os.path.relpath(entry, home)
+                lower_name = entry.name.lower()
+                if any(lower_name.endswith(ext) for ext in COMMON_EXTS):
                     results.append({
-                        "normalized_key": norm,
+                        "normalized_key": normalize_name(entry.name),
+                        "tokens": tokenize_name(entry.name),
                         "name": entry.name,
                         "signal": "downloaded_app",
-                        "source": f"home/{user}/{rel}",
+                        "label": "Application binary",
+                        "source": rel_source(entry, home, user),
                         "target": str(entry),
                         "kind": "file",
-                        "default_selected": True,
-                        "confidence_boost": 0.20,
+                        "confidence_boost": 0.18,
                     })
             elif entry.is_dir():
-                # Heuristic: folder contains an executable or looks like an extracted app
-                has_exec = any(
-                    (entry / child).stat().st_mode & 0o111 != 0
-                    for child in os.listdir(entry)
-                    if (entry / child).is_file()
-                ) if entry.exists() else False
+                try:
+                    children = list(entry.iterdir())
+                except Exception:
+                    children = []
+                has_exec = any(child.is_file() and os.access(child, os.X_OK) for child in children)
                 if has_exec:
-                    norm = normalize_name(entry.name)
-                    rel = os.path.relpath(entry, home)
                     results.append({
-                        "normalized_key": norm,
+                        "normalized_key": normalize_name(entry.name),
+                        "tokens": tokenize_name(entry.name),
                         "name": entry.name,
                         "signal": "application_folder",
-                        "source": f"home/{user}/{rel}",
+                        "label": "Application folder",
+                        "source": rel_source(entry, home, user),
                         "target": str(entry),
                         "kind": "folder",
-                        "default_selected": True,
                         "confidence_boost": 0.20,
                     })
     return results
 
 
-def detect_projects(home: Path, user: str) -> list:
-    """Detect project folders under common project directories."""
-    results = []
-    project_roots = ["Projects", "Code", "Workspace", "Games", "Documents"]
-    for root_name in project_roots:
-        root = home / root_name
-        if not root.exists():
+def best_anchor_for_entry(entry: dict, anchors: list):
+    best = None
+    best_score = 0
+    for anchor in anchors:
+        overlap = len(entry["tokens"] & anchor["tokens"])
+        if overlap > best_score:
+            best = anchor
+            best_score = overlap
+        elif overlap == best_score and overlap > 0 and best is not None:
+            if len(anchor["tokens"]) < len(best["tokens"]):
+                best = anchor
+    return best if best_score > 0 else None
+
+
+def attach_related_entries(anchors: list, entries: list, used_paths: set):
+    unmatched = []
+    for entry in entries:
+        if not entry["normalized_key"] or str(entry["target"]) in used_paths:
             continue
-        for entry in root.iterdir():
-            if not entry.is_dir():
-                continue
-            norm = normalize_name(entry.name)
-            rel = os.path.relpath(entry, home)
-            is_git = (entry / ".git").is_dir()
-            signals = ["project_folder"]
-            if is_git:
-                signals.append("git_repo")
-            results.append({
-                "normalized_key": norm,
-                "name": entry.name,
-                "signal": "project_folder",
-                "source": f"home/{user}/{rel}",
-                "target": str(entry),
-                "kind": "folder",
-                "default_selected": True,
-                "confidence_boost": 0.30 + (0.15 if is_git else 0),
-                "signals": signals,
-            })
-    return results
+        anchor = best_anchor_for_entry(entry, anchors)
+        if anchor is None:
+            unmatched.append(entry)
+            continue
+        anchor["builder"].add_path(
+            component_id=create_component_id(entry["signal"], entry["name"]),
+            label=entry["label"],
+            source=entry["source"],
+            target=entry["target"],
+            kind=entry["kind"],
+            signal=entry["signal"],
+            default_selected=True,
+            confidence_boost=entry["confidence_boost"],
+        )
+        used_paths.add(str(entry["target"]))
+    return unmatched
 
 
-# ------------------------------------------------------------------
-# Bundle merging + scoring
-# ------------------------------------------------------------------
-def merge_bundles(partials: list) -> list:
-    groups = {}
-    for p in partials:
-        key = p["normalized_key"]
-        if key not in groups:
-            groups[key] = []
-        groups[key].append(p)
+def build_generic_bundles(unmatched: list) -> list:
+    grouped = defaultdict(list)
+    for entry in unmatched:
+        grouped[entry["normalized_key"]].append(entry)
 
     bundles = []
-    for key, items in groups.items():
-        signals = set()
-        folder_bundles = []
-        total_confidence = 0.0
-        name = key.replace("-", " ").title()
-
-        # Prefer name from desktop launcher or downloaded app
+    for normalized, items in grouped.items():
+        if not normalized:
+            continue
+        name = items[0]["name"]
+        bundle = BundleBuilder(f"bundle.{normalized}", name, "generic", normalized)
         for item in items:
-            if item["signal"] == "desktop_launcher":
-                name = item["name"]
-                break
-            elif item["signal"] == "downloaded_app":
-                name = item["name"]
-
-        for item in items:
-            signals.add(item["signal"])
-            total_confidence += item.get("confidence_boost", 0.0)
-            folder_bundles.append({
-                "id": item["signal"].replace("_", "_"),
-                "label": label_for_signal(item["signal"]),
-                "source": item["source"],
-                "target": item["target"],
-                "kind": item["kind"],
-                "default_selected": item.get("default_selected", True),
-            })
-
-        confidence = min(0.99, total_confidence + (0.10 if key in ALIAS_MAP else 0.0))
-        bundle_type = "app"
-        if "project_folder" in signals and "desktop_launcher" not in signals:
-            bundle_type = "project"
-        elif "downloaded_app" in signals and "desktop_launcher" not in signals:
-            bundle_type = "download"
-
-        bundles.append({
-            "id": f"{bundle_type}.{key}",
-            "name": name,
-            "type": bundle_type,
-            "confidence": round(confidence, 2),
-            "signals": sorted(signals),
-            "folder_bundles": folder_bundles,
-        })
-
+            bundle.add_path(
+                component_id=create_component_id(item["signal"], item["name"]),
+                label=item["label"],
+                source=item["source"],
+                target=item["target"],
+                kind=item["kind"],
+                signal=item["signal"],
+                default_selected=True,
+                confidence_boost=item["confidence_boost"],
+            )
+        bundles.append(bundle)
     return bundles
 
 
-def label_for_signal(signal: str) -> str:
-    mapping = {
-        "desktop_launcher": "Launcher",
-        "config_folder": "Settings",
-        "local_share_folder": "App data",
-        "downloaded_app": "Application binary",
-        "application_folder": "Application folder",
-        "project_folder": "Project folder",
-    }
-    return mapping.get(signal, signal.replace("_", " ").title())
+def build_bundles(home: Path, user: str) -> list:
+    steam_anchors, used_paths = build_steam_bundles(home, user)
+    desktop_anchors, desktop_paths = build_desktop_anchors(home, user)
+    used_paths |= desktop_paths
+
+    anchors = steam_anchors + desktop_anchors
+    related_entries = detect_home_data_entries(home, user) + detect_downloaded_apps(home, user)
+    unmatched = attach_related_entries(anchors, related_entries, used_paths)
+    generic_bundles = build_generic_bundles(unmatched)
+
+    builders = [item["builder"] for item in anchors] + generic_bundles
+    bundles = [builder.to_json() for builder in builders if builder.folder_bundles]
+    bundles.sort(key=lambda bundle: (-bundle["confidence"], bundle["name"].lower()))
+    return bundles
 
 
-# ------------------------------------------------------------------
-# Main
-# ------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Noland Bundle Indexer")
     parser.add_argument("--user", required=True)
@@ -530,16 +680,7 @@ def main():
         print(f"Home directory {home} does not exist", file=sys.stderr)
         sys.exit(1)
 
-    partials = []
-    partials.extend(detect_launchers(home, args.user))
-    partials.extend(detect_config_folders(home, args.user))
-    partials.extend(detect_local_share(home, args.user))
-    partials.extend(detect_downloaded_apps(home, args.user))
-    partials.extend(detect_projects(home, args.user))
-
-    bundles = merge_bundles(partials)
-    # Sort by confidence desc, then name
-    bundles.sort(key=lambda b: (-b["confidence"], b["name"].lower()))
+    bundles = build_bundles(home, args.user)
 
     index = {
         "schema_version": 1,

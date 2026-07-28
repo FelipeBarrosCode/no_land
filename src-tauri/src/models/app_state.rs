@@ -26,6 +26,8 @@ pub struct PersistedAppState {
     pub shared_storage_credentials: SharedStorageCredentialState,
     #[serde(default)]
     pub application_catalog: Vec<crate::models::application_bundle::ApplicationBundle>,
+    #[serde(default)]
+    pub bundle_learning: BundleLearningState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
@@ -55,6 +57,7 @@ impl Default for PersistedAppState {
             shared_storage_profiles: Vec::new(),
             shared_storage_credentials: SharedStorageCredentialState::default(),
             application_catalog: Vec::new(),
+            bundle_learning: BundleLearningState::default(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
@@ -330,9 +333,12 @@ pub enum SetupStage {
 #[serde(rename_all = "snake_case")]
 pub enum WireGuardSetupMode {
     #[default]
-    WireguardAppWindows,
-    WireguardAppLinux,
-    WireguardAppMacosManual,
+    #[serde(alias = "wireguard_app_windows")]
+    GotatunManagedWindows,
+    #[serde(alias = "wireguard_app_linux")]
+    GotatunManagedLinux,
+    #[serde(alias = "wireguard_app_macos_manual")]
+    GotatunManagedMacos,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -383,11 +389,11 @@ impl Default for PostWireGuardSetupState {
         Self {
             stage: SetupStage::PreWireguardExistingFlow,
             wireguard_setup_mode: if cfg!(target_os = "macos") {
-                WireGuardSetupMode::WireguardAppMacosManual
+                WireGuardSetupMode::GotatunManagedMacos
             } else if cfg!(target_os = "windows") {
-                WireGuardSetupMode::WireguardAppWindows
+                WireGuardSetupMode::GotatunManagedWindows
             } else {
-                WireGuardSetupMode::WireguardAppLinux
+                WireGuardSetupMode::GotatunManagedLinux
             },
             wireguard_setup_status: WireGuardSetupStatus::NotStarted,
             current_instance_id: None,
@@ -601,27 +607,44 @@ pub struct ProvisionedServerState {
     pub embedded_moonlight_host_id: String,
     #[serde(default)]
     pub embedded_moonlight_paired: bool,
+    #[serde(default = "default_orchestration_state")]
     pub last_state: OrchestrationState,
+    #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
     pub steps: ProvisionedServerSteps,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionedServerSteps {
+    #[serde(default)]
     pub ssh_key_ready: bool,
+    #[serde(default)]
     pub ssh_key_uploaded_to_vast: bool,
+    #[serde(default)]
     pub instance_created: bool,
+    #[serde(default)]
     pub instance_ready: bool,
+    #[serde(default)]
     pub ssh_connected: bool,
+    #[serde(default)]
     pub nvidia_headless_configured: bool,
     #[serde(default)]
     pub post_nvidia_reboot_completed: bool,
+    #[serde(default)]
     pub sunshine_configured: bool,
+    #[serde(default)]
     pub low_latency_audio_configured: bool,
+    #[serde(default)]
+    pub mic_receiver_installed: bool,
+    #[serde(default)]
     pub wireguard_configured: bool,
+    #[serde(default)]
     pub moonlight_configured: bool,
+    #[serde(default)]
     pub awaiting_pair_pin: bool,
+    #[serde(default)]
     pub pairing_completed: bool,
     #[serde(default)]
     pub post_provision_completed: bool,
@@ -652,6 +675,10 @@ impl ProvisionedServerState {
             steps: ProvisionedServerSteps::default(),
         }
     }
+}
+
+fn default_orchestration_state() -> OrchestrationState {
+    OrchestrationState::Idle
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -858,6 +885,46 @@ pub struct SharedStorageObjectEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageSyncSelectionRequest {
     pub selected_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleLearningState {
+    #[serde(default)]
+    pub manual_attachments: Vec<ManualBundleAttachment>,
+    #[serde(default)]
+    pub tracking_sessions: Vec<BundleTrackingSession>,
+    #[serde(default)]
+    pub suggestions: Vec<BundleLearningSuggestion>,
+    #[serde(default)]
+    pub last_passive_scan_epoch: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualBundleAttachment {
+    pub bundle_id: String,
+    pub folder_bundle: FolderBundle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleTrackingSession {
+    pub session_id: String,
+    pub bundle_id: String,
+    pub instance_id: u64,
+    pub started_at: String,
+    pub started_at_epoch: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleLearningSuggestion {
+    pub bundle_id: String,
+    pub folder_bundle: FolderBundle,
+    pub discovered_at: String,
+    pub source: String,
+    pub tracking_session_id: Option<String>,
 }
 
 // ============================================================

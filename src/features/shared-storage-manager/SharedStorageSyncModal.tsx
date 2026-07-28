@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
-import type { ApplicationBundle, SharedStorageObjectEntry } from "../../lib/types";
+import type { ApplicationBundle } from "../../lib/types";
 
 interface Props {
   open: boolean;
@@ -9,27 +9,8 @@ interface Props {
   instanceId: number | null;
   bundles: ApplicationBundle[];
   onClose: () => void;
-  onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
-  onConfirmSync: (selectedPaths: string[]) => Promise<void>;
-}
-
-function buildChildrenMap(entries: SharedStorageObjectEntry[]) {
-  const map = new Map<string, SharedStorageObjectEntry[]>();
-  for (const entry of entries) {
-    const key = entry.parentPath || "/";
-    const current = map.get(key) ?? [];
-    current.push(entry);
-    map.set(key, current);
-  }
-  for (const value of map.values()) {
-    value.sort((a, b) => {
-      if (a.isDir !== b.isDir) {
-        return a.isDir ? -1 : 1;
-      }
-      return a.name.localeCompare(b.name);
-    });
-  }
-  return map;
+  onLoadBundles: (instanceId?: number) => Promise<void>;
+  onRestoreBundle: (bundleId: string) => Promise<void>;
 }
 
 export function SharedStorageSyncModal({
@@ -38,14 +19,12 @@ export function SharedStorageSyncModal({
   instanceId,
   bundles,
   onClose,
-  onLoadObjects,
-  onConfirmSync
+  onLoadBundles,
+  onRestoreBundle
 }: Props) {
-  const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
+  const [selectedBundleId, setSelectedBundleId] = useState<string | null>(null);
   const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
@@ -57,31 +36,32 @@ export function SharedStorageSyncModal({
     setLoading(true);
     setPendingAction({
       key: "sync-modal.load",
-      label: "Loading shared storage tree",
-      detail: "Fetching the available cloud files and folders.",
+      label: "Loading bundles",
+      detail: "Fetching the available application bundles from shared storage.",
       mode: "indeterminate",
       progress: null,
       startedAt: Date.now()
     });
     setLoadError(null);
-    setSelectedPaths([]);
+    setSelectedBundleId(null);
 
     const timeoutId = window.setTimeout(() => {
       if (active) {
-        setLoadError("Loading is taking too long. Please retry.");
+        setLoadError("Loading bundles is taking too long. Please retry.");
         setLoading(false);
       }
     }, 25000);
 
-    void onLoadObjects(instanceId)
-      .then((result) => {
+    void onLoadBundles(instanceId)
+      .catch((error: unknown) => {
         if (!active) {
           return;
         }
-        setEntries(result ?? []);
-        if (!result) {
-          setLoadError("Unable to retrieve files from shared storage.");
-        }
+        setLoadError(
+          error instanceof Error
+            ? error.message
+            : "Unable to retrieve bundles from shared storage.",
+        );
       })
       .finally(() => {
         if (active) {
@@ -91,79 +71,27 @@ export function SharedStorageSyncModal({
         }
       });
 
+
     return () => {
       active = false;
       window.clearTimeout(timeoutId);
     };
-  }, [open, instanceId, onLoadObjects]);
-
-  const childrenMap = useMemo(() => buildChildrenMap(entries), [entries]);
+  }, [open, instanceId, onLoadBundles]);
 
   if (!open) {
     return null;
   }
 
-  const toggleSelected = (path: string) => {
-    setSelectedPaths((current) =>
-      current.includes(path) ? current.filter((item) => item !== path) : [...current, path]
-    );
-  };
-
-  const toggleExpanded = (path: string) => {
-    setExpanded((current) => ({ ...current, [path]: !current[path] }));
-  };
-
-  const renderNode = (entry: SharedStorageObjectEntry, depth: number) => {
-    const isChecked = selectedPaths.includes(entry.path);
-    const children = childrenMap.get(entry.path) ?? [];
-    const isExpanded = expanded[entry.path] ?? depth < 1;
-
-    return (
-      <div key={`${entry.path}-${entry.isDir ? "dir" : "file"}`}>
-        <div
-          className="flex items-center gap-2 rounded border border-[#30365d] bg-[#11162a] px-2 py-1"
-          style={{ marginLeft: `${depth * 12}px` }}
-        >
-          {entry.isDir ? (
-            <button
-              type="button"
-              className="w-5 text-left text-[#7ab6ff]"
-              onClick={() => toggleExpanded(entry.path)}
-            >
-              {isExpanded ? "▾" : "▸"}
-            </button>
-          ) : (
-            <span className="w-5 text-[#7ab6ff]">•</span>
-          )}
-
-          <input
-            type="checkbox"
-            checked={isChecked}
-            onChange={() => toggleSelected(entry.path)}
-            className="h-4 w-4"
-          />
-
-          <span className="truncate text-[1.15rem] text-[#d7e8ff]">
-            {entry.name}
-            {entry.isDir ? "/" : ""}
-          </span>
-        </div>
-
-        {entry.isDir && isExpanded && children.map((child) => renderNode(child, depth + 1))}
-      </div>
-    );
-  };
-
-  const roots = childrenMap.get("/") ?? [];
   const committedBundles = bundles.filter((bundle) => bundle.backupStatus === "committed");
+  const selectedBundle = committedBundles.find((bundle) => bundle.id === selectedBundleId) ?? null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame max-h-[90vh] w-full max-w-3xl overflow-hidden">
         <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">Sync From Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Choose folders or files to sync to the remote machine.</p>
+            <h2 className="font-display text-base text-white">Restore Bundle From Shared Storage</h2>
+            <p className="text-[1.2rem] text-[#b4c8de]">Choose a software bundle and restore the full app/game with its related data.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
             Close
@@ -171,77 +99,110 @@ export function SharedStorageSyncModal({
         </div>
 
         <div className="max-h-[65vh] overflow-y-auto px-5 py-4">
-          <div className="mb-4 rounded border border-[#30365d] bg-[#11162a] p-3">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
-                  High-level bundles
-                </p>
-                <p className="mt-1 text-[1.05rem] text-[#9ec0e4]">
-                  These are the detected application bundles currently available from the shared-storage catalog.
-                </p>
-              </div>
-              <span className="text-[1.05rem] text-[#d7e8ff]">
-                {committedBundles.length} available
-              </span>
-            </div>
-            {committedBundles.length > 0 ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {committedBundles.map((bundle) => (
-                  <span
-                    key={bundle.id}
-                    className="rounded border border-[#3f476c] bg-[#0d1326] px-2 py-1 text-[1rem] text-[#d7e8ff]"
-                    title={`${bundle.components.length} components`}
-                  >
-                    {bundle.displayName}
-                  </span>
-                ))}
-              </div>
-            ) : (
-              <p className="mt-3 text-[1.05rem] text-[#8aa1ba]">
-                No committed application bundles are visible yet.
-              </p>
-            )}
-          </div>
-
           {loading ? (
-            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
+            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading bundles...</p>
           ) : loadError ? (
             <div className="space-y-2">
               <p className="text-[1.2rem] text-red-300">{loadError}</p>
               <p className="text-[1.05rem] text-[#b4c8de]">Close and reopen Sync to retry.</p>
             </div>
-          ) : roots.length === 0 ? (
-            <p className="text-[1.2rem] text-[#b4c8de]">No files found in shared storage.</p>
+          ) : committedBundles.length === 0 ? (
+            <p className="text-[1.2rem] text-[#b4c8de]">No bundles found in shared storage.</p>
           ) : (
-            <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
+            <div className="grid gap-4 md:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)]">
+              <div className="space-y-2">
+                {committedBundles.map((bundle) => {
+                  const isSelected = bundle.id === selectedBundleId;
+                  return (
+                    <button
+                      key={bundle.id}
+                      type="button"
+                      onClick={() => setSelectedBundleId(bundle.id)}
+                      className={`w-full rounded border px-3 py-3 text-left transition ${
+                        isSelected
+                          ? "border-neon-cyan bg-[#13203f]"
+                          : "border-[#30365d] bg-[#11162a] hover:border-[#4e5da3]"
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div>
+                          <p className="text-[1.2rem] text-[#d7e8ff]">{bundle.displayName}</p>
+                          <p className="mt-1 text-[1rem] text-[#8aa1ba]">
+                            {bundle.components.length} related location{bundle.components.length !== 1 ? "s" : ""}
+                          </p>
+                        </div>
+                        <span className="rounded border border-[#3f476c] bg-[#0d1326] px-2 py-1 text-[0.95rem] text-[#d7e8ff]">
+                          {bundle.kind}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="rounded border border-[#30365d] bg-[#11162a] p-3">
+                {selectedBundle ? (
+                  <>
+                    <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
+                      Bundle details
+                    </p>
+                    <h3 className="mt-2 text-[1.3rem] text-[#d7e8ff]">{selectedBundle.displayName}</h3>
+                    <p className="mt-1 text-[1rem] text-[#8aa1ba]">ID: {selectedBundle.id}</p>
+                    <p className="mt-3 text-[1rem] text-[#9ec0e4]">
+                      Restoring this bundle will recover the software together with its related detected data paths.
+                    </p>
+                    <div className="mt-3 space-y-2">
+                      {selectedBundle.components.map((component) => (
+                        <div
+                          key={component.id}
+                          className="rounded border border-[#3f476c] bg-[#0d1326] px-2 py-2"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-[1rem] text-[#d7e8ff]">{component.displayName}</span>
+                            <span className="text-[0.95rem] text-[#8aa1ba]">{component.kind}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-[1.1rem] text-[#9ec0e4]">Select a bundle to inspect and restore it.</p>
+                )}
+              </div>
+            </div>
           )}
         </div>
 
         <div className="flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
-          <p className="text-[1.1rem] text-[#9ec0e4]">Selected: {selectedPaths.length}</p>
+          <p className="text-[1.1rem] text-[#9ec0e4]">
+            {selectedBundle ? `Selected bundle: ${selectedBundle.displayName}` : "Select a bundle to restore"}
+          </p>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
               Cancel
             </Button>
             <Button
-              disabled={busy || loading || selectedPaths.length === 0}
+              disabled={busy || loading || !selectedBundleId}
               loading={busy}
-              loadingText="Syncing..."
+              loadingText="Restoring..."
               onClick={async () => {
+                if (!selectedBundleId) {
+                  return;
+                }
                 setPendingAction({
                   key: "sync-modal.run",
-                  label: "Syncing selected files",
-                  detail: "Copying your selected files from shared storage to the instance.",
+                  label: "Restoring bundle",
+                  detail: "Restoring the selected software bundle to the instance.",
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()
                 });
-                await onConfirmSync(selectedPaths);
+                await onRestoreBundle(selectedBundleId);
                 setPendingAction(null);
+                onClose();
               }}
             >
-              Sync Selected
+              Restore Bundle
             </Button>
           </div>
         </div>

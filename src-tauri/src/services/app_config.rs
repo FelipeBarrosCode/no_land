@@ -77,7 +77,7 @@ impl Default for AppConfig {
         Self {
             state_schema_version: 1,
             default_template_hash: env::var("NOLAND_TEMPLATE_HASH")
-                .unwrap_or_else(|_| "566868bff8b15eef891ee706acbbb5e5".to_string()),
+                .unwrap_or_else(|_| "f3544e2b9fdb968e8774b7e6eb2860db".to_string()),
             min_host_reliability: env::var("NOLAND_MIN_RELIABILITY")
                 .ok()
                 .and_then(|value| value.parse::<f64>().ok())

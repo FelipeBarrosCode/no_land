@@ -2,10 +2,13 @@ pub mod application_bundles;
 pub mod shared_storage;
 
 pub use self::application_bundles::{
-    cancel_restore_job, discover_application_bundles, get_application_bundle,
+    accept_bundle_learning_suggestion, attach_path_to_bundle, cancel_restore_job,
+    detach_path_from_bundle, discover_application_bundles, get_application_bundle,
     get_application_catalog, get_restore_job_status, list_application_bundles,
-    list_bundle_snapshots, reload_application_catalog, remove_local_bundle, request_cloud_deletion,
-    restore_application_bundle, trigger_bundle_backup,
+    list_bundle_learning_suggestions, list_bundle_manual_attachments, list_bundle_snapshots,
+    list_bundle_tracking_sessions, reject_bundle_learning_suggestion, reload_application_catalog,
+    remove_local_bundle, request_cloud_deletion, restore_application_bundle, start_bundle_tracking,
+    stop_bundle_tracking, trigger_bundle_backup,
 };
 pub use self::shared_storage::{
     begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
@@ -29,6 +32,7 @@ use crate::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
     },
+    mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -3860,11 +3864,52 @@ pub async fn reset_instance_sunshine_settings(
 
 #[tauri::command]
 pub async fn reconnect_instance_wireguard(
-    _context: State<'_, AppContext>,
-    _instance_id: u64,
+    context: State<'_, AppContext>,
+    instance_id: u64,
 ) -> Result<String, FrontendError> {
-    open_wireguard_app().map_err(FrontendError::from)?;
-    Ok("Opened WireGuard app.".to_string())
+    let preflight = local_environment_check(true);
+    if !preflight.ok {
+        let missing = preflight
+            .checks
+            .iter()
+            .filter(|check| !check.found)
+            .map(|check| format!("{} ({})", check.tool, check.install_hint))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(AppError::Command(format!(
+            "Local environment check failed. Missing tools: {missing}"
+        ))
+        .into());
+    }
+
+    let config_path = {
+        let state = context.state.read().await;
+        state
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == instance_id)
+            .map(|record| record.wireguard_config_path.clone())
+            .filter(|path| std::path::Path::new(path).exists())
+            .unwrap_or_else(|| state.wireguard.config_path.clone())
+    };
+
+    if config_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "WireGuard client config path is empty. Run provisioning first.".to_string(),
+        )
+        .into());
+    }
+
+    if !Path::new(&config_path).exists() {
+        return Err(AppError::NotFound(format!(
+            "WireGuard client config not found at {}",
+            config_path
+        ))
+        .into());
+    }
+
+    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
+    Ok(message)
 }
 
 #[tauri::command]
@@ -4041,6 +4086,11 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
+    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -4289,6 +4339,7 @@ pub async fn moonlight_start_stream(
 pub async fn moonlight_disconnect_stream(
     app: AppHandle,
     moonlight: State<'_, MoonlightManager>,
+    context: State<'_, AppContext>,
 ) -> Result<MoonlightSessionStateResponse, FrontendError> {
     moonlight
         .runtime
@@ -4304,6 +4355,14 @@ pub async fn moonlight_disconnect_stream(
     if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
         *active_preferences = None;
     }
+
+    // Tear down the managed GoTun tunnel for the active instance so no orphaned processes remain
+    if let Err(e) =
+        crate::services::wireguard::teardown_managed_runtime_for_context(context.inner()).await
+    {
+        tracing::warn!("GotaTun teardown after disconnect failed (non-fatal): {e}");
+    }
+
     close_stream_window(&app).map_err(moonlight_frontend_error)?;
     let state = moonlight
         .runtime

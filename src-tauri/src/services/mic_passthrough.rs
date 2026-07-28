@@ -1,9 +1,12 @@
 use std::{collections::HashMap, time::Duration};
 
+use parking_lot::Mutex as SyncMutex;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
+use crate::mic_client::device_list::{self, MicrophoneDevice};
+use crate::mic_client::{self, MicClientConfig, MicClientHandle};
 use crate::models::app_state::{
     InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse, MicState,
 };
@@ -14,8 +17,16 @@ use super::{app_context::AppContext, remote_exec::RemoteExec};
 static MIC_SESSIONS: std::sync::OnceLock<RwLock<HashMap<u64, MicSession>>> =
     std::sync::OnceLock::new();
 
+/// Pipeline handles keyed by instance_id.
+static MIC_HANDLES: std::sync::OnceLock<SyncMutex<HashMap<u64, MicClientHandle>>> =
+    std::sync::OnceLock::new();
+
 fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
     MIC_SESSIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn get_mic_handles() -> &'static SyncMutex<HashMap<u64, MicClientHandle>> {
+    MIC_HANDLES.get_or_init(|| SyncMutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone)]
@@ -34,6 +45,11 @@ struct MicSession {
 pub struct MicPassthroughService;
 
 impl MicPassthroughService {
+    /// List available recording devices on this machine.
+    pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
+        device_list::list_devices()
+    }
+
     /// Get mic configuration for an instance.
     pub async fn get_config(
         context: &AppContext,
@@ -127,7 +143,8 @@ impl MicPassthroughService {
         let session_id = uuid::Uuid::new_v4().to_string();
         let session_token = generate_session_token();
         let ssrc: u32 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFF) as u32;
-        let rtp_port = 34778u16;
+        let session_id_u64: u64 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFFFFFFFFFF) as u64;
+        let receiver_port: u16 = 48020u16;
         let started_at = chrono::Local::now().to_rfc3339();
 
         let session = MicSession {
@@ -144,6 +161,25 @@ impl MicPassthroughService {
             sessions.insert(instance_id, session);
         }
 
+        // ── Start the audio capture + encode + transport pipeline ──
+        let secret_bytes = session_token.as_bytes().to_vec();
+        let remote_addr = format!("{}:{}", server.wireguard_server_ip.trim(), receiver_port);
+
+        let pipeline_config = MicClientConfig {
+            device_id: None,
+            quality_profile: profile.clone(),
+            session_id: session_id_u64,
+            session_secret: secret_bytes,
+            ssrc,
+            remote_addr: remote_addr.clone(),
+        };
+
+        let handle = mic_client::start_pipeline(pipeline_config)?;
+        {
+            let mut handles = get_mic_handles().lock();
+            handles.insert(instance_id, handle);
+        }
+
         // Try to notify VM agent (best effort for MVP)
         if let Ok(remote) = build_remote_exec_for_instance(context, instance_id).await {
             let target_user = context.config.audio_target_user.clone();
@@ -156,7 +192,7 @@ impl MicPassthroughService {
                 &session_token,
                 &peer_ip,
                 ssrc,
-                rtp_port,
+                receiver_port,
                 &profile,
             )
             .await;
@@ -170,7 +206,8 @@ impl MicPassthroughService {
             instance_id = instance_id,
             session_id = %session_id,
             ssrc = ssrc,
-            "Microphone passthrough enabled"
+            remote_addr = %remote_addr,
+            "Microphone passthrough enabled with audio pipeline"
         );
 
         Ok(MicSessionResponse {
@@ -178,7 +215,7 @@ impl MicPassthroughService {
             session_token,
             ssrc,
             vm_wireguard_ip: server.wireguard_server_ip.clone(),
-            rtp_port,
+            rtp_port: receiver_port,
             sample_rate: 48000,
             channels: 1,
             frame_ms: profile.frame_ms(),
@@ -198,6 +235,15 @@ impl MicPassthroughService {
             return Err(AppError::InvalidInput(
                 "Microphone passthrough is not enabled for this instance.".to_string(),
             ));
+        }
+
+        // Stop the audio pipeline
+        {
+            let mut handles = get_mic_handles().lock();
+            if let Some(mut handle) = handles.remove(&instance_id) {
+                handle.stop();
+                info!(instance_id = instance_id, "Mic audio pipeline stopped");
+            }
         }
 
         // Try to notify VM agent

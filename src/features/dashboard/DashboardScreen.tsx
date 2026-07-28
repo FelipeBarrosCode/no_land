@@ -84,17 +84,12 @@ interface Props {
     instanceId: number,
     selectedPaths: string[],
   ) => Promise<string | null>;
-  onSyncInstanceStorage: (
-    instanceId: number,
-    selectedPaths: string[],
-  ) => Promise<string | null>;
-  onListSyncableStorageObjects: (
-    instanceId: number,
-  ) => Promise<SharedStorageObjectEntry[] | null>;
   onListExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
   applicationBundles: ApplicationBundle[];
+  onLoadApplicationBundles: (instanceId?: number) => Promise<void>;
+  onRestoreBundle: (bundleId: string, restoreMode: string, selectedComponents?: string[]) => Promise<void>;
 }
 
 export function DashboardScreen({
@@ -128,10 +123,10 @@ export function DashboardScreen({
   onPauseInstance,
   onDestroyInstance,
   onSaveInstanceStorageSelected,
-  onSyncInstanceStorage,
-  onListSyncableStorageObjects,
   onListExportableStorageObjects,
   applicationBundles,
+  onLoadApplicationBundles,
+  onRestoreBundle,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
@@ -211,14 +206,10 @@ export function DashboardScreen({
     setSyncInstanceId(instanceId);
   }
 
-  async function handleSyncSelection(selectedPaths: string[]) {
-    if (syncInstanceId === null) {
-      return;
-    }
-
-    await onSyncInstanceStorage(syncInstanceId, selectedPaths);
-    setSyncInstanceId(null);
+  async function handleRestoreBundle(bundleId: string) {
+    await onRestoreBundle(bundleId, "complete");
   }
+
 
   async function handleExportSelection(selectedPaths: string[]) {
     if (exportInstanceId === null) {
@@ -752,8 +743,8 @@ export function DashboardScreen({
         instanceId={syncInstanceId}
         bundles={applicationBundles}
         onClose={() => setSyncInstanceId(null)}
-        onLoadObjects={onListSyncableStorageObjects}
-        onConfirmSync={handleSyncSelection}
+        onLoadBundles={onLoadApplicationBundles}
+        onRestoreBundle={handleRestoreBundle}
       />
 
       <SharedStorageExportModal
