@@ -3,6 +3,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use noland_mic_protocol::packet::ParsedPacket;
+use serde::Serialize;
 use tracing::{debug, info, warn};
 
 use crate::auth_session::AuthSession;
@@ -33,6 +34,17 @@ pub struct Receiver {
 
 /// Maximum frames to decode per tick to keep the real-time loop responsive.
 const MAX_FRAMES_PER_TICK: u32 = 5;
+const ACTIVE_PACKET_WINDOW_MS: u64 = 750;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReceiverRuntimeStatus {
+    pub receiving_audio: bool,
+    pub packet_loss_percent: f64,
+    pub jitter_ms: f64,
+    pub buffer_depth_ms: f64,
+    pub last_packet_ms_ago: Option<u64>,
+}
 
 impl Receiver {
     pub fn new(audio_config: AudioConfig, jitter_config: JitterConfig) -> Self {
@@ -247,6 +259,35 @@ impl Receiver {
             let padding = target_bytes - self.scratch.len();
             let silence = vec![0u8; padding];
             let _ = output.write_all(&silence);
+        }
+    }
+
+    pub fn runtime_status(&self) -> ReceiverRuntimeStatus {
+        let stats = self.jitter.snapshot_stats();
+        let last_packet_ms_ago = self
+            .last_packet_time
+            .map(|last| last.elapsed().as_millis() as u64);
+        let receiving_audio = last_packet_ms_ago
+            .map(|elapsed| elapsed <= ACTIVE_PACKET_WINDOW_MS)
+            .unwrap_or(false)
+            && !self.silent;
+        let packet_loss_percent = if stats.packets_received == 0 || last_packet_ms_ago.is_none() {
+            0.0
+        } else {
+            let total_packets = stats.packets_received + stats.packets_lost;
+            if total_packets > 0 {
+                (stats.packets_lost as f64 / total_packets as f64) * 100.0
+            } else {
+                0.0
+            }
+        };
+
+        ReceiverRuntimeStatus {
+            receiving_audio,
+            packet_loss_percent,
+            jitter_ms: stats.smoothed_jitter_ms,
+            buffer_depth_ms: stats.buffer_depth_ms,
+            last_packet_ms_ago,
         }
     }
 

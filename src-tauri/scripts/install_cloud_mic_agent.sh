@@ -11,6 +11,7 @@ CONFIG_DIR="/etc/noland"
 RUNTIME_DIR_BASE="/run/noland"
 FIFO_PATH="${RUNTIME_DIR_BASE}/noland_remote_microphone.pcm"
 MODULE_ID_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.module"
+STATUS_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.status.json"
 
 uid="$(id -u "$USER_NAME")"
 group_name="$(id -gn "$USER_NAME")"
@@ -128,6 +129,7 @@ cat > "$INSTALL_DIR/noland-mic-source-cleanup" <<'EOF'
 set -euo pipefail
 FIFO_PATH="/run/noland/noland_remote_microphone.pcm"
 MODULE_ID_FILE="/run/noland/noland_remote_microphone.module"
+STATUS_FILE="/run/noland/noland_remote_microphone.status.json"
 if [[ -f "$MODULE_ID_FILE" ]]; then
   module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
   if [[ -n "$module_id" ]]; then
@@ -136,6 +138,7 @@ if [[ -f "$MODULE_ID_FILE" ]]; then
   rm -f "$MODULE_ID_FILE"
 fi
 rm -f "$FIFO_PATH"
+rm -f "$STATUS_FILE"
 EOF
 chmod +x "$INSTALL_DIR/noland-mic-source-cleanup"
 chown "$USER_NAME:$group_name" "$INSTALL_DIR/noland-mic-source-cleanup"

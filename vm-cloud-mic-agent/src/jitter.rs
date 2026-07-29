@@ -171,18 +171,21 @@ impl JitterBuffer {
         self.buffer.iter().filter(|f| f.is_some()).count()
     }
 
-    /// Drain statistics and reset counters.
-    pub fn drain_stats(&mut self) -> JitterStats {
-        let stats = JitterStats {
+    /// Snapshot current statistics without resetting counters.
+    pub fn snapshot_stats(&self) -> JitterStats {
+        JitterStats {
             target_delay_ms: self.target_delay_ms,
             smoothed_jitter_ms: self.smoothed_jitter_ms,
             buffer_depth_ms: self.current_depth_packets() as f64 * 10.0,
             packets_received: self.packets_received,
             packets_lost: self.packets_lost,
             packets_recovered: self.packets_recovered,
-        };
-        // Keep cumulative counters
-        stats
+        }
+    }
+
+    /// Drain statistics and reset counters.
+    pub fn drain_stats(&mut self) -> JitterStats {
+        self.snapshot_stats()
     }
 
     /// Number of consecutive missed frames at the playhead.

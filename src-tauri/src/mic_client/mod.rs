@@ -3,6 +3,7 @@ pub mod device_list;
 pub mod encoder;
 pub mod transport;
 
+use std::sync::mpsc;
 use std::time::Instant;
 
 use crossbeam_channel::{bounded, Receiver};
@@ -34,11 +35,15 @@ pub struct MicClientConfig {
 /// Handle to a running microphone client pipeline.
 pub struct MicClientHandle {
     stop_tx: Option<oneshot::Sender<()>>,
+    capture_stop_tx: Option<mpsc::Sender<()>>,
 }
 
 impl MicClientHandle {
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(tx) = self.capture_stop_tx.take() {
             let _ = tx.send(());
         }
     }
@@ -53,15 +58,52 @@ impl Drop for MicClientHandle {
 /// Start the microphone capture → encode → transport pipeline.
 pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
     let (capture_tx, capture_rx) = bounded::<CaptureChunk>(64);
-
-    let _capture =
-        capture::MicCaptureDevice::open_and_start(config.device_id.as_deref(), capture_tx)?;
-
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
+    let (capture_stop_tx, capture_stop_rx) = mpsc::channel::<()>();
+    let (capture_ready_tx, capture_ready_rx) = mpsc::sync_channel::<AppResult<String>>(1);
 
     let session_id = config.session_id;
     let ssrc = config.ssrc;
     let remote_addr = config.remote_addr.clone();
+    let capture_device_id = config.device_id.clone();
+
+    std::thread::Builder::new()
+        .name("noland-mic-capture".into())
+        .spawn(move || {
+            let capture = match capture::MicCaptureDevice::open_and_start(
+                capture_device_id.as_deref(),
+                capture_tx,
+            ) {
+                Ok(capture) => capture,
+                Err(error) => {
+                    let _ = capture_ready_tx.send(Err(error));
+                    return;
+                }
+            };
+
+            let capture_name = capture.name().unwrap_or("unknown").to_string();
+            let _ = capture_ready_tx.send(Ok(capture_name.clone()));
+
+            info!(
+                capture_device = %capture_name,
+                "Microphone capture thread running"
+            );
+
+            let _capture = capture;
+            let _ = capture_stop_rx.recv();
+            info!("Microphone capture thread stopping");
+        })
+        .map_err(|e| AppError::Command(format!("Failed to spawn capture thread: {e}")))?;
+
+    let capture_name = match capture_ready_rx.recv() {
+        Ok(Ok(name)) => name,
+        Ok(Err(error)) => return Err(error),
+        Err(error) => {
+            return Err(AppError::Command(format!(
+                "Mic capture thread terminated before reporting readiness: {error}"
+            )))
+        }
+    };
 
     std::thread::Builder::new()
         .name("noland-mic-encoder".into())
@@ -74,11 +116,13 @@ pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
         session_id = session_id,
         ssrc = ssrc,
         remote_addr = %remote_addr,
+        capture_device = %capture_name,
         "Microphone client pipeline started"
     );
 
     Ok(MicClientHandle {
         stop_tx: Some(stop_tx),
+        capture_stop_tx: Some(capture_stop_tx),
     })
 }
 

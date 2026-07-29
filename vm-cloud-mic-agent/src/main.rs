@@ -4,16 +4,21 @@ mod decoder;
 mod jitter;
 mod receiver;
 
+use std::fs;
 use std::net::UdpSocket;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use clap::Parser;
 use tracing::{error, info, warn};
 
 use config::ReceiverConfig;
-use receiver::Receiver;
+use receiver::{Receiver, ReceiverRuntimeStatus};
+
+const STATUS_PATH: &str = "/run/noland/noland_remote_microphone.status.json";
+const STATUS_WRITE_INTERVAL_MS: u64 = 250;
 
 #[derive(Parser)]
 #[command(name = "noland-mic-receiver")]
@@ -114,6 +119,9 @@ fn main() {
     // Create receiver pipeline
     let mut receiver = Receiver::new(config.audio.clone(), config.jitter.clone());
     let mut stdout = std::io::stdout();
+    let mut last_status_write = Instant::now() - Duration::from_millis(STATUS_WRITE_INTERVAL_MS);
+
+    write_runtime_status(STATUS_PATH, &receiver.runtime_status()).ok();
 
     info!("Receiver initialized. Waiting for microphone packets...");
 
@@ -146,11 +154,29 @@ fn main() {
         // Drain decoded PCM to stdout (for PipeWire pipe-source)
         receiver.drain_pcm(&mut stdout);
 
+        if last_status_write.elapsed() >= Duration::from_millis(STATUS_WRITE_INTERVAL_MS) {
+            write_runtime_status(STATUS_PATH, &receiver.runtime_status()).ok();
+            last_status_write = Instant::now();
+        }
+
         // Sleep a tiny amount to avoid busy-waiting
         std::thread::sleep(Duration::from_millis(1));
     }
 
     info!("Receiver shutting down");
     receiver.flush(&mut stdout);
+    write_runtime_status(STATUS_PATH, &receiver.runtime_status()).ok();
     info!("Noland microphone receiver stopped");
+}
+
+fn write_runtime_status(path: &str, status: &ReceiverRuntimeStatus) -> std::io::Result<()> {
+    if let Some(parent) = Path::new(path).parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp_path = format!("{path}.tmp");
+    let payload = serde_json::to_vec(status)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error.to_string()))?;
+    fs::write(&tmp_path, payload)?;
+    fs::rename(tmp_path, path)?;
+    Ok(())
 }

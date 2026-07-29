@@ -427,7 +427,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user restart noland-mic-receiver.service; run_user systemctl --user is-active --quiet noland-mic-receiver.service; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; source_present=false; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; if ! run_user systemctl --user is-active --quiet noland-mic-receiver.service; then run_user systemctl --user start noland-mic-receiver.service; fi; if [[ \"$source_present\" != true ]]; then sleep 1; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; fi",
         )?;
 
         let output = {
@@ -478,7 +478,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user restart noland-mic-receiver.service; run_user systemctl --user is-active --quiet noland-mic-receiver.service; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user stop noland-mic-receiver.service >/dev/null 2>&1 || true; pkill -9 -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1 || true; sleep 1; run_user systemctl --user start noland-mic-receiver.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then break; fi; sleep 1; done; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
         )?;
 
         let output = {
@@ -532,7 +532,7 @@ impl MicPassthroughService {
     ) -> AppResult<VmAgentStatus> {
         let cmd = remote_user_bus_command(
             target_user,
-            "bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; receiver_active=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_active=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; udp_listening=false; if ss -uln | grep -q \":48020 \"; then udp_listening=true; fi; device_ready=false; if [[ \"$receiver_active\" = true ]] && [[ \"$source_present\" = true ]]; then device_ready=true; fi; receiving_audio=false; if [[ \"$device_ready\" = true ]] && [[ \"$udp_listening\" = true ]]; then receiving_audio=true; fi; printf \"{\\\"deviceReady\\\":%s,\\\"receivingAudio\\\":%s,\\\"packetLossPercent\\\":0.0,\\\"jitterMs\\\":0.0,\\\"bufferDepthMs\\\":0.0,\\\"lastPacketMsAgo\\\":null,\\\"pipewireConnected\\\":%s,\\\"defaultSource\\\":%s}\\n\" \"$device_ready\" \"$receiving_audio\" \"$pipewire_connected\" \"$default_source\"",
+            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; receiver_active=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_active=true; fi; receiver_process=false; if pgrep -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1; then receiver_process=true; fi; udp_listening=false; if ss -uln | grep -q \":48020 \">/dev/null 2>&1; then udp_listening=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; device_ready=false; if [[ \"$source_present\" = true ]] && ([[ \"$receiver_active\" = true ]] || [[ \"$receiver_process\" = true ]] || [[ \"$udp_listening\" = true ]]); then device_ready=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$device_ready\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json, os; raw = os.environ.get(\\\"STATUS_JSON\\\", \\\"{}\\\"); status = json.loads(raw) if raw.strip() else {}; out = {\\\"deviceReady\\\": os.environ.get(\\\"DEVICE_READY\\\", \\\"\\\").lower() == \\\"true\\\", \\\"receivingAudio\\\": bool(status.get(\\\"receivingAudio\\\", False)), \\\"packetLossPercent\\\": float(status.get(\\\"packetLossPercent\\\", 0.0) or 0.0), \\\"jitterMs\\\": float(status.get(\\\"jitterMs\\\", 0.0) or 0.0), \\\"bufferDepthMs\\\": float(status.get(\\\"bufferDepthMs\\\", 0.0) or 0.0), \\\"lastPacketMsAgo\\\": status.get(\\\"lastPacketMsAgo\\\"), \\\"pipewireConnected\\\": os.environ.get(\\\"PIPEWIRE_CONNECTED\\\", \\\"\\\").lower() == \\\"true\\\", \\\"defaultSource\\\": os.environ.get(\\\"DEFAULT_SOURCE\\\", \\\"\\\").lower() == \\\"true\\\"}; print(json.dumps(out, separators=(\\\",\\\", \\\":\\\")))\"",
         )?;
 
         let output = {
@@ -581,11 +581,10 @@ impl MicPassthroughService {
             return MicState::CloudMicMissing;
         }
 
-        if status.packet_loss_percent > 10.0 {
-            return MicState::PacketLossHigh;
-        }
-
         if status.receiving_audio {
+            if status.packet_loss_percent > 10.0 {
+                return MicState::PacketLossHigh;
+            }
             return MicState::Streaming;
         }
 
