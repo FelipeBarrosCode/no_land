@@ -1,4 +1,6 @@
 import { useState } from "react";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -6,16 +8,28 @@ import type { BlockingActionState } from "../../components/ui/BlockingLoaderOver
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
+import { MicControls } from "../../components/ui/MicControls";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
-import { resolveMoonlightDownloadUrl, resolveWireguardDownloadUrl } from "../../lib/backend";
-import { MOONLIGHT_DOWNLOAD_URL, WIREGUARD_DOWNLOAD_URL } from "../../lib/constants";
-import type { OfferCandidate, PersistedAppState, RentedInstanceSummary, ServerPreferences, SharedStorageObjectEntry, SunshineSettingsResponse } from "../../lib/types";
+import {
+  VAST_BILLING_URL,
+  VAST_API_KEY_URL,
+} from "../../lib/constants";
+import type {
+  OfferCandidate,
+  PersistedAppState,
+  RentedInstanceSummary,
+  ServerPreferences,
+  SharedStorageObjectEntry,
+  EmbeddedMoonlightInstanceStatus,
+  VastBrowserBillingAction,
+  VastWalletSummary,
+} from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
-import { SunshineSettingsPanel } from "../shared-storage-manager/SunshineSettingsPanel";
+
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
 
@@ -23,13 +37,14 @@ interface Props {
   appState: PersistedAppState;
   offers: OfferCandidate[];
   rentedInstances: RentedInstanceSummary[];
+  embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null;
+  vastWalletSummary: VastWalletSummary | null;
   searchingOffers: boolean;
   offersPage: number;
   offersHasNextPage: boolean;
   busy: boolean;
   instanceActionRunning: boolean;
   blockingAction: BlockingActionState | null;
-  sunshineSettings: SunshineSettingsResponse | null;
   onSearchOffers: (page?: number) => Promise<void>;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
@@ -41,54 +56,72 @@ interface Props {
     longitude: number;
   }) => Promise<void>;
   onLoadRentedInstances: () => Promise<void>;
-  onStartPlayExisting: (instanceId: number) => Promise<void>;
+  onRefreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
+  onOpenVastBillingBrowser: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<unknown>;
+  onStartPlayExisting: (instanceId: number) => Promise<string | null>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
   onStartPlay: () => Promise<void>;
-  onSaveServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
-  onLoadSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
-  onSaveSunshineSettings: (instanceId: number, settings: Record<string, unknown>, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
-  onResetSunshineSettings: (instanceId: number, sunshineUsername: string, sunshinePassword: string) => Promise<void>;
+  onSaveServerPreferences: (
+    payload: Partial<ServerPreferences>,
+  ) => Promise<void>;
+  onSetEmbeddedMoonlightPipelineEnabled: (
+    instanceId: number,
+    enabled: boolean,
+  ) => Promise<void>;
+  onLoadEmbeddedMoonlightStatus: (
+    instanceId: number,
+  ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
+  onRerunEmbeddedMoonlightPairing: (
+    instanceId: number,
+  ) => Promise<unknown>;
   onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
   onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
-  onSaveInstanceStorageSelected: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
-  onSyncInstanceStorage: (instanceId: number, selectedPaths: string[]) => Promise<string | null>;
-  onListSyncableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
-  onListExportableStorageObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
+  onSaveInstanceStorageSelected: (
+    instanceId: number,
+    selectedPaths: string[],
+  ) => Promise<string | null>;
+  onSyncInstanceStorage: (
+    instanceId: number,
+    selectedPaths: string[],
+  ) => Promise<string | null>;
+  onListSyncableStorageObjects: (
+    instanceId: number,
+  ) => Promise<SharedStorageObjectEntry[] | null>;
+  onListExportableStorageObjects: (
+    instanceId: number,
+  ) => Promise<SharedStorageObjectEntry[] | null>;
 }
-
-const placeholders = [
-  "Steam Library",
-  "Cloud Presets",
-  "Latency Tuning",
-  "Controller Profiles",
-  "Scene Presets"
-];
 
 export function DashboardScreen({
   appState,
   offers,
   rentedInstances,
+  embeddedMoonlightStatus,
+  vastWalletSummary,
   searchingOffers,
   offersPage,
   offersHasNextPage,
   busy,
   instanceActionRunning,
   blockingAction,
-  sunshineSettings,
   onSearchOffers,
   onNextOffersPage,
   onPreviousOffersPage,
   onManualLocationSave,
   onLoadRentedInstances,
+  onRefreshVastWalletSummary,
+  onOpenVastBillingBrowser,
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
   onSaveServerPreferences,
-  onLoadSunshineSettings,
-  onSaveSunshineSettings,
-  onResetSunshineSettings,
+  onSetEmbeddedMoonlightPipelineEnabled,
+  onLoadEmbeddedMoonlightStatus,
+  onRerunEmbeddedMoonlightPairing,
   onReconnectWireguard,
   onRebootInstanceServices,
   onPauseInstance,
@@ -96,33 +129,31 @@ export function DashboardScreen({
   onSaveInstanceStorageSelected,
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
-  onListExportableStorageObjects
+  onListExportableStorageObjects,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [settingsInstanceId, setSettingsInstanceId] = useState<number | null>(null);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
+  const [connectionInfoModalType, setConnectionInfoModalType] = useState<
+    "wireguard" | null
+  >(null);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
+  const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
 
-  async function handleMoonlightDownload() {
-    const downloadUrl = await resolveMoonlightDownloadUrl();
-    try {
-      await openUrl(downloadUrl);
-    } catch {
-      window.open(downloadUrl, "_blank", "noopener,noreferrer");
-    }
-  }
+  void onOpenVastBillingBrowser;
 
-  async function handleWireguardDownload() {
-    const downloadUrl = await resolveWireguardDownloadUrl();
+  const walletAmountLabel = vastWalletSummary?.displayAmount || "--";
+
+  async function openExternalUrl(url: string) {
     try {
-      await openUrl(downloadUrl);
+      await openUrl(url);
     } catch {
-      window.open(downloadUrl, "_blank", "noopener,noreferrer");
+      window.open(url, "_blank", "noopener,noreferrer");
     }
   }
 
@@ -132,38 +163,24 @@ export function DashboardScreen({
   }
 
   async function handlePlayExisting(instanceId: number) {
-    await onStartPlayExisting(instanceId);
-    navigate("/provisioning");
+    const mode = await onStartPlayExisting(instanceId);
+    if (mode === "provisioning") {
+      navigate("/provisioning");
+    }
   }
 
   async function handleOpenSettings(instanceId: number) {
-    setSettingsInstanceId(instanceId);
-  }
-
-  async function handleLoadSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
-    if (settingsInstanceId !== null) {
-      await onLoadSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
+    await onSetEmbeddedMoonlightPipelineEnabled(instanceId, true);
+    await onLoadEmbeddedMoonlightStatus(instanceId);
+    const mode = await onStartPlayExisting(instanceId);
+    if (mode === "provisioning") {
+      navigate("/provisioning");
     }
   }
 
-  async function handleSaveSunshineSettings(
-    settings: Record<string, unknown>,
-    sunshineUsername: string,
-    sunshinePassword: string
-  ) {
-    if (settingsInstanceId !== null) {
-      await onSaveSunshineSettings(settingsInstanceId, settings, sunshineUsername, sunshinePassword);
-    }
-  }
-
-  async function handleResetSunshineSettings(sunshineUsername: string, sunshinePassword: string) {
-    if (settingsInstanceId !== null) {
-      await onResetSunshineSettings(settingsInstanceId, sunshineUsername, sunshinePassword);
-    }
-  }
-
-  function handleCloseSunshineSettings() {
-    setSettingsInstanceId(null);
+  async function handlePair(instanceId: number) {
+    await onRerunEmbeddedMoonlightPairing(instanceId);
+    navigate("/provisioning");
   }
 
   async function handleReconnect(instanceId: number) {
@@ -210,6 +227,14 @@ export function DashboardScreen({
     setExportInstanceId(null);
   }
 
+  async function handleOpenWalletBilling(action?: VastBrowserBillingAction) {
+    if (action === "open-auto-topup") {
+      await openExternalUrl(VAST_BILLING_URL);
+      return;
+    }
+    await openExternalUrl(VAST_BILLING_URL);
+  }
+
   function openTutorial() {
     setTutorialStep(0);
     setTutorialOpen(true);
@@ -245,8 +270,16 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
-            <Button variant="ghost" onClick={openTutorial}>Help</Button>
-            <Button variant="ghost" onClick={() => navigate("/settings")}>Settings</Button>
+            <Button variant="ghost" onClick={() => setWalletModalOpen(true)}>
+              Wallet {walletAmountLabel}
+            </Button>
+            <Button variant="ghost" onClick={openTutorial}>
+              <SpriteIcon icon="help" />
+              <span className="ml-1">Help</span>
+            </Button>
+            <Button variant="ghost" onClick={() => navigate("/settings")}>
+              Settings
+            </Button>
             <Button variant="secondary" onClick={() => setPickerOpen(true)}>
               Select Server
             </Button>
@@ -254,68 +287,91 @@ export function DashboardScreen({
           </div>
         </header>
 
-        <section className="grid gap-4 md:grid-cols-3">
-          <Card interactive onClick={handleMoonlightDownload} className="pixel-frame min-h-40">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 1</p>
-              <SpriteIcon icon="moonlight" />
-            </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
-              <a href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Download Moonlight
-              </a>
-            </h2>
-            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official installer for your OS and complete setup. Noland Connect updates
-              {" "}
-              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={MOONLIGHT_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Moonlight
-              </a>{" "}
-              settings after provisioning.
-            </p>
-          </Card>
-
-          <Card interactive onClick={handleWireguardDownload} className="pixel-frame min-h-40">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 2</p>
-              <SpriteIcon icon="settings" />
-            </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">
-              <a href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                Download WireGuard
-              </a>
-            </h2>
-            <p className="mt-2 max-w-md text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Open the official{" "}
-              <a className="text-neon-cyan underline underline-offset-2 hover:text-white" href={WIREGUARD_DOWNLOAD_URL} target="_blank" rel="noreferrer">
-                WireGuard
-              </a>{" "}
-              install guide for your OS, install the app, then manage the tunnel from there.
-            </p>
-          </Card>
-
-          <Card interactive onClick={() => setPickerOpen(true)} className="pixel-frame min-h-40">
-            <div className="flex items-center justify-between">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Panel 3</p>
-              <SpriteIcon icon="server" />
-            </div>
-            <h2 className="mt-3 font-display text-base text-neon-cyan md:text-lg">Set Server</h2>
-            <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-              Discover nearby GPU offers by reliability, distance, and price. Adjust storage before
-              launch.
-            </p>
-          </Card>
-        </section>
-
-        <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-          {placeholders.map((item) => (
-            <Card key={item} className="min-h-28 animate-slide-up">
-              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#93b7d6]">Cartridge</p>
-              <h3 className="mt-2 font-display text-[11px] leading-[1.4] text-white">{item}</h3>
-              <p className="mt-2 text-[1.2rem] leading-none text-[#98adc9]">Coming soon</p>
+        {showDashboardGuidance ? (
+          <section className="grid gap-4 md:grid-cols-3">
+            <Card
+              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
+            >
+              <div className="flex items-center justify-between">
+                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                  Panel 1
+                </p>
+                <div className="flex items-center gap-2">
+                  <AIPromptHelper
+                    topic="Moonlight Client Download"
+                    promptText={APP_PROMPTS.moonlightCard}
+                    variant="icon"
+                  />
+                  <SpriteIcon icon="moonlight" />
+                </div>
+              </div>
+              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
+                Managed Streaming
+              </h2>
+              <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+                Noland now handles the streaming and connection flow inside the app. Just complete Vast.ai billing and API key setup, then continue from the dashboard.
+              </p>
             </Card>
-          ))}
-        </section>
+
+            <div className="flex flex-col gap-4">
+              <Card
+                interactive
+                onClick={() => setConnectionInfoModalType("wireguard")}
+                className="pixel-frame flex-1 flex flex-col justify-between p-4"
+              >
+                <div>
+                  <div className="flex items-center justify-between">
+                    <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+                      Connection Type
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <AIPromptHelper
+                        topic="Managed Tunnel Connection Option"
+                        promptText={APP_PROMPTS.wireguardCard}
+                        variant="icon"
+                      />
+                      <SpriteIcon icon="settings" />
+                    </div>
+                  </div>
+                  <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
+                    Managed Secure Connection
+                  </h2>
+                  <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                    Noland activates and verifies the secure connection flow for you inside the app before moving on to streaming setup.
+                  </p>
+                </div>
+              </Card>
+            </div>
+
+            <Card
+              interactive
+              onClick={() => setPickerOpen(true)}
+              className="pixel-frame min-h-40 flex flex-col justify-center p-4"
+            >
+              <div className="flex items-center justify-between">
+                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                  Panel 3
+                </p>
+                <div className="flex items-center gap-2">
+                  <AIPromptHelper
+                    topic="Set Server Selection Offering"
+                    promptText={APP_PROMPTS.setServerCard}
+                    variant="icon"
+                  />
+                  <SpriteIcon icon="server" />
+                </div>
+              </div>
+              <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
+                Set Server
+              </h2>
+              <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+                Discover nearby high-performance GPU server offers filtered by
+                price, reliability, and network distance. Adjust template hash
+                and storage allocation prior to launching your machine.
+              </p>
+            </Card>
+          </section>
+        ) : null}
 
         <TutorialModal
           open={tutorialOpen}
@@ -330,103 +386,197 @@ export function DashboardScreen({
         <section>
           <Card className="pixel-frame">
             <div className="mb-3 flex items-center justify-between">
-              <div>
-                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Rented Servers</h3>
-                {blockingAction && blockingAction.key.startsWith("instance.") && (
-                  <p className="mt-1 text-[1.1rem] text-[#9ec4df]" aria-live="polite">
-                    {blockingLabel}
-                    {blockingDetail ? `: ${blockingDetail}` : "..."}
-                  </p>
-                )}
+              <div className="flex items-center gap-2">
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
+                  Rented Servers
+                </h3>
+                <AIPromptHelper
+                  topic="Managing Rented Servers"
+                  promptText={APP_PROMPTS.rentedServersSection}
+                  variant="icon"
+                />
+                {blockingAction &&
+                  blockingAction.key.startsWith("instance.") && (
+                    <p
+                      className="mt-1 text-[1.1rem] text-[#9ec4df]"
+                      aria-live="polite"
+                    >
+                      {blockingLabel}
+                      {blockingDetail ? `: ${blockingDetail}` : "..."}
+                    </p>
+                  )}
               </div>
-              <Button variant="secondary" onClick={onLoadRentedInstances} disabled={busy} loading={busy && !blockingAction} loadingText="Refreshing...">
+              <Button
+                variant="secondary"
+                onClick={onLoadRentedInstances}
+                disabled={busy}
+                loading={busy && !blockingAction}
+                loadingText="Refreshing..."
+              >
                 Refresh Rented
               </Button>
             </div>
 
-            {rentedInstances.length === 0 ? (
-              <p className="text-[1.25rem] text-[#bfd3ee]">
-                No active rented servers found for this account.
-              </p>
-            ) : (
-              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {rentedInstances.map((instance) => (
-                  <Card key={instance.instanceId} className="border-2 border-[#3a4068]">
-                    <div className="flex items-center justify-between gap-2">
-                      <h4 className="font-display text-[11px] text-white">{instance.label}</h4>
-                      <StatusPill
-                        state={instance.status.toLowerCase().includes("run") ? "Ready" : "WaitingForInstance"}
-                      />
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {rentedInstances.map((instance) => (
+                <Card
+                  key={instance.instanceId}
+                  className="border-2 border-[#3a4068]"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="font-display text-[11px] text-white">
+                      {instance.label}
+                    </h4>
+                    <StatusPill
+                      state={
+                        instance.status.toLowerCase().includes("run")
+                          ? "Ready"
+                          : "WaitingForInstance"
+                      }
+                    />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
+                    <p>ID: {instance.instanceId}</p>
+                    <p>Status: {instance.status}</p>
+                    <p>GPU: {instance.gpuName}</p>
+                    <p>SSH: {instance.sshHost || "pending"}</p>
+                  </div>
+                  {instance.embeddedMoonlightPipelineEnabled && (
+                    <div className="mt-2 space-y-2">
+                      <div className="rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
+                        Embedded Moonlight pipeline enabled
+                      </div>
+                      {embeddedMoonlightStatus?.instanceId === instance.instanceId && (
+                        <div className="rounded border border-[#3a4068] bg-[#10152f]/60 px-2 py-2 text-[11px] text-[#bfd3ee]">
+                          <p>Session: {embeddedMoonlightStatus.sessionState}</p>
+                          <p>Paired: {embeddedMoonlightStatus.paired ? "yes" : "no"}</p>
+                          <p>Connected: {embeddedMoonlightStatus.runtimeConnected ? "yes" : "no"}</p>
+                          <p>Renderer ready: {embeddedMoonlightStatus.rendererReady ? "yes" : "no"}</p>
+                          <p>Video active: {embeddedMoonlightStatus.videoSessionActive ? "yes" : "no"}</p>
+                          <p>Video frames: {embeddedMoonlightStatus.videoFrameCount}</p>
+                          <p>Rendered frames: {embeddedMoonlightStatus.rendererSubmittedFrameCount}</p>
+                          <p>Dropped frames: {embeddedMoonlightStatus.rendererDroppedFrameCount}</p>
+                          <p>Audio samples: {embeddedMoonlightStatus.audioSampleCount}</p>
+                          {embeddedMoonlightStatus.lastRuntimeEvent ? (
+                            <p className="mt-1 text-[#8db7d8]">{embeddedMoonlightStatus.lastRuntimeEvent}</p>
+                          ) : null}
+                          {embeddedMoonlightStatus.lastError ? (
+                            <p className="mt-1 text-[#ff8fb7]">{embeddedMoonlightStatus.lastError}</p>
+                          ) : null}
+                        </div>
+                      )}
                     </div>
-                    <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
-                      <p>ID: {instance.instanceId}</p>
-                      <p>Status: {instance.status}</p>
-                      <p>GPU: {instance.gpuName}</p>
-                      <p>SSH: {instance.sshHost || "pending"}</p>
-                    </div>
+                  )}
+                  <div className="mt-3">
+                    <InstanceCardActions
+                      instance={instance}
+                      busy={busy}
+                      instanceActionRunning={instanceActionRunning}
+                      blockingAction={blockingAction}
+                      onPlay={handlePlayExisting}
+                      onSettings={handleOpenSettings}
+                      onPair={handlePair}
+                      onReconnect={handleReconnect}
+                      onReboot={handleReboot}
+                      onPause={handlePause}
+                      onDestroy={handleDestroy}
+                      onSaveStorage={handleSaveStorage}
+                      onSyncStorage={handleSyncStorage}
+                    />
+                  </div>
+                  {instance.status.toLowerCase().includes("run") && (
                     <div className="mt-3">
-                      <InstanceCardActions
-                         instance={instance}
-                         busy={busy}
-                         instanceActionRunning={instanceActionRunning}
-                         blockingAction={blockingAction}
-                         onPlay={handlePlayExisting}
-                        onSettings={handleOpenSettings}
-                        onReconnect={handleReconnect}
-                        onReboot={handleReboot}
-                        onPause={handlePause}
-                        onDestroy={handleDestroy}
-                        onSaveStorage={handleSaveStorage}
-                        onSyncStorage={handleSyncStorage}
-                      />
+                      <MicControls instanceId={instance.instanceId} />
                     </div>
-                  </Card>
-                ))}
-              </div>
-            )}
+                  )}
+
+                </Card>
+              ))}
+
+              <Card
+                interactive
+                onClick={() => setPickerOpen(true)}
+                className="flex items-center justify-center border-2 border-dashed border-[#3a4068] hover:border-neon-cyan hover:bg-[#10152f]/30 transition-colors min-h-[14rem] bg-[#10152f]/10"
+              >
+                <div className="text-[9rem] text-[#bfd3ee] font-bold transition-transform hover:scale-110 select-none leading-none">
+                  +
+                </div>
+              </Card>
+            </div>
           </Card>
         </section>
 
         <section className="grid gap-4 lg:grid-cols-[1.5fr_1fr]">
           <Card className="pixel-frame min-h-44">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">Selected Server</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
+                  Selected Server
+                </h3>
+                <AIPromptHelper
+                  topic="Selected Server Specifications"
+                  promptText={APP_PROMPTS.selectedServerSection}
+                  variant="icon"
+                />
+              </div>
               <StatusPill state={appState.orchestrationState} />
             </div>
 
             {appState.selectedOffer ? (
               <div className="mt-4 grid grid-cols-2 gap-3 text-[1.25rem] leading-[1.05] text-[#d9efff] md:grid-cols-4">
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Host</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Host
+                  </p>
                   <p>{appState.selectedOffer.hostLabel}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Location</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Location
+                  </p>
                   <p>{appState.selectedOffer.locationLabel}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">GPU</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    GPU
+                  </p>
                   <p>{appState.selectedOffer.gpuName}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Price/hour</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Price/hour
+                  </p>
                   <p>${appState.selectedOffer.hourlyPrice.toFixed(3)}</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Distance</p>
-                  <p>{appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Distance
+                  </p>
+                  <p>
+                    {appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km
+                  </p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Reliability</p>
-                  <p>{(appState.selectedOffer.reliability * 100).toFixed(1)}%</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Reliability
+                  </p>
+                  <p>
+                    {(appState.selectedOffer.reliability * 100).toFixed(1)}%
+                  </p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Storage</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Storage
+                  </p>
                   <p>{appState.serverPreferences.storageGb} GB</p>
                 </div>
                 <div>
-                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">Template</p>
-                  <p className="truncate">{appState.serverPreferences.templateHash}</p>
+                  <p className="font-display text-[10px] uppercase text-[#8db7d8]">
+                    Template
+                  </p>
+                  <p className="truncate">
+                    {appState.serverPreferences.templateHash}
+                  </p>
                 </div>
               </div>
             ) : null}
@@ -446,7 +596,10 @@ export function DashboardScreen({
                 />
                 <HudBar
                   label="Distance"
-                  value={Math.max(0, 1000 - appState.selectedOffer.estimatedDistanceKm)}
+                  value={Math.max(
+                    0,
+                    1000 - appState.selectedOffer.estimatedDistanceKm,
+                  )}
                   max={1000}
                   valueLabel={`${appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km`}
                 />
@@ -461,40 +614,39 @@ export function DashboardScreen({
           <Card className="pixel-frame flex flex-col justify-between gap-4">
             <div>
               <div className="flex items-center justify-between">
-                <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">Action</p>
+                <div className="flex items-center gap-2">
+                  <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
+                    Action
+                  </p>
+                  <AIPromptHelper
+                    topic="Provisioning and Play Execution"
+                    promptText={APP_PROMPTS.playButtonSection}
+                    variant="icon"
+                  />
+                </div>
                 <SpriteIcon icon="play" />
               </div>
               <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
               <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-                Creates the instance, waits for readiness, runs provisioning, and opens pairing
-                guidance.
+                Creates the instance, waits for readiness, runs provisioning,
+                and opens pairing guidance.
               </p>
             </div>
             <Button
-              className="h-12 w-full justify-center text-[12px]"
+              className="h-12 w-full justify-center text-[16px]"
               disabled={busy || !appState.selectedOffer}
               loading={blockingAction?.key === "provisioning.flow"}
               loadingText="Starting session..."
               onClick={handlePlay}
             >
-              Play
+              <SpriteIcon icon="play" />
+              <span className="ml-1">Play</span>
             </Button>
           </Card>
         </section>
       </div>
 
-      {settingsInstanceId !== null && (
-        <SunshineSettingsPanel
-          settings={sunshineSettings}
-          busy={instanceActionRunning}
-          defaultUsername={appState.credentials.appUsername}
-          defaultPassword={appState.credentials.appPassword}
-          onLoad={handleLoadSunshineSettings}
-          onSave={handleSaveSunshineSettings}
-          onReset={handleResetSunshineSettings}
-          onClose={handleCloseSunshineSettings}
-        />
-      )}
+
 
       <ServerPickerModal
         open={pickerOpen}
@@ -512,9 +664,87 @@ export function DashboardScreen({
         onNextPage={onNextOffersPage}
         onPreviousPage={onPreviousOffersPage}
         onManualLocationSave={onManualLocationSave}
-        onSelectOffer={onSelectOffer}
+        onSelectOffer={async (offerId, storageGb) => {
+          await onSelectOffer(offerId, storageGb);
+          setPickerOpen(false);
+        }}
         onUpdateServerPreferences={onSaveServerPreferences}
       />
+
+      {walletModalOpen ? (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
+          <div className="glass-panel pixel-frame crt-surface w-full max-w-lg p-6">
+            <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-3">
+              <div>
+                <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
+                  Vast.ai Wallet
+                </p>
+                <h3 className="mt-1 font-display text-lg text-white">
+                  {walletAmountLabel}
+                </h3>
+              </div>
+              <Button variant="ghost" onClick={() => setWalletModalOpen(false)}>
+                Close
+              </Button>
+            </div>
+
+            <p className="text-[1.15rem] leading-snug text-[#bfd3ee]">
+              Open the correct Vast.ai page in your normal browser to add account credit, configure automatic top-ups, or manage API keys.
+            </p>
+
+            <div className="mt-4 space-y-3">
+              <Button
+                className="w-full justify-center"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("open-add-credit")}
+              >
+                Add More Credits
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("open-auto-topup")}
+              >
+                Add Credits at a Limit
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void handleOpenWalletBilling("snapshot")}
+              >
+                Open Billing Overview
+              </Button>
+              <Button
+                className="w-full justify-center"
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
+              >
+                Open API Key Page
+              </Button>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#3e4270] pt-4 text-[1rem] text-[#8db7d8]">
+              <div className="space-y-1">
+                <p>Amount in account: {walletAmountLabel}</p>
+                <p>
+                  Source: {vastWalletSummary?.source === "vast_api" ? "Vast API" : "Unavailable"}
+                </p>
+              </div>
+              <Button
+                variant="ghost"
+                disabled={busy}
+                onClick={() => void onRefreshVastWalletSummary()}
+              >
+                Refresh Balance
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <SharedStorageSyncModal
         open={syncInstanceId !== null}
@@ -533,6 +763,58 @@ export function DashboardScreen({
         onLoadObjects={onListExportableStorageObjects}
         onConfirmExport={handleExportSelection}
       />
+
+      {connectionInfoModalType && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
+          <div className="glass-panel pixel-frame crt-surface w-full max-w-xl p-6">
+            <div className="mb-4 flex items-center justify-between gap-2 border-b border-[#3e4270] pb-2">
+              <h3
+                className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+                data-text="Managed Tunnel Info"
+              >
+                Managed Tunnel Info
+              </h3>
+              <AIPromptHelper
+                topic="Managed WireGuard-Compatible Tunnel"
+                promptText={APP_PROMPTS.wireguardModalInfo}
+                variant="both"
+              />
+            </div>
+
+            <div className="space-y-4 text-[1.2rem] leading-relaxed text-[#c5d8ec]">
+              <p>
+                Noland manages the secure desktop connection flow for you inside the app.
+              </p>
+              <div>
+                <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
+                  How it works
+                </p>
+                <p className="text-[1.15rem] text-[#b9cce2]">
+                  Noland generates the connection config, starts the managed link locally, verifies connectivity to the remote instance, and then continues into streaming setup.
+                </p>
+              </div>
+              <div>
+                <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
+                  Requirements
+                </p>
+                <p className="text-[1.15rem] text-[#b9cce2]">
+                  No separate tunnel, Moonlight, Tailscale, or WireGuard setup is required from you. If macOS or Linux asks for elevation, just approve it so Noland can finish local configuration.
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-[#3e4270] pt-4">
+              <Button
+                variant="secondary"
+                onClick={() => setConnectionInfoModalType(null)}
+              >
+                Got it
+              </Button>
+
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

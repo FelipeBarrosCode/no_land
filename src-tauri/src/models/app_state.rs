@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5,6 +7,8 @@ use serde::{Deserialize, Serialize};
 pub struct PersistedAppState {
     pub version: u32,
     pub onboarding_completed: bool,
+    #[serde(default)]
+    pub has_completed_guided_setup: bool,
     pub credentials: CredentialsState,
     pub ssh: SshState,
     pub location: LocationState,
@@ -16,10 +20,16 @@ pub struct PersistedAppState {
     pub moonlight: MoonlightState,
     pub moonlight_preferences: MoonlightPreferences,
     pub shared_storage: SharedStorageState,
+    #[serde(default)]
+    pub shared_storage_profiles: Vec<crate::models::application_bundle::ProfileReference>,
+    #[serde(default)]
+    pub shared_storage_credentials: SharedStorageCredentialState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
     pub orchestration_state: OrchestrationState,
+    #[serde(default)]
+    pub connection_provider: ConnectionProvider,
     pub last_error: Option<String>,
 }
 
@@ -28,6 +38,7 @@ impl Default for PersistedAppState {
         Self {
             version: 1,
             onboarding_completed: false,
+            has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
             ssh: SshState::default(),
             location: LocationState::default(),
@@ -39,20 +50,36 @@ impl Default for PersistedAppState {
             moonlight: MoonlightState::default(),
             moonlight_preferences: MoonlightPreferences::default(),
             shared_storage: SharedStorageState::default(),
+            shared_storage_profiles: Vec::new(),
+            shared_storage_credentials: SharedStorageCredentialState::default(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
+            connection_provider: ConnectionProvider::default(),
             last_error: None,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CredentialsState {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
+    #[serde(default)]
+    pub tailscale_api_key: String,
+}
+
+impl Default for CredentialsState {
+    fn default() -> Self {
+        Self {
+            app_username: String::new(),
+            app_password: String::new(),
+            vast_api_key: String::new(),
+            tailscale_api_key: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -174,6 +201,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_mic_device_id() -> String {
+    "default".to_string()
+}
+
+fn default_mic_device_name() -> String {
+    "System Default".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OfferCandidate {
@@ -267,6 +302,14 @@ pub struct WireGuardState {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
+pub enum ConnectionProvider {
+    #[default]
+    Wireguard,
+    Tailscale,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
 pub enum SetupStage {
     #[default]
     PreWireguardExistingFlow,
@@ -355,10 +398,10 @@ impl Default for PostWireGuardSetupState {
             current_instance_id: None,
             wireguard_export_path: String::new(),
             wireguard_config: String::new(),
-            wireguard_verified_host: "10.77.0.1".to_string(),
+            wireguard_verified_host: String::new(),
             wireguard_reachable_ports: Vec::new(),
             sunshine_username: String::new(),
-            moonlight_host: "10.77.0.1".to_string(),
+            moonlight_host: String::new(),
             moonlight_installed: false,
             paired: false,
             setup_complete: false,
@@ -417,6 +460,10 @@ fn default_edid_source_label() -> String {
 pub struct MoonlightState {
     pub configured: bool,
     pub host_address: String,
+    #[serde(default)]
+    pub session_state: String,
+    #[serde(default)]
+    pub last_error: Option<String>,
 }
 
 impl Default for MoonlightState {
@@ -424,6 +471,8 @@ impl Default for MoonlightState {
         Self {
             configured: false,
             host_address: String::new(),
+            session_state: "idle".to_string(),
+            last_error: None,
         }
     }
 }
@@ -453,6 +502,8 @@ pub struct MoonlightPreferences {
     pub gameopts: u8,
     pub gamepadmouse: u8,
     pub detectnetblocking: u8,
+    #[serde(default)]
+    pub show_input_debug_hud: u8,
 }
 
 impl Default for MoonlightPreferences {
@@ -477,6 +528,7 @@ impl Default for MoonlightPreferences {
             gameopts: 1,
             gamepadmouse: 1,
             detectnetblocking: 1,
+            show_input_debug_hud: 0,
         }
     }
 }
@@ -518,6 +570,8 @@ pub struct RentedInstanceSummary {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub public_ip: String,
+    #[serde(default)]
+    pub embedded_moonlight_pipeline_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -542,6 +596,22 @@ pub struct ProvisionedServerState {
     pub wireguard_config_path: String,
     #[serde(default)]
     pub moonlight_host_address: String,
+    #[serde(default)]
+    pub connection_provider: ConnectionProvider,
+    #[serde(default)]
+    pub tailscale_client_ip: String,
+    #[serde(default)]
+    pub embedded_moonlight_pipeline_enabled: bool,
+    #[serde(default)]
+    pub embedded_moonlight_host_id: String,
+    #[serde(default)]
+    pub embedded_moonlight_paired: bool,
+    #[serde(default = "default_mic_device_id")]
+    pub mic_device_id: String,
+    #[serde(default = "default_mic_device_name")]
+    pub mic_device_name: String,
+    #[serde(default)]
+    pub mic_quality_profile: MicQualityProfile,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -560,6 +630,8 @@ pub struct ProvisionedServerSteps {
     pub post_nvidia_reboot_completed: bool,
     pub sunshine_configured: bool,
     pub low_latency_audio_configured: bool,
+    #[serde(default)]
+    pub mic_receiver_installed: bool,
     pub wireguard_configured: bool,
     pub moonlight_configured: bool,
     pub awaiting_pair_pin: bool,
@@ -583,6 +655,14 @@ impl ProvisionedServerState {
             wireguard_client_public_key: String::new(),
             wireguard_config_path: String::new(),
             moonlight_host_address: String::new(),
+            connection_provider: ConnectionProvider::default(),
+            tailscale_client_ip: String::new(),
+            embedded_moonlight_pipeline_enabled: false,
+            embedded_moonlight_host_id: String::new(),
+            embedded_moonlight_paired: false,
+            mic_device_id: default_mic_device_id(),
+            mic_device_name: default_mic_device_name(),
+            mic_quality_profile: MicQualityProfile::Standard,
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),
@@ -606,6 +686,10 @@ pub enum OrchestrationState {
     ConfiguringWireGuard,
     ConfiguringSunshine,
     ConfiguringNvidiaHeadless,
+    SelectingConnectionProvider,
+    ConfiguringTailscale,
+    TailscaleConfigGenerated,
+    TailscaleConnected,
     WireGuardConfigGenerated,
     WireGuardAppHandoffStarted,
     WireGuardWaitingForImport,
@@ -633,6 +717,8 @@ pub struct OnboardingPayload {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
+    #[serde(default)]
+    pub tailscale_api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -766,6 +852,30 @@ pub struct SharedStorageSyncSelectionRequest {
     pub selected_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageCredentialState {
+    #[serde(default)]
+    pub profiles: HashMap<String, SharedStorageProfileSecret>,
+    #[serde(default)]
+    pub oauth_sessions: HashMap<String, SharedStorageOAuthSessionSecret>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageProfileSecret {
+    pub credentials: crate::models::application_bundle::StorageCredential,
+    #[serde(default)]
+    pub provider_fields: HashMap<String, String>,
+    pub repository_key_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageOAuthSessionSecret {
+    pub credentials: crate::models::application_bundle::StorageCredential,
+}
+
 // ============================================================
 // Bundle Index + Restore types
 // ============================================================
@@ -879,6 +989,7 @@ pub struct InstanceMicConfig {
     pub channels: u32,
     pub vm_wireguard_ip: String,
     pub rtp_port: u16,
+    pub device_id: String,
     pub device_name: String,
     pub quality_profile: MicQualityProfile,
     pub session_id: Option<String>,
@@ -893,13 +1004,14 @@ impl Default for InstanceMicConfig {
         Self {
             instance_id: 0,
             enabled: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             codec: "opus".to_string(),
             sample_rate: 48000,
             channels: 1,
             vm_wireguard_ip: String::new(),
-            rtp_port: 34778,
-            device_name: "Cloud Mic".to_string(),
+            rtp_port: 48200,
+            device_id: default_mic_device_id(),
+            device_name: default_mic_device_name(),
             quality_profile: MicQualityProfile::Standard,
             session_id: None,
             session_token: None,
@@ -935,7 +1047,7 @@ impl MicQualityProfile {
 
     pub fn frame_ms(&self) -> u32 {
         match self {
-            MicQualityProfile::Standard => 20,
+            MicQualityProfile::Standard => 10,
             MicQualityProfile::LowLatency => 10,
             MicQualityProfile::HighQuality => 20,
         }
@@ -972,11 +1084,11 @@ impl Default for InstanceMicRuntimeStatus {
             vm_agent_reachable: false,
             device_ready: false,
             receiving_audio: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             sample_rate: 48000,
             channels: 1,
             bitrate_kbps: 32,
-            frame_ms: 20,
+            frame_ms: 10,
             packet_loss_percent: 0.0,
             jitter_ms: 0.0,
             buffer_depth_ms: 0.0,
@@ -1007,6 +1119,7 @@ pub enum MicState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicSettingsUpdate {
+    pub device_id: Option<String>,
     pub quality_profile: Option<MicQualityProfile>,
 }
 

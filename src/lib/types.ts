@@ -15,6 +15,10 @@ export type OrchestrationState =
   | "ConfiguringWireGuard"
   | "ConfiguringSunshine"
   | "ConfiguringNvidiaHeadless"
+  | "SelectingConnectionProvider"
+  | "ConfiguringTailscale"
+  | "TailscaleConfigGenerated"
+  | "TailscaleConnected"
   | "WireGuardConfigGenerated"
   | "WireGuardAppHandoffStarted"
   | "WireGuardWaitingForImport"
@@ -94,10 +98,13 @@ export interface PostWireGuardSetupState {
   lastError: SetupErrorState | null;
 }
 
+export type ConnectionProvider = "wireguard" | "tailscale";
+
 export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  tailscaleApiKey: string;
 }
 
 export interface SshState {
@@ -198,6 +205,8 @@ export interface SunshineState {
 export interface MoonlightState {
   configured: boolean;
   hostAddress: string;
+  sessionState: string;
+  lastError: string | null;
 }
 
 export interface ProvisionedServerSteps {
@@ -209,6 +218,7 @@ export interface ProvisionedServerSteps {
   nvidiaHeadlessConfigured: boolean;
   sunshineConfigured: boolean;
   lowLatencyAudioConfigured: boolean;
+  micReceiverInstalled: boolean;
   wireguardConfigured: boolean;
   moonlightConfigured: boolean;
   awaitingPairPin: boolean;
@@ -228,6 +238,14 @@ export interface ProvisionedServerState {
   wireguardClientPublicKey: string;
   wireguardConfigPath: string;
   moonlightHostAddress: string;
+  connectionProvider: ConnectionProvider;
+  tailscaleClientIp: string;
+  embeddedMoonlightPipelineEnabled: boolean;
+  embeddedMoonlightHostId: string;
+  embeddedMoonlightPaired: boolean;
+  micDeviceId: string;
+  micDeviceName: string;
+  micQualityProfile: MicQualityProfile;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -253,6 +271,7 @@ export interface MoonlightPreferences {
   gameopts: number;
   gamepadmouse: number;
   detectnetblocking: number;
+  showInputDebugHud: number;
 }
 
 export interface RentedInstanceSummary {
@@ -263,6 +282,7 @@ export interface RentedInstanceSummary {
   sshHost: string;
   sshPort: number;
   publicIp: string;
+  embeddedMoonlightPipelineEnabled: boolean;
 }
 
 export interface ServerPreferencesUpdate {
@@ -296,9 +316,54 @@ export interface PlatformCredentialsUpdate {
   appPassword: string;
 }
 
+export type VastBrowserBillingAction =
+  | "snapshot"
+  | "open-add-credit"
+  | "open-auto-topup";
+
+export interface VastBrowserAutomationStatus {
+  available: boolean;
+  nodeFound: boolean;
+  scriptRoot: string;
+  storageStatePath: string;
+  artifactDir: string;
+  sessionConnected: boolean;
+  sessionMetadataPath: string | null;
+  apiKeyResultPath: string | null;
+  billingResultPath: string | null;
+  savedAt: string | null;
+  lastError: string | null;
+}
+
+export interface VastBrowserAuthSessionResult extends VastBrowserAutomationStatus {
+  pageUrl: string | null;
+}
+
+export interface VastBrowserGeneratedApiKeyResult extends VastBrowserAutomationStatus {
+  apiKey: string | null;
+  apiKeyName: string;
+  discoveredSecretMasked: string | null;
+  resultPath: string;
+}
+
+export interface VastBrowserBillingSessionResult extends VastBrowserAutomationStatus {
+  action: VastBrowserBillingAction;
+  pageUrl: string | null;
+  resultPath: string;
+}
+
+export interface VastWalletSummary {
+  available: boolean;
+  balanceUsd: number | null;
+  displayAmount: string;
+  source: "vast_api" | "browser_artifact" | "unavailable";
+  lastUpdatedAt: string | null;
+}
+
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;
+  hasCompletedGuidedSetup: boolean;
   credentials: CredentialsState;
   ssh: SshState;
   location: LocationState;
@@ -310,9 +375,11 @@ export interface PersistedAppState {
   moonlight: MoonlightState;
   moonlightPreferences: MoonlightPreferences;
   sharedStorage: SharedStorageState;
+  sharedStorageProfiles?: ProfileReference[];
   provisionedServers: ProvisionedServerState[];
   postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;
+  connectionProvider: ConnectionProvider;
   lastError: string | null;
 }
 
@@ -329,6 +396,7 @@ export interface OnboardingPayload {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  tailscaleApiKey: string;
 }
 
 export interface ManualLocationInput {
@@ -402,6 +470,31 @@ export interface MoonlightDetectionResult {
   error?: string;
 }
 
+export interface MoonlightPairingSessionResponse {
+  sessionId: string;
+  hostId: string;
+  pin: string;
+  expiresInSeconds: number;
+}
+
+export interface EmbeddedMoonlightInstanceStatus {
+  instanceId: number;
+  enabled: boolean;
+  hostId: string;
+  paired: boolean;
+  hostAddress: string;
+  sessionState: string;
+  lastError: string | null;
+  runtimeConnected: boolean;
+  rendererReady: boolean;
+  videoSessionActive: boolean;
+  videoFrameCount: number;
+  rendererSubmittedFrameCount: number;
+  rendererDroppedFrameCount: number;
+  audioSampleCount: number;
+  lastRuntimeEvent: string | null;
+}
+
 export interface SunshineVerificationResult {
   reachable: boolean;
   authenticated: boolean;
@@ -435,6 +528,88 @@ export interface SharedStorageSettingsUpdate {
   remoteName: string;
   destinationPrefix: string;
   cryptPassword?: string;
+}
+
+export type StorageProvider =
+  | "amazon_s3"
+  | "backblaze_b2"
+  | "cloudflare_r2"
+  | "wasabi"
+  | "digital_ocean_spaces"
+  | "generic_s3"
+  | "google_drive"
+  | "google_cloud_storage"
+  | "microsoft_one_drive"
+  | "dropbox"
+  | "box"
+  | "azure_blob"
+  | "sftp"
+  | "webdav";
+
+export interface SharedStorageProfile {
+  id: string;
+  displayName: string;
+  provider: StorageProvider;
+  providerLabel: string;
+  bucket: string | null;
+  prefix: string | null;
+  credentialVaultReference: string;
+  repositoryId: string;
+  status: string;
+  lastVerifiedAt: number | null;
+  protectedBundlesCount: number;
+  totalStoredBytes: number;
+}
+
+export interface SharedStorageTestResult {
+  authenticated: boolean;
+  canList: boolean;
+  canWrite: boolean;
+  canRead: boolean;
+  canDeleteTestObject: boolean;
+  repositoryAccessible: boolean;
+  latencyMs: number | null;
+  error: string | null;
+}
+
+export interface ProviderSelectOption {
+  value: string;
+  label: string;
+}
+
+export type ProviderFieldType =
+  | "text"
+  | "password"
+  | "number"
+  | "toggle"
+  | { options: ProviderSelectOption[] };
+
+export interface ProviderField {
+  key: string;
+  label: string;
+  fieldType: ProviderFieldType;
+  required: boolean;
+  placeholder: string | null;
+  helpText: string | null;
+}
+
+export interface ProviderDefinition {
+  provider: StorageProvider;
+  label: string;
+  category: string;
+  isOauth: boolean;
+  description: string;
+  fields: ProviderField[];
+}
+
+export interface ProfileReference {
+  id: string;
+  displayName: string;
+  providerLabel: string;
+  provider?: StorageProvider | null;
+  bucket?: string | null;
+  prefix?: string | null;
+  active?: boolean;
 }
 
 export interface BackupStatusResponse {
@@ -574,6 +749,7 @@ export interface InstanceMicConfig {
   channels: number;
   vmWireguardIp: string;
   rtpPort: number;
+  deviceId: string;
   deviceName: string;
   qualityProfile: MicQualityProfile;
   sessionId: string | null;
@@ -629,5 +805,14 @@ export interface MicSessionResponse {
 }
 
 export interface MicSettingsUpdate {
+  deviceId?: string;
   qualityProfile?: MicQualityProfile;
+}
+
+export interface MicrophoneDevice {
+  id: string;
+  name: string;
+  isDefault: boolean;
+  sampleRates: number[];
+  channels: number;
 }

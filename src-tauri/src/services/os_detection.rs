@@ -199,6 +199,7 @@ impl OsDetection {
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install Xcode Command Line Tools or OpenSSH client tools.".to_string()
                 }
+                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` and ensure it is available in PATH."),
             };
         }
@@ -214,6 +215,7 @@ impl OsDetection {
                     "Install OpenSSH client tools (example: `sudo apt-get install -y openssh-client`)."
                         .to_string()
                 }
+                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` with your package manager and ensure it is in PATH."),
             };
         }

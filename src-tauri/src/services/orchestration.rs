@@ -13,8 +13,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            EdidMode, MoonlightPreferences, OrchestrationState, ProvisionedServerState,
-            ProvisionedServerSteps,
+            ConnectionProvider, EdidMode, MoonlightPreferences, OrchestrationState,
+            ProvisionedServerState, ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
     },
@@ -24,6 +24,7 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
+    mic_receiver::MicReceiverProvisioner,
     moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
@@ -366,6 +367,7 @@ impl OrchestrationService {
         context
             .update_state(|state| {
                 state.orchestration_state = OrchestrationState::Ready;
+                state.has_completed_guided_setup = true;
                 state.last_error = None;
             })
             .await?;
@@ -433,6 +435,7 @@ impl OrchestrationService {
         context
             .update_state(|state| {
                 state.orchestration_state = OrchestrationState::Ready;
+                state.has_completed_guided_setup = true;
                 state.last_error = None;
             })
             .await?;
@@ -732,12 +735,26 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         initial_state.server_preferences.storage_gb
     );
 
+    let (env_user, env_pass) = {
+        let state = context.state.read().await;
+        (
+            state.credentials.app_username.clone(),
+            state.credentials.app_password.clone(),
+        )
+    };
+
+    let env_vars = serde_json::json!({
+        "-e USER": env_user,
+        "-e PASS": env_pass
+    });
+
     let mut instance = match instance_manager
         .create_instance(
             &vast,
             offer.id,
             &initial_state.server_preferences.template_hash,
             initial_state.server_preferences.storage_gb,
+            Some(env_vars),
         )
         .await
     {
@@ -1297,6 +1314,30 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
+    // Reload persisted state.json before choosing the connection provider.
+    // The provider selection and associated credentials are persisted config,
+    // so orchestration should branch from the disk-backed snapshot rather than
+    // relying only on the current in-memory lock state.
+    let persisted_state = context.reload_state_from_disk().await?;
+    if persisted_state.connection_provider == ConnectionProvider::Tailscale {
+        warn!(
+            instance_id = instance.id,
+            "Tailscale selection is deprecated; continuing with the managed GotaTun/WireGuard provisioning path"
+        );
+        context
+            .update_state(|state| {
+                state.connection_provider = ConnectionProvider::Wireguard;
+                if let Some(record) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance.id)
+                {
+                    record.connection_provider = ConnectionProvider::Wireguard;
+                }
+            })
+            .await?;
+    }
+
     match vast.get_instance(instance.id).await {
         Ok(refreshed_instance) => {
             instance.public_ip = refreshed_instance.public_ip;
@@ -1362,6 +1403,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     instance.id,
                     &[
                         ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MicReceiverInstalled,
                         ProvisionStepMarker::MoonlightConfigured,
                         ProvisionStepMarker::AwaitingPairPin,
                         ProvisionStepMarker::PairingCompleted,
@@ -1431,6 +1473,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 instance.id,
                 &[
                     ProvisionStepMarker::WireguardConfigured,
+                    ProvisionStepMarker::MicReceiverInstalled,
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
@@ -1556,6 +1599,43 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         .await?;
     ensure_not_cancelled(&context)?;
 
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        Some(offer.id),
+    )
+    .await?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
+    ensure_not_cancelled(&context)?;
+
     if !wireguard_step_completed {
         emit_transition(
             &app,
@@ -1589,6 +1669,8 @@ async fn run_existing_instance_orchestration(
     instance_id: u64,
 ) -> AppResult<()> {
     ensure_not_cancelled(&context)?;
+
+    let _ = context.reload_state_from_disk().await?;
 
     context
         .update_state(|state| {
@@ -2145,6 +2227,30 @@ async fn run_existing_instance_orchestration(
     }
     ensure_not_cancelled(&context)?;
 
+    let existing_connection_provider = {
+        let snapshot = context.state.read().await;
+        snapshot.connection_provider
+    };
+
+    if existing_connection_provider == ConnectionProvider::Tailscale {
+        warn!(
+            instance_id = instance.id,
+            "Existing instance was marked as Tailscale-backed; continuing with the managed GotaTun/WireGuard path"
+        );
+        context
+            .update_state(|state| {
+                state.connection_provider = ConnectionProvider::Wireguard;
+                if let Some(record) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance.id)
+                {
+                    record.connection_provider = ConnectionProvider::Wireguard;
+                }
+            })
+            .await?;
+    }
+
     match vast.get_instance(instance.id).await {
         Ok(refreshed_instance) => {
             instance.public_ip = refreshed_instance.public_ip;
@@ -2210,6 +2316,7 @@ async fn run_existing_instance_orchestration(
                     instance.id,
                     &[
                         ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MicReceiverInstalled,
                         ProvisionStepMarker::MoonlightConfigured,
                         ProvisionStepMarker::AwaitingPairPin,
                         ProvisionStepMarker::PairingCompleted,
@@ -2279,6 +2386,7 @@ async fn run_existing_instance_orchestration(
                 instance.id,
                 &[
                     ProvisionStepMarker::WireguardConfigured,
+                    ProvisionStepMarker::MicReceiverInstalled,
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
@@ -2402,6 +2510,43 @@ async fn run_existing_instance_orchestration(
             state.sunshine.configured = true;
         })
         .await?;
+    ensure_not_cancelled(&context)?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        offer_id,
+    )
+    .await?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -3288,6 +3433,7 @@ pub(crate) enum ProvisionStepMarker {
     SunshineConfigured,
     LowLatencyAudioConfigured,
     WireguardConfigured,
+    MicReceiverInstalled,
     MoonlightConfigured,
     AwaitingPairPin,
     PairingCompleted,
@@ -3305,6 +3451,7 @@ fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> 
         ProvisionStepMarker::PostNvidiaRebootCompleted => steps.post_nvidia_reboot_completed,
         ProvisionStepMarker::SunshineConfigured => steps.sunshine_configured,
         ProvisionStepMarker::LowLatencyAudioConfigured => steps.low_latency_audio_configured,
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin,
@@ -3328,6 +3475,7 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::LowLatencyAudioConfigured => {
             steps.low_latency_audio_configured = value
         }
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed = value,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured = value,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured = value,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin = value,
@@ -3358,10 +3506,16 @@ fn determine_resume_step(steps: &ProvisionedServerSteps) -> (OrchestrationState,
             OrchestrationState::ConfiguringMoonlight,
             "Resuming: Moonlight configured, need pairing".to_string(),
         )
+    } else if steps.mic_receiver_installed {
+        (
+            OrchestrationState::ConfiguringWireGuard,
+            "Resuming: Remote microphone receiver installed, continuing post-WireGuard setup"
+                .to_string(),
+        )
     } else if steps.wireguard_configured {
         (
             OrchestrationState::ConfiguringWireGuard,
-            "Resuming: Starting from WireGuard config".to_string(),
+            "Resuming: WireGuard configured, installing remote microphone receiver".to_string(),
         )
     } else if steps.low_latency_audio_configured {
         (
@@ -3429,12 +3583,18 @@ async fn hydrate_state_from_server_record(
     let wireguard_server_public_key = record.wireguard_server_public_key.clone();
     let wireguard_client_public_key = record.wireguard_client_public_key.clone();
     let wireguard_config_path = record.wireguard_config_path.clone();
+    let connection_provider = record.connection_provider;
+    let tailscale_client_ip = record.tailscale_client_ip.clone();
     let sunshine_configured = record.steps.sunshine_configured;
     let moonlight_configured = record.steps.moonlight_configured || record.steps.pairing_completed;
-    let moonlight_host_address = if record.moonlight_host_address.trim().is_empty() {
-        wireguard_server_ip.clone()
-    } else {
+    let moonlight_host_address = if !record.moonlight_host_address.trim().is_empty() {
         record.moonlight_host_address.clone()
+    } else if connection_provider == ConnectionProvider::Tailscale
+        && !tailscale_client_ip.trim().is_empty()
+    {
+        tailscale_client_ip.clone()
+    } else {
+        wireguard_server_ip.clone()
     };
 
     context
@@ -3461,6 +3621,7 @@ async fn hydrate_state_from_server_record(
             state.wireguard.server_public_key = wireguard_server_public_key.clone();
             state.wireguard.client_public_key = wireguard_client_public_key.clone();
             state.wireguard.config_path = wireguard_config_path.clone();
+            state.connection_provider = connection_provider;
             state.sunshine.configured = sunshine_configured;
             state.moonlight.configured = moonlight_configured;
             state.moonlight.host_address = moonlight_host_address.clone();
@@ -3840,4 +4001,54 @@ async fn emit_transition(
     };
 
     context.emit_progress(app, event).await;
+}
+
+async fn initialize_post_tailscale_flow(
+    app: &AppHandle,
+    context: &AppContext,
+    instance_id: u64,
+    tailscale_ip: &str,
+) -> AppResult<()> {
+    use crate::models::app_state::{
+        PostWireGuardSetupState, SetupStage, WireGuardSetupMode, WireGuardSetupStatus,
+    };
+
+    let app_username = { context.state.read().await.credentials.app_username.clone() };
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup = PostWireGuardSetupState {
+                stage: SetupStage::WireguardConnected,
+                wireguard_setup_mode: WireGuardSetupMode::WireguardAppLinux,
+                wireguard_setup_status: WireGuardSetupStatus::Connected,
+                current_instance_id: Some(instance_id),
+                wireguard_export_path: String::new(),
+                wireguard_config: String::new(),
+                wireguard_verified_host: tailscale_ip.to_string(),
+                wireguard_reachable_ports: vec![47984, 47989, 47990, 48010],
+                sunshine_username: app_username.clone(),
+                moonlight_host: tailscale_ip.to_string(),
+                moonlight_installed: false,
+                paired: false,
+                setup_complete: false,
+                last_error: None,
+            };
+            state.orchestration_state = OrchestrationState::TailscaleConnected;
+            state.moonlight.host_address = tailscale_ip.to_string();
+            state.moonlight.configured = true;
+            state.last_error = None;
+        })
+        .await?;
+
+    emit_transition(
+        app,
+        context,
+        OrchestrationState::TailscaleConnected,
+        "Tailscale connected. Click Continue to proceed to Moonlight/Sunshine setup.",
+        Some(format!("Remote IP: {}", tailscale_ip)),
+        false,
+    )
+    .await;
+
+    Ok(())
 }

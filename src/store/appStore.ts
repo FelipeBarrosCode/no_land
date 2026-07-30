@@ -8,10 +8,10 @@ import {
   selectOffer,
   setManualLocation,
   setupWireguardClient,
+  reconnectLocalWireguardClientQuick,
   setupWireguardAppHandoff,
   startPlayExistingInstance,
   startPlayFlow,
-  submitMoonlightPinToSunshine,
   submitPairingPin,
   skipPairingAndContinue,
   subscribeProvisioningEvents,
@@ -29,6 +29,8 @@ import {
   updateServerPreferences,
   updateSshCredentials,
   updateVastApiKey,
+  updateTailscaleApiKey,
+  updateConnectionProvider,
   getSharedStorageSettings,
   saveSharedStorageSettings,
   testSharedStorageConfig,
@@ -60,6 +62,23 @@ import {
   syncInstanceFromSharedStorageSelected,
   listInstanceExportableStorageObjects,
   saveInstanceToSharedStorageSelected,
+  setInstanceMoonlightPipelineEnabled,
+  getInstanceMoonlightPipelineStatus,
+  prepareInstanceMoonlightPairing,
+  completeInstanceMoonlightPairing,
+  generateVastApiKeyFromBrowserSession as generateVastApiKeyFromBrowserSessionCommand,
+  getVastBrowserAutomationStatus as getVastBrowserAutomationStatusCommand,
+  openVastBillingBrowserSession as openVastBillingBrowserSessionCommand,
+  startVastBrowserAuthSession as startVastBrowserAuthSessionCommand,
+  getVastWalletSummary as getVastWalletSummaryCommand,
+  listStorageProviders,
+  saveStaticProviderCredentials,
+  testSharedStorageConnection,
+  getSharedStorageProfiles,
+  setActiveSharedStorageProfile,
+  disconnectSharedStorageProfile,
+  beginOauthAuthorization,
+  completeOauthAuthorization,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -90,11 +109,23 @@ import type {
   MicSettingsUpdate,
   MicQualityProfile,
   MoonlightDetectionResult,
+  MoonlightPairingSessionResponse,
+  EmbeddedMoonlightInstanceStatus,
   OrchestrationState,
   PostWireGuardSetupState,
   ReachabilityResult,
   SetupStage,
   SunshineVerificationResult,
+  VastBrowserAuthSessionResult,
+  VastBrowserAutomationStatus,
+  VastBrowserBillingAction,
+  VastBrowserBillingSessionResult,
+  VastBrowserGeneratedApiKeyResult,
+  VastWalletSummary,
+  ProviderDefinition,
+  ProfileReference,
+  SharedStorageProfile,
+  SharedStorageTestResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -113,6 +144,8 @@ interface AppStore {
   serverPickerOpen: boolean;
   error: string | null;
   _eventsBound: boolean;
+  vastBrowserAutomationStatus: VastBrowserAutomationStatus | null;
+  vastWalletSummary: VastWalletSummary | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
   setServerPickerOpen: (open: boolean) => void;
@@ -123,9 +156,22 @@ interface AppStore {
   previousOffersPage: () => Promise<void>;
   chooseOffer: (offerId: number, storageGb: number) => Promise<void>;
   startPlay: () => Promise<void>;
-  startPlayExisting: (instanceId: number) => Promise<void>;
+  startPlayExisting: (instanceId: number) => Promise<string | null>;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
+  refreshVastBrowserAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
+  connectVastBrowserSession: () => Promise<VastBrowserAuthSessionResult | null>;
+  generateVastApiKeyViaBrowserSession: (
+    apiKeyName?: string,
+  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
+  openVastBillingBrowserSession: (
+    action?: VastBrowserBillingAction,
+  ) => Promise<VastBrowserBillingSessionResult | null>;
+  refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
+  saveTailscaleApiKey: (apiKey: string) => Promise<void>;
+  saveConnectionProvider: (payload: {
+    connectionProvider: "wireguard" | "tailscale";
+  }) => Promise<void>;
   savePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
@@ -157,6 +203,10 @@ interface AppStore {
   startSleepPrevention: () => Promise<string | null>;
   stopSleepPrevention: () => Promise<string | null>;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
+  storageProviders: ProviderDefinition[];
+  sharedStorageProfiles: ProfileReference[];
+  sharedStorageTestResult: SharedStorageTestResult | null;
+  oauthSessionId: string | null;
   backupStatus: BackupStatusResponse | null;
   instanceBackupStatus: SharedStorageInstanceStatus | null;
   loadSharedStorageSettings: () => Promise<void>;
@@ -164,6 +214,27 @@ interface AppStore {
     payload: SharedStorageSettingsUpdate,
   ) => Promise<void>;
   testSharedStorageConfig: () => Promise<string | null>;
+  loadStorageProviders: () => Promise<void>;
+  connectStorageProvider: (
+    provider: string,
+    credentials: Record<string, string>,
+    bucket: string | null,
+    prefix: string | null,
+    displayName: string,
+  ) => Promise<void>;
+  testStorageConnection: (profileId: string) => Promise<void>;
+  loadSharedStorageProfiles: () => Promise<void>;
+  setActiveStorageProfile: (profileId: string) => Promise<void>;
+  disconnectStorageProfile: (profileId: string) => Promise<void>;
+  syncActiveInstanceToSharedStorage: () => Promise<void>;
+  beginOauthFlow: (
+    provider: string,
+    displayName: string,
+    clientId?: string,
+    clientSecret?: string | null,
+    providerFields?: Record<string, string>,
+  ) => Promise<string | null>;
+  completeOauthFlow: (sessionId: string) => Promise<void>;
   triggerBackup: () => Promise<void>;
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
   syncInstanceStorage: (
@@ -185,6 +256,8 @@ interface AppStore {
   setupBackupSchedule: () => Promise<string | null>;
   removeBackupSchedule: () => Promise<string | null>;
   sunshineSettings: SunshineSettingsResponse | null;
+  embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null;
+  activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   instanceActionRunning: boolean;
   loadSunshineSettings: (
     instanceId: number,
@@ -197,6 +270,23 @@ interface AppStore {
     sunshineUsername: string,
     sunshinePassword: string,
   ) => Promise<void>;
+  setEmbeddedMoonlightPipelineEnabled: (
+    instanceId: number,
+    enabled: boolean,
+  ) => Promise<void>;
+  loadEmbeddedMoonlightStatus: (
+    instanceId: number,
+  ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
+  prepareEmbeddedMoonlightPairing: (
+    instanceId: number,
+  ) => Promise<MoonlightPairingSessionResponse | null>;
+  completeEmbeddedMoonlightPairing: (
+    instanceId: number,
+    sessionId: string,
+  ) => Promise<boolean>;
+  rerunEmbeddedMoonlightPairing: (
+    instanceId: number,
+  ) => Promise<MoonlightPairingSessionResponse | null>;
   resetSunshineSettings: (
     instanceId: number,
     sunshineUsername: string,
@@ -266,6 +356,10 @@ interface AsyncActionOptions {
 }
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
+  "SelectingConnectionProvider",
+  "ConfiguringTailscale",
+  "TailscaleConfigGenerated",
+  "TailscaleConnected",
   "WireGuardConfigGenerated",
   "WireGuardAppHandoffStarted",
   "WireGuardWaitingForImport",
@@ -284,6 +378,9 @@ const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
 const POST_WIREGUARD_EVENT_STAGE_MAP: Partial<
   Record<OrchestrationState, SetupStage>
 > = {
+  ConfiguringTailscale: "wireguard_config_generated",
+  TailscaleConfigGenerated: "wireguard_config_generated",
+  TailscaleConnected: "wireguard_connected",
   WireGuardConfigGenerated: "wireguard_config_generated",
   WireGuardAppHandoffStarted: "wireguard_app_handoff_started",
   WireGuardWaitingForImport: "wireguard_waiting_for_import",
@@ -352,9 +449,12 @@ async function refreshProvisioningState(
 
 async function applyProvisioningEventState(
   event: ProvisioningEvent,
-  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+  set: (
+    partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>),
+  ) => void,
 ): Promise<void> {
   let latestPostWireguardSetup: PostWireGuardSetupState | null = null;
+  let latestAppState: PersistedAppState | null = null;
   if (PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
     try {
       latestPostWireguardSetup = await getSetupStatus();
@@ -363,18 +463,33 @@ async function applyProvisioningEventState(
     }
   }
 
+  if (event.state === "Ready") {
+    try {
+      latestAppState = await getAppState();
+    } catch {
+      latestAppState = null;
+    }
+  }
+
   set((state) => {
     const nextLogs = [event, ...state.logs].slice(0, 500);
-    const nextBaseState = state.appState
+    const nextBaseState = latestAppState
       ? {
-          ...state.appState,
-          orchestrationState: event.state,
-          lastError: event.isError ? event.message : state.appState.lastError,
+          ...latestAppState,
           ...(latestPostWireguardSetup
             ? { postWireguardSetup: latestPostWireguardSetup }
             : {}),
         }
-      : state.appState;
+      : state.appState
+        ? {
+            ...state.appState,
+            orchestrationState: event.state,
+            lastError: event.isError ? event.message : state.appState.lastError,
+            ...(latestPostWireguardSetup
+              ? { postWireguardSetup: latestPostWireguardSetup }
+              : {}),
+          }
+        : state.appState;
     const nextState = nextBaseState
       ? applyPostWireguardEventState(nextBaseState, event.state)
       : nextBaseState;
@@ -421,10 +536,14 @@ const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   ConfiguringSunshine: "Configuring Sunshine",
   ConfiguringWireGuard: "Configuring WireGuard",
   ConfiguringNvidiaHeadless: "Configuring NVIDIA headless mode",
-  WireGuardConfigGenerated: "WireGuard config generated",
-  WireGuardAppHandoffStarted: "Opening WireGuard app",
-  WireGuardWaitingForImport: "Waiting for WireGuard import",
-  WireGuardWaitingForActivation: "Waiting for WireGuard activation",
+  SelectingConnectionProvider: "Selecting connection provider",
+  ConfiguringTailscale: "Configuring Tailscale",
+  TailscaleConfigGenerated: "Tailscale config generated",
+  TailscaleConnected: "Tailscale connected",
+  WireGuardConfigGenerated: "Managed tunnel config generated",
+  WireGuardAppHandoffStarted: "Starting managed tunnel",
+  WireGuardWaitingForImport: "Preparing managed tunnel",
+  WireGuardWaitingForActivation: "Waiting for managed tunnel activation",
   WireGuardVerifying: "Verifying secure tunnel",
   WireGuardConnected: "Secure tunnel connected",
   MoonlightSunshineReadyToSetup: "Ready to set up Moonlight and Sunshine",
@@ -601,10 +720,18 @@ export const useAppStore = create<AppStore>((set, get) => {
     serverPickerOpen: false,
     error: null,
     _eventsBound: false,
+    vastBrowserAutomationStatus: null,
+    vastWalletSummary: null,
     sharedStorageSettings: null,
+    storageProviders: [],
+    sharedStorageProfiles: [],
+    sharedStorageTestResult: null,
+    oauthSessionId: null,
     backupStatus: null,
     instanceBackupStatus: null,
     sunshineSettings: null,
+    embeddedMoonlightStatus: null,
+    activeMoonlightPairing: null,
     instanceActionRunning: false,
     bundleIndex: null,
     restoreJob: null,
@@ -616,17 +743,25 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const [appState, logs, postWireguardSetup] = await Promise.all([
-          getAppState(),
-          getProvisioningLogs(),
-          getSetupStatus(),
-        ]);
+        const [appState, logs, postWireguardSetup, vastBrowserAutomationStatus] =
+          await Promise.all([
+            getAppState(),
+            getProvisioningLogs(),
+            getSetupStatus(),
+            getVastBrowserAutomationStatusCommand().catch(() => null),
+          ]);
         let rentedInstances: RentedInstanceSummary[] = [];
+        let vastWalletSummary: VastWalletSummary | null = null;
         if (
           appState.onboardingCompleted &&
           appState.credentials.vastApiKey.trim().length > 0
         ) {
-          rentedInstances = await getRentedInstances();
+          const [instances, wallet] = await Promise.all([
+            getRentedInstances(),
+            getVastWalletSummaryCommand().catch(() => null),
+          ]);
+          rentedInstances = instances;
+          vastWalletSummary = wallet;
         }
 
         set({
@@ -636,6 +771,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           },
           logs,
           rentedInstances,
+          vastBrowserAutomationStatus,
+          vastWalletSummary,
           loading: false,
         });
       } catch (error) {
@@ -761,15 +898,22 @@ export const useAppStore = create<AppStore>((set, get) => {
     startPlayExisting: async (instanceId) => {
       beginProvisioningBlock("Reconnecting to your existing gaming instance.");
       try {
-        await startPlayExistingInstance(instanceId);
+        const mode = await startPlayExistingInstance(instanceId);
         const appState = await getAppState();
-        set({ appState });
+        const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId).catch(() => null);
+        set({ appState, embeddedMoonlightStatus });
+        if (mode === "embedded") {
+          endProvisioningBlock();
+          return mode;
+        }
         if (PROVISIONING_INTERACTIVE_STATES.has(appState.orchestrationState)) {
           endProvisioningBlock();
         }
+        return mode;
       } catch (error) {
         endProvisioningBlock();
         set({ error: mapError(error) });
+        return null;
       }
     },
 
@@ -787,8 +931,139 @@ export const useAppStore = create<AppStore>((set, get) => {
       set({ busy: true, error: null });
       try {
         const appState = await updateVastApiKey(apiKey);
-        const rentedInstances = await getRentedInstances();
-        set({ appState, rentedInstances, busy: false });
+        const [rentedInstances, vastWalletSummary] = await Promise.all([
+          getRentedInstances(),
+          getVastWalletSummaryCommand().catch(() => null),
+        ]);
+        set({ appState, rentedInstances, vastWalletSummary, busy: false });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    refreshVastBrowserAutomationStatus: async () => {
+      return runBusyTask(
+        {
+          key: "vast.browser.status",
+          label: "Checking Vast browser automation",
+          detail: "Refreshing reusable Vast.ai browser-session status.",
+          blocking: false,
+        },
+        async () => {
+          const status = await getVastBrowserAutomationStatusCommand();
+          set({ vastBrowserAutomationStatus: status });
+          return status;
+        },
+        null,
+      );
+    },
+
+    connectVastBrowserSession: async () => {
+      return runBusyTask(
+        {
+          key: "vast.browser.connect",
+          label: "Connecting Vast.ai account",
+          detail:
+            "Launching a managed Chrome session. Complete Vast.ai login, then close the browser window when finished.",
+          blocking: true,
+        },
+        async () => {
+          const result = await startVastBrowserAuthSessionCommand();
+          set({ vastBrowserAutomationStatus: result });
+          return result;
+        },
+        null,
+      );
+    },
+
+    generateVastApiKeyViaBrowserSession: async (apiKeyName) => {
+      return runBusyTask(
+        {
+          key: "vast.browser.apiKey",
+          label: "Generating Vast.ai API key",
+          detail:
+            "Reusing the saved Vast.ai browser session to create an API key.",
+          blocking: true,
+        },
+        async () => {
+          const result = await generateVastApiKeyFromBrowserSessionCommand(
+            apiKeyName ? { apiKeyName } : undefined,
+          );
+          const appState = await getAppState();
+          const [rentedInstances, vastWalletSummary] = appState.credentials.vastApiKey.trim()
+            ? await Promise.all([
+                getRentedInstances().catch(() => []),
+                getVastWalletSummaryCommand().catch(() => null),
+              ])
+            : [[], null];
+          set({
+            appState,
+            rentedInstances,
+            vastBrowserAutomationStatus: result,
+            vastWalletSummary,
+          });
+          return result;
+        },
+        null,
+      );
+    },
+
+    openVastBillingBrowserSession: async (action) => {
+      return runBusyTask(
+        {
+          key: "vast.browser.billing",
+          label: "Opening Vast.ai billing",
+          detail:
+            "Launching a saved-session Vast.ai billing browser. Close that browser window when you are done.",
+          blocking: true,
+        },
+        async () => {
+          const result = await openVastBillingBrowserSessionCommand(
+            action ? { action } : undefined,
+          );
+          const appState = get().appState;
+          const vastWalletSummary = appState?.credentials.vastApiKey.trim()
+            ? await getVastWalletSummaryCommand().catch(() => null)
+            : null;
+          set({ vastBrowserAutomationStatus: result, vastWalletSummary });
+          return result;
+        },
+        null,
+      );
+    },
+
+    refreshVastWalletSummary: async () => {
+      return runBusyTask(
+        {
+          key: "vast.wallet.summary",
+          label: "Refreshing Vast.ai wallet",
+          detail: "Fetching your current Vast.ai account balance.",
+          blocking: false,
+        },
+        async () => {
+          const summary = await getVastWalletSummaryCommand();
+          set({ vastWalletSummary: summary });
+          return summary;
+        },
+        null,
+      );
+    },
+
+    saveTailscaleApiKey: async (apiKey) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateTailscaleApiKey(apiKey);
+        set({ appState, busy: false });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    saveConnectionProvider: async (payload) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateConnectionProvider(payload);
+        set({ appState, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
       }
@@ -926,12 +1201,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runBusyTask(
         {
           key: "wireguard.local.reconnect",
-          label: "Opening WireGuard",
-          detail: "Open the WireGuard app and manage the tunnel manually.",
+          label: "Reconnecting managed tunnel",
+          detail: "Restarting the local GotaTun-backed tunnel.",
         },
         async () => {
-          await openWireguardApp();
-          return "Opened WireGuard app.";
+          return await reconnectLocalWireguardClientQuick();
         },
         null,
       );
@@ -941,8 +1215,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "wireguard.appHandoff",
-          label: "Opening WireGuard app",
-          detail: "Preparing your generated tunnel for the WireGuard app.",
+          label: "Starting managed tunnel",
+          detail: "Applying the generated config through the local GotaTun-backed tunnel flow.",
           blocking: true,
         },
         async () => {
@@ -977,8 +1251,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "wireguard.open",
-          label: "Opening WireGuard",
-          detail: "Generating client config and launching the WireGuard app.",
+          label: "Exporting managed tunnel config",
+          detail: "Preparing the client config file for manual inspection or fallback use.",
         },
         async () => {
           await downloadWireguardConfig();
@@ -1061,26 +1335,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    submitMoonlightPin: async (pin) => {
-      return runBusyTask(
-        {
-          key: "moonlightSunshine.pin",
-          label: "Submitting PIN to Sunshine",
-          detail: "Pairing Moonlight with Sunshine over the secure tunnel.",
-          blocking: true,
-        },
-        async () => {
-          try {
-            const setup = await submitMoonlightPinToSunshine(pin);
-            await refreshProvisioningState(set);
-            return setup;
-          } catch (error) {
-            await refreshProvisioningState(set);
-            throw error;
-          }
-        },
-        null,
-      );
+    submitMoonlightPin: async (_pin) => {
+      throw new Error("Legacy Sunshine PIN submission is no longer used by provisioning handoff.");
     },
 
     retrySetupStage: async (stage) => {
@@ -1171,6 +1427,168 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => await testSharedStorageConfig(),
         null,
       );
+    },
+
+    loadStorageProviders: async () => {
+      try {
+        const providers = await listStorageProviders();
+        set({ storageProviders: providers });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    connectStorageProvider: async (
+      provider,
+      credentials,
+      bucket,
+      prefix,
+      displayName,
+    ) => {
+      await runBusyTask(
+        {
+          key: "storage.connect",
+          label: "Connecting storage",
+          blocking: true,
+        },
+        async () => {
+          const credentialsJson = JSON.stringify(credentials);
+          const profile = await saveStaticProviderCredentials(
+            provider,
+            credentialsJson,
+            bucket,
+            prefix,
+            displayName,
+          );
+          await get().loadSharedStorageProfiles();
+          return profile;
+        },
+        null as unknown as SharedStorageProfile,
+      );
+    },
+
+    testStorageConnection: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.test",
+          label: "Testing connection",
+        },
+        async () => {
+          const result = await testSharedStorageConnection(profileId);
+          set({ sharedStorageTestResult: result });
+          return result;
+        },
+        null as unknown as SharedStorageTestResult,
+      );
+    },
+
+    loadSharedStorageProfiles: async () => {
+      try {
+        const profiles = await getSharedStorageProfiles();
+        set({ sharedStorageProfiles: profiles });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    setActiveStorageProfile: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.profile.activate",
+          label: "Switching storage profile",
+        },
+        async () => {
+          await setActiveSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
+    },
+
+    disconnectStorageProfile: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.disconnect",
+          label: "Disconnecting storage",
+        },
+        async () => {
+          await disconnectSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
+    },
+
+    syncActiveInstanceToSharedStorage: async () => {
+      await runBusyTask(
+        {
+          key: "storage.sync.active-instance",
+          label: "Whole-instance export removed",
+          detail:
+            "Use the shared storage export flow to choose specific files or folders instead of syncing the whole filesystem.",
+          blocking: true,
+        },
+        async () => {
+          const instanceId = get().appState?.instance.instanceId;
+          if (!instanceId) {
+            throw new Error(
+              "No active instance selected. Start or select a server first.",
+            );
+          }
+          throw new Error(
+            "Whole-instance shared-storage export has been removed. Use Export Selected Files from the dashboard/shared storage UI.",
+          );
+        },
+        null,
+      );
+    },
+
+    beginOauthFlow: async (
+      provider,
+      displayName,
+      clientId,
+      clientSecret,
+      providerFields,
+    ) => {
+      try {
+        const response = await beginOauthAuthorization(
+          provider,
+          displayName,
+          clientId || "",
+          clientSecret || null,
+          JSON.stringify(providerFields || {}),
+        );
+        set({ oauthSessionId: response.sessionId });
+        if ("__TAURI_INTERNALS__" in window) {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(response.authorizationUrl);
+        } else {
+          window.open(response.authorizationUrl, "_blank", "noopener,noreferrer");
+        }
+        return response.sessionId;
+      } catch (error) {
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
+    completeOauthFlow: async (sessionId) => {
+      await runBusyTask(
+        {
+          key: "storage.oauth.complete",
+          label: "Completing authorization",
+        },
+        async () => {
+          const result = await completeOauthAuthorization(sessionId);
+          set({ oauthSessionId: null });
+          await get().loadSharedStorageProfiles();
+          return result;
+        },
+        null as never,
+      );
+      if (get().error) {
+        set({ oauthSessionId: null });
+      }
     },
 
     triggerBackup: async () => {
@@ -1413,12 +1831,140 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
+    setEmbeddedMoonlightPipelineEnabled: async (instanceId, enabled) => {
+      await runInstanceTask(
+        {
+          key: "instance.moonlight.pipeline",
+          label: enabled ? "Enabling embedded Moonlight" : "Disabling embedded Moonlight",
+          detail: enabled
+            ? "Turning on the built-in Moonlight pipeline for this instance."
+            : "Turning off the built-in Moonlight pipeline for this instance.",
+        },
+        async () => {
+          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, enabled);
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = enabled
+            ? await getInstanceMoonlightPipelineStatus(instanceId)
+            : null;
+          set({ appState, rentedInstances, embeddedMoonlightStatus });
+        },
+        undefined,
+      );
+    },
+
+    loadEmbeddedMoonlightStatus: async (instanceId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.status",
+          label: "Loading embedded Moonlight status",
+          detail: "Checking whether this instance is ready for the built-in stream pipeline.",
+        },
+        async () => {
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({ embeddedMoonlightStatus });
+          return embeddedMoonlightStatus;
+        },
+        null,
+      );
+    },
+
+    prepareEmbeddedMoonlightPairing: async (instanceId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.begin",
+          label: "Starting embedded Moonlight pairing",
+          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          const session = await prepareInstanceMoonlightPairing(instanceId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: session,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return session;
+        },
+        null,
+      );
+    },
+
+    completeEmbeddedMoonlightPairing: async (instanceId, sessionId) => {
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.complete",
+          label: "Completing embedded Moonlight pairing",
+          detail: "Finalizing Sunshine pairing for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          await completeInstanceMoonlightPairing(instanceId, sessionId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: null,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return true;
+        },
+        false,
+      );
+    },
+
+    rerunEmbeddedMoonlightPairing: async (instanceId) => {
+      await runInstanceTask(
+        {
+          key: "instance.moonlight.pipeline",
+          label: "Enabling embedded Moonlight",
+          detail: "Turning on the built-in Moonlight pipeline for this instance.",
+        },
+        async () => {
+          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, true);
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({ appState, rentedInstances, embeddedMoonlightStatus });
+        },
+        undefined,
+      );
+
+      return await runInstanceTask(
+        {
+          key: "instance.moonlight.pair.begin",
+          label: "Starting embedded Moonlight pairing",
+          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
+          blocking: true,
+        },
+        async () => {
+          const session = await prepareInstanceMoonlightPairing(instanceId);
+          const appState = await getAppState();
+          const rentedInstances = await getRentedInstances();
+          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
+          set({
+            activeMoonlightPairing: session,
+            appState,
+            rentedInstances,
+            embeddedMoonlightStatus,
+          });
+          return session;
+        },
+        null,
+      );
+    },
+
     reconnectWireguard: async (instanceId) => {
       return await runInstanceTask(
         {
           key: "instance.wireguard.reconnect",
-          label: "Opening WireGuard",
-          detail: "Open the WireGuard app and manage the tunnel manually.",
+          label: "Reconnecting managed tunnel",
+          detail:
+            "Refreshing the remote tunnel state and local managed tunnel flow.",
           blocking: true,
         },
         async () => await reconnectInstanceWireguard(instanceId),
@@ -1450,6 +1996,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           await pauseInstance(instanceId);
+          set((state) => ({
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );
@@ -1467,7 +2020,14 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => {
           await destroyInstance(instanceId);
           const appState = await getAppState();
-          set({ appState });
+          set((state) => ({
+            appState,
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );

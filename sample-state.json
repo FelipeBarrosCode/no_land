@@ -4,7 +4,8 @@
   "credentials": {
     "appUsername": "",
     "appPassword": "",
-    "vastApiKey": ""
+    "vastApiKey": "",
+    "tailscaleApiKey": ""
   },
   "ssh": {
     "keyName": "nolandConnectSSH",
@@ -68,5 +69,6 @@
   },
   "provisionedServers": [],
   "orchestrationState": "Idle",
+  "connectionProvider": "wireguard",
   "lastError": null
 }

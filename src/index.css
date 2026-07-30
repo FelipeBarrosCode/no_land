@@ -26,8 +26,12 @@ body,
 #root {
   margin: 0;
   width: 100%;
+  max-width: 100vw;
   min-height: 100%;
   background: var(--bg);
+  overflow-x: hidden;
+  overscroll-behavior: none;
+  touch-action: pan-y;
 }
 
 body {
@@ -62,6 +66,18 @@ body::before {
     );
   opacity: 0.6;
   z-index: 30;
+}
+
+html.stream-window,
+body.stream-window,
+body.stream-window #root {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+body.stream-window::before,
+body.stream-window .crt-surface::after {
+  display: none !important;
 }
 
 a {

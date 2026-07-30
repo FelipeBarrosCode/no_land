@@ -11,6 +11,7 @@ interface Props {
   blockingAction: BlockingActionState | null;
   onPlay: (instanceId: number) => void;
   onSettings: (instanceId: number) => void;
+  onPair: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
   onPause: (instanceId: number) => void;
@@ -26,12 +27,13 @@ export function InstanceCardActions({
   blockingAction,
   onPlay,
   onSettings,
+  onPair,
   onReconnect,
   onReboot,
   onPause,
   onDestroy,
   onSaveStorage,
-  onSyncStorage
+  onSyncStorage,
 }: Props) {
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
@@ -49,7 +51,7 @@ export function InstanceCardActions({
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-2 gap-2">
+      <div className="grid grid-cols-3 gap-2">
         <Button
           className="w-full"
           disabled={actionDisabled}
@@ -58,7 +60,18 @@ export function InstanceCardActions({
           onClick={() => onPlay(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
-          <span className="ml-1">Play</span>
+          <span className="ml-1">Provisioning</span>
+        </Button>
+
+        <Button
+          variant="ghost"
+          className="w-full"
+          disabled={actionDisabled}
+          loading={loadingKey === "instance.moonlight.pair.begin" || loadingKey === "instance.moonlight.pair.complete"}
+          loadingText="Pairing..."
+          onClick={() => onPair(instance.instanceId)}
+        >
+          <span className="ml-1">Pair</span>
         </Button>
 
         <Button
@@ -67,15 +80,15 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           onClick={() => onSettings(instance.instanceId)}
         >
-          <span className="text-xs">⚙</span>
-          <span className="ml-1">Settings</span>
+          <SpriteIcon icon="play" />
+          <span className="ml-1">Play</span>
         </Button>
       </div>
 
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.export"}
           loadingText="Saving files..."
@@ -86,7 +99,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
           loadingText="Syncing files..."
@@ -97,20 +110,20 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.wireguard.reconnect"}
           loadingText="Opening..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open WireGuard
+          Open Connections
         </Button>
       </div>
 
       <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.services.reboot"}
           loadingText="Rebooting..."
@@ -121,7 +134,7 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className="w-full text-xs"
+          className="w-full text-[14px]"
           disabled={actionDisabled || !isRunning}
           loading={loadingKey === "instance.pause"}
           loadingText="Pausing..."
@@ -132,24 +145,29 @@ export function InstanceCardActions({
 
         <Button
           variant="ghost"
-          className={`w-full text-xs ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
+          className={`w-full text-[14px] ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
           disabled={actionDisabled}
           loading={loadingKey === "instance.destroy"}
           loadingText="Destroying..."
           onClick={handleDestroy}
         >
-          {showDestroyConfirm ? "Confirm Destroy" : "Destroy"}
+          {showDestroyConfirm ? (
+            "Confirm Destroy"
+          ) : (
+            <>
+              <SpriteIcon icon="destroy" />
+              <span className="ml-1">Destroy</span>
+            </>
+          )}
         </Button>
       </div>
 
       {showDestroyConfirm && (
         <div className="text-xs text-red-300 bg-red-900/20 p-2 rounded border border-red-500/30">
-          This will permanently destroy instance {instance.instanceId}. A backup will run first if configured.
+          This will permanently destroy instance {instance.instanceId}. A backup
+          will run first if configured.
           <div className="mt-1 flex gap-2">
-            <button
-              className="text-red-400 underline"
-              onClick={handleDestroy}
-            >
+            <button className="text-red-400 underline" onClick={handleDestroy}>
               Yes, destroy
             </button>
             <button

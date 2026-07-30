@@ -114,9 +114,9 @@ impl Default for AppConfig {
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
             moonlight_download_url_linux:
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
-            wireguard_download_url_windows: "https://www.wireguard.com/install/".to_string(),
-            wireguard_download_url_macos: "https://www.wireguard.com/install/".to_string(),
-            wireguard_download_url_linux: "https://www.wireguard.com/install/".to_string(),
+            wireguard_download_url_windows: "https://github.com/mullvad/gotatun".to_string(),
+            wireguard_download_url_macos: "https://github.com/mullvad/gotatun".to_string(),
+            wireguard_download_url_linux: "https://github.com/mullvad/gotatun".to_string(),
             sunshine: SunshineDefaults {
                 av1_mode: 1,
                 bind_address: env::var("NOLAND_SUNSHINE_BIND_ADDRESS").unwrap_or_default(),

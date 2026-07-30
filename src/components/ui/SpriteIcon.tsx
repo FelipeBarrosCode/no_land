@@ -1,6 +1,6 @@
 import clsx from "clsx";
 
-type IconName = "moonlight" | "server" | "play" | "settings";
+type IconName = "moonlight" | "server" | "play" | "settings" | "help" | "destroy" | "copy" | "close" | "robot";
 
 interface Props {
   icon: IconName;
@@ -41,9 +41,48 @@ const sprites: Record<IconName, number[]> = {
     2, 5, 5, 5, 2, 0,
     0, 2, 0, 2, 0, 0,
     0, 0, 0, 0, 0, 0
+  ],
+  help: [
+    0, 0, 5, 5, 0, 0,
+    0, 5, 0, 0, 5, 0,
+    0, 0, 0, 0, 5, 0,
+    0, 0, 0, 5, 0, 0,
+    0, 0, 5, 0, 0, 0,
+    0, 0, 0, 0, 0, 0
+  ],
+  destroy: [
+    0, 0, 5, 5, 0, 0,
+    0, 5, 5, 5, 5, 0,
+    5, 2, 2, 2, 2, 5,
+    5, 2, 2, 2, 2, 5,
+    5, 2, 2, 2, 2, 5,
+    5, 5, 5, 5, 5, 5
+  ],
+  copy: [
+    0, 5, 5, 5, 5, 0,
+    0, 5, 2, 2, 5, 0,
+    5, 5, 2, 2, 5, 5,
+    5, 2, 2, 2, 2, 5,
+    5, 2, 2, 2, 2, 5,
+    5, 5, 5, 5, 5, 5
+  ],
+  close: [
+    5, 0, 0, 0, 0, 5,
+    0, 5, 0, 0, 5, 0,
+    0, 0, 5, 5, 0, 0,
+    0, 0, 5, 5, 0, 0,
+    0, 5, 0, 0, 5, 0,
+    5, 0, 0, 0, 0, 5
+  ],
+  robot: [
+    0, 2, 2, 2, 2, 0,
+    2, 5, 2, 2, 5, 2,
+    2, 2, 2, 2, 2, 2,
+    0, 2, 2, 2, 2, 0,
+    2, 2, 2, 2, 2, 2,
+    2, 0, 2, 2, 0, 2
   ]
 };
-
 export function SpriteIcon({ icon, className }: Props) {
   const sprite = sprites[icon];
 

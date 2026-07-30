@@ -1,9 +1,14 @@
 import { useMemo, useState } from "react";
 import { Button } from "../../components/ui/Button";
+import { SpriteIcon } from "../../components/ui/SpriteIcon";
+import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
+
 import type {
   OrchestrationState,
   PersistedAppState,
   SetupStage,
+  MoonlightPairingSessionResponse,
 } from "../../lib/types";
 
 interface Props {
@@ -16,7 +21,9 @@ interface Props {
   onVerifyWireguard: () => Promise<unknown>;
   onDetectMoonlight: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
-  onSubmitMoonlightPin: (pin: string) => Promise<unknown>;
+  activeMoonlightPairing: MoonlightPairingSessionResponse | null;
+  onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
+  onCompleteMoonlightPairingHandoff: (pin: string) => Promise<unknown>;
   onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
 }
 
@@ -55,32 +62,42 @@ export function PostWireguardModal({
   onVerifyWireguard,
   onDetectMoonlight,
   onSetupMoonlightSunshine,
-  onSubmitMoonlightPin,
+  activeMoonlightPairing,
+  onPrepareMoonlightPairingHandoff,
+  onCompleteMoonlightPairingHandoff,
   onRetrySetupStage,
 }: Props) {
-  const [pin, setPin] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
+  const [pairingCopyState, setPairingCopyState] = useState<
+    "idle" | "copied" | "failed"
+  >("idle");
   void onVerifyWireguard;
   void onDetectMoonlight;
+  void onOpenWireguardApp;
+
   const setup = appState.postWireguardSetup;
   const activeInstanceId = appState.instance.instanceId;
+  const moonlightHost =
+    setup.moonlightHost || appState.moonlight.hostAddress || "10.77.0.1";
+  const sunshineUrl = `https://${moonlightHost}:47990/`;
+  const sunshineUsername =
+    setup.sunshineUsername || appState.credentials.appUsername || "";
+  const sunshinePassword = appState.credentials.appPassword || "";
   const configMatchesActiveInstance =
     activeInstanceId !== null &&
     activeInstanceId !== undefined &&
     setup.currentInstanceId === activeInstanceId;
-  const isMacManual = setup.wireguardSetupMode === "wireguard_app_macos_manual";
   const isWireguardPhase =
-    wireguardStages.has(setup.stage) && !streamingPrepStages.has(setup.stage);
-  const hasStartedManualSetup =
-    setup.stage !== "wireguard_config_generated" &&
-    setup.stage !== "pre_wireguard_existing_flow";
+    wireguardStages.has(setup.stage) &&
+    !streamingPrepStages.has(setup.stage) &&
+    !pinStages.has(setup.stage);
   const canShowWireguardConfig =
     configMatchesActiveInstance && setup.wireguardConfig.trim().length > 0;
   const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
   const stageShowsPinSubmission = pinStages.has(setup.stage);
-  const showPinInput = stageShowsPinSubmission;
+  const showPairingHandoff = stageShowsPinSubmission;
   const orchestrationShowsPinSubmission = new Set<OrchestrationState>([
     "MoonlightPairingStarted",
     "MoonlightPinReceived",
@@ -95,24 +112,15 @@ export function PostWireguardModal({
   const pinRetryError =
     setup.lastError?.stage === "moonlight_pin_received" ||
     setup.lastError?.stage === "sunshine_pin_submitting";
-
-  const instructions = useMemo(() => {
-    if (isMacManual) {
-      return [
-        "Open the WireGuard app.",
-        "Import the downloaded .conf file, or create a tunnel and paste the config.",
-        "Activate the tunnel in the WireGuard app.",
-        "Return here and click Done to continue.",
-      ];
-    }
-
-    return [
-      "Open the WireGuard app.",
-      "Import the generated tunnel if prompted.",
-      "Activate the tunnel in WireGuard.",
-      "Return here and click Done to continue.",
-    ];
-  }, [isMacManual]);
+  const pairingSession = activeMoonlightPairing;
+  const instructions = useMemo(
+    () => [
+      "Click Start Managed Tunnel below.",
+      "Approve elevation if your operating system prompts for it.",
+      "Let Noland verify tunnel connectivity automatically before continuing.",
+    ],
+    [],
+  );
 
   if (!open) {
     return null;
@@ -127,27 +135,69 @@ export function PostWireguardModal({
     }
   }
 
+  async function copyPairingPin() {
+    if (!pairingSession) {
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(pairingSession.pin);
+      setPairingCopyState("copied");
+    } catch {
+      setPairingCopyState("failed");
+    }
+  }
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame crt-surface w-full max-w-3xl p-6">
-        <h3
-          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-          data-text="Secure Tunnel Setup"
+        <button
+          onClick={() => window.history.back()}
+          className="absolute right-4 top-4 text-[#b9caf0] transition hover:text-white"
+          aria-label="Close modal"
         >
-          {isWireguardPhase
-            ? "Secure Tunnel Setup"
-            : "Moonlight & Sunshine Setup"}
-        </h3>
+          <SpriteIcon icon="close" />
+        </button>
+        <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2">
+          <h3
+            className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+            data-text={
+              isWireguardPhase
+                ? "Managed Tunnel Setup"
+                : "Moonlight & Sunshine Setup"
+            }
+          >
+            {isWireguardPhase
+              ? "Managed Tunnel Setup"
+              : "Moonlight & Sunshine Setup"}
+          </h3>
+          <AIPromptHelper
+            topic={
+              isWireguardPhase
+                ? "Managed Tunnel Setup"
+                : "Moonlight & Sunshine Pair Setup"
+            }
+            promptText={
+              isWireguardPhase
+                ? APP_PROMPTS.wireguardModalInfo
+                : APP_PROMPTS.playButtonSection
+            }
+            variant="both"
+          />
+        </div>
 
         {isWireguardPhase ? (
           <>
             <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
-              {isMacManual
-                ? hasStartedManualSetup
-                  ? "To finish the secure connection setup, import this tunnel into the WireGuard app."
-                  : "Click Start Manual Setup to load the current tunnel config for this instance, then import it into the WireGuard app."
-                : "WireGuard app is required for the tunnel handoff. Import and activate the generated tunnel, then continue."}
+              Noland is ready to bring up the managed local tunnel and will verify connectivity before moving on to streaming setup.
             </p>
+            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
+              <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                Managed by Noland
+              </h4>
+              <p className="mt-2">
+                The secure connection flow is handled by Noland inside the app. You only need to approve local permissions if your operating system asks.
+              </p>
+            </div>
 
             <ol className="mt-4 list-decimal space-y-2 pl-5 text-[1.08rem] leading-snug text-[#cfe7ff]">
               {instructions.map((instruction) => (
@@ -157,25 +207,30 @@ export function PostWireguardModal({
 
             {!configMatchesActiveInstance && (
               <p className="mt-4 text-[1rem] text-[#9ab0cc]">
-                Loading the current WireGuard config for this instance. If this
-                does not update, click Start Manual Setup.
+                Loading the current tunnel config for this instance. If this
+                does not update, click Start Managed Tunnel.
               </p>
             )}
 
             {canShowWireguardConfig && (
-              <textarea
-                readOnly
-                value={setup.wireguardConfig}
-                className="mt-4 min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
-              />
+              <div className="mt-4">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b9caf0]">
+                    Managed Tunnel Configuration
+                  </span>
+                  <Button variant="primary" onClick={() => void copyConfig()}>
+                    <SpriteIcon icon="copy" />
+                    <span className="ml-1">Copy to Clipboard</span>
+                  </Button>
+                </div>
+                <textarea
+                  readOnly
+                  value={setup.wireguardConfig}
+                  className="min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
+                />
+              </div>
             )}
-
             <div className="mt-4 flex flex-wrap gap-2">
-              {canShowWireguardConfig && (
-                <Button variant="ghost" onClick={() => void copyConfig()}>
-                  Copy Config
-                </Button>
-              )}
               <Button
                 variant="secondary"
                 onClick={() => void onDownloadWireguardConfig()}
@@ -184,24 +239,17 @@ export function PostWireguardModal({
                 Download .conf
               </Button>
               <Button
-                variant="secondary"
-                onClick={() => void onOpenWireguardApp()}
-                disabled={busy}
-              >
-                Open WireGuard
-              </Button>
-              <Button
                 onClick={() => void onSetupWireguardAppHandoff()}
                 disabled={busy}
               >
-                {isMacManual ? "Start Manual Setup" : "Open WireGuard & Import"}
+                Start Managed Tunnel
               </Button>
               <Button
                 variant="ghost"
                 onClick={() => void onSetupMoonlightSunshine()}
                 disabled={busy}
               >
-                Done
+                Continue to Moonlight Setup
               </Button>
             </div>
 
@@ -227,15 +275,33 @@ export function PostWireguardModal({
               <>
                 <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
                   Finishing Sunshine and Moonlight setup on{" "}
-                  <span className="text-neon-cyan">10.77.0.1</span>. PIN entry
-                  unlocks when this preparation is done.
+                  <span className="text-neon-cyan">{moonlightHost}</span>.
+                  Pairing handoff unlocks when this preparation is done.
                 </p>
+                <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
+                  <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
+                    Streaming setup checklist
+                  </h4>
+                  <ol className="mt-3 list-decimal space-y-2 pl-5 leading-snug">
+                    <li>
+                      Keep Noland open while the secure connection finishes on{" "}
+                      <span className="text-neon-cyan">{moonlightHost}</span>.
+                    </li>
+                    <li>
+                      Wait for the pairing handoff to unlock inside the app.
+                    </li>
+                    <li>
+                      Let Noland generate the pairing PIN automatically here.
+                    </li>
+                  </ol>
+                </div>
               </>
             ) : (
               <>
                 <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
-                  Sunshine and Moonlight are ready. Generate a PIN in Moonlight
-                  and submit it below.
+                  Sunshine and Moonlight are ready. Use the pairing handoff
+                  below and Noland will generate and submit the pairing PIN for
+                  you.
                 </p>
                 <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.02rem] text-[#cfe7ff]">
                   <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-cyan">
@@ -243,62 +309,95 @@ export function PostWireguardModal({
                   </h4>
                   <p className="mt-2">
                     {moonlightChecked
-                      ? setup.moonlightInstalled
-                        ? "Moonlight was detected on this machine. Use the manual PIN fallback below."
-                        : "Moonlight was not detected on this machine. Use the manual PIN fallback from another Moonlight client, or install Moonlight here and retry setup."
-                      : "Moonlight setup is still in progress."}
+                      ? "Streaming setup is ready. Use the pairing handoff below."
+                      : "Streaming setup is still in progress."}
                   </p>
                 </div>
               </>
             )}
 
-            {showPinInput && (
+            {showPairingHandoff && (
               <div className="mt-5 border border-[#3d426f] bg-[#10152f] p-4">
                 <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-                  Manual PIN Fallback
+                  Pairing Handoff
                 </h4>
                 <ol className="mt-3 list-decimal space-y-2 pl-5 text-[1.05rem] leading-snug text-[#cfe7ff]">
                   <li>
-                    Open Moonlight and add the PC at{" "}
-                    <span className="text-neon-cyan">10.77.0.1</span>.
-                  </li>
-                  <li>Generate the PIN in Moonlight.</li>
-                  <li>
-                    Paste that PIN below and Noland will submit it to Sunshine
-                    automatically.
+                    Make sure the instance is reachable at{" "}
+                    <span className="text-neon-cyan">{moonlightHost}</span>.
                   </li>
                   <li>
-                    You can use this again anytime, even after setup says it is
-                    complete.
+                    Let Noland generate the Sunshine pairing PIN automatically.
+                  </li>
+                  <li>
+                    Complete the pairing handoff and wait for Sunshine pairing
+                    to finish.
                   </li>
                 </ol>
-                <input
-                  value={pin}
-                  onChange={(event) =>
-                    setPin(event.target.value.replace(/\D+/g, ""))
-                  }
-                  placeholder="Enter the PIN shown in Moonlight"
-                  className="mt-4 w-full border border-[#3d426f] bg-[#0f1430] px-3 py-2 text-[1.05rem] text-white outline-none"
-                />
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <Button
-                    onClick={() => void onSubmitMoonlightPin(pin)}
-                    disabled={busy || pin.length < 4}
-                  >
-                    Submit PIN to Sunshine
-                  </Button>
-                  {setup.lastError?.retryable && !pinRetryError && (
+
+                {pairingSession ? (
+                  <div className="mt-4 border border-[#4f6a4e] bg-[#152316] p-3 text-[1rem] text-[#e6ffd7]">
+                    <h5 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
+                      Generated Pairing PIN
+                    </h5>
+                    <p className="mt-2 font-display text-lg text-white">
+                      {pairingSession.pin}
+                    </p>
+                    <p className="mt-1 text-[0.95rem] text-[#c9efb7]">
+                      Expires in about {pairingSession.expiresInSeconds} seconds.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <Button
+                        variant="secondary"
+                        onClick={() => void copyPairingPin()}
+                      >
+                        <SpriteIcon icon="copy" />
+                        <span className="ml-1">Copy PIN</span>
+                      </Button>
+                      <Button
+                        onClick={() =>
+                          void onCompleteMoonlightPairingHandoff(
+                            pairingSession.pin,
+                          )
+                        }
+                        disabled={busy}
+                      >
+                        Complete Pairing
+                      </Button>
+                    </div>
+                    {pairingCopyState === "copied" && (
+                      <p className="mt-2 text-[1rem] text-neon-lime">
+                        PIN copied to clipboard.
+                      </p>
+                    )}
+                    {pairingCopyState === "failed" && (
+                      <p className="mt-2 text-[1rem] text-[#ffb2bf]">
+                        Copy failed. Use the PIN shown above.
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="mt-4 flex flex-wrap gap-2">
+                    <Button
+                      onClick={() => void onPrepareMoonlightPairingHandoff()}
+                      disabled={busy}
+                    >
+                      Generate Pairing PIN
+                    </Button>
+                  </div>
+                )}
+
+                {setup.lastError?.retryable && !pinRetryError && (
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <Button
                       variant="ghost"
-                      onClick={() =>
-                        void onRetrySetupStage(setup.lastError!.stage)
-                      }
+                      onClick={() => void onRetrySetupStage(setup.lastError!.stage)}
                       disabled={busy}
                     >
                       Retry Current Step
                     </Button>
-                  )}
-                </div>
+                  </div>
+                )}
               </div>
             )}
 
@@ -306,17 +405,26 @@ export function PostWireguardModal({
               <div className="mt-4 border border-neon-lime bg-[#1f3223] p-4 text-[1.08rem] text-[#d9ffca]">
                 <p>
                   Setup complete. Your secure streaming connection is ready, and
-                  you can still submit a fresh PIN below at any time.
+                  you can generate a fresh pairing handoff again at any time.
                 </p>
                 <div className="mt-3 border border-[#4f6a4e] bg-[#152316] p-3 text-[1rem] text-[#e6ffd7]">
                   <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
                     Sunshine Login
                   </h4>
-                  <p className="mt-2">
-                    Username: <span className="text-white">user</span>
+                  <p className="mt-2 break-all">
+                    URL: <span className="text-white">{sunshineUrl}</span>
                   </p>
-                  <p>
-                    Password: <span className="text-white">password</span>
+                  <p className="break-all">
+                    Username:{" "}
+                    <span className="text-white">
+                      {sunshineUsername || "(empty)"}
+                    </span>
+                  </p>
+                  <p className="break-all">
+                    Password:{" "}
+                    <span className="text-white">
+                      {sunshinePassword || "(empty)"}
+                    </span>
                   </p>
                 </div>
               </div>
@@ -331,7 +439,38 @@ export function PostWireguardModal({
             </h4>
             <p className="mt-2">{setup.lastError.message}</p>
             {setup.lastError.details && (
-              <p className="mt-2 text-[#ffbdc7]">{setup.lastError.details}</p>
+              <p className="mt-2 whitespace-pre-wrap break-words text-[#ffbdc7]">
+                {setup.lastError.details}
+              </p>
+            )}
+            {(setup.lastError.code.includes("sunshine") ||
+              setup.lastError.stage === "sunshine_verifying" ||
+              setup.lastError.stage ===
+                "sunshine_credentials_configuring") && (
+              <div className="mt-3 border border-[#7a3f52] bg-[#341723] p-3 text-[1rem] text-[#ffd9df]">
+                <h4 className="font-display text-[11px] uppercase tracking-[0.12em] text-[#ffc3cf]">
+                  Manual Sunshine Login
+                </h4>
+                <p className="mt-2 break-all">
+                  URL: <span className="text-white">{sunshineUrl}</span>
+                </p>
+                <p className="break-all">
+                  Username:{" "}
+                  <span className="text-white">
+                    {sunshineUsername || "(empty)"}
+                  </span>
+                </p>
+                <p className="break-all">
+                  Password:{" "}
+                  <span className="text-white">
+                    {sunshinePassword || "(empty)"}
+                  </span>
+                </p>
+                <p className="mt-2 text-[#ffbdc7]">
+                  Open the Sunshine UI manually, log in with these credentials,
+                  confirm the web UI loads, then come back here and retry.
+                </p>
+              </div>
             )}
             {setup.lastError.retryable && !pinRetryError && (
               <div className="mt-3">
@@ -346,7 +485,7 @@ export function PostWireguardModal({
             )}
             {pinRetryError && (
               <p className="mt-3 text-[#ffbdc7]">
-                Generate a fresh PIN in Moonlight and submit it again here.
+                Generate a fresh pairing PIN handoff and try again here.
               </p>
             )}
           </div>

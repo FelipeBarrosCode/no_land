@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::fs;
 
 use crate::{
@@ -52,6 +52,28 @@ impl JsonStateStore {
 
         Ok(migrated)
     }
+
+    async fn load_existing_root_map(&self) -> AppResult<Map<String, Value>> {
+        if !self.state_path.exists() {
+            return Ok(Map::new());
+        }
+
+        let contents = fs::read_to_string(&self.state_path).await?;
+        let raw_value: Value = serde_json::from_str(&contents).map_err(|error| {
+            AppError::Serialization(format!(
+                "Failed to parse state file at {}: {error}",
+                self.state_path.display()
+            ))
+        })?;
+
+        match raw_value {
+            Value::Object(map) => Ok(map),
+            _ => Err(AppError::Serialization(format!(
+                "State file at {} is not a JSON object",
+                self.state_path.display()
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -81,7 +103,27 @@ impl StateStore for JsonStateStore {
     async fn save_state(&self, state: &PersistedAppState) -> AppResult<()> {
         self.ensure_parent_exists().await?;
 
-        let body = serde_json::to_string_pretty(state)?;
+        let mut root_map = match self.load_existing_root_map().await {
+            Ok(map) => map,
+            Err(AppError::Serialization(_)) if self.state_path.exists() => Map::new(),
+            Err(error) => return Err(error),
+        };
+
+        let next_value = serde_json::to_value(state)?;
+        let next_map = match next_value {
+            Value::Object(map) => map,
+            _ => {
+                return Err(AppError::Serialization(
+                    "PersistedAppState did not serialize to a JSON object".to_string(),
+                ))
+            }
+        };
+
+        for (key, value) in next_map {
+            root_map.insert(key, value);
+        }
+
+        let body = serde_json::to_string_pretty(&Value::Object(root_map))?;
         fs::write(&self.state_path, body).await?;
         Ok(())
     }
@@ -106,5 +148,68 @@ fn merge_json(target: &mut Value, source: &Value) {
         (target_slot, source_value) => {
             *target_slot = source_value.clone();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serde_json::json;
+    use tokio::fs;
+
+    use super::{JsonStateStore, StateStore};
+    use crate::models::app_state::PersistedAppState;
+
+    fn temp_state_path(name: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "noland-json-state-store-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base.join("state.json")
+    }
+
+    #[tokio::test]
+    async fn save_state_preserves_moonlight_category() {
+        let path = temp_state_path("preserve-moonlight");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!({
+                "version": 1,
+                "moonligConf": {
+                    "schemaVersion": 1,
+                    "hosts": {
+                        "instance-1": {
+                            "hostId": "instance-1"
+                        }
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let store = JsonStateStore::new(path.clone(), 1);
+        let mut state = PersistedAppState::default();
+        state.onboarding_completed = true;
+        store.save_state(&state).await.unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert_eq!(
+            root.get("moonligConf")
+                .and_then(|value| value.get("hosts"))
+                .and_then(|value| value.get("instance-1"))
+                .and_then(|value| value.get("hostId"))
+                .and_then(|value| value.as_str()),
+            Some("instance-1")
+        );
+        assert_eq!(
+            root.get("onboardingCompleted")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
     }
 }

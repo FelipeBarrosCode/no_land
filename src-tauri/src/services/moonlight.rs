@@ -19,6 +19,15 @@ use crate::{
     models::app_state::MoonlightPreferences,
 };
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn noland_macos_detect_main_display(
+        width: *mut u32,
+        height: *mut u32,
+        refresh_hz: *mut u32,
+    ) -> i32;
+}
+
 #[cfg(target_os = "linux")]
 use crate::services::os_detection::OsDetection;
 
@@ -1064,6 +1073,12 @@ fn force_close_moonlight() -> AppResult<()> {
     Ok(())
 }
 
+impl MoonlightService {
+    pub fn terminate_running_client() -> AppResult<()> {
+        ensure_moonlight_not_running(true)
+    }
+}
+
 fn detect_display(native: bool) -> AppResult<DisplayDetection> {
     let mut detection = detect_display_impl().unwrap_or(DisplayDetection {
         width: 1920,
@@ -1083,6 +1098,19 @@ fn detect_display(native: bool) -> AppResult<DisplayDetection> {
 fn detect_display_impl() -> Option<DisplayDetection> {
     #[cfg(target_os = "macos")]
     {
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut refresh_hz = 0u32;
+        let detected =
+            unsafe { noland_macos_detect_main_display(&mut width, &mut height, &mut refresh_hz) };
+        if detected != 0 && width > 0 && height > 0 {
+            return Some(DisplayDetection {
+                width,
+                height,
+                refresh_rate_hz: refresh_hz.max(60),
+            });
+        }
+
         let output = Command::new("system_profiler")
             .arg("SPDisplaysDataType")
             .output()
@@ -1242,7 +1270,7 @@ fn detect_codec_support() -> MoonlightCodecSupport {
     {
         return MoonlightCodecSupport {
             h264: true,
-            hevc: cfg!(target_arch = "aarch64"),
+            hevc: true,
             av1: false,
         };
     }
@@ -1263,9 +1291,16 @@ fn detect_codec_support() -> MoonlightCodecSupport {
             let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
             support.hevc = text.contains(" hevc ")
                 || text.contains("hevc_cuvid")
-                || text.contains("hevc_vaapi");
+                || text.contains("hevc_vaapi")
+                || text.contains("hevc_vdpau");
             support.av1 =
                 text.contains(" av1 ") || text.contains("av1_cuvid") || text.contains("av1_vaapi");
+        }
+
+        // Moonlight bundles its own ffmpeg software decoder, so HEVC works
+        // even when a hardware decoder isn't listed.
+        if !support.hevc {
+            support.hevc = true;
         }
 
         return support;

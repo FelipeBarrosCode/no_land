@@ -2,7 +2,10 @@
 
 mod commands;
 mod errors;
+mod input;
+mod mic_client;
 mod models;
+mod moonlight;
 mod services;
 mod utils;
 
@@ -19,8 +22,8 @@ use services::{
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
     wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
 };
-use tauri::Manager;
-use tracing::{error, info};
+use tauri::{Manager, WindowEvent};
+use tracing::{error, info, warn};
 use utils::logging::init_logging;
 
 fn main() {
@@ -41,8 +44,34 @@ fn main() {
                 .map_err(|error| format!("Failed to create app data directory: {error}"))?;
 
             let state_path = app_data_dir.join("state.json");
-            let state_store: Arc<dyn StateStore> =
-                Arc::new(JsonStateStore::new(state_path, config.state_schema_version));
+            let state_store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(
+                state_path.clone(),
+                config.state_schema_version,
+            ));
+
+            match tauri::async_runtime::block_on(
+                moonlight::composition::bootstrap_default_services(
+                    state_path.clone(),
+                    app_data_dir.clone(),
+                ),
+            ) {
+                Ok(result) => {
+                    if result.created {
+                        info!(
+                            "Bootstrapped Moonlight identity {} and persisted moonligConf",
+                            result.identity.unique_id
+                        );
+                    } else {
+                        info!(
+                            "Validated existing Moonlight identity {}",
+                            result.identity.unique_id
+                        );
+                    }
+                }
+                Err(error) => {
+                    warn!("Moonlight bootstrap could not complete: {error}");
+                }
+            }
 
             let mut initial_state = tauri::async_runtime::block_on(state_store.load_state())
                 .map_err(|error| format!("Failed loading persisted state: {error}"))?;
@@ -74,6 +103,16 @@ fn main() {
                 state_changed = true;
             }
 
+            if !initial_state.has_completed_guided_setup
+                && (initial_state.post_wireguard_setup.setup_complete
+                    || initial_state.provisioned_servers.iter().any(|server| {
+                        server.steps.pairing_completed || server.steps.moonlight_configured
+                    }))
+            {
+                initial_state.has_completed_guided_setup = true;
+                state_changed = true;
+            }
+
             initial_state.sunshine.edid_refresh_rate_hz = initial_state
                 .sunshine
                 .edid_refresh_rate_hz
@@ -84,31 +123,29 @@ fn main() {
                 .trim()
                 .is_empty()
             {
-                let (width, height, refresh_hz, source_label) = match initial_state
-                    .sunshine
-                    .edid_mode
-                {
-                    crate::models::app_state::EdidMode::Manual => (
-                        initial_state.moonlight_preferences.width,
-                        initial_state.moonlight_preferences.height,
-                        initial_state.sunshine.edid_refresh_rate_hz,
-                        "Manual".to_string(),
-                    ),
-                    crate::models::app_state::EdidMode::AutoDetect => {
-                        if let Some((detected_width, detected_height, detected_refresh)) =
-                            detect_client_display_for_provisioning()
-                        {
-                            (
-                                detected_width,
-                                detected_height,
-                                detected_refresh,
-                                "Auto-Detected".to_string(),
-                            )
-                        } else {
-                            (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+                let (width, height, refresh_hz, source_label) =
+                    match initial_state.sunshine.edid_mode {
+                        crate::models::app_state::EdidMode::Manual => (
+                            initial_state.moonlight_preferences.width,
+                            initial_state.moonlight_preferences.height,
+                            initial_state.sunshine.edid_refresh_rate_hz,
+                            "Manual".to_string(),
+                        ),
+                        crate::models::app_state::EdidMode::AutoDetect => {
+                            if let Some((detected_width, detected_height, detected_refresh)) =
+                                detect_client_display_for_provisioning()
+                            {
+                                (
+                                    detected_width,
+                                    detected_height,
+                                    detected_refresh,
+                                    "Auto-Detected".to_string(),
+                                )
+                            } else {
+                                (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+                            }
                         }
-                    }
-                };
+                    };
                 initial_state.sunshine.headless_edid_base64 =
                     generate_headless_edid_base64(width, height, refresh_hz)
                         .map_err(|error| format!("Failed generating default EDID: {error}"))?;
@@ -125,6 +162,15 @@ fn main() {
 
             let context = AppContext::new(config, state_store, initial_state);
             app.manage(context.clone());
+            app.manage(moonlight::platform::StreamWindowCloseState::default());
+            let moonlight_manager = moonlight::composition::MoonlightManager::new(
+                state_path.clone(),
+                app_data_dir.clone(),
+            );
+            moonlight_manager
+                .runtime
+                .start_event_bridge(app.handle().clone());
+            app.manage(moonlight_manager);
 
             let app_handle = app.handle().clone();
             let resume_context = context.clone();
@@ -145,6 +191,41 @@ fn main() {
 
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if window.label() != moonlight::platform::STREAM_WINDOW_LABEL {
+                return;
+            }
+
+            let WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+
+            let close_state = window.state::<moonlight::platform::StreamWindowCloseState>();
+            if close_state.allow_close() {
+                return;
+            }
+
+            api.prevent_close();
+            if !close_state.begin_close_intercept() {
+                return;
+            }
+
+            let app = window.app_handle().clone();
+            let moonlight = app.state::<moonlight::composition::MoonlightManager>();
+            let runtime = moonlight.runtime.clone();
+            let input = moonlight.input.clone();
+            let active_session_preferences = moonlight.active_session_preferences.clone();
+
+            tauri::async_runtime::spawn(async move {
+                let _ = runtime.stop().await;
+                let _ = runtime.detach_surface().await;
+                input.end_capture();
+                if let Ok(mut active_preferences) = active_session_preferences.lock() {
+                    *active_preferences = None;
+                }
+                let _ = moonlight::platform::close_stream_window(&app);
+            });
+        })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             complete_onboarding,
@@ -160,6 +241,7 @@ fn main() {
             local_environment_preflight,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
+            disconnect_local_wireguard_client_command,
             setup_wireguard_app_handoff_command,
             verify_wireguard,
             open_wireguard_app_command,
@@ -179,15 +261,34 @@ fn main() {
             configure_moonlight_client,
             restore_moonlight_backup,
             get_rented_instances,
+            get_vast_browser_automation_status,
+            get_vast_wallet_summary,
+            start_vast_browser_auth_session,
+            generate_vast_api_key_from_browser_session,
+            open_vast_billing_browser_session,
             update_vast_api_key,
+            update_tailscale_api_key,
+            update_connection_provider,
             update_platform_credentials,
             update_server_preferences,
             update_moonlight_preferences,
+            set_instance_moonlight_pipeline_enabled,
+            moonlight_get_instance_pipeline_status,
+            moonlight_prepare_instance_pairing,
+            moonlight_complete_instance_pairing,
             regenerate_edid,
             update_ssh_credentials,
             get_shared_storage_settings,
             save_shared_storage_settings,
             test_shared_storage_config,
+            list_storage_providers,
+            save_static_provider_credentials,
+            test_shared_storage_connection,
+            get_shared_storage_profiles,
+            set_active_shared_storage_profile,
+            disconnect_shared_storage_profile,
+            begin_oauth_authorization,
+            complete_oauth_authorization,
             trigger_instance_backup,
             trigger_instance_backup_for,
             sync_instance_from_shared_storage,
@@ -216,7 +317,33 @@ fn main() {
             disable_instance_mic,
             reconnect_instance_mic,
             recreate_instance_mic_device,
-            get_instance_mic_status
+            get_instance_mic_status,
+            list_microphones,
+            moonlight_get_configuration,
+            moonlight_register_host,
+            moonlight_refresh_host,
+            moonlight_begin_pairing,
+            moonlight_complete_pairing,
+            moonlight_list_apps,
+            moonlight_start_stream,
+            moonlight_disconnect_stream,
+            moonlight_start_input_capture,
+            moonlight_stop_input_capture,
+            moonlight_update_video_geometry,
+            moonlight_activate_native_mouse_capture,
+            moonlight_deactivate_native_mouse_capture,
+            moonlight_quit_remote_app,
+            moonlight_send_relative_mouse,
+            moonlight_send_absolute_mouse,
+            moonlight_send_mouse_button,
+            moonlight_send_keyboard,
+            moonlight_send_controller_arrival,
+            moonlight_send_controller_state,
+            moonlight_update_preferences,
+            moonlight_forget_host,
+            moonlight_get_active_input_mode,
+            moonlight_get_input_debug_state,
+            moonlight_get_session_state
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

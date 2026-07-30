@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Card } from "../components/ui/Card";
@@ -6,6 +6,7 @@ import { DashboardScreen } from "../features/dashboard/DashboardScreen";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 
@@ -14,13 +15,37 @@ function RootRoute() {
   const busy = useAppStore((state) => state.busy);
   const offers = useAppStore((state) => state.offers);
   const rentedInstances = useAppStore((state) => state.rentedInstances);
+  const embeddedMoonlightStatus = useAppStore(
+    (state) => state.embeddedMoonlightStatus,
+  );
   const searchingOffers = useAppStore((state) => state.searching);
   const offersPage = useAppStore((state) => state.offersPage);
   const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
-  const instanceActionRunning = useAppStore((state) => state.instanceActionRunning);
-  const sunshineSettings = useAppStore((state) => state.sunshineSettings);
+  const instanceActionRunning = useAppStore(
+    (state) => state.instanceActionRunning,
+  );
+
   const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
+  const vastBrowserAutomationStatus = useAppStore(
+    (state) => state.vastBrowserAutomationStatus,
+  );
+  const connectVastBrowserSession = useAppStore(
+    (state) => state.connectVastBrowserSession,
+  );
+  const refreshVastBrowserAutomationStatus = useAppStore(
+    (state) => state.refreshVastBrowserAutomationStatus,
+  );
+  const generateVastApiKeyViaBrowserSession = useAppStore(
+    (state) => state.generateVastApiKeyViaBrowserSession,
+  );
+  const openVastBillingBrowserSession = useAppStore(
+    (state) => state.openVastBillingBrowserSession,
+  );
+  const vastWalletSummary = useAppStore((state) => state.vastWalletSummary);
+  const refreshVastWalletSummary = useAppStore(
+    (state) => state.refreshVastWalletSummary,
+  );
   const discoverOffers = useAppStore((state) => state.discoverOffers);
   const nextOffersPage = useAppStore((state) => state.nextOffersPage);
   const previousOffersPage = useAppStore((state) => state.previousOffersPage);
@@ -29,25 +54,68 @@ function RootRoute() {
   const chooseOffer = useAppStore((state) => state.chooseOffer);
   const startPlay = useAppStore((state) => state.startPlay);
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
-  const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
-  const loadSunshineSettings = useAppStore((state) => state.loadSunshineSettings);
-  const saveSunshineSettings = useAppStore((state) => state.saveSunshineSettings);
-  const resetSunshineSettings = useAppStore((state) => state.resetSunshineSettings);
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+
+  const setEmbeddedMoonlightPipelineEnabled = useAppStore(
+    (state) => state.setEmbeddedMoonlightPipelineEnabled,
+  );
+  const loadEmbeddedMoonlightStatus = useAppStore(
+    (state) => state.loadEmbeddedMoonlightStatus,
+  );
+  const rerunEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.rerunEmbeddedMoonlightPairing,
+  );
+
+  useEffect(() => {
+    if (!embeddedMoonlightStatus?.enabled) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadEmbeddedMoonlightStatus(embeddedMoonlightStatus.instanceId);
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [embeddedMoonlightStatus?.enabled, embeddedMoonlightStatus?.instanceId, loadEmbeddedMoonlightStatus]);
+
+
   const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
-  const rebootInstanceServices = useAppStore((state) => state.rebootInstanceServices);
+  const rebootInstanceServices = useAppStore(
+    (state) => state.rebootInstanceServices,
+  );
   const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
   const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
-  const listSyncableStorageObjects = useAppStore((state) => state.listSyncableStorageObjects);
-  const saveInstanceStorageSelected = useAppStore((state) => state.saveInstanceStorageSelected);
-  const listExportableStorageObjects = useAppStore((state) => state.listExportableStorageObjects);
+  const listSyncableStorageObjects = useAppStore(
+    (state) => state.listSyncableStorageObjects,
+  );
+  const saveInstanceStorageSelected = useAppStore(
+    (state) => state.saveInstanceStorageSelected,
+  );
+  const listExportableStorageObjects = useAppStore(
+    (state) => state.listExportableStorageObjects,
+  );
 
   if (!appState) {
     return null;
   }
 
   if (!appState.onboardingCompleted) {
-    return <OnboardingScreen busy={busy} onSubmit={runOnboarding} />;
+    return (
+      <OnboardingScreen
+        busy={busy}
+        onSubmit={runOnboarding}
+        vastAutomationStatus={vastBrowserAutomationStatus}
+        onConnectVastBrowser={connectVastBrowserSession}
+        onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
+        onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
+        onOpenVastBillingBrowser={openVastBillingBrowserSession}
+      />
+    );
   }
 
   return (
@@ -55,25 +123,28 @@ function RootRoute() {
       appState={appState}
       offers={offers}
       rentedInstances={rentedInstances}
+      embeddedMoonlightStatus={embeddedMoonlightStatus}
       searchingOffers={searchingOffers}
       offersPage={offersPage}
       offersHasNextPage={offersHasNextPage}
       busy={busy}
       instanceActionRunning={instanceActionRunning}
       blockingAction={blockingAction}
-      sunshineSettings={sunshineSettings}
+      vastWalletSummary={vastWalletSummary}
       onSearchOffers={discoverOffers}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
       onManualLocationSave={saveManualLocation}
       onLoadRentedInstances={loadRentedInstances}
+      onRefreshVastWalletSummary={refreshVastWalletSummary}
+      onOpenVastBillingBrowser={openVastBillingBrowserSession}
       onStartPlayExisting={startPlayExisting}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
       onSaveServerPreferences={saveServerPreferences}
-      onLoadSunshineSettings={loadSunshineSettings}
-      onSaveSunshineSettings={saveSunshineSettings}
-      onResetSunshineSettings={resetSunshineSettings}
+      onSetEmbeddedMoonlightPipelineEnabled={setEmbeddedMoonlightPipelineEnabled}
+      onLoadEmbeddedMoonlightStatus={loadEmbeddedMoonlightStatus}
+      onRerunEmbeddedMoonlightPairing={rerunEmbeddedMoonlightPairing}
       onReconnectWireguard={reconnectWireguard}
       onRebootInstanceServices={rebootInstanceServices}
       onPauseInstance={pauseInstance}
@@ -91,40 +162,78 @@ function ProvisioningRoute() {
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
   const blockingAction = useAppStore((state) => state.blockingAction);
-  const setupWireguardAppHandoff = useAppStore((state) => state.setupWireguardAppHandoff);
+  const setupWireguardAppHandoff = useAppStore(
+    (state) => state.setupWireguardAppHandoff,
+  );
   const openWireguardApp = useAppStore((state) => state.openWireguardApp);
-  const downloadWireguardConfig = useAppStore((state) => state.downloadWireguardConfig);
-  const verifyWireguardConnection = useAppStore((state) => state.verifyWireguardConnection);
+  const downloadWireguardConfig = useAppStore(
+    (state) => state.downloadWireguardConfig,
+  );
+  const verifyWireguardConnection = useAppStore(
+    (state) => state.verifyWireguardConnection,
+  );
   const detectMoonlight = useAppStore((state) => state.detectMoonlight);
-  const setupMoonlightSunshine = useAppStore((state) => state.setupMoonlightSunshine);
-  const submitMoonlightPin = useAppStore((state) => state.submitMoonlightPin);
+  const setupMoonlightSunshine = useAppStore(
+    (state) => state.setupMoonlightSunshine,
+  );
+  const activeMoonlightPairing = useAppStore(
+    (state) => state.activeMoonlightPairing,
+  );
+  const prepareEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.prepareEmbeddedMoonlightPairing,
+  );
+  const completeEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.completeEmbeddedMoonlightPairing,
+  );
   const retrySetupStage = useAppStore((state) => state.retrySetupStage);
-  const sleepPreventionActive = useAppStore((state) => state.sleepPreventionActive);
-  const startSleepPrevention = useAppStore((state) => state.startSleepPrevention);
+  const sleepPreventionActive = useAppStore(
+    (state) => state.sleepPreventionActive,
+  );
+  const startSleepPrevention = useAppStore(
+    (state) => state.startSleepPrevention,
+  );
   const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
 
   if (!appState) {
     return null;
   }
 
+  const provisioningInstanceId =
+    appState.postWireguardSetup.currentInstanceId ?? appState.instance.instanceId;
+
   return (
-      <ProvisioningScreen
-        appState={appState}
-        logs={logs}
-        busy={busy}
-        blockingAction={blockingAction}
-        onSetupWireguardAppHandoff={setupWireguardAppHandoff}
-        onOpenWireguardApp={openWireguardApp}
-        onDownloadWireguardConfig={downloadWireguardConfig}
-        onVerifyWireguard={verifyWireguardConnection}
-        onDetectMoonlight={detectMoonlight}
-        onSetupMoonlightSunshine={setupMoonlightSunshine}
-        onSubmitMoonlightPin={submitMoonlightPin}
-        onRetrySetupStage={retrySetupStage}
-        sleepPreventionActive={sleepPreventionActive}
-        onStartSleepPrevention={startSleepPrevention}
-        onStopSleepPrevention={stopSleepPrevention}
-      />
+    <ProvisioningScreen
+      appState={appState}
+      logs={logs}
+      busy={busy}
+      blockingAction={blockingAction}
+      onSetupWireguardAppHandoff={setupWireguardAppHandoff}
+      onOpenWireguardApp={openWireguardApp}
+      onDownloadWireguardConfig={downloadWireguardConfig}
+      onVerifyWireguard={verifyWireguardConnection}
+      onDetectMoonlight={detectMoonlight}
+      onSetupMoonlightSunshine={setupMoonlightSunshine}
+      activeMoonlightPairing={activeMoonlightPairing}
+      onPrepareMoonlightPairingHandoff={() => {
+        if (!provisioningInstanceId) {
+          return Promise.resolve(null);
+        }
+        return prepareEmbeddedMoonlightPairing(provisioningInstanceId);
+      }}
+      onCompleteMoonlightPairingHandoff={(_pin) => {
+        if (!provisioningInstanceId || !activeMoonlightPairing?.sessionId) {
+          return Promise.resolve(null);
+        }
+        return completeEmbeddedMoonlightPairing(
+          provisioningInstanceId,
+          activeMoonlightPairing.sessionId,
+        );
+      }}
+      onRetrySetupStage={retrySetupStage}
+      sleepPreventionActive={sleepPreventionActive}
+      onStartSleepPrevention={startSleepPrevention}
+      onStopSleepPrevention={stopSleepPrevention}
+    />
   );
 }
 
@@ -137,7 +246,10 @@ function BootScreen() {
           alt="Noland logo"
           className="mx-auto mb-4 max-h-40 w-auto border border-[#3d426f]"
         />
-        <p className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base" data-text="Loading Noland Connect...">
+        <p
+          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+          data-text="Loading Noland Connect..."
+        >
           Loading Noland Connect...
         </p>
       </Card>
@@ -146,6 +258,8 @@ function BootScreen() {
 }
 
 export function App() {
+  const [windowLabel, setWindowLabel] = useState<string | null>(null);
+  const [windowLabelResolved, setWindowLabelResolved] = useState(false);
   const initialize = useAppStore((state) => state.initialize);
   const bindEvents = useAppStore((state) => state.bindEvents);
   const loading = useAppStore((state) => state.loading);
@@ -156,20 +270,111 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
-  const savePlatformCredentials = useAppStore((state) => state.savePlatformCredentials);
-  const saveServerPreferences = useAppStore((state) => state.saveServerPreferences);
-  const saveMoonlightPreferences = useAppStore((state) => state.saveMoonlightPreferences);
+  const vastBrowserAutomationStatus = useAppStore(
+    (state) => state.vastBrowserAutomationStatus,
+  );
+  const refreshVastBrowserAutomationStatus = useAppStore(
+    (state) => state.refreshVastBrowserAutomationStatus,
+  );
+  const connectVastBrowserSession = useAppStore(
+    (state) => state.connectVastBrowserSession,
+  );
+  const generateVastApiKeyViaBrowserSession = useAppStore(
+    (state) => state.generateVastApiKeyViaBrowserSession,
+  );
+  const openVastBillingBrowserSession = useAppStore(
+    (state) => state.openVastBillingBrowserSession,
+  );
+  const saveConnectionProvider = useAppStore(
+    (state) => state.saveConnectionProvider,
+  );
+  const savePlatformCredentials = useAppStore(
+    (state) => state.savePlatformCredentials,
+  );
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+  const saveMoonlightPreferences = useAppStore(
+    (state) => state.saveMoonlightPreferences,
+  );
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
   const regenerateEdid = useAppStore((state) => state.regenerateEdid);
-  const sharedStorageSettings = useAppStore((state) => state.sharedStorageSettings);
-  const saveSharedStorageSettings = useAppStore((state) => state.saveSharedStorageSettings);
-  const testSharedStorageConfig = useAppStore((state) => state.testSharedStorageConfig);
-  const loadSharedStorageSettings = useAppStore((state) => state.loadSharedStorageSettings);
+  const storageProviders = useAppStore((state) => state.storageProviders);
+  const sharedStorageProfiles = useAppStore(
+    (state) => state.sharedStorageProfiles,
+  );
+  const sharedStorageTestResult = useAppStore(
+    (state) => state.sharedStorageTestResult,
+  );
+  const loadStorageProviders = useAppStore(
+    (state) => state.loadStorageProviders,
+  );
+  const connectStorageProvider = useAppStore(
+    (state) => state.connectStorageProvider,
+  );
+  const testStorageConnection = useAppStore(
+    (state) => state.testStorageConnection,
+  );
+  const loadSharedStorageProfiles = useAppStore(
+    (state) => state.loadSharedStorageProfiles,
+  );
+  const setActiveStorageProfile = useAppStore(
+    (state) => state.setActiveStorageProfile,
+  );
+  const disconnectStorageProfile = useAppStore(
+    (state) => state.disconnectStorageProfile,
+  );
+  const oauthSessionId = useAppStore((state) => state.oauthSessionId);
+  const beginOauthFlow = useAppStore((state) => state.beginOauthFlow);
+  const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
 
   useEffect(() => {
+    let cancelled = false;
+
+    async function resolveWindowLabel() {
+      if (!("__TAURI_INTERNALS__" in window)) {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+        return;
+      }
+      try {
+        const api = await import("@tauri-apps/api/window");
+        const currentWindow = api.getCurrentWindow();
+        if (!cancelled) {
+          setWindowLabel(currentWindow.label);
+          setWindowLabelResolved(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+      }
+    }
+
+    void resolveWindowLabel();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
     void initialize();
     void bindEvents();
-  }, [bindEvents, initialize]);
+  }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
+  if (!windowLabelResolved) {
+    return <BootScreen />;
+  }
+
+  if (windowLabel === "moonlight-stream") {
+    return <StreamWindowScreen />;
+  }
 
   if (loading) {
     return <BootScreen />;
@@ -192,7 +397,9 @@ export function App() {
         </div>
       )}
 
-      {isBlocking && blockingAction && <BlockingLoaderOverlay action={blockingAction} />}
+      {isBlocking && blockingAction && (
+        <BlockingLoaderOverlay action={blockingAction} />
+      )}
 
       <HashRouter>
         <Routes>
@@ -205,16 +412,30 @@ export function App() {
                 <SettingsScreen
                   appState={appState}
                   busy={busy}
-                  sharedStorageSettings={sharedStorageSettings}
+                  vastAutomationStatus={vastBrowserAutomationStatus}
+                  storageProviders={storageProviders}
+                  sharedStorageProfiles={sharedStorageProfiles}
+                  sharedStorageTestResult={sharedStorageTestResult}
+                  onLoadStorageProviders={loadStorageProviders}
+                  onConnectStorageProvider={connectStorageProvider}
+                  onTestStorageConnection={testStorageConnection}
+                  onLoadSharedStorageProfiles={loadSharedStorageProfiles}
+                  onSetActiveStorageProfile={setActiveStorageProfile}
+                  onDisconnectStorageProfile={disconnectStorageProfile}
+                  oauthSessionId={oauthSessionId}
+                  onBeginOauthFlow={beginOauthFlow}
+                  onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
+                  onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
+                  onConnectVastBrowser={connectVastBrowserSession}
+                  onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
+                  onOpenVastBillingBrowser={openVastBillingBrowserSession}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
                   onRegenerateEdid={regenerateEdid}
-                  onSaveSharedStorageSettings={saveSharedStorageSettings}
-                  onTestSharedStorageConfig={testSharedStorageConfig}
-                  onLoadSharedStorageSettings={loadSharedStorageSettings}
+                  onSaveConnectionProvider={saveConnectionProvider}
                 />
               ) : null
             }
