@@ -73,10 +73,13 @@ jobs:
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            patchelf \
             pkg-config \
             libgstreamer1.0-dev \
-            libgstreamer-plugins-base1.0-dev
+            libgstreamer-plugins-base1.0-dev \
+            libssl-dev \
+            libopus-dev \
+            libpulse-dev \
+            patchelf
 
       - name: Install macOS GStreamer framework
         if: matrix.platform == 'macos'

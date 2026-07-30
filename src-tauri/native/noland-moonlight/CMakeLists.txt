@@ -1,3 +1,12 @@
+set(NOLAND_NATIVE_PREFIX "" CACHE PATH "Prefix containing native SDL2/Opus dependencies")
+
+set(NOLAND_NATIVE_INCLUDE_HINTS)
+set(NOLAND_NATIVE_LIB_HINTS)
+if(NOLAND_NATIVE_PREFIX)
+  list(APPEND NOLAND_NATIVE_INCLUDE_HINTS "${NOLAND_NATIVE_PREFIX}/include")
+  list(APPEND NOLAND_NATIVE_LIB_HINTS "${NOLAND_NATIVE_PREFIX}/lib")
+endif()
+
 add_library(noland_moonlight STATIC
   src/noland_moonlight.c
   src/noland_controller_manager.c
@@ -21,8 +30,26 @@ elseif(WIN32)
   target_link_libraries(noland_moonlight PRIVATE winmm)
 endif()
 
-find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS /opt/homebrew/include /usr/local/include REQUIRED)
-find_library(OPUS_LIBRARY opus HINTS /opt/homebrew/lib /usr/local/lib REQUIRED)
+if(WIN32)
+  include(FetchContent)
+  set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+  set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+  set(OPUS_STACK_PROTECTOR OFF CACHE BOOL "" FORCE)
+  set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    opus_dep
+    URL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
+  )
+  FetchContent_MakeAvailable(opus_dep)
+  set(OPUS_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-opus-include")
+  file(MAKE_DIRECTORY "${OPUS_INCLUDE_DIR}/opus")
+  file(COPY "${opus_dep_SOURCE_DIR}/include/" DESTINATION "${OPUS_INCLUDE_DIR}/opus")
+  set(OPUS_LIBRARY_TARGET opus)
+else()
+  find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} /opt/homebrew/include /usr/local/include REQUIRED)
+  find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS} /opt/homebrew/lib /usr/local/lib REQUIRED)
+endif()
 
 target_include_directories(noland_moonlight
   PUBLIC
@@ -34,7 +61,11 @@ target_include_directories(noland_moonlight
 
 target_compile_features(noland_moonlight PRIVATE c_std_11)
 set_target_properties(noland_moonlight PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY})
+if(WIN32)
+  target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY_TARGET})
+else()
+  target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY})
+endif()
 
 if(APPLE)
   find_library(APPKIT_FRAMEWORK AppKit REQUIRED)

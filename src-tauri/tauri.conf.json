@@ -29,6 +29,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
+      "binaries/gotatun",
       "binaries/noland-mic-sender"
     ],
     "macOS": {
