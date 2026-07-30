@@ -42,6 +42,14 @@ jobs:
           npm -v
           command -v ssh || true
 
+      - name: Install macOS dependencies
+        shell: bash
+        run: |
+          brew install pkg-config sdl2
+          SDL2_PREFIX="$(brew --prefix sdl2)"
+          HOMEBREW_PREFIX="$(brew --prefix)"
+          echo "PKG_CONFIG_PATH=${SDL2_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
       - name: Install dependencies
         run: npm ci
 

@@ -72,6 +72,15 @@ jobs:
             librsvg2-dev \
             patchelf
 
+      - name: Install macOS dependencies
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          brew install pkg-config sdl2
+          SDL2_PREFIX="$(brew --prefix sdl2)"
+          HOMEBREW_PREFIX="$(brew --prefix)"
+          echo "PKG_CONFIG_PATH=${SDL2_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
       - name: Environment diagnostics
         shell: bash
         run: |
