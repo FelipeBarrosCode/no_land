@@ -64,9 +64,9 @@ pub struct JitterConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SecurityConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub require_active_session: bool,
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub require_packet_authentication: bool,
     #[serde(default = "default_session_timeout")]
     pub session_timeout_seconds: u64,
@@ -76,7 +76,7 @@ fn default_bind_address() -> String {
     "10.77.0.1".to_string()
 }
 fn default_port() -> u16 {
-    48020
+    48200
 }
 fn default_interface() -> String {
     "wg0".to_string()
@@ -103,19 +103,19 @@ fn default_pw_description() -> String {
     "Noland Remote Microphone".to_string()
 }
 fn default_jitter_initial() -> f64 {
-    20.0
+    25.0
 }
 fn default_jitter_min() -> f64 {
-    10.0
+    15.0
 }
 fn default_jitter_max() -> f64 {
-    40.0
+    60.0
 }
 fn default_reorder_window() -> usize {
     64
 }
-fn default_true() -> bool {
-    true
+fn default_false() -> bool {
+    false
 }
 fn default_session_timeout() -> u64 {
     5
@@ -170,8 +170,8 @@ impl Default for JitterConfig {
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
-            require_active_session: default_true(),
-            require_packet_authentication: default_true(),
+            require_active_session: default_false(),
+            require_packet_authentication: default_false(),
             session_timeout_seconds: default_session_timeout(),
         }
     }

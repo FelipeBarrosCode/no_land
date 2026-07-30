@@ -33,6 +33,161 @@ use services::moonlight::{
     MoonlightService,
 };
 
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_relative_mouse(_delta_x: f64, _delta_y: f64) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_absolute_mouse(
+    _x: f64,
+    _y: f64,
+    _content_width: f64,
+    _content_height: f64,
+) {
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_mouse_button(_button: u8, _pressed: bool) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_keyboard(
+    _virtual_key: u16,
+    _pressed: bool,
+    _modifiers: u8,
+) {
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_vertical_scroll(_amount: f64, _high_resolution: bool) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_horizontal_scroll(_amount: f64, _high_resolution: bool) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_focus_changed(_focused: bool) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_on_capture_changed(_active: bool, _mode: i32) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_request_capture() -> i32 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_native_event(_kind: i32) {}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_capture_active() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_capture_mode() -> i32 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_capture_requests() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_native_mouse_moves() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_native_mouse_downs() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_native_mouse_ups() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_native_keys() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_rust_relative_callbacks() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_rust_absolute_callbacks() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_rust_button_callbacks() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_macos_input_debug_rust_key_callbacks() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_relative_send_attempts() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_absolute_send_attempts() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_button_send_attempts() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_key_send_attempts() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_scroll_send_attempts() -> u64 {
+    0
+}
+
+#[cfg(target_os = "macos")]
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_input_debug_send_errors() -> u64 {
+    0
+}
+
 fn parse_args() -> Result<(MoonlightConfigureOptions, Option<String>, bool), AppError> {
     let mut options = MoonlightConfigureOptions::default();
     let mut args = env::args().skip(1).peekable();

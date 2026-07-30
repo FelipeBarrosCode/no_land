@@ -1,27 +1,17 @@
-pub mod capture;
 pub mod device_list;
-pub mod encoder;
-pub mod transport;
+mod runtime;
 
-use std::sync::mpsc;
-use std::time::Instant;
+use std::fs::OpenOptions;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
-use crossbeam_channel::{bounded, Receiver};
-use tokio::sync::oneshot;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::errors::{AppError, AppResult};
-use crate::mic_client::transport::MicrophoneTransport;
 use crate::models::app_state::MicQualityProfile;
 
-/// A captured chunk of PCM audio from the microphone.
-#[derive(Debug, Clone)]
-pub struct CaptureChunk {
-    pub timestamp: Instant,
-    pub samples: Vec<f32>,
-}
-
-/// Configuration for the microphone client pipeline.
+/// Configuration for the microphone sender sidecar.
 #[derive(Debug, Clone)]
 pub struct MicClientConfig {
     pub device_id: Option<String>,
@@ -32,19 +22,16 @@ pub struct MicClientConfig {
     pub remote_addr: String,
 }
 
-/// Handle to a running microphone client pipeline.
+/// Handle to a running microphone sender sidecar.
 pub struct MicClientHandle {
-    stop_tx: Option<oneshot::Sender<()>>,
-    capture_stop_tx: Option<mpsc::Sender<()>>,
+    child: Option<Child>,
 }
 
 impl MicClientHandle {
     pub fn stop(&mut self) {
-        if let Some(tx) = self.stop_tx.take() {
-            let _ = tx.send(());
-        }
-        if let Some(tx) = self.capture_stop_tx.take() {
-            let _ = tx.send(());
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }
@@ -55,159 +42,122 @@ impl Drop for MicClientHandle {
     }
 }
 
-/// Start the microphone capture → encode → transport pipeline.
-pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
-    let (capture_tx, capture_rx) = bounded::<CaptureChunk>(64);
-    let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    let (capture_stop_tx, capture_stop_rx) = mpsc::channel::<()>();
-    let (capture_ready_tx, capture_ready_rx) = mpsc::sync_channel::<AppResult<String>>(1);
-
-    let session_id = config.session_id;
-    let ssrc = config.ssrc;
-    let remote_addr = config.remote_addr.clone();
-    let capture_device_id = config.device_id.clone();
-
-    std::thread::Builder::new()
-        .name("noland-mic-capture".into())
-        .spawn(move || {
-            let capture = match capture::MicCaptureDevice::open_and_start(
-                capture_device_id.as_deref(),
-                capture_tx,
-            ) {
-                Ok(capture) => capture,
-                Err(error) => {
-                    let _ = capture_ready_tx.send(Err(error));
-                    return;
-                }
-            };
-
-            let capture_name = capture.name().unwrap_or("unknown").to_string();
-            let _ = capture_ready_tx.send(Ok(capture_name.clone()));
-
-            info!(
-                capture_device = %capture_name,
-                "Microphone capture thread running"
-            );
-
-            let _capture = capture;
-            let _ = capture_stop_rx.recv();
-            info!("Microphone capture thread stopping");
-        })
-        .map_err(|e| AppError::Command(format!("Failed to spawn capture thread: {e}")))?;
-
-    let capture_name = match capture_ready_rx.recv() {
-        Ok(Ok(name)) => name,
-        Ok(Err(error)) => return Err(error),
-        Err(error) => {
-            return Err(AppError::Command(format!(
-                "Mic capture thread terminated before reporting readiness: {error}"
-            )))
-        }
-    };
-
-    std::thread::Builder::new()
-        .name("noland-mic-encoder".into())
-        .spawn(move || {
-            run_encoder_loop(config, capture_rx, stop_rx);
-        })
-        .map_err(|e| AppError::Command(format!("Failed to spawn encoder thread: {e}")))?;
-
-    info!(
-        session_id = session_id,
-        ssrc = ssrc,
-        remote_addr = %remote_addr,
-        capture_device = %capture_name,
-        "Microphone client pipeline started"
-    );
-
-    Ok(MicClientHandle {
-        stop_tx: Some(stop_tx),
-        capture_stop_tx: Some(capture_stop_tx),
-    })
+fn sidecar_log_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(cache_dir) = dirs::cache_dir() {
+        candidates.push(cache_dir.join("noland-connect").join("logs"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("src-tauri").join("target").join("logs"));
+    }
+    candidates
 }
 
-fn run_encoder_loop(
-    config: MicClientConfig,
-    rx: Receiver<CaptureChunk>,
-    mut stop_rx: oneshot::Receiver<()>,
-) {
-    let encoder =
-        match encoder::OpusMicEncoder::new(config.quality_profile.bitrate_kbps() as i32 * 1000) {
-            Ok(enc) => enc,
-            Err(e) => {
-                error!("Failed to create Opus encoder: {e}");
-                return;
-            }
-        };
-
-    let mut transport = match transport::NolandUdpV1Transport::connect(
-        &config.remote_addr,
-        config.session_id,
-        config.session_secret,
-        config.ssrc,
-    ) {
-        Ok(t) => t,
-        Err(e) => {
-            error!(addr = %config.remote_addr, "Failed to connect mic transport: {e}");
-            return;
+fn prepare_sidecar_log_stdio() -> Option<(Stdio, Stdio)> {
+    for directory in sidecar_log_paths() {
+        if std::fs::create_dir_all(&directory).is_err() {
+            continue;
         }
+        let log_path = directory.join("noland-mic-sender.log");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .ok()?;
+        let stderr = file.try_clone().ok()?;
+        return Some((Stdio::from(file), Stdio::from(stderr)));
+    }
+    None
+}
+
+#[cfg(unix)]
+fn cleanup_stale_stream_processes(sidecar: &Path) {
+    let sidecar_path = sidecar.to_string_lossy().to_string();
+    let output = Command::new("pgrep")
+        .arg("-f")
+        .arg(format!("{} stream", sidecar_path))
+        .output();
+
+    let Ok(output) = output else {
+        return;
     };
 
-    let mut sequence: u16 = 0;
-    let mut timestamp: u32 = 0;
-    let samples_per_frame = 480u32;
-
-    loop {
-        if stop_rx.try_recv().is_ok() {
-            info!("Mic encoder loop received stop signal");
-            let buf = encoder.encode_silence();
-            let _ = transport.send_frame(
-                sequence,
-                timestamp,
-                noland_mic_protocol::flags::END_OF_STREAM,
-                &buf,
-            );
-            return;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let pid = line.trim();
+        if pid.is_empty() {
+            continue;
         }
-
-        match rx.recv() {
-            Ok(chunk) => {
-                let num_samples = chunk.samples.len().min(480);
-                let samples = if num_samples < 480 {
-                    let mut padded = vec![0.0f32; 480];
-                    padded[..num_samples].copy_from_slice(&chunk.samples[..num_samples]);
-                    padded
-                } else {
-                    chunk.samples
-                };
-
-                let opus_buf = encoder
-                    .encode(&samples[..480])
-                    .unwrap_or_else(|_| encoder.encode_silence());
-
-                let mut flags = noland_mic_protocol::flags::OPUS_FRAME;
-                if matches!(config.quality_profile, MicQualityProfile::HighQuality) {
-                    flags |= noland_mic_protocol::flags::FEC_ENABLED;
-                }
-
-                if let Err(e) = transport.send_frame(sequence, timestamp, flags, &opus_buf) {
-                    warn!(sequence, "Mic transport send failed: {e}");
-                }
-
-                sequence = sequence.wrapping_add(1);
-                timestamp = timestamp.wrapping_add(samples_per_frame);
-            }
-            Err(_) => {
-                info!("Mic capture channel closed, stopping encoder loop");
-                let buf = encoder.encode_silence();
-                let _ = transport.send_frame(
-                    sequence,
-                    timestamp,
-                    noland_mic_protocol::flags::END_OF_STREAM,
-                    &buf,
-                );
-                return;
-            }
-        }
+        let _ = Command::new("kill").arg("-TERM").arg(pid).status();
     }
+}
+
+#[cfg(not(unix))]
+fn cleanup_stale_stream_processes(_sidecar: &Path) {}
+
+/// Start the local microphone sender sidecar.
+pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = config;
+        return Err(AppError::Command(
+            "Bundled GStreamer microphone sender is not yet available on this platform".to_string(),
+        ));
+    }
+
+    let remote: SocketAddr = config.remote_addr.parse().map_err(|error| {
+        AppError::InvalidInput(format!(
+            "Invalid microphone receiver address '{}': {error}",
+            config.remote_addr
+        ))
+    })?;
+
+    let sidecar = runtime::resolve_mic_sender_binary()?;
+
+    cleanup_stale_stream_processes(&sidecar);
+
+    let mut command = Command::new(&sidecar);
+    runtime::configure_gstreamer_command(&mut command, &sidecar);
+    let (stdout, stderr) = prepare_sidecar_log_stdio().unwrap_or((Stdio::null(), Stdio::null()));
+
+    command
+        .arg("stream")
+        .arg("--host")
+        .arg(remote.ip().to_string())
+        .arg("--port")
+        .arg(remote.port().to_string())
+        .arg("--bitrate-kbps")
+        .arg(config.quality_profile.bitrate_kbps().to_string())
+        .arg("--frame-ms")
+        .arg(config.quality_profile.frame_ms().to_string())
+        .stdout(stdout)
+        .stdin(Stdio::null())
+        .stderr(stderr);
+
+    if let Some(device_id) = config
+        .device_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("default"))
+    {
+        command.arg("--device-id").arg(device_id);
+    }
+
+    let child = command.spawn().map_err(|error| {
+        AppError::Command(format!(
+            "Failed to start microphone sender sidecar '{}': {error}",
+            sidecar.display()
+        ))
+    })?;
+
+    info!(
+        session_id = config.session_id,
+        ssrc = config.ssrc,
+        remote_addr = %config.remote_addr,
+        bitrate_kbps = config.quality_profile.bitrate_kbps(),
+        frame_ms = config.quality_profile.frame_ms(),
+        session_secret_len = config.session_secret.len(),
+        "Started GStreamer microphone sender sidecar"
+    );
+
+    Ok(MicClientHandle { child: Some(child) })
 }

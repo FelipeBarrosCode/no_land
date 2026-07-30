@@ -1004,12 +1004,12 @@ impl Default for InstanceMicConfig {
         Self {
             instance_id: 0,
             enabled: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             codec: "opus".to_string(),
             sample_rate: 48000,
             channels: 1,
             vm_wireguard_ip: String::new(),
-            rtp_port: 48020,
+            rtp_port: 48200,
             device_id: default_mic_device_id(),
             device_name: default_mic_device_name(),
             quality_profile: MicQualityProfile::Standard,
@@ -1047,7 +1047,7 @@ impl MicQualityProfile {
 
     pub fn frame_ms(&self) -> u32 {
         match self {
-            MicQualityProfile::Standard => 20,
+            MicQualityProfile::Standard => 10,
             MicQualityProfile::LowLatency => 10,
             MicQualityProfile::HighQuality => 20,
         }
@@ -1084,11 +1084,11 @@ impl Default for InstanceMicRuntimeStatus {
             vm_agent_reachable: false,
             device_ready: false,
             receiving_audio: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             sample_rate: 48000,
             channels: 1,
             bitrate_kbps: 32,
-            frame_ms: 20,
+            frame_ms: 10,
             packet_loss_percent: 0.0,
             jitter_ms: 0.0,
             buffer_depth_ms: 0.0,

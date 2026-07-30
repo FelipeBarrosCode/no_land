@@ -9,8 +9,6 @@ INSTALL_DIR="/home/$USER_NAME/.local/bin"
 SERVICE_DIR="/home/$USER_NAME/.config/systemd/user"
 CONFIG_DIR="/etc/noland"
 RUNTIME_DIR_BASE="/run/noland"
-FIFO_PATH="${RUNTIME_DIR_BASE}/noland_remote_microphone.pcm"
-MODULE_ID_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.module"
 STATUS_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.status.json"
 
 uid="$(id -u "$USER_NAME")"
@@ -43,7 +41,9 @@ echo ""
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y pipewire pipewire-pulse wireplumber pulseaudio-utils
+apt-get install -y pipewire pipewire-pulse wireplumber pulseaudio-utils \
+  gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
 
 # --- Create directories ---
 mkdir -p "$INSTALL_DIR"
@@ -68,7 +68,7 @@ fi
 cat > "$CONFIG_DIR/microphone.toml" <<TOML
 [network]
 bind_address = "${WG_IP}"
-port = 48020
+port = 48200
 interface = "wg0"
 maximum_packet_size = 1200
 recv_buffer_bytes = 524288
@@ -81,9 +81,9 @@ pipewire_node_name = "noland_remote_microphone"
 pipewire_description = "Noland Remote Microphone"
 
 [jitter]
-initial_ms = 20.0
-minimum_ms = 10.0
-maximum_ms = 40.0
+initial_ms = 25.0
+minimum_ms = 15.0
+maximum_ms = 60.0
 reorder_window_packets = 64
 
 [security]
@@ -99,13 +99,11 @@ echo "Configuration written to $CONFIG_DIR/microphone.toml"
 cat > "$INSTALL_DIR/noland-mic-source-setup" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-RUNTIME_DIR_BASE="/run/noland"
-FIFO_PATH="/run/noland/noland_remote_microphone.pcm"
-MODULE_ID_FILE="/run/noland/noland_remote_microphone.module"
-mkdir -p "$RUNTIME_DIR_BASE"
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
 rm -f "$FIFO_PATH"
 mkfifo "$FIFO_PATH"
-chmod 660 "$FIFO_PATH"
+chmod 644 "$FIFO_PATH"
 existing_module="$(pactl list short modules 2>/dev/null | awk '/module-pipe-source/ && /source_name=noland_remote_microphone/ {print $1; exit}')"
 if [[ -n "$existing_module" ]]; then
   pactl unload-module "$existing_module" >/dev/null 2>&1 || true
@@ -117,8 +115,10 @@ if [[ -f "$MODULE_ID_FILE" ]]; then
   fi
   rm -f "$MODULE_ID_FILE"
 fi
-module_id="$(pactl load-module module-pipe-source source_name=noland_remote_microphone file="$FIFO_PATH" format=s16le rate=48000 channels=1 source_properties=device.description='Noland Remote Microphone')"
+module_id="$(pactl load-module module-pipe-source source_name=noland_remote_microphone file="$FIFO_PATH" format=s16le rate=48000 channels=1 source_properties="device.description=Noland Remote Microphone")"
 echo "$module_id" > "$MODULE_ID_FILE"
+pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true
+pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true
 pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true
 EOF
 chmod +x "$INSTALL_DIR/noland-mic-source-setup"
@@ -127,8 +127,8 @@ chown "$USER_NAME:$group_name" "$INSTALL_DIR/noland-mic-source-setup"
 cat > "$INSTALL_DIR/noland-mic-source-cleanup" <<'EOF'
 #!/bin/bash
 set -euo pipefail
-FIFO_PATH="/run/noland/noland_remote_microphone.pcm"
-MODULE_ID_FILE="/run/noland/noland_remote_microphone.module"
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
 STATUS_FILE="/run/noland/noland_remote_microphone.status.json"
 if [[ -f "$MODULE_ID_FILE" ]]; then
   module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
@@ -153,15 +153,15 @@ Wants=pipewire.service pipewire-pulse.service wireplumber.service
 [Service]
 Type=simple
 ExecStartPre=${INSTALL_DIR}/noland-mic-source-setup
-ExecStart=/usr/bin/bash -lc 'exec ${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_DIR}/microphone.toml --bind ${WG_IP} --port 48020 > ${FIFO_PATH}'
+ExecStart=/usr/bin/bash -lc 'exec ${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_DIR}/microphone.toml --bind ${WG_IP} --port 48200 > /tmp/noland_remote_microphone.pcm'
 ExecStopPost=${INSTALL_DIR}/noland-mic-source-cleanup
 Restart=always
 RestartSec=1
 NoNewPrivileges=true
-PrivateTmp=true
+PrivateTmp=false
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=${RUNTIME_DIR_BASE}
+ReadWritePaths=${RUNTIME_DIR_BASE} /tmp
 LimitNOFILE=4096
 
 [Install]
@@ -189,10 +189,10 @@ else
 fi
 
 # Check UDP socket
-if ss -uln | grep -q ":48020 "; then
-    echo "[OK] UDP port 48020 is listening"
+if ss -uln | grep -q ":48200 "; then
+    echo "[OK] UDP port 48200 is listening"
 else
-    echo "[WARN] UDP port 48020 not detected (may need root for ss/netstat)"
+    echo "[WARN] UDP port 48200 not detected (may need root for ss/netstat)"
 fi
 
 # Check Pulse/PipeWire source

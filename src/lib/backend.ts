@@ -812,6 +812,69 @@ export async function getInstanceMicStatus(
   });
 }
 
-export async function listMicrophones(): Promise<MicrophoneDevice[]> {
-  return invokeSafe<MicrophoneDevice[]>("list_microphones");
+let microphoneListCache:
+  | { fetchedAt: number; devices: MicrophoneDevice[] }
+  | null = null;
+let microphoneListInFlight: Promise<MicrophoneDevice[]> | null = null;
+const microphoneListTimeoutMs = 12_000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+export async function listMicrophones(
+  options?: { forceRefresh?: boolean },
+): Promise<MicrophoneDevice[]> {
+  const forceRefresh = options?.forceRefresh ?? false;
+  const now = Date.now();
+  const cacheTtlMs = 30_000;
+
+  if (
+    !forceRefresh &&
+    microphoneListCache &&
+    now - microphoneListCache.fetchedAt < cacheTtlMs
+  ) {
+    return microphoneListCache.devices;
+  }
+
+  if (!forceRefresh && microphoneListInFlight) {
+    return microphoneListInFlight;
+  }
+
+  const request = withTimeout(
+    invokeSafe<MicrophoneDevice[]>("list_microphones"),
+    microphoneListTimeoutMs,
+    "Loading microphones timed out. Please try Refresh.",
+  )
+    .then((devices) => {
+      microphoneListCache = { fetchedAt: Date.now(), devices };
+      return devices;
+    })
+    .finally(() => {
+      if (microphoneListInFlight === request) {
+        microphoneListInFlight = null;
+      }
+    });
+
+  microphoneListInFlight = request;
+  return request;
 }

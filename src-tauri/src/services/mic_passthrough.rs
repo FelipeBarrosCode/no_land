@@ -1,4 +1,7 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use parking_lot::Mutex as SyncMutex;
 use tokio::sync::RwLock;
@@ -23,6 +26,8 @@ static MIC_SESSIONS: std::sync::OnceLock<RwLock<HashMap<u64, MicSession>>> =
 /// Pipeline handles keyed by instance_id.
 static MIC_HANDLES: std::sync::OnceLock<SyncMutex<HashMap<u64, MicClientHandle>>> =
     std::sync::OnceLock::new();
+static MIC_DEVICE_CACHE: std::sync::OnceLock<SyncMutex<Option<CachedDeviceList>>> =
+    std::sync::OnceLock::new();
 
 fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
     MIC_SESSIONS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -30,6 +35,10 @@ fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
 
 fn get_mic_handles() -> &'static SyncMutex<HashMap<u64, MicClientHandle>> {
     MIC_HANDLES.get_or_init(|| SyncMutex::new(HashMap::new()))
+}
+
+fn get_mic_device_cache() -> &'static SyncMutex<Option<CachedDeviceList>> {
+    MIC_DEVICE_CACHE.get_or_init(|| SyncMutex::new(None))
 }
 
 #[derive(Debug, Clone)]
@@ -41,6 +50,12 @@ struct MicSession {
     quality_profile: MicQualityProfile,
 }
 
+#[derive(Debug, Clone)]
+struct CachedDeviceList {
+    fetched_at: Instant,
+    devices: Vec<MicrophoneDevice>,
+}
+
 /// Microphone passthrough service.
 ///
 /// Manages mic configuration, sessions, and VM agent communication
@@ -50,7 +65,23 @@ pub struct MicPassthroughService;
 impl MicPassthroughService {
     /// List available recording devices on this machine.
     pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
-        device_list::list_devices()
+        const CACHE_TTL: Duration = Duration::from_secs(30);
+
+        if let Some(cached) = get_mic_device_cache()
+            .lock()
+            .as_ref()
+            .filter(|cached| cached.fetched_at.elapsed() < CACHE_TTL)
+            .cloned()
+        {
+            return Ok(cached.devices);
+        }
+
+        let devices = device_list::list_devices()?;
+        *get_mic_device_cache().lock() = Some(CachedDeviceList {
+            fetched_at: Instant::now(),
+            devices: devices.clone(),
+        });
+        Ok(devices)
     }
 
     /// Get mic configuration for an instance.
@@ -203,7 +234,7 @@ impl MicPassthroughService {
         let session_token = generate_session_token();
         let ssrc: u32 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFF) as u32;
         let session_id_u64: u64 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFFFFFFFFFF) as u64;
-        let receiver_port: u16 = 48020u16;
+        let receiver_port: u16 = 48200u16;
         let started_at = chrono::Local::now().to_rfc3339();
 
         // ── Start the audio capture + encode + transport pipeline ──
@@ -230,7 +261,13 @@ impl MicPassthroughService {
         };
         {
             let mut handles = get_mic_handles().lock();
-            handles.insert(instance_id, handle);
+            if let Some(mut previous) = handles.insert(instance_id, handle) {
+                previous.stop();
+                warn!(
+                    instance_id = instance_id,
+                    "Replaced an existing stale mic sender handle"
+                );
+            }
         }
 
         let session = MicSession {
@@ -307,19 +344,19 @@ impl MicPassthroughService {
             sessions.remove(&instance_id)
         };
 
-        if session.is_none() {
-            return Err(AppError::InvalidInput(
-                "Microphone passthrough is not enabled for this instance.".to_string(),
-            ));
-        }
-
-        // Stop the audio pipeline
+        // Stop the audio pipeline even if the session record was lost.
         {
             let mut handles = get_mic_handles().lock();
             if let Some(mut handle) = handles.remove(&instance_id) {
                 handle.stop();
                 info!(instance_id = instance_id, "Mic audio pipeline stopped");
             }
+        }
+
+        if session.is_none() {
+            return Err(AppError::InvalidInput(
+                "Microphone passthrough is not enabled for this instance.".to_string(),
+            ));
         }
 
         // Try to notify VM agent
@@ -365,20 +402,24 @@ impl MicPassthroughService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<InstanceMicRuntimeStatus> {
-        let remote = build_remote_exec_for_instance(context, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-
         let mut status = InstanceMicRuntimeStatus::default();
 
-        // Check if we have a local session
+        // Check if we have a local session. When the mic is disabled, avoid any
+        // expensive remote SSH status probes entirely.
         {
             let sessions = get_mic_sessions().read().await;
             if let Some(session) = sessions.get(&instance_id) {
                 status.enabled = true;
                 status.bitrate_kbps = session.quality_profile.bitrate_kbps();
                 status.frame_ms = session.quality_profile.frame_ms();
+            } else {
+                status.state = MicState::Disabled;
+                return Ok(status);
             }
         }
+
+        let remote = build_remote_exec_for_instance(context, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
 
         // Try to get VM agent status
         match Self::call_vm_agent_status(&remote, &target_user).await {
@@ -451,7 +492,7 @@ impl MicPassthroughService {
     async fn call_vm_agent_stop_session(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ -S \"$bus_path\" ]]; then run_user systemctl --user restart noland-mic-receiver.service; fi",
+            "if [[ -S \"$bus_path\" ]]; then run_user systemctl --user start noland-mic-receiver.service >/dev/null 2>&1 || true; fi",
         )?;
 
         let output = {
@@ -532,7 +573,7 @@ impl MicPassthroughService {
     ) -> AppResult<VmAgentStatus> {
         let cmd = remote_user_bus_command(
             target_user,
-            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; receiver_active=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_active=true; fi; receiver_process=false; if pgrep -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1; then receiver_process=true; fi; udp_listening=false; if ss -uln | grep -q \":48020 \">/dev/null 2>&1; then udp_listening=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; device_ready=false; if [[ \"$source_present\" = true ]] && ([[ \"$receiver_active\" = true ]] || [[ \"$receiver_process\" = true ]] || [[ \"$udp_listening\" = true ]]); then device_ready=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$device_ready\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json, os; raw = os.environ.get(\\\"STATUS_JSON\\\", \\\"{}\\\"); status = json.loads(raw) if raw.strip() else {}; out = {\\\"deviceReady\\\": os.environ.get(\\\"DEVICE_READY\\\", \\\"\\\").lower() == \\\"true\\\", \\\"receivingAudio\\\": bool(status.get(\\\"receivingAudio\\\", False)), \\\"packetLossPercent\\\": float(status.get(\\\"packetLossPercent\\\", 0.0) or 0.0), \\\"jitterMs\\\": float(status.get(\\\"jitterMs\\\", 0.0) or 0.0), \\\"bufferDepthMs\\\": float(status.get(\\\"bufferDepthMs\\\", 0.0) or 0.0), \\\"lastPacketMsAgo\\\": status.get(\\\"lastPacketMsAgo\\\"), \\\"pipewireConnected\\\": os.environ.get(\\\"PIPEWIRE_CONNECTED\\\", \\\"\\\").lower() == \\\"true\\\", \\\"defaultSource\\\": os.environ.get(\\\"DEFAULT_SOURCE\\\", \\\"\\\").lower() == \\\"true\\\"}; print(json.dumps(out, separators=(\\\",\\\", \\\":\\\")))\"",
+            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; receiver_active=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_active=true; fi; receiver_process=false; if pgrep -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1; then receiver_process=true; fi; udp_listening=false; if ss -uln | grep -q \":48200 \">/dev/null 2>&1; then udp_listening=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; device_ready=false; if [[ \"$source_present\" = true ]] && ([[ \"$receiver_active\" = true ]] || [[ \"$receiver_process\" = true ]] || [[ \"$udp_listening\" = true ]]); then device_ready=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$device_ready\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json, os; raw = os.environ.get(\\\"STATUS_JSON\\\", \\\"{}\\\"); status = json.loads(raw) if raw.strip() else {}; out = {\\\"deviceReady\\\": os.environ.get(\\\"DEVICE_READY\\\", \\\"\\\").lower() == \\\"true\\\", \\\"receivingAudio\\\": bool(status.get(\\\"receivingAudio\\\", False)), \\\"packetLossPercent\\\": float(status.get(\\\"packetLossPercent\\\", 0.0) or 0.0), \\\"jitterMs\\\": float(status.get(\\\"jitterMs\\\", 0.0) or 0.0), \\\"bufferDepthMs\\\": float(status.get(\\\"bufferDepthMs\\\", 0.0) or 0.0), \\\"lastPacketMsAgo\\\": status.get(\\\"lastPacketMsAgo\\\"), \\\"pipewireConnected\\\": os.environ.get(\\\"PIPEWIRE_CONNECTED\\\", \\\"\\\").lower() == \\\"true\\\", \\\"defaultSource\\\": os.environ.get(\\\"DEFAULT_SOURCE\\\", \\\"\\\").lower() == \\\"true\\\"}; print(json.dumps(out, separators=(\\\",\\\", \\\":\\\")))\"",
         )?;
 
         let output = {

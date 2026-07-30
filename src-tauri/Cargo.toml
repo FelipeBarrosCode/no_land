@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/noland-mic-protocol"]
+members = ["."]
 resolver = "2"
 
 [package]
@@ -9,6 +9,10 @@ description = "Noland Connect desktop app"
 authors = ["Noland"]
 edition = "2021"
 default-run = "noland-connect"
+
+[[bin]]
+name = "noland-mic-sender"
+path = "src/bin/noland_mic_sender.rs"
 
 [build-dependencies]
 bindgen = "0.70.1"
@@ -38,6 +42,7 @@ sha2 = { version = "0.10.9", features = ["oid"] }
 serde_json = "1.0.133"
 form_urlencoded = "1"
 urlencoding = "2"
+ctrlc = "3.4.5"
 tauri = { version = "2.0.0", features = ["unstable"] }
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-opener = "2.0.0"
@@ -49,9 +54,9 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "tim
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x25519-dalek = "2.0.1"
 x509-parser = "0.16.0"
-noland-mic-protocol = { path = "crates/noland-mic-protocol" }
-audiopus = "0.3.0-rc.0"
-cpal = "0.15"
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+gstreamer = "0.23"
 
 [features]
 default = ["custom-protocol"]

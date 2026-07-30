@@ -57,7 +57,7 @@ export RUSTUP_HOME=/root/.rustup
 export CARGO_HOME=/root/.cargo
 export PATH="$CARGO_HOME/bin:$PATH"
 apt-get update -y
-apt-get install -y build-essential pkg-config cmake curl clang ca-certificates
+apt-get install -y build-essential pkg-config cmake curl clang ca-certificates libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pipewire pipewire-pulse wireplumber gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav pulseaudio-utils
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 fi
@@ -169,7 +169,7 @@ async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
     let archive_string = archive_path.display().to_string();
     let workspace_string = workspace_root.display().to_string();
     let tar_command = format!(
-        "COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf '{}' -C '{}' --exclude=vm-cloud-mic-agent/Cargo.lock --exclude=vm-cloud-mic-agent/target vm-cloud-mic-agent src-tauri/crates/noland-mic-protocol",
+        "COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf '{}' -C '{}' --exclude=vm-cloud-mic-agent/Cargo.lock --exclude=vm-cloud-mic-agent/target vm-cloud-mic-agent",
         archive_string.replace('"', "\\\""),
         workspace_string.replace('"', "\\\"")
     );

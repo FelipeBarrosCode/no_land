@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getInstanceMicConfig,
   enableInstanceMic,
@@ -25,29 +25,113 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
   const [config, setConfig] = useState<InstanceMicConfig | null>(null);
   const [status, setStatus] = useState<InstanceMicRuntimeStatus | null>(null);
   const [devices, setDevices] = useState<MicrophoneDevice[]>([]);
+  const [devicesLoading, setDevicesLoading] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const statusPollInFlightRef = useRef(false);
+  const initialLoadInFlightRef = useRef(false);
 
-  const loadData = useCallback(async () => {
-    try {
-      const [cfg, st, devs] = await Promise.all([
-        getInstanceMicConfig(instanceId),
-        getInstanceMicStatus(instanceId).catch(() => null),
-        listMicrophones().catch(() => []),
-      ]);
-      setConfig(cfg);
-      setStatus(st);
-      setDevices(devs);
-    } catch (e) {
-      setError(String(e));
-    }
+  const loadConfig = useCallback(async () => {
+    const cfg = await getInstanceMicConfig(instanceId);
+    setConfig(cfg);
+    return cfg;
   }, [instanceId]);
 
+  const loadDevices = useCallback(async (forceRefresh = false) => {
+    setDevicesLoading(true);
+    try {
+      const devs = await listMicrophones({ forceRefresh });
+      setDevices(devs);
+      return devs;
+    } finally {
+      setDevicesLoading(false);
+    }
+  }, []);
+
+  const loadStatus = useCallback(
+    async (force = false) => {
+      if (statusPollInFlightRef.current) {
+        return null;
+      }
+      if (!force) {
+        if (document.visibilityState !== "visible") {
+          return null;
+        }
+        if (!document.hasFocus()) {
+          return null;
+        }
+        if (!(config?.enabled ?? false)) {
+          return null;
+        }
+      }
+
+      statusPollInFlightRef.current = true;
+      try {
+        const nextStatus = await getInstanceMicStatus(instanceId);
+        setStatus(nextStatus);
+        return nextStatus;
+      } catch {
+        return null;
+      } finally {
+        statusPollInFlightRef.current = false;
+      }
+    },
+    [config?.enabled, instanceId],
+  );
+
+  const loadInitialData = useCallback(async () => {
+    if (initialLoadInFlightRef.current) {
+      return;
+    }
+    initialLoadInFlightRef.current = true;
+    try {
+      const [cfg] = await Promise.all([loadConfig(), loadDevices()]);
+      if (cfg.enabled) {
+        await loadStatus(true);
+      } else {
+        setStatus(null);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      initialLoadInFlightRef.current = false;
+    }
+  }, [loadConfig, loadDevices, loadStatus]);
+
   useEffect(() => {
-    loadData();
-    const interval = setInterval(loadData, 3000);
-    return () => clearInterval(interval);
-  }, [loadData]);
+    void loadInitialData();
+  }, [loadInitialData]);
+
+  useEffect(() => {
+    const onVisibilityOrFocus = () => {
+      if (document.visibilityState === "visible" && document.hasFocus()) {
+        void loadConfig();
+        void loadStatus(true);
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityOrFocus);
+    window.addEventListener("focus", onVisibilityOrFocus);
+
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityOrFocus);
+      window.removeEventListener("focus", onVisibilityOrFocus);
+    };
+  }, [loadConfig, loadStatus]);
+
+  useEffect(() => {
+    if (!(config?.enabled ?? false)) {
+      setStatus(null);
+      return;
+    }
+
+    void loadStatus(true);
+    const interval = window.setInterval(() => {
+      void loadStatus(false);
+    }, 10000);
+
+    return () => window.clearInterval(interval);
+  }, [config?.enabled, loadStatus]);
 
   const handleToggleMic = async () => {
     setLoading(true);
@@ -55,10 +139,15 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     try {
       if (config?.enabled) {
         await disableInstanceMic(instanceId);
+        const nextConfig = await loadConfig();
+        if (!nextConfig.enabled) {
+          setStatus(null);
+        }
       } else {
         await enableInstanceMic(instanceId, config?.qualityProfile);
+        await loadConfig();
+        await loadStatus(true);
       }
-      await loadData();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -71,7 +160,8 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     setError(null);
     try {
       await updateInstanceMicSettings(instanceId, { qualityProfile: profile });
-      await loadData();
+      await loadConfig();
+      await loadStatus(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -84,7 +174,21 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     setError(null);
     try {
       await updateInstanceMicSettings(instanceId, { deviceId });
-      await loadData();
+      await loadConfig();
+      await loadStatus(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRefreshDevices = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      await loadDevices(true);
+      await loadConfig();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -97,7 +201,8 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     setError(null);
     try {
       await reconnectInstanceMic(instanceId);
-      await loadData();
+      await loadConfig();
+      await loadStatus(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -110,7 +215,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     setError(null);
     try {
       await recreateInstanceMicDevice(instanceId);
-      await loadData();
+      await loadStatus(true);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -212,20 +317,38 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
 
       {/* Device selection */}
       <div>
-        <label className="text-xs text-gray-400 block mb-1">
-          Input Device
-        </label>
+        <div className="mb-1 flex items-center justify-between gap-2">
+          <label className="text-xs text-gray-400 block">Input Device</label>
+          <button
+            type="button"
+            onClick={handleRefreshDevices}
+            disabled={loading}
+            className="rounded border border-gray-600 bg-gray-800 px-2 py-1 text-[10px] text-gray-300 transition-colors hover:bg-gray-700 disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
         <select
           className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200"
           value={config?.deviceId ?? "default"}
           onChange={(e) => handleDeviceChange(e.target.value)}
-          disabled={loading}
+          disabled={loading || devicesLoading || devices.length === 0}
         >
-          {devices.map((d) => (
-            <option key={d.id} value={d.id}>
-              {d.name} {d.isDefault ? "(Default)" : ""}
+          {devicesLoading ? (
+            <option value={config?.deviceId ?? "default"}>
+              Loading microphones...
             </option>
-          ))}
+          ) : devices.length === 0 ? (
+            <option value={config?.deviceId ?? "default"}>
+              No microphones detected
+            </option>
+          ) : (
+            devices.map((d) => (
+              <option key={d.id} value={d.id}>
+                {d.name} {d.isDefault ? "(Default)" : ""}
+              </option>
+            ))
+          )}
         </select>
         <p className="mt-1 text-[11px] text-gray-500">
           Current: {config?.deviceName ?? "System Default"}
