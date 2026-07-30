@@ -9,6 +9,15 @@ description = "Noland Connect desktop app"
 authors = ["Noland"]
 edition = "2021"
 default-run = "noland-connect"
+autobins = false
+
+[[bin]]
+name = "noland-connect"
+path = "src/main.rs"
+
+[[bin]]
+name = "moonlight_config"
+path = "src/bin/moonlight_config.rs"
 
 [[bin]]
 name = "noland-mic-sender"
