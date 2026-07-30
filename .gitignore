@@ -4,6 +4,7 @@ src-tauri/target/
 src-tauri/gen/
 src-tauri/bundled/
 src-tauri/binaries/noland-mic-sender-*
+src-tauri/.native-deps/
 vm-cloud-mic-agent/target/
 *.log
 .DS_Store

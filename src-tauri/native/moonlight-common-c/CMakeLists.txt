@@ -60,6 +60,8 @@ if (USE_MBEDTLS)
     # For sub project added via CMake
     target_link_libraries(moonlight-common-c PRIVATE mbedcrypto)
   endif()
+elseif(WIN32)
+  target_link_libraries(moonlight-common-c PRIVATE bcrypt.lib)
 else()
   find_package(OpenSSL 1.0.2 REQUIRED)
   target_link_libraries(moonlight-common-c PRIVATE ${OPENSSL_CRYPTO_LIBRARY})

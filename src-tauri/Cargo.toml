@@ -14,6 +14,7 @@ path = "src/main.rs"
 [[bin]]
 name = "moonlight_config"
 path = "src/bin/moonlight_config.rs"
+required-features = ["moonlight-config-bin"]
 
 [build-dependencies]
 bindgen = "0.70.1"
@@ -55,3 +56,4 @@ x509-parser = "0.16.0"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+moonlight-config-bin = []

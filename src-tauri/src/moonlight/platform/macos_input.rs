@@ -6,6 +6,7 @@ use std::{
     },
 };
 
+#[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tauri::{Runtime, Window};
 
@@ -264,6 +265,11 @@ fn native_capture_mode(mode: MouseMode) -> i32 {
         MouseMode::Relative => 1,
         MouseMode::Absolute => 2,
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn native_capture_mode(_mode: MouseMode) -> i32 {
+    0
 }
 
 #[unsafe(no_mangle)]

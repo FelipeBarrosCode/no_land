@@ -12,6 +12,10 @@
 #define OBLAS_ARCH_RISCV 1
 #endif
 
+#if (defined(__APPLE__) || defined(_WIN32)) && defined(OBLAS_ARCH_X86)
+#define OBLAS_DISABLE_RUNTIME_CPU_DETECT 1
+#endif
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #include <intrin.h>
 #include <stdlib.h>
