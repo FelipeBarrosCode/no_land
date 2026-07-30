@@ -3,6 +3,7 @@
 mod commands;
 mod errors;
 mod input;
+mod mic_client;
 mod models;
 mod moonlight;
 mod services;
@@ -240,6 +241,7 @@ fn main() {
             local_environment_preflight,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
+            disconnect_local_wireguard_client_command,
             setup_wireguard_app_handoff_command,
             verify_wireguard,
             open_wireguard_app_command,
@@ -279,6 +281,14 @@ fn main() {
             get_shared_storage_settings,
             save_shared_storage_settings,
             test_shared_storage_config,
+            list_storage_providers,
+            save_static_provider_credentials,
+            test_shared_storage_connection,
+            get_shared_storage_profiles,
+            set_active_shared_storage_profile,
+            disconnect_shared_storage_profile,
+            begin_oauth_authorization,
+            complete_oauth_authorization,
             trigger_instance_backup,
             trigger_instance_backup_for,
             sync_instance_from_shared_storage,
@@ -308,6 +318,7 @@ fn main() {
             reconnect_instance_mic,
             recreate_instance_mic_device,
             get_instance_mic_status,
+            list_microphones,
             moonlight_get_configuration,
             moonlight_register_host,
             moonlight_refresh_host,

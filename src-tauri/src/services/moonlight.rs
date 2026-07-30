@@ -1073,6 +1073,12 @@ fn force_close_moonlight() -> AppResult<()> {
     Ok(())
 }
 
+impl MoonlightService {
+    pub fn terminate_running_client() -> AppResult<()> {
+        ensure_moonlight_not_running(true)
+    }
+}
+
 fn detect_display(native: bool) -> AppResult<DisplayDetection> {
     let mut detection = detect_display_impl().unwrap_or(DisplayDetection {
         width: 1920,

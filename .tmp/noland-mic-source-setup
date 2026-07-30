@@ -1,0 +1,21 @@
+#!/bin/bash
+set -euo pipefail
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
+rm -f "$FIFO_PATH"
+mkfifo "$FIFO_PATH"
+chmod 644 "$FIFO_PATH"
+existing_module="$(pactl list short modules 2>/dev/null | awk '/module-pipe-source/ && /source_name=noland_remote_microphone/ {print $1; exit}')"
+if [[ -n "$existing_module" ]]; then
+  pactl unload-module "$existing_module" >/dev/null 2>&1 || true
+fi
+if [[ -f "$MODULE_ID_FILE" ]]; then
+  old_module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
+  if [[ -n "$old_module_id" ]]; then
+    pactl unload-module "$old_module_id" >/dev/null 2>&1 || true
+  fi
+  rm -f "$MODULE_ID_FILE"
+fi
+module_id="$(pactl load-module module-pipe-source source_name=noland_remote_microphone file="$FIFO_PATH" format=s16le rate=48000 channels=1 source_properties=device.description='Noland Remote Microphone')"
+echo "$module_id" > "$MODULE_ID_FILE"
+pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true

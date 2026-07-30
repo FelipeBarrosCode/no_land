@@ -1,15 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 
-# Cloud Mic Agent provisioning script for Ubuntu VMs
-# This installs and configures the cloud-mic-agent as a systemd user service
+# Noland Microphone Receiver provisioning script for Ubuntu VMs
+# Installs and configures noland-mic-receiver as a systemd user service.
 
 USER_NAME="${1:-user}"
-AGENT_VERSION="${2:-0.1.0}"
 INSTALL_DIR="/home/$USER_NAME/.local/bin"
 SERVICE_DIR="/home/$USER_NAME/.config/systemd/user"
+CONFIG_DIR="/etc/noland"
+RUNTIME_DIR_BASE="/run/noland"
+STATUS_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.status.json"
 
 uid="$(id -u "$USER_NAME")"
+group_name="$(id -gn "$USER_NAME")"
 runtime_dir="/run/user/${uid}"
 bus_path="${runtime_dir}/bus"
 
@@ -27,44 +30,164 @@ if command -v ip >/dev/null 2>&1; then
 fi
 
 if [ -z "$WG_IP" ]; then
-    echo "Warning: Could not detect WireGuard IP. Agent will bind to 127.0.0.1"
+    echo "Warning: Could not detect WireGuard IP. Receiver will bind to 127.0.0.1"
     WG_IP="127.0.0.1"
 fi
 
-echo "Installing cloud-mic-agent for user: $USER_NAME"
-echo "WireGuard IP detected: $WG_IP"
-
-# Ensure directories exist
-mkdir -p "$INSTALL_DIR"
-mkdir -p "$SERVICE_DIR"
-chown -R "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.local" "/home/$USER_NAME/.config"
-
-# Copy binary (assumes binary is available at /tmp/cloud-mic-agent)
-if [ -f "/tmp/cloud-mic-agent" ]; then
-    cp "/tmp/cloud-mic-agent" "$INSTALL_DIR/cloud-mic-agent"
-    chmod +x "$INSTALL_DIR/cloud-mic-agent"
-    echo "Binary installed to $INSTALL_DIR/cloud-mic-agent"
-else
-    echo "Warning: /tmp/cloud-mic-agent not found. Please build and copy the binary first."
-    echo "  cd vm-cloud-mic-agent && cargo build --release"
-    echo "  scp target/release/cloud-mic-agent user@vm:/tmp/"
+WG_CLIENT_IP=""
+if command -v wg >/dev/null 2>&1; then
+    WG_CLIENT_IP=$(wg show wg0 allowed-ips 2>/dev/null | awk '{for (i = 2; i <= NF; i++) if ($i ~ /\/32$/) {gsub(/\/32$/, "", $i); print $i; exit}}' || true)
+fi
+if [ -z "$WG_CLIENT_IP" ] && [ -f /etc/wireguard/wg0.conf ]; then
+    WG_CLIENT_IP=$(awk -F'= *' '/AllowedIPs/ {split($2, ips, ","); for (i in ips) {gsub(/^ +| +$/, "", ips[i]); if (ips[i] ~ /\/32$/) {sub(/\/32$/, "", ips[i]); print ips[i]; exit}}}' /etc/wireguard/wg0.conf || true)
 fi
 
-# Create systemd user service
-cat > "$SERVICE_DIR/cloud-mic-agent.service" <<EOF
+echo "=== Noland Microphone Receiver Installation ==="
+echo "User:               $USER_NAME"
+echo "WireGuard IP:       $WG_IP"
+echo "WireGuard client:   ${WG_CLIENT_IP:-unknown}"
+echo ""
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y pipewire pipewire-pulse wireplumber pulseaudio-utils \
+  gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+
+# --- Create directories ---
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$SERVICE_DIR"
+mkdir -p "$CONFIG_DIR"
+mkdir -p "$RUNTIME_DIR_BASE"
+chown -R "$USER_NAME:$group_name" "/home/$USER_NAME/.local" "/home/$USER_NAME/.config"
+chown "$USER_NAME:$group_name" "$RUNTIME_DIR_BASE"
+
+# --- Install binary ---
+if [ -f "/tmp/noland-mic-receiver" ]; then
+    cp "/tmp/noland-mic-receiver" "$INSTALL_DIR/noland-mic-receiver"
+    chmod +x "$INSTALL_DIR/noland-mic-receiver"
+    echo "Binary installed to $INSTALL_DIR/noland-mic-receiver"
+else
+    echo "Warning: /tmp/noland-mic-receiver not found."
+    echo "  Build: cd vm-cloud-mic-agent && cargo build --release"
+    echo "  Copy:  scp target/release/noland-mic-receiver user@vm:/tmp/"
+fi
+
+# --- Write configuration ---
+cat > "$CONFIG_DIR/microphone.toml" <<TOML
+[network]
+bind_address = "${WG_IP}"
+port = 48200
+interface = "wg0"
+maximum_packet_size = 1200
+recv_buffer_bytes = 524288
+
+[audio]
+sample_rate = 48000
+channels = 1
+frame_duration_ms = 10
+pipewire_node_name = "noland_remote_microphone"
+pipewire_description = "Noland Remote Microphone"
+
+[jitter]
+initial_ms = 25.0
+minimum_ms = 15.0
+maximum_ms = 60.0
+reorder_window_packets = 64
+
+[security]
+require_active_session = false
+require_packet_authentication = false
+session_timeout_seconds = 5
+TOML
+
+chown "$USER_NAME:$group_name" "$CONFIG_DIR/microphone.toml"
+echo "Configuration written to $CONFIG_DIR/microphone.toml"
+
+# --- Lock down firewall for mic traffic over WireGuard ---
+if command -v ufw >/dev/null 2>&1; then
+    ufw --force enable >/dev/null 2>&1 || true
+    if [ -n "$WG_CLIENT_IP" ] && [ "$WG_IP" != "127.0.0.1" ]; then
+        ufw status | grep -q "from ${WG_CLIENT_IP}/32 to ${WG_IP} port 48200 proto udp" || \
+            ufw allow in on wg0 from "${WG_CLIENT_IP}/32" to "$WG_IP" port 48200 proto udp comment 'Noland mic over WireGuard' >/dev/null 2>&1 || true
+        ufw status | grep -q "deny in on wg0 to ${WG_IP} port 48200 proto udp" || \
+            ufw deny in on wg0 to "$WG_IP" port 48200 proto udp >/dev/null 2>&1 || true
+        echo "Firewall rule ensured for mic UDP 48200 on wg0 from ${WG_CLIENT_IP}/32"
+    else
+        echo "Warning: could not determine WireGuard client IP for mic firewall rule; skipping UFW mic restriction"
+    fi
+else
+    echo "Warning: ufw not installed; skipping mic firewall rule"
+fi
+
+# --- Create PipeWire source helper scripts ---
+cat > "$INSTALL_DIR/noland-mic-source-setup" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
+rm -f "$FIFO_PATH"
+mkfifo "$FIFO_PATH"
+chmod 644 "$FIFO_PATH"
+existing_module="$(pactl list short modules 2>/dev/null | awk '/module-pipe-source/ && /source_name=noland_remote_microphone/ {print $1; exit}')"
+if [[ -n "$existing_module" ]]; then
+  pactl unload-module "$existing_module" >/dev/null 2>&1 || true
+fi
+if [[ -f "$MODULE_ID_FILE" ]]; then
+  old_module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
+  if [[ -n "$old_module_id" ]]; then
+    pactl unload-module "$old_module_id" >/dev/null 2>&1 || true
+  fi
+  rm -f "$MODULE_ID_FILE"
+fi
+module_id="$(pactl load-module module-pipe-source source_name=noland_remote_microphone file="$FIFO_PATH" format=s16le rate=48000 channels=1 source_properties="device.description=Noland Remote Microphone")"
+echo "$module_id" > "$MODULE_ID_FILE"
+pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true
+pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true
+pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true
+EOF
+chmod +x "$INSTALL_DIR/noland-mic-source-setup"
+chown "$USER_NAME:$group_name" "$INSTALL_DIR/noland-mic-source-setup"
+
+cat > "$INSTALL_DIR/noland-mic-source-cleanup" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
+STATUS_FILE="/run/noland/noland_remote_microphone.status.json"
+if [[ -f "$MODULE_ID_FILE" ]]; then
+  module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
+  if [[ -n "$module_id" ]]; then
+    pactl unload-module "$module_id" >/dev/null 2>&1 || true
+  fi
+  rm -f "$MODULE_ID_FILE"
+fi
+rm -f "$FIFO_PATH"
+rm -f "$STATUS_FILE"
+EOF
+chmod +x "$INSTALL_DIR/noland-mic-source-cleanup"
+chown "$USER_NAME:$group_name" "$INSTALL_DIR/noland-mic-source-cleanup"
+
+# --- Create systemd user service ---
+cat > "$SERVICE_DIR/noland-mic-receiver.service" <<EOF
 [Unit]
-Description=Cloud Mic Agent
-After=pipewire.service pipewire-pulse.service
+Description=Noland Remote Microphone Receiver
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
 
 [Service]
 Type=simple
-Environment="CLOUD_MIC_AGENT_BIND=${WG_IP}:34779"
-Environment="CLOUD_MIC_RTP_PORT=34778"
-Environment="CLOUD_MIC_WG_IP=${WG_IP}"
-Environment="RUST_LOG=info"
-ExecStart=${INSTALL_DIR}/cloud-mic-agent
-Restart=on-failure
-RestartSec=5
+ExecStartPre=${INSTALL_DIR}/noland-mic-source-setup
+ExecStart=/usr/bin/bash -lc 'exec ${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_DIR}/microphone.toml --bind ${WG_IP} --port 48200 > /tmp/noland_remote_microphone.pcm'
+ExecStopPost=${INSTALL_DIR}/noland-mic-source-cleanup
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=${RUNTIME_DIR_BASE} /tmp
+LimitNOFILE=4096
 
 [Install]
 WantedBy=default.target
@@ -72,26 +195,49 @@ EOF
 
 echo "Systemd user service created"
 
-# Enable and start service for the user
+# --- Enable and start ---
 if [[ -d "$runtime_dir" && -S "$bus_path" ]]; then
     run_user_systemctl daemon-reload
-    run_user_systemctl enable cloud-mic-agent.service || true
-    run_user_systemctl restart cloud-mic-agent.service || true
+    run_user_systemctl enable noland-mic-receiver.service || true
+    run_user_systemctl restart noland-mic-receiver.service || true
 else
     echo "Warning: user systemd session bus unavailable for $USER_NAME"
-    echo "Expected: XDG_RUNTIME_DIR=$runtime_dir and DBUS socket $bus_path"
 fi
 
-# Verify
-sleep 1
-if [[ -d "$runtime_dir" && -S "$bus_path" ]] && run_user_systemctl is-active cloud-mic-agent.service >/dev/null 2>&1; then
-    echo "Cloud Mic Agent is running"
-    curl -sf "http://${WG_IP}:34779/health" && echo "Health check: OK" || echo "Health check: FAILED"
+# --- Verify ---
+sleep 2
+echo ""
+if [[ -d "$runtime_dir" && -S "$bus_path" ]] && run_user_systemctl is-active noland-mic-receiver.service >/dev/null 2>&1; then
+    echo "[OK] noland-mic-receiver is running"
 else
-    echo "Cloud Mic Agent failed to start. Check logs with:"
-    echo "  sudo -u $USER_NAME XDG_RUNTIME_DIR=$runtime_dir DBUS_SESSION_BUS_ADDRESS=unix:path=$bus_path systemctl --user status cloud-mic-agent.service"
+    echo "[FAIL] noland-mic-receiver failed to start"
+fi
+
+# Check UDP socket
+if ss -uln | grep -q ":48200 "; then
+    echo "[OK] UDP port 48200 is listening"
+else
+    echo "[WARN] UDP port 48200 not detected (may need root for ss/netstat)"
+fi
+
+# Check firewall rule
+if command -v ufw >/dev/null 2>&1 && [ -n "$WG_CLIENT_IP" ] && [ "$WG_IP" != "127.0.0.1" ]; then
+    if ufw status | grep -q "48200/udp"; then
+        echo "[OK] UFW rule for mic UDP 48200 is present"
+    else
+        echo "[WARN] UFW rule for mic UDP 48200 not detected"
+    fi
+fi
+
+# Check Pulse/PipeWire source
+if [[ -d "$runtime_dir" && -S "$bus_path" ]] && sudo -u "$USER_NAME" env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_path}" pactl list short sources 2>/dev/null | grep -q 'noland_remote_microphone'; then
+    echo "[OK] PipeWire microphone source is published"
+else
+    echo "[WARN] PipeWire microphone source not detected"
 fi
 
 echo ""
 echo "Installation complete."
-echo "Manage with: systemctl --user {start|stop|restart|status} cloud-mic-agent.service"
+echo "Manage:  systemctl --user {start|stop|restart|status} noland-mic-receiver.service"
+echo "Logs:    journalctl --user -u noland-mic-receiver.service -f"
+echo "Check:   pactl list short sources | grep noland_remote_microphone"

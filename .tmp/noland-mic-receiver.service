@@ -1,0 +1,21 @@
+[Unit]
+Description=Noland Remote Microphone Receiver
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+Type=simple
+ExecStartPre=/home/user/.local/bin/noland-mic-source-setup
+ExecStart=/usr/bin/bash -lc 'exec /home/user/.local/bin/noland-mic-receiver --config /etc/noland/microphone.toml --bind 10.77.0.1 --port 48200 > /tmp/noland_remote_microphone.pcm'
+ExecStopPost=/home/user/.local/bin/noland-mic-source-cleanup
+Restart=always
+RestartSec=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/run/noland /tmp
+LimitNOFILE=4096
+
+[Install]
+WantedBy=default.target

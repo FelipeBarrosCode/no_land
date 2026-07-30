@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,6 +20,10 @@ pub struct PersistedAppState {
     pub moonlight: MoonlightState,
     pub moonlight_preferences: MoonlightPreferences,
     pub shared_storage: SharedStorageState,
+    #[serde(default)]
+    pub shared_storage_profiles: Vec<crate::models::application_bundle::ProfileReference>,
+    #[serde(default)]
+    pub shared_storage_credentials: SharedStorageCredentialState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
@@ -44,6 +50,8 @@ impl Default for PersistedAppState {
             moonlight: MoonlightState::default(),
             moonlight_preferences: MoonlightPreferences::default(),
             shared_storage: SharedStorageState::default(),
+            shared_storage_profiles: Vec::new(),
+            shared_storage_credentials: SharedStorageCredentialState::default(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
@@ -191,6 +199,14 @@ impl Default for ServerPreferences {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_mic_device_id() -> String {
+    "default".to_string()
+}
+
+fn default_mic_device_name() -> String {
+    "System Default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +606,12 @@ pub struct ProvisionedServerState {
     pub embedded_moonlight_host_id: String,
     #[serde(default)]
     pub embedded_moonlight_paired: bool,
+    #[serde(default = "default_mic_device_id")]
+    pub mic_device_id: String,
+    #[serde(default = "default_mic_device_name")]
+    pub mic_device_name: String,
+    #[serde(default)]
+    pub mic_quality_profile: MicQualityProfile,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -608,6 +630,8 @@ pub struct ProvisionedServerSteps {
     pub post_nvidia_reboot_completed: bool,
     pub sunshine_configured: bool,
     pub low_latency_audio_configured: bool,
+    #[serde(default)]
+    pub mic_receiver_installed: bool,
     pub wireguard_configured: bool,
     pub moonlight_configured: bool,
     pub awaiting_pair_pin: bool,
@@ -636,6 +660,9 @@ impl ProvisionedServerState {
             embedded_moonlight_pipeline_enabled: false,
             embedded_moonlight_host_id: String::new(),
             embedded_moonlight_paired: false,
+            mic_device_id: default_mic_device_id(),
+            mic_device_name: default_mic_device_name(),
+            mic_quality_profile: MicQualityProfile::Standard,
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),
@@ -825,6 +852,30 @@ pub struct SharedStorageSyncSelectionRequest {
     pub selected_paths: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageCredentialState {
+    #[serde(default)]
+    pub profiles: HashMap<String, SharedStorageProfileSecret>,
+    #[serde(default)]
+    pub oauth_sessions: HashMap<String, SharedStorageOAuthSessionSecret>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageProfileSecret {
+    pub credentials: crate::models::application_bundle::StorageCredential,
+    #[serde(default)]
+    pub provider_fields: HashMap<String, String>,
+    pub repository_key_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageOAuthSessionSecret {
+    pub credentials: crate::models::application_bundle::StorageCredential,
+}
+
 // ============================================================
 // Bundle Index + Restore types
 // ============================================================
@@ -938,6 +989,7 @@ pub struct InstanceMicConfig {
     pub channels: u32,
     pub vm_wireguard_ip: String,
     pub rtp_port: u16,
+    pub device_id: String,
     pub device_name: String,
     pub quality_profile: MicQualityProfile,
     pub session_id: Option<String>,
@@ -952,13 +1004,14 @@ impl Default for InstanceMicConfig {
         Self {
             instance_id: 0,
             enabled: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             codec: "opus".to_string(),
             sample_rate: 48000,
             channels: 1,
             vm_wireguard_ip: String::new(),
-            rtp_port: 34778,
-            device_name: "Cloud Mic".to_string(),
+            rtp_port: 48200,
+            device_id: default_mic_device_id(),
+            device_name: default_mic_device_name(),
             quality_profile: MicQualityProfile::Standard,
             session_id: None,
             session_token: None,
@@ -994,7 +1047,7 @@ impl MicQualityProfile {
 
     pub fn frame_ms(&self) -> u32 {
         match self {
-            MicQualityProfile::Standard => 20,
+            MicQualityProfile::Standard => 10,
             MicQualityProfile::LowLatency => 10,
             MicQualityProfile::HighQuality => 20,
         }
@@ -1031,11 +1084,11 @@ impl Default for InstanceMicRuntimeStatus {
             vm_agent_reachable: false,
             device_ready: false,
             receiving_audio: false,
-            transport: "native_rtp_udp".to_string(),
+            transport: "gstreamer_rtp_udp".to_string(),
             sample_rate: 48000,
             channels: 1,
             bitrate_kbps: 32,
-            frame_ms: 20,
+            frame_ms: 10,
             packet_loss_percent: 0.0,
             jitter_ms: 0.0,
             buffer_depth_ms: 0.0,
@@ -1066,6 +1119,7 @@ pub enum MicState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MicSettingsUpdate {
+    pub device_id: Option<String>,
     pub quality_profile: Option<MicQualityProfile>,
 }
 

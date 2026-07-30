@@ -1,3 +1,11 @@
+pub mod shared_storage;
+
+pub use self::shared_storage::{
+    begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
+    get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
+    set_active_shared_storage_profile, test_shared_storage_connection,
+};
+
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -14,6 +22,7 @@ use crate::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
     },
+    mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -79,6 +88,7 @@ use crate::{
         wireguard::{
             locate_gotatun_binary, read_local_wireguard_show_output,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
+            teardown_local_wireguard_client,
         },
     },
     utils::redact::redact_secret,
@@ -2215,6 +2225,41 @@ pub async fn reconnect_local_wireguard_client_quick(
 }
 
 #[tauri::command]
+pub async fn disconnect_local_wireguard_client_command(
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let config_path = {
+        let state = context.state.read().await;
+        if let Some(instance_id) = state.instance.instance_id {
+            if let Some(path) = state
+                .provisioned_servers
+                .iter()
+                .find(|record| record.instance_id == instance_id)
+                .map(|record| record.wireguard_config_path.clone())
+                .filter(|path| std::path::Path::new(path).exists())
+            {
+                path
+            } else {
+                state.wireguard.config_path.clone()
+            }
+        } else {
+            state.wireguard.config_path.clone()
+        }
+    };
+
+    if config_path.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "WireGuard client config path is empty. Nothing to disconnect.".to_string(),
+        )
+        .into());
+    }
+
+    let message = teardown_local_wireguard_client(Path::new(&config_path))?;
+
+    Ok(message)
+}
+
+#[tauri::command]
 pub async fn setup_wireguard_app_handoff_command(
     app: AppHandle,
     context: State<'_, AppContext>,
@@ -3857,11 +3902,72 @@ pub async fn reconnect_instance_wireguard(
     Ok("Opened WireGuard app.".to_string())
 }
 
+async fn teardown_local_instance_session(
+    app: &AppHandle,
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    instance_id: u64,
+) {
+    if let Err(error) = MicPassthroughService::disable(context, instance_id).await {
+        if !matches!(error, AppError::InvalidInput(_)) {
+            warn!(
+                instance_id = instance_id,
+                "Failed to disable mic passthrough during teardown: {}", error
+            );
+        }
+    }
+
+    if let Err(error) = crate::mic_client::cleanup_stale_pipeline_processes() {
+        warn!(
+            instance_id = instance_id,
+            "Failed to clean up stale mic sender processes: {}", error
+        );
+    }
+
+    let active_instance_id = context.load_state().await.instance.instance_id;
+    if active_instance_id != Some(instance_id) {
+        return;
+    }
+
+    if let Err(error) = moonlight.runtime.stop().await {
+        warn!(
+            instance_id = instance_id,
+            "Failed to stop embedded Moonlight runtime: {}", error
+        );
+    }
+    if let Err(error) = moonlight.runtime.detach_surface().await {
+        warn!(
+            instance_id = instance_id,
+            "Failed to detach embedded Moonlight surface: {}", error
+        );
+    }
+    moonlight.input.end_capture();
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = None;
+    }
+    if let Err(error) = close_stream_window(app) {
+        warn!(
+            instance_id = instance_id,
+            "Failed to close Moonlight stream window: {}", error
+        );
+    }
+    if let Err(error) = MoonlightService::terminate_running_client() {
+        warn!(
+            instance_id = instance_id,
+            "Failed to terminate local Moonlight client process: {}", error
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn pause_instance(
+    app: AppHandle,
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
     instance_id: u64,
 ) -> Result<(), FrontendError> {
+    teardown_local_instance_session(&app, context.inner(), moonlight.inner(), instance_id).await;
+
     InstanceLifecycleService::pause_instance(context.inner(), instance_id)
         .await
         .map_err(Into::into)
@@ -3869,9 +3975,13 @@ pub async fn pause_instance(
 
 #[tauri::command]
 pub async fn destroy_instance(
+    app: AppHandle,
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
     instance_id: u64,
 ) -> Result<(), FrontendError> {
+    teardown_local_instance_session(&app, context.inner(), moonlight.inner(), instance_id).await;
+
     InstanceLifecycleService::destroy_instance(context.inner(), instance_id)
         .await
         .map_err(Into::into)
@@ -3977,7 +4087,7 @@ pub async fn update_instance_mic_settings(
     instance_id: u64,
     payload: MicSettingsUpdate,
 ) -> Result<InstanceMicConfig, FrontendError> {
-    MicPassthroughService::update_settings(context.inner(), instance_id, payload.quality_profile)
+    MicPassthroughService::update_settings(context.inner(), instance_id, payload)
         .await
         .map_err(Into::into)
 }
@@ -4031,6 +4141,11 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
+    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]

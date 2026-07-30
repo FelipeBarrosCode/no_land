@@ -2,6 +2,9 @@ node_modules/
 dist/
 src-tauri/target/
 src-tauri/gen/
+src-tauri/bundled/
+src-tauri/binaries/noland-mic-sender-*
+vm-cloud-mic-agent/target/
 *.log
 .DS_Store
 .env

@@ -24,6 +24,7 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
+    mic_receiver::MicReceiverProvisioner,
     moonlight::{detect_client_display_for_provisioning, MoonlightService},
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
@@ -1402,6 +1403,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     instance.id,
                     &[
                         ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MicReceiverInstalled,
                         ProvisionStepMarker::MoonlightConfigured,
                         ProvisionStepMarker::AwaitingPairPin,
                         ProvisionStepMarker::PairingCompleted,
@@ -1471,6 +1473,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 instance.id,
                 &[
                     ProvisionStepMarker::WireguardConfigured,
+                    ProvisionStepMarker::MicReceiverInstalled,
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
@@ -1594,6 +1597,43 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             state.sunshine.configured = true;
         })
         .await?;
+    ensure_not_cancelled(&context)?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        Some(offer.id),
+    )
+    .await?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -2276,6 +2316,7 @@ async fn run_existing_instance_orchestration(
                     instance.id,
                     &[
                         ProvisionStepMarker::WireguardConfigured,
+                        ProvisionStepMarker::MicReceiverInstalled,
                         ProvisionStepMarker::MoonlightConfigured,
                         ProvisionStepMarker::AwaitingPairPin,
                         ProvisionStepMarker::PairingCompleted,
@@ -2345,6 +2386,7 @@ async fn run_existing_instance_orchestration(
                 instance.id,
                 &[
                     ProvisionStepMarker::WireguardConfigured,
+                    ProvisionStepMarker::MicReceiverInstalled,
                     ProvisionStepMarker::MoonlightConfigured,
                     ProvisionStepMarker::AwaitingPairPin,
                     ProvisionStepMarker::PairingCompleted,
@@ -2468,6 +2510,43 @@ async fn run_existing_instance_orchestration(
             state.sunshine.configured = true;
         })
         .await?;
+    ensure_not_cancelled(&context)?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
+        &context,
+        instance.id,
+        ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        offer_id,
+    )
+    .await?;
+
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -3354,6 +3433,7 @@ pub(crate) enum ProvisionStepMarker {
     SunshineConfigured,
     LowLatencyAudioConfigured,
     WireguardConfigured,
+    MicReceiverInstalled,
     MoonlightConfigured,
     AwaitingPairPin,
     PairingCompleted,
@@ -3371,6 +3451,7 @@ fn step_completed(steps: &ProvisionedServerSteps, step: ProvisionStepMarker) -> 
         ProvisionStepMarker::PostNvidiaRebootCompleted => steps.post_nvidia_reboot_completed,
         ProvisionStepMarker::SunshineConfigured => steps.sunshine_configured,
         ProvisionStepMarker::LowLatencyAudioConfigured => steps.low_latency_audio_configured,
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin,
@@ -3394,6 +3475,7 @@ fn set_step_completed(steps: &mut ProvisionedServerSteps, step: ProvisionStepMar
         ProvisionStepMarker::LowLatencyAudioConfigured => {
             steps.low_latency_audio_configured = value
         }
+        ProvisionStepMarker::MicReceiverInstalled => steps.mic_receiver_installed = value,
         ProvisionStepMarker::WireguardConfigured => steps.wireguard_configured = value,
         ProvisionStepMarker::MoonlightConfigured => steps.moonlight_configured = value,
         ProvisionStepMarker::AwaitingPairPin => steps.awaiting_pair_pin = value,
@@ -3424,10 +3506,16 @@ fn determine_resume_step(steps: &ProvisionedServerSteps) -> (OrchestrationState,
             OrchestrationState::ConfiguringMoonlight,
             "Resuming: Moonlight configured, need pairing".to_string(),
         )
+    } else if steps.mic_receiver_installed {
+        (
+            OrchestrationState::ConfiguringWireGuard,
+            "Resuming: Remote microphone receiver installed, continuing post-WireGuard setup"
+                .to_string(),
+        )
     } else if steps.wireguard_configured {
         (
             OrchestrationState::ConfiguringWireGuard,
-            "Resuming: Starting from WireGuard config".to_string(),
+            "Resuming: WireGuard configured, installing remote microphone receiver".to_string(),
         )
     } else if steps.low_latency_audio_configured {
         (

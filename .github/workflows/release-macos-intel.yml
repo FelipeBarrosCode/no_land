@@ -2,6 +2,9 @@ name: Build macOS Intel Binary
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GSTREAMER_VERSION: 1.24.13
+  NOLAND_GSTREAMER_FRAMEWORK: /Library/Frameworks/GStreamer.framework
+  PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/Current/lib/pkgconfig
 
 on:
   workflow_dispatch:
@@ -34,6 +37,15 @@ jobs:
         with:
           targets: x86_64-apple-darwin
 
+      - name: Install macOS GStreamer framework
+        shell: bash
+        run: |
+          curl -L --retry 3 -o /tmp/gstreamer.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-${GSTREAMER_VERSION}-universal.pkg"
+          curl -L --retry 3 -o /tmp/gstreamer-devel.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-devel-${GSTREAMER_VERSION}-universal.pkg"
+          sudo installer -pkg /tmp/gstreamer.pkg -target /
+          sudo installer -pkg /tmp/gstreamer-devel.pkg -target /
+          pkg-config --modversion gstreamer-1.0
+
       - name: Environment diagnostics
         shell: bash
         run: |
@@ -41,6 +53,7 @@ jobs:
           node -v
           npm -v
           command -v ssh || true
+          pkg-config --modversion gstreamer-1.0 || true
 
       - name: Install dependencies
         run: npm ci

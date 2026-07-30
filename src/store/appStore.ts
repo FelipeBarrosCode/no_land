@@ -71,6 +71,14 @@ import {
   openVastBillingBrowserSession as openVastBillingBrowserSessionCommand,
   startVastBrowserAuthSession as startVastBrowserAuthSessionCommand,
   getVastWalletSummary as getVastWalletSummaryCommand,
+  listStorageProviders,
+  saveStaticProviderCredentials,
+  testSharedStorageConnection,
+  getSharedStorageProfiles,
+  setActiveSharedStorageProfile,
+  disconnectSharedStorageProfile,
+  beginOauthAuthorization,
+  completeOauthAuthorization,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -114,6 +122,10 @@ import type {
   VastBrowserBillingSessionResult,
   VastBrowserGeneratedApiKeyResult,
   VastWalletSummary,
+  ProviderDefinition,
+  ProfileReference,
+  SharedStorageProfile,
+  SharedStorageTestResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -191,6 +203,10 @@ interface AppStore {
   startSleepPrevention: () => Promise<string | null>;
   stopSleepPrevention: () => Promise<string | null>;
   sharedStorageSettings: SharedStorageSettingsResponse | null;
+  storageProviders: ProviderDefinition[];
+  sharedStorageProfiles: ProfileReference[];
+  sharedStorageTestResult: SharedStorageTestResult | null;
+  oauthSessionId: string | null;
   backupStatus: BackupStatusResponse | null;
   instanceBackupStatus: SharedStorageInstanceStatus | null;
   loadSharedStorageSettings: () => Promise<void>;
@@ -198,6 +214,27 @@ interface AppStore {
     payload: SharedStorageSettingsUpdate,
   ) => Promise<void>;
   testSharedStorageConfig: () => Promise<string | null>;
+  loadStorageProviders: () => Promise<void>;
+  connectStorageProvider: (
+    provider: string,
+    credentials: Record<string, string>,
+    bucket: string | null,
+    prefix: string | null,
+    displayName: string,
+  ) => Promise<void>;
+  testStorageConnection: (profileId: string) => Promise<void>;
+  loadSharedStorageProfiles: () => Promise<void>;
+  setActiveStorageProfile: (profileId: string) => Promise<void>;
+  disconnectStorageProfile: (profileId: string) => Promise<void>;
+  syncActiveInstanceToSharedStorage: () => Promise<void>;
+  beginOauthFlow: (
+    provider: string,
+    displayName: string,
+    clientId?: string,
+    clientSecret?: string | null,
+    providerFields?: Record<string, string>,
+  ) => Promise<string | null>;
+  completeOauthFlow: (sessionId: string) => Promise<void>;
   triggerBackup: () => Promise<void>;
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
   syncInstanceStorage: (
@@ -686,6 +723,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     vastBrowserAutomationStatus: null,
     vastWalletSummary: null,
     sharedStorageSettings: null,
+    storageProviders: [],
+    sharedStorageProfiles: [],
+    sharedStorageTestResult: null,
+    oauthSessionId: null,
     backupStatus: null,
     instanceBackupStatus: null,
     sunshineSettings: null,
@@ -1388,6 +1429,168 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
+    loadStorageProviders: async () => {
+      try {
+        const providers = await listStorageProviders();
+        set({ storageProviders: providers });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    connectStorageProvider: async (
+      provider,
+      credentials,
+      bucket,
+      prefix,
+      displayName,
+    ) => {
+      await runBusyTask(
+        {
+          key: "storage.connect",
+          label: "Connecting storage",
+          blocking: true,
+        },
+        async () => {
+          const credentialsJson = JSON.stringify(credentials);
+          const profile = await saveStaticProviderCredentials(
+            provider,
+            credentialsJson,
+            bucket,
+            prefix,
+            displayName,
+          );
+          await get().loadSharedStorageProfiles();
+          return profile;
+        },
+        null as unknown as SharedStorageProfile,
+      );
+    },
+
+    testStorageConnection: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.test",
+          label: "Testing connection",
+        },
+        async () => {
+          const result = await testSharedStorageConnection(profileId);
+          set({ sharedStorageTestResult: result });
+          return result;
+        },
+        null as unknown as SharedStorageTestResult,
+      );
+    },
+
+    loadSharedStorageProfiles: async () => {
+      try {
+        const profiles = await getSharedStorageProfiles();
+        set({ sharedStorageProfiles: profiles });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    setActiveStorageProfile: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.profile.activate",
+          label: "Switching storage profile",
+        },
+        async () => {
+          await setActiveSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
+    },
+
+    disconnectStorageProfile: async (profileId) => {
+      await runBusyTask(
+        {
+          key: "storage.disconnect",
+          label: "Disconnecting storage",
+        },
+        async () => {
+          await disconnectSharedStorageProfile(profileId);
+          await get().loadSharedStorageProfiles();
+        },
+        undefined,
+      );
+    },
+
+    syncActiveInstanceToSharedStorage: async () => {
+      await runBusyTask(
+        {
+          key: "storage.sync.active-instance",
+          label: "Whole-instance export removed",
+          detail:
+            "Use the shared storage export flow to choose specific files or folders instead of syncing the whole filesystem.",
+          blocking: true,
+        },
+        async () => {
+          const instanceId = get().appState?.instance.instanceId;
+          if (!instanceId) {
+            throw new Error(
+              "No active instance selected. Start or select a server first.",
+            );
+          }
+          throw new Error(
+            "Whole-instance shared-storage export has been removed. Use Export Selected Files from the dashboard/shared storage UI.",
+          );
+        },
+        null,
+      );
+    },
+
+    beginOauthFlow: async (
+      provider,
+      displayName,
+      clientId,
+      clientSecret,
+      providerFields,
+    ) => {
+      try {
+        const response = await beginOauthAuthorization(
+          provider,
+          displayName,
+          clientId || "",
+          clientSecret || null,
+          JSON.stringify(providerFields || {}),
+        );
+        set({ oauthSessionId: response.sessionId });
+        if ("__TAURI_INTERNALS__" in window) {
+          const { openUrl } = await import("@tauri-apps/plugin-opener");
+          await openUrl(response.authorizationUrl);
+        } else {
+          window.open(response.authorizationUrl, "_blank", "noopener,noreferrer");
+        }
+        return response.sessionId;
+      } catch (error) {
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
+    completeOauthFlow: async (sessionId) => {
+      await runBusyTask(
+        {
+          key: "storage.oauth.complete",
+          label: "Completing authorization",
+        },
+        async () => {
+          const result = await completeOauthAuthorization(sessionId);
+          set({ oauthSessionId: null });
+          await get().loadSharedStorageProfiles();
+          return result;
+        },
+        null as never,
+      );
+      if (get().error) {
+        set({ oauthSessionId: null });
+      }
+    },
+
     triggerBackup: async () => {
       set({ busy: true, error: null });
       try {
@@ -1793,6 +1996,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           await pauseInstance(instanceId);
+          set((state) => ({
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );
@@ -1810,7 +2020,14 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => {
           await destroyInstance(instanceId);
           const appState = await getAppState();
-          set({ appState });
+          set((state) => ({
+            appState,
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );
