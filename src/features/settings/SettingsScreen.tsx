@@ -1070,7 +1070,7 @@ export function SettingsScreen({
   const storagePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Shared Storage
+        Shared Storage (BETA)
       </h2>
       <div className="mt-4">
         <SharedStorageSettingsV2
@@ -1195,7 +1195,7 @@ export function SettingsScreen({
                 variant={section === "storage" ? "secondary" : "ghost"}
                 onClick={() => setSection("storage")}
               >
-                Shared Storage
+                Shared Storage (BETA)
               </Button>
               <Button
                 variant={section === "connection" ? "secondary" : "ghost"}
