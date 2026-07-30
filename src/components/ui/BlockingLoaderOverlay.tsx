@@ -48,7 +48,7 @@ export function BlockingLoaderOverlay({ action, inline = false, className }: Pro
       aria-busy="true"
       aria-live="polite"
       className={clsx(
-        "glass-panel pixel-frame w-full max-w-xl p-6 text-left shadow-[0_0_30px_rgba(68,214,255,0.2)]",
+        "glass-panel pixel-frame max-h-[80vh] w-full max-w-xl overflow-y-auto p-6 text-left shadow-[0_0_30px_rgba(68,214,255,0.2)]",
         className
       )}
     >

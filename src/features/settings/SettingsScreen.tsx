@@ -7,14 +7,15 @@ import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { SharedStorageSettings } from "../shared-storage-manager/SharedStorageSettings";
+import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import type {
   MoonlightPreferences,
   PlatformCredentialsUpdate,
   PersistedAppState,
+  ProfileReference,
+  ProviderDefinition,
   ServerPreferencesUpdate,
-  SharedStorageSettingsResponse,
-  SharedStorageSettingsUpdate,
+  SharedStorageTestResult,
   SshCredentialsUpdate,
   VastBrowserAutomationStatus,
   VastBrowserBillingAction,
@@ -58,8 +59,31 @@ type ClientForm = {
 interface Props {
   appState: PersistedAppState;
   busy: boolean;
-  sharedStorageSettings: SharedStorageSettingsResponse | null;
   vastAutomationStatus: VastBrowserAutomationStatus | null;
+  storageProviders: ProviderDefinition[];
+  sharedStorageProfiles: ProfileReference[];
+  sharedStorageTestResult: SharedStorageTestResult | null;
+  onLoadStorageProviders: () => Promise<void>;
+  onConnectStorageProvider: (
+    provider: string,
+    credentials: Record<string, string>,
+    bucket: string | null,
+    prefix: string | null,
+    displayName: string,
+  ) => Promise<void>;
+  onTestStorageConnection: (profileId: string) => Promise<void>;
+  onLoadSharedStorageProfiles: () => Promise<void>;
+  onSetActiveStorageProfile: (profileId: string) => Promise<void>;
+  onDisconnectStorageProfile: (profileId: string) => Promise<void>;
+  oauthSessionId: string | null;
+  onBeginOauthFlow: (
+    provider: string,
+    displayName: string,
+    clientId?: string,
+    clientSecret?: string | null,
+    providerFields?: Record<string, string>,
+  ) => Promise<string | null>;
+  onCompleteOauthFlow: (sessionId: string) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
   onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
   onConnectVastBrowser: () => Promise<unknown>;
@@ -81,11 +105,6 @@ interface Props {
     mode: "auto_detect" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
-  onSaveSharedStorageSettings: (
-    payload: SharedStorageSettingsUpdate,
-  ) => Promise<void>;
-  onTestSharedStorageConfig: () => Promise<string | null>;
-  onLoadSharedStorageSettings: () => Promise<void>;
   onSaveConnectionProvider: (payload: {
     connectionProvider: "wireguard";
   }) => Promise<void>;
@@ -188,8 +207,19 @@ function SelectField({
 export function SettingsScreen({
   appState,
   busy,
-  sharedStorageSettings,
   vastAutomationStatus,
+  storageProviders,
+  sharedStorageProfiles,
+  sharedStorageTestResult,
+  onLoadStorageProviders,
+  onConnectStorageProvider,
+  onTestStorageConnection,
+  onLoadSharedStorageProfiles,
+  onSetActiveStorageProfile,
+  onDisconnectStorageProfile,
+  oauthSessionId,
+  onBeginOauthFlow,
+  onCompleteOauthFlow,
   onSaveApiKey,
   onRefreshVastAutomationStatus,
   onConnectVastBrowser,
@@ -200,9 +230,6 @@ export function SettingsScreen({
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
   onRegenerateEdid,
-  onSaveSharedStorageSettings,
-  onTestSharedStorageConfig,
-  onLoadSharedStorageSettings,
   onSaveConnectionProvider,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
@@ -305,9 +332,7 @@ export function SettingsScreen({
     });
   }, [appState]);
 
-  useEffect(() => {
-    void onLoadSharedStorageSettings();
-  }, []);
+
 
   void vastAutomationStatus;
   void onRefreshVastAutomationStatus;
@@ -1045,14 +1070,23 @@ export function SettingsScreen({
   const storagePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Shared Storage
+        Shared Storage (BETA)
       </h2>
       <div className="mt-4">
-        <SharedStorageSettings
-          settings={sharedStorageSettings}
+        <SharedStorageSettingsV2
           busy={busy}
-          onSave={onSaveSharedStorageSettings}
-          onTest={onTestSharedStorageConfig}
+          providers={storageProviders}
+          profiles={sharedStorageProfiles}
+          testResult={sharedStorageTestResult}
+          oauthSessionId={oauthSessionId}
+          onConnectProvider={onConnectStorageProvider}
+          onTestConnection={onTestStorageConnection}
+          onSetActiveProfile={onSetActiveStorageProfile}
+          onDisconnect={onDisconnectStorageProfile}
+          onLoadProviders={onLoadStorageProviders}
+          onLoadProfiles={onLoadSharedStorageProfiles}
+          onBeginOauthFlow={onBeginOauthFlow}
+          onCompleteOauthFlow={onCompleteOauthFlow}
         />
       </div>
     </Card>
@@ -1161,7 +1195,7 @@ export function SettingsScreen({
                 variant={section === "storage" ? "secondary" : "ghost"}
                 onClick={() => setSection("storage")}
               >
-                Shared Storage
+                Shared Storage (BETA)
               </Button>
               <Button
                 variant={section === "connection" ? "secondary" : "ghost"}

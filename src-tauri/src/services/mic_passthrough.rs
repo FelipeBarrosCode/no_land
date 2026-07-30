@@ -1,21 +1,44 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
+use parking_lot::Mutex as SyncMutex;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
+use crate::mic_client::device_list::{self, MicrophoneDevice};
+use crate::mic_client::{self, MicClientConfig, MicClientHandle};
 use crate::models::app_state::{
-    InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse, MicState,
+    InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse,
+    MicSettingsUpdate, MicState,
 };
 
-use super::{app_context::AppContext, remote_exec::RemoteExec};
+use super::{
+    app_context::AppContext, mic_receiver::MicReceiverProvisioner, remote_exec::RemoteExec,
+};
 
 /// In-memory mic session tracking per instance.
 static MIC_SESSIONS: std::sync::OnceLock<RwLock<HashMap<u64, MicSession>>> =
     std::sync::OnceLock::new();
 
+/// Pipeline handles keyed by instance_id.
+static MIC_HANDLES: std::sync::OnceLock<SyncMutex<HashMap<u64, MicClientHandle>>> =
+    std::sync::OnceLock::new();
+static MIC_DEVICE_CACHE: std::sync::OnceLock<SyncMutex<Option<CachedDeviceList>>> =
+    std::sync::OnceLock::new();
+
 fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
     MIC_SESSIONS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn get_mic_handles() -> &'static SyncMutex<HashMap<u64, MicClientHandle>> {
+    MIC_HANDLES.get_or_init(|| SyncMutex::new(HashMap::new()))
+}
+
+fn get_mic_device_cache() -> &'static SyncMutex<Option<CachedDeviceList>> {
+    MIC_DEVICE_CACHE.get_or_init(|| SyncMutex::new(None))
 }
 
 #[derive(Debug, Clone)]
@@ -27,6 +50,12 @@ struct MicSession {
     quality_profile: MicQualityProfile,
 }
 
+#[derive(Debug, Clone)]
+struct CachedDeviceList {
+    fetched_at: Instant,
+    devices: Vec<MicrophoneDevice>,
+}
+
 /// Microphone passthrough service.
 ///
 /// Manages mic configuration, sessions, and VM agent communication
@@ -34,6 +63,27 @@ struct MicSession {
 pub struct MicPassthroughService;
 
 impl MicPassthroughService {
+    /// List available recording devices on this machine.
+    pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
+        const CACHE_TTL: Duration = Duration::from_secs(30);
+
+        if let Some(cached) = get_mic_device_cache()
+            .lock()
+            .as_ref()
+            .filter(|cached| cached.fetched_at.elapsed() < CACHE_TTL)
+            .cloned()
+        {
+            return Ok(cached.devices);
+        }
+
+        let devices = device_list::list_devices()?;
+        *get_mic_device_cache().lock() = Some(CachedDeviceList {
+            fetched_at: Instant::now(),
+            devices: devices.clone(),
+        });
+        Ok(devices)
+    }
+
     /// Get mic configuration for an instance.
     pub async fn get_config(
         context: &AppContext,
@@ -48,10 +98,14 @@ impl MicPassthroughService {
             .find(|s| s.instance_id == instance_id)
             .ok_or_else(|| AppError::NotFound(format!("Instance {} not found", instance_id)))?;
 
-        // Build config from state + defaults
+        // Build config from persisted state + defaults
         let mut config = InstanceMicConfig::default();
         config.instance_id = instance_id;
         config.vm_wireguard_ip = server.wireguard_server_ip.clone();
+        config.device_id = normalize_device_id(&server.mic_device_id);
+        config.device_name =
+            resolved_device_name(&config.device_id, server.mic_device_name.as_str());
+        config.quality_profile = server.mic_quality_profile.clone();
 
         // If we have an active session, include it
         let sessions = get_mic_sessions().read().await;
@@ -71,25 +125,47 @@ impl MicPassthroughService {
     pub async fn update_settings(
         context: &AppContext,
         instance_id: u64,
-        quality_profile: Option<MicQualityProfile>,
+        payload: MicSettingsUpdate,
     ) -> AppResult<InstanceMicConfig> {
-        let mut config = Self::get_config(context, instance_id).await?;
+        let current_config = Self::get_config(context, instance_id).await?;
+        let device_id = payload
+            .device_id
+            .as_deref()
+            .map(normalize_device_id)
+            .unwrap_or_else(|| current_config.device_id.clone());
+        let device_name = resolve_selected_device_name(&device_id)?;
+        let quality_profile = payload
+            .quality_profile
+            .unwrap_or_else(|| current_config.quality_profile.clone());
 
-        if let Some(profile) = quality_profile {
-            config.quality_profile = profile;
-        }
+        context
+            .update_state(move |state| {
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+                {
+                    server.mic_device_id = device_id.clone();
+                    server.mic_device_name = device_name.clone();
+                    server.mic_quality_profile = quality_profile.clone();
+                }
+            })
+            .await?;
 
-        // If currently enabled, update the running session
-        let sessions = get_mic_sessions().read().await;
-        if sessions.contains_key(&instance_id) {
-            drop(sessions);
+        let was_active = {
+            let sessions = get_mic_sessions().read().await;
+            sessions.contains_key(&instance_id)
+        };
+
+        if was_active {
             info!(
                 instance_id = instance_id,
-                "Mic settings updated while streaming; will apply on next session"
+                "Mic settings updated while streaming; reconnecting to apply changes"
             );
+            let _ = Self::reconnect(context, instance_id).await?;
         }
 
-        Ok(config)
+        Self::get_config(context, instance_id).await
     }
 
     /// Enable microphone passthrough for an instance.
@@ -98,6 +174,7 @@ impl MicPassthroughService {
         instance_id: u64,
         requested_profile: Option<MicQualityProfile>,
     ) -> AppResult<MicSessionResponse> {
+        let persisted_config = Self::get_config(context, instance_id).await?;
         let state = context.load_state().await;
 
         // Verify instance exists and is running
@@ -123,12 +200,75 @@ impl MicPassthroughService {
             }
         }
 
-        let profile = requested_profile.unwrap_or(MicQualityProfile::Standard);
+        let requested_profile_supplied = requested_profile.is_some();
+        let profile = requested_profile.unwrap_or_else(|| persisted_config.quality_profile.clone());
+        if requested_profile_supplied && profile != server.mic_quality_profile {
+            let device_id = server.mic_device_id.clone();
+            let device_name = server.mic_device_name.clone();
+            let profile_for_save = profile.clone();
+            context
+                .update_state(move |state| {
+                    if let Some(server) = state
+                        .provisioned_servers
+                        .iter_mut()
+                        .find(|server| server.instance_id == instance_id)
+                    {
+                        server.mic_device_id = device_id.clone();
+                        server.mic_device_name = device_name.clone();
+                        server.mic_quality_profile = profile_for_save.clone();
+                    }
+                })
+                .await?;
+        }
+
+        let selected_device_id = normalize_device_id(&persisted_config.device_id);
+        let selected_device_name =
+            resolved_device_name(&selected_device_id, persisted_config.device_name.as_str());
+        let capture_device_id = if selected_device_id == "default" {
+            None
+        } else {
+            Some(selected_device_id.clone())
+        };
+
         let session_id = uuid::Uuid::new_v4().to_string();
         let session_token = generate_session_token();
         let ssrc: u32 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFF) as u32;
-        let rtp_port = 34778u16;
+        let session_id_u64: u64 = (uuid::Uuid::new_v4().as_u128() & 0xFFFFFFFFFFFFFFFF) as u64;
+        let receiver_port: u16 = 48200u16;
         let started_at = chrono::Local::now().to_rfc3339();
+
+        // ── Start the audio capture + encode + transport pipeline ──
+        let secret_bytes = session_token.as_bytes().to_vec();
+        let remote_addr = format!("{}:{}", server.wireguard_server_ip.trim(), receiver_port);
+
+        let pipeline_config = MicClientConfig {
+            device_id: capture_device_id,
+            quality_profile: profile.clone(),
+            session_id: session_id_u64,
+            session_secret: secret_bytes,
+            ssrc,
+            remote_addr: remote_addr.clone(),
+        };
+
+        let handle = match mic_client::start_pipeline(pipeline_config) {
+            Ok(handle) => handle,
+            Err(error) => {
+                return Err(AppError::Provisioning(format!(
+                    "Failed to start local microphone capture for '{}': {}",
+                    selected_device_name, error
+                )));
+            }
+        };
+        {
+            let mut handles = get_mic_handles().lock();
+            if let Some(mut previous) = handles.insert(instance_id, handle) {
+                previous.stop();
+                warn!(
+                    instance_id = instance_id,
+                    "Replaced an existing stale mic sender handle"
+                );
+            }
+        }
 
         let session = MicSession {
             session_id: session_id.clone(),
@@ -138,16 +278,25 @@ impl MicPassthroughService {
             quality_profile: profile.clone(),
         };
 
-        // Store session
         {
             let mut sessions = get_mic_sessions().write().await;
             sessions.insert(instance_id, session);
         }
 
-        // Try to notify VM agent (best effort for MVP)
+        // Try to notify VM agent and recreate the remote device first.
         if let Ok(remote) = build_remote_exec_for_instance(context, instance_id).await {
             let target_user = context.config.audio_target_user.clone();
             let peer_ip = state.wireguard.client_ip.clone();
+
+            if let Err(error) =
+                Self::recreate_or_install_remote_device(&remote, &target_user, instance_id).await
+            {
+                warn!(
+                    instance_id = instance_id,
+                    "VM agent device recreation failed before mic start (non-fatal): {}", error
+                );
+            }
+
             let start_result = Self::call_vm_agent_start_session(
                 &remote,
                 &target_user,
@@ -156,7 +305,7 @@ impl MicPassthroughService {
                 &session_token,
                 &peer_ip,
                 ssrc,
-                rtp_port,
+                receiver_port,
                 &profile,
             )
             .await;
@@ -170,7 +319,8 @@ impl MicPassthroughService {
             instance_id = instance_id,
             session_id = %session_id,
             ssrc = ssrc,
-            "Microphone passthrough enabled"
+            remote_addr = %remote_addr,
+            "Microphone passthrough enabled with audio pipeline"
         );
 
         Ok(MicSessionResponse {
@@ -178,7 +328,7 @@ impl MicPassthroughService {
             session_token,
             ssrc,
             vm_wireguard_ip: server.wireguard_server_ip.clone(),
-            rtp_port,
+            rtp_port: receiver_port,
             sample_rate: 48000,
             channels: 1,
             frame_ms: profile.frame_ms(),
@@ -193,6 +343,15 @@ impl MicPassthroughService {
             let mut sessions = get_mic_sessions().write().await;
             sessions.remove(&instance_id)
         };
+
+        // Stop the audio pipeline even if the session record was lost.
+        {
+            let mut handles = get_mic_handles().lock();
+            if let Some(mut handle) = handles.remove(&instance_id) {
+                handle.stop();
+                info!(instance_id = instance_id, "Mic audio pipeline stopped");
+            }
+        }
 
         if session.is_none() {
             return Err(AppError::InvalidInput(
@@ -218,17 +377,11 @@ impl MicPassthroughService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<MicSessionResponse> {
-        // Get current profile before removing
-        let current_profile = {
-            let sessions = get_mic_sessions().read().await;
-            sessions
-                .get(&instance_id)
-                .map(|s| s.quality_profile.clone())
-        };
+        let current_config = Self::get_config(context, instance_id).await?;
 
-        // Disable then enable
+        // Disable then enable using the persisted settings.
         let _ = Self::disable(context, instance_id).await;
-        Self::enable(context, instance_id, current_profile).await
+        Self::enable(context, instance_id, Some(current_config.quality_profile)).await
     }
 
     /// Recreate the Cloud Mic device on the VM.
@@ -236,7 +389,7 @@ impl MicPassthroughService {
         let remote = build_remote_exec_for_instance(context, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
-        Self::call_vm_agent_recreate_device(&remote, &target_user).await?;
+        Self::recreate_or_install_remote_device(&remote, &target_user, instance_id).await?;
         info!(
             instance_id = instance_id,
             "Cloud Mic device recreated on VM"
@@ -249,20 +402,24 @@ impl MicPassthroughService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<InstanceMicRuntimeStatus> {
-        let remote = build_remote_exec_for_instance(context, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-
         let mut status = InstanceMicRuntimeStatus::default();
 
-        // Check if we have a local session
+        // Check if we have a local session. When the mic is disabled, avoid any
+        // expensive remote SSH status probes entirely.
         {
             let sessions = get_mic_sessions().read().await;
             if let Some(session) = sessions.get(&instance_id) {
                 status.enabled = true;
                 status.bitrate_kbps = session.quality_profile.bitrate_kbps();
                 status.frame_ms = session.quality_profile.frame_ms();
+            } else {
+                status.state = MicState::Disabled;
+                return Ok(status);
             }
         }
+
+        let remote = build_remote_exec_for_instance(context, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
 
         // Try to get VM agent status
         match Self::call_vm_agent_status(&remote, &target_user).await {
@@ -301,35 +458,18 @@ impl MicPassthroughService {
     async fn call_vm_agent_start_session(
         remote: &RemoteExec,
         target_user: &str,
-        vm_wg_ip: &str,
-        session_id: &str,
-        session_token: &str,
-        peer_ip: &str,
-        ssrc: u32,
-        rtp_port: u16,
-        profile: &MicQualityProfile,
+        _vm_wg_ip: &str,
+        _session_id: &str,
+        _session_token: &str,
+        _peer_ip: &str,
+        _ssrc: u32,
+        _rtp_port: u16,
+        _profile: &MicQualityProfile,
     ) -> AppResult<()> {
-        let body = serde_json::json!({
-            "sessionId": session_id,
-            "sessionToken": session_token,
-            "expectedPeerIp": peer_ip,
-            "ssrc": ssrc,
-            "rtpPort": rtp_port,
-            "codec": "opus",
-            "sampleRate": 48000,
-            "channels": 1,
-            "frameMs": profile.frame_ms(),
-            "bitrateKbps": profile.bitrate_kbps(),
-        });
-
-        let cmd = format!(
-            "sudo -u {user} curl -sf -X POST http://{ip}:34779/session/start \
-             -H 'Content-Type: application/json' \
-             -d '{body}' 2>&1",
-            user = target_user,
-            ip = vm_wg_ip,
-            body = shell_escape(&body.to_string()),
-        );
+        let cmd = remote_user_bus_command(
+            target_user,
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; source_present=false; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; if ! run_user systemctl --user is-active --quiet noland-mic-receiver.service; then run_user systemctl --user start noland-mic-receiver.service; fi; if [[ \"$source_present\" != true ]]; then sleep 1; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; fi; run_user pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true; run_user pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
+        )?;
 
         let output = {
             let r = remote.clone();
@@ -340,8 +480,9 @@ impl MicPassthroughService {
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
-                "VM agent session/start failed: {}",
-                output.stderr.trim()
+                "Remote mic session/start failed: {} {}",
+                output.stderr.trim(),
+                output.stdout.trim()
             )));
         }
 
@@ -349,10 +490,10 @@ impl MicPassthroughService {
     }
 
     async fn call_vm_agent_stop_session(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-        let cmd = format!(
-            "sudo -u {user} curl -sf -X POST http://localhost:34779/session/stop 2>&1",
-            user = target_user,
-        );
+        let cmd = remote_user_bus_command(
+            target_user,
+            "if [[ -S \"$bus_path\" ]]; then run_user systemctl --user start noland-mic-receiver.service >/dev/null 2>&1 || true; fi",
+        )?;
 
         let output = {
             let r = remote.clone();
@@ -363,8 +504,9 @@ impl MicPassthroughService {
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
-                "VM agent session/stop failed: {}",
-                output.stderr.trim()
+                "Remote mic session/stop failed: {} {}",
+                output.stderr.trim(),
+                output.stdout.trim()
             )));
         }
 
@@ -375,10 +517,10 @@ impl MicPassthroughService {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<()> {
-        let cmd = format!(
-            "sudo -u {user} curl -sf -X POST http://localhost:34779/device/recreate 2>&1",
-            user = target_user,
-        );
+        let cmd = remote_user_bus_command(
+            target_user,
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user stop noland-mic-receiver.service >/dev/null 2>&1 || true; pkill -9 -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1 || true; sleep 1; run_user systemctl --user start noland-mic-receiver.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then break; fi; sleep 1; done; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; run_user pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true; run_user pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
+        )?;
 
         let output = {
             let r = remote.clone();
@@ -389,22 +531,50 @@ impl MicPassthroughService {
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
-                "VM agent device/recreate failed: {}",
-                output.stderr.trim()
+                "Remote mic device/recreate failed: {} {}",
+                output.stderr.trim(),
+                output.stdout.trim()
             )));
         }
 
         Ok(())
     }
 
+    async fn recreate_or_install_remote_device(
+        remote: &RemoteExec,
+        target_user: &str,
+        instance_id: u64,
+    ) -> AppResult<()> {
+        match Self::call_vm_agent_recreate_device(remote, target_user).await {
+            Ok(()) => Ok(()),
+            Err(recreate_error) => {
+                warn!(
+                    instance_id = instance_id,
+                    "Remote mic recreate failed; attempting install/build fallback: {}",
+                    recreate_error
+                );
+
+                MicReceiverProvisioner::install(remote, target_user).await?;
+                Self::call_vm_agent_recreate_device(remote, target_user)
+                    .await
+                    .map_err(|retry_error| {
+                        AppError::Provisioning(format!(
+                            "Remote mic recreate failed after install/build fallback. initial_error: {}; retry_error: {}",
+                            recreate_error, retry_error
+                        ))
+                    })
+            }
+        }
+    }
+
     async fn call_vm_agent_status(
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<VmAgentStatus> {
-        let cmd = format!(
-            "sudo -u {user} curl -sf http://localhost:34779/status 2>&1",
-            user = target_user,
-        );
+        let cmd = remote_user_bus_command(
+            target_user,
+            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; receiver_active=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_active=true; fi; receiver_process=false; if pgrep -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1; then receiver_process=true; fi; udp_listening=false; if ss -uln | grep -q \":48200 \">/dev/null 2>&1; then udp_listening=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; device_ready=false; if [[ \"$source_present\" = true ]] && ([[ \"$receiver_active\" = true ]] || [[ \"$receiver_process\" = true ]] || [[ \"$udp_listening\" = true ]]); then device_ready=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$device_ready\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json, os; raw = os.environ.get(\\\"STATUS_JSON\\\", \\\"{}\\\"); status = json.loads(raw) if raw.strip() else {}; out = {\\\"deviceReady\\\": os.environ.get(\\\"DEVICE_READY\\\", \\\"\\\").lower() == \\\"true\\\", \\\"receivingAudio\\\": bool(status.get(\\\"receivingAudio\\\", False)), \\\"packetLossPercent\\\": float(status.get(\\\"packetLossPercent\\\", 0.0) or 0.0), \\\"jitterMs\\\": float(status.get(\\\"jitterMs\\\", 0.0) or 0.0), \\\"bufferDepthMs\\\": float(status.get(\\\"bufferDepthMs\\\", 0.0) or 0.0), \\\"lastPacketMsAgo\\\": status.get(\\\"lastPacketMsAgo\\\"), \\\"pipewireConnected\\\": os.environ.get(\\\"PIPEWIRE_CONNECTED\\\", \\\"\\\").lower() == \\\"true\\\", \\\"defaultSource\\\": os.environ.get(\\\"DEFAULT_SOURCE\\\", \\\"\\\").lower() == \\\"true\\\"}; print(json.dumps(out, separators=(\\\",\\\", \\\":\\\")))\"",
+        )?;
 
         let output = {
             let r = remote.clone();
@@ -415,14 +585,15 @@ impl MicPassthroughService {
 
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
-                "VM agent status check failed: {}",
-                output.stderr.trim()
+                "Remote mic status check failed: {} {}",
+                output.stderr.trim(),
+                output.stdout.trim()
             )));
         }
 
         let status: VmAgentStatus = serde_json::from_str(&output.stdout).map_err(|e| {
             AppError::Serialization(format!(
-                "Failed to parse VM agent status: {e}. Raw: {}",
+                "Failed to parse remote mic status: {e}. Raw: {}",
                 &output.stdout[..output.stdout.len().min(200)]
             ))
         })?;
@@ -451,11 +622,10 @@ impl MicPassthroughService {
             return MicState::CloudMicMissing;
         }
 
-        if status.packet_loss_percent > 10.0 {
-            return MicState::PacketLossHigh;
-        }
-
         if status.receiving_audio {
+            if status.packet_loss_percent > 10.0 {
+                return MicState::PacketLossHigh;
+            }
             return MicState::Streaming;
         }
 
@@ -493,6 +663,46 @@ fn generate_session_token() -> String {
     bytes.extend_from_slice(u1.as_bytes());
     bytes.extend_from_slice(u2.as_bytes());
     base64::engine::general_purpose::STANDARD.encode(&bytes)
+}
+
+fn normalize_device_id(device_id: &str) -> String {
+    let trimmed = device_id.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        "default".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn resolved_device_name(device_id: &str, fallback_name: &str) -> String {
+    if device_id == "default" {
+        return "System Default".to_string();
+    }
+
+    let trimmed = fallback_name.trim();
+    if trimmed.is_empty() {
+        device_id.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn resolve_selected_device_name(device_id: &str) -> AppResult<String> {
+    if device_id == "default" {
+        return Ok("System Default".to_string());
+    }
+
+    let devices = device_list::list_devices()?;
+    devices
+        .into_iter()
+        .find(|device| device.id == device_id)
+        .map(|device| device.name)
+        .ok_or_else(|| {
+            AppError::InvalidInput(format!(
+                "Microphone device '{}' is no longer available on this machine.",
+                device_id
+            ))
+        })
 }
 
 async fn build_remote_exec_for_instance(
@@ -534,8 +744,21 @@ async fn build_remote_exec_for_instance(
     })
 }
 
-fn shell_escape(input: &str) -> String {
-    input.replace('\'', "'\"'\"'")
+fn remote_user_bus_command(target_user: &str, body: &str) -> AppResult<String> {
+    if !target_user
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Invalid audio target user '{}'.",
+            target_user
+        )));
+    }
+
+    Ok(format!(
+        "sudo bash -lc 'set -euo pipefail; USER_NAME=\"{}\"; uid=$(id -u \"$USER_NAME\"); runtime_dir=\"/run/user/$uid\"; bus_path=\"$runtime_dir/bus\"; run_user() {{ sudo -u \"$USER_NAME\" env XDG_RUNTIME_DIR=\"$runtime_dir\" DBUS_SESSION_BUS_ADDRESS=\"unix:path=$bus_path\" \"$@\"; }}; {}'",
+        target_user, body
+    ))
 }
 
 #[cfg(test)]

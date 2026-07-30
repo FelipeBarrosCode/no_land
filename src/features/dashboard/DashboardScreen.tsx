@@ -8,6 +8,7 @@ import type { BlockingActionState } from "../../components/ui/BlockingLoaderOver
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
+import { MicControls } from "../../components/ui/MicControls";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import {
@@ -483,6 +484,11 @@ export function DashboardScreen({
                       onSyncStorage={handleSyncStorage}
                     />
                   </div>
+                  {instance.status.toLowerCase().includes("run") && (
+                    <div className="mt-3">
+                      <MicControls instanceId={instance.instanceId} />
+                    </div>
+                  )}
 
                 </Card>
               ))}

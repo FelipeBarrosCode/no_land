@@ -19,6 +19,10 @@ import type {
   SshCredentialsUpdate,
   SharedStorageSettingsResponse,
   SharedStorageSettingsUpdate,
+  SharedStorageProfile,
+  SharedStorageTestResult,
+  ProviderDefinition,
+  ProfileReference,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
@@ -32,6 +36,7 @@ import type {
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
+  MicrophoneDevice,
   MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
   EmbeddedMoonlightInstanceStatus,
@@ -514,6 +519,85 @@ export async function testSharedStorageConfig(): Promise<string> {
   return invokeSafe<string>("test_shared_storage_config");
 }
 
+export async function listStorageProviders(): Promise<ProviderDefinition[]> {
+  return invokeSafe<ProviderDefinition[]>("list_storage_providers");
+}
+
+export async function saveStaticProviderCredentials(
+  provider: string,
+  credentialsJson: string,
+  bucket: string | null,
+  prefix: string | null,
+  displayName: string,
+): Promise<SharedStorageProfile> {
+  return invokeSafe<SharedStorageProfile>("save_static_provider_credentials", {
+    provider,
+    credentialsJson,
+    bucket,
+    prefix,
+    displayName,
+  });
+}
+
+export async function testSharedStorageConnection(
+  profileId: string,
+): Promise<SharedStorageTestResult> {
+  return invokeSafe<SharedStorageTestResult>("test_shared_storage_connection", {
+    profileId,
+  });
+}
+
+export async function getSharedStorageProfiles(): Promise<ProfileReference[]> {
+  return invokeSafe<ProfileReference[]>("get_shared_storage_profiles");
+}
+
+export async function setActiveSharedStorageProfile(
+  profileId: string,
+): Promise<void> {
+  return invokeSafe<void>("set_active_shared_storage_profile", { profileId });
+}
+
+export async function disconnectSharedStorageProfile(
+  profileId: string,
+): Promise<void> {
+  return invokeSafe<void>("disconnect_shared_storage_profile", { profileId });
+}
+
+export interface OAuthBeginResponse {
+  sessionId: string;
+  authorizationUrl: string;
+  providerLabel: string;
+}
+
+export interface OAuthCompleteResponse {
+  profile: SharedStorageProfile;
+  accountEmail: string | null;
+}
+
+export async function beginOauthAuthorization(
+  provider: string,
+  displayName: string,
+  clientId: string,
+  clientSecret: string | null,
+  providerFieldsJson?: string | null,
+): Promise<OAuthBeginResponse> {
+  return invokeSafe<OAuthBeginResponse>("begin_oauth_authorization", {
+    provider,
+    displayName,
+    clientId,
+    clientSecret,
+    providerFieldsJson: providerFieldsJson ?? null,
+  });
+}
+
+export async function completeOauthAuthorization(
+  sessionId: string,
+): Promise<OAuthCompleteResponse> {
+  return invokeSafe<OAuthCompleteResponse>("complete_oauth_authorization", {
+    sessionId,
+  });
+}
+
 export async function triggerInstanceBackup(): Promise<BackupStatusResponse> {
   return invokeSafe<BackupStatusResponse>("trigger_instance_backup");
 }
@@ -726,4 +810,71 @@ export async function getInstanceMicStatus(
   return invokeSafe<InstanceMicRuntimeStatus>("get_instance_mic_status", {
     instanceId,
   });
+}
+
+let microphoneListCache:
+  | { fetchedAt: number; devices: MicrophoneDevice[] }
+  | null = null;
+let microphoneListInFlight: Promise<MicrophoneDevice[]> | null = null;
+const microphoneListTimeoutMs = 12_000;
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+export async function listMicrophones(
+  options?: { forceRefresh?: boolean },
+): Promise<MicrophoneDevice[]> {
+  const forceRefresh = options?.forceRefresh ?? false;
+  const now = Date.now();
+  const cacheTtlMs = 30_000;
+
+  if (
+    !forceRefresh &&
+    microphoneListCache &&
+    now - microphoneListCache.fetchedAt < cacheTtlMs
+  ) {
+    return microphoneListCache.devices;
+  }
+
+  if (!forceRefresh && microphoneListInFlight) {
+    return microphoneListInFlight;
+  }
+
+  const request = withTimeout(
+    invokeSafe<MicrophoneDevice[]>("list_microphones"),
+    microphoneListTimeoutMs,
+    "Loading microphones timed out. Please try Refresh.",
+  )
+    .then((devices) => {
+      microphoneListCache = { fetchedAt: Date.now(), devices };
+      return devices;
+    })
+    .finally(() => {
+      if (microphoneListInFlight === request) {
+        microphoneListInFlight = null;
+      }
+    });
+
+  microphoneListInFlight = request;
+  return request;
 }

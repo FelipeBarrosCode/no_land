@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+FIFO_PATH="/tmp/noland_remote_microphone.pcm"
+MODULE_ID_FILE="/tmp/noland_remote_microphone.module"
+STATUS_FILE="/run/noland/noland_remote_microphone.status.json"
+if [[ -f "$MODULE_ID_FILE" ]]; then
+  module_id="$(cat "$MODULE_ID_FILE" 2>/dev/null || true)"
+  if [[ -n "$module_id" ]]; then
+    pactl unload-module "$module_id" >/dev/null 2>&1 || true
+  fi
+  rm -f "$MODULE_ID_FILE"
+fi
+rm -f "$FIFO_PATH"
+rm -f "$STATUS_FILE"
