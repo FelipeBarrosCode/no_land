@@ -1996,6 +1996,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           await pauseInstance(instanceId);
+          set((state) => ({
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );
@@ -2013,7 +2020,14 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => {
           await destroyInstance(instanceId);
           const appState = await getAppState();
-          set({ appState });
+          set((state) => ({
+            appState,
+            embeddedMoonlightStatus:
+              state.embeddedMoonlightStatus?.instanceId === instanceId
+                ? null
+                : state.embeddedMoonlightStatus,
+            activeMoonlightPairing: null,
+          }));
         },
         undefined,
       );

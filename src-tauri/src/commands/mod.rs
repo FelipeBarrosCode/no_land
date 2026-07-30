@@ -3902,11 +3902,72 @@ pub async fn reconnect_instance_wireguard(
     Ok("Opened WireGuard app.".to_string())
 }
 
+async fn teardown_local_instance_session(
+    app: &AppHandle,
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    instance_id: u64,
+) {
+    if let Err(error) = MicPassthroughService::disable(context, instance_id).await {
+        if !matches!(error, AppError::InvalidInput(_)) {
+            warn!(
+                instance_id = instance_id,
+                "Failed to disable mic passthrough during teardown: {}", error
+            );
+        }
+    }
+
+    if let Err(error) = crate::mic_client::cleanup_stale_pipeline_processes() {
+        warn!(
+            instance_id = instance_id,
+            "Failed to clean up stale mic sender processes: {}", error
+        );
+    }
+
+    let active_instance_id = context.load_state().await.instance.instance_id;
+    if active_instance_id != Some(instance_id) {
+        return;
+    }
+
+    if let Err(error) = moonlight.runtime.stop().await {
+        warn!(
+            instance_id = instance_id,
+            "Failed to stop embedded Moonlight runtime: {}", error
+        );
+    }
+    if let Err(error) = moonlight.runtime.detach_surface().await {
+        warn!(
+            instance_id = instance_id,
+            "Failed to detach embedded Moonlight surface: {}", error
+        );
+    }
+    moonlight.input.end_capture();
+    if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
+        *active_preferences = None;
+    }
+    if let Err(error) = close_stream_window(app) {
+        warn!(
+            instance_id = instance_id,
+            "Failed to close Moonlight stream window: {}", error
+        );
+    }
+    if let Err(error) = MoonlightService::terminate_running_client() {
+        warn!(
+            instance_id = instance_id,
+            "Failed to terminate local Moonlight client process: {}", error
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn pause_instance(
+    app: AppHandle,
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
     instance_id: u64,
 ) -> Result<(), FrontendError> {
+    teardown_local_instance_session(&app, context.inner(), moonlight.inner(), instance_id).await;
+
     InstanceLifecycleService::pause_instance(context.inner(), instance_id)
         .await
         .map_err(Into::into)
@@ -3914,9 +3975,13 @@ pub async fn pause_instance(
 
 #[tauri::command]
 pub async fn destroy_instance(
+    app: AppHandle,
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
     instance_id: u64,
 ) -> Result<(), FrontendError> {
+    teardown_local_instance_session(&app, context.inner(), moonlight.inner(), instance_id).await;
+
     InstanceLifecycleService::destroy_instance(context.inner(), instance_id)
         .await
         .map_err(Into::into)

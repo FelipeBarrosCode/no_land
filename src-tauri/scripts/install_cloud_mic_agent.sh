@@ -34,9 +34,18 @@ if [ -z "$WG_IP" ]; then
     WG_IP="127.0.0.1"
 fi
 
+WG_CLIENT_IP=""
+if command -v wg >/dev/null 2>&1; then
+    WG_CLIENT_IP=$(wg show wg0 allowed-ips 2>/dev/null | awk '{for (i = 2; i <= NF; i++) if ($i ~ /\/32$/) {gsub(/\/32$/, "", $i); print $i; exit}}' || true)
+fi
+if [ -z "$WG_CLIENT_IP" ] && [ -f /etc/wireguard/wg0.conf ]; then
+    WG_CLIENT_IP=$(awk -F'= *' '/AllowedIPs/ {split($2, ips, ","); for (i in ips) {gsub(/^ +| +$/, "", ips[i]); if (ips[i] ~ /\/32$/) {sub(/\/32$/, "", ips[i]); print ips[i]; exit}}}' /etc/wireguard/wg0.conf || true)
+fi
+
 echo "=== Noland Microphone Receiver Installation ==="
-echo "User:         $USER_NAME"
-echo "WireGuard IP: $WG_IP"
+echo "User:               $USER_NAME"
+echo "WireGuard IP:       $WG_IP"
+echo "WireGuard client:   ${WG_CLIENT_IP:-unknown}"
 echo ""
 
 export DEBIAN_FRONTEND=noninteractive
@@ -94,6 +103,22 @@ TOML
 
 chown "$USER_NAME:$group_name" "$CONFIG_DIR/microphone.toml"
 echo "Configuration written to $CONFIG_DIR/microphone.toml"
+
+# --- Lock down firewall for mic traffic over WireGuard ---
+if command -v ufw >/dev/null 2>&1; then
+    ufw --force enable >/dev/null 2>&1 || true
+    if [ -n "$WG_CLIENT_IP" ] && [ "$WG_IP" != "127.0.0.1" ]; then
+        ufw status | grep -q "from ${WG_CLIENT_IP}/32 to ${WG_IP} port 48200 proto udp" || \
+            ufw allow in on wg0 from "${WG_CLIENT_IP}/32" to "$WG_IP" port 48200 proto udp comment 'Noland mic over WireGuard' >/dev/null 2>&1 || true
+        ufw status | grep -q "deny in on wg0 to ${WG_IP} port 48200 proto udp" || \
+            ufw deny in on wg0 to "$WG_IP" port 48200 proto udp >/dev/null 2>&1 || true
+        echo "Firewall rule ensured for mic UDP 48200 on wg0 from ${WG_CLIENT_IP}/32"
+    else
+        echo "Warning: could not determine WireGuard client IP for mic firewall rule; skipping UFW mic restriction"
+    fi
+else
+    echo "Warning: ufw not installed; skipping mic firewall rule"
+fi
 
 # --- Create PipeWire source helper scripts ---
 cat > "$INSTALL_DIR/noland-mic-source-setup" <<'EOF'
@@ -193,6 +218,15 @@ if ss -uln | grep -q ":48200 "; then
     echo "[OK] UDP port 48200 is listening"
 else
     echo "[WARN] UDP port 48200 not detected (may need root for ss/netstat)"
+fi
+
+# Check firewall rule
+if command -v ufw >/dev/null 2>&1 && [ -n "$WG_CLIENT_IP" ] && [ "$WG_IP" != "127.0.0.1" ]; then
+    if ufw status | grep -q "48200/udp"; then
+        echo "[OK] UFW rule for mic UDP 48200 is present"
+    else
+        echo "[WARN] UFW rule for mic UDP 48200 not detected"
+    fi
 fi
 
 # Check Pulse/PipeWire source

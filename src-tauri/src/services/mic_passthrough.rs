@@ -468,7 +468,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; source_present=false; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; if ! run_user systemctl --user is-active --quiet noland-mic-receiver.service; then run_user systemctl --user start noland-mic-receiver.service; fi; if [[ \"$source_present\" != true ]]; then sleep 1; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; fi",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; source_present=false; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; if ! run_user systemctl --user is-active --quiet noland-mic-receiver.service; then run_user systemctl --user start noland-mic-receiver.service; fi; if [[ \"$source_present\" != true ]]; then sleep 1; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; fi; run_user pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true; run_user pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
         )?;
 
         let output = {
@@ -519,7 +519,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user stop noland-mic-receiver.service >/dev/null 2>&1 || true; pkill -9 -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1 || true; sleep 1; run_user systemctl --user start noland-mic-receiver.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then break; fi; sleep 1; done; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; run_user systemctl --user daemon-reload; run_user systemctl --user stop noland-mic-receiver.service >/dev/null 2>&1 || true; pkill -9 -f /home/$USER_NAME/.local/bin/noland-mic-receiver >/dev/null 2>&1 || true; sleep 1; run_user systemctl --user start noland-mic-receiver.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then break; fi; sleep 1; done; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; run_user pactl set-source-mute noland_remote_microphone 0 >/dev/null 2>&1 || true; run_user pactl set-source-volume noland_remote_microphone 100% >/dev/null 2>&1 || true; run_user pactl set-default-source noland_remote_microphone >/dev/null 2>&1 || true",
         )?;
 
         let output = {

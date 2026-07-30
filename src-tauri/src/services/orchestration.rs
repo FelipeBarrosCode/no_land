@@ -1599,58 +1599,41 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         .await?;
     ensure_not_cancelled(&context)?;
 
-    if server_step_is_completed(
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
         &context,
         instance.id,
         ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        Some(offer.id),
     )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Skipping remote microphone receiver installation",
-            instance.id,
-        )
-        .await;
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Installing remote microphone receiver",
-            Some(format!(
-                "target_user={} remote_bind_ip={}",
-                target_user, wireguard_result.server_ip
-            )),
-            false,
-        )
-        .await;
+    .await?;
 
-        let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
-        mark_server_step_completed(
-            &context,
-            instance.id,
-            ProvisionStepMarker::MicReceiverInstalled,
-            OrchestrationState::ConfiguringWireGuard,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            Some(offer.id),
-        )
-        .await?;
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Remote microphone receiver installed",
-            Some(install_output),
-            false,
-        )
-        .await;
-    }
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -2529,58 +2512,41 @@ async fn run_existing_instance_orchestration(
         .await?;
     ensure_not_cancelled(&context)?;
 
-    if server_step_is_completed(
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Ensuring remote microphone receiver is installed",
+        Some(format!(
+            "target_user={} remote_bind_ip={}",
+            target_user, wireguard_result.server_ip
+        )),
+        false,
+    )
+    .await;
+
+    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    mark_server_step_completed(
         &context,
         instance.id,
         ProvisionStepMarker::MicReceiverInstalled,
+        OrchestrationState::ConfiguringWireGuard,
+        &instance.status,
+        &instance.ssh_host,
+        instance.ssh_port,
+        offer_id,
     )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Skipping remote microphone receiver installation",
-            instance.id,
-        )
-        .await;
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Installing remote microphone receiver",
-            Some(format!(
-                "target_user={} remote_bind_ip={}",
-                target_user, wireguard_result.server_ip
-            )),
-            false,
-        )
-        .await;
+    .await?;
 
-        let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
-        mark_server_step_completed(
-            &context,
-            instance.id,
-            ProvisionStepMarker::MicReceiverInstalled,
-            OrchestrationState::ConfiguringWireGuard,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            offer_id,
-        )
-        .await?;
-
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Remote microphone receiver installed",
-            Some(install_output),
-            false,
-        )
-        .await;
-    }
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConfiguringWireGuard,
+        "Remote microphone receiver ready",
+        Some(install_output),
+        false,
+    )
+    .await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
