@@ -82,11 +82,18 @@ const frameworkRootLibs = existsSync(frameworksDir)
       .filter(isMachOCandidate)
   : [];
 
+ensureBundledSdl3(frameworksDir, frameworkRootLibs);
+
 const frameworkIndex = new Map();
 for (const file of frameworkFiles) {
   const rel = relative(frameworkLibDir, file);
   frameworkIndex.set(rel, file);
   frameworkIndex.set(basename(file), file);
+}
+
+const frameworkRootIndex = new Map();
+for (const file of frameworkRootLibs) {
+  frameworkRootIndex.set(basename(file), file);
 }
 
 const scanned = new Set();
@@ -95,6 +102,9 @@ const externalLibs = new Map();
 
 for (const file of [...allTargets]) {
   patchFile(file);
+}
+for (const file of [...allTargets]) {
+  rewriteRemainingGStreamerDeps(file);
 }
 
 for (const file of frameworkFiles) {
@@ -158,6 +168,9 @@ function resolveBundledTarget(dep) {
     if (existsSync(candidate)) return candidate;
   }
   const name = basename(dep);
+  if (frameworkRootIndex.has(name)) {
+    return frameworkRootIndex.get(name);
+  }
   if (frameworkIndex.has(name)) {
     return frameworkIndex.get(name);
   }
@@ -189,6 +202,17 @@ function installNameForConsumer(consumer, target) {
   const consumerDir = dirname(consumer);
   const rel = relative(consumerDir, target);
   return `@loader_path/${toPosix(rel)}`;
+}
+
+function rewriteRemainingGStreamerDeps(file) {
+  for (const dep of listDependencies(file)) {
+    if (!dep.includes('GStreamer.framework/Versions/Current/lib/')) continue;
+    const target = resolveBundledTarget(dep);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
 }
 
 function frameworkIdFor(file) {
@@ -228,6 +252,37 @@ function rebuildDmg(app, dmg, volumeName) {
   mkdirSync(dirname(dmg), { recursive: true });
   if (existsSync(dmg)) rmSync(dmg, { force: true });
   run('hdiutil', ['create', '-volname', volumeName, '-srcfolder', app, '-ov', '-format', 'UDZO', dmg]);
+}
+
+function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
+  const sdl2Compat = join(frameworksDir, 'libSDL2-2.0.0.dylib');
+  if (!existsSync(sdl2Compat)) return;
+
+  const sdl3Candidates = [
+    '/opt/homebrew/opt/sdl3/lib/libSDL3.dylib',
+    '/usr/local/opt/sdl3/lib/libSDL3.dylib',
+  ];
+
+  const sdl3 = sdl3Candidates.find((candidate) => existsSync(candidate));
+  if (!sdl3) return;
+
+  const companionCandidates = [
+    sdl3.replace(/libSDL3\.dylib$/, 'libSDL3.0.dylib'),
+  ];
+
+  const toCopy = [sdl3, ...companionCandidates.filter((candidate) => existsSync(candidate))];
+  for (const source of toCopy) {
+    const dest = join(frameworksDir, basename(source));
+    if (!existsSync(dest)) {
+      copyFileSync(source, dest);
+      try {
+        chmodSync(dest, statSync(source).mode);
+      } catch {}
+    }
+    if (!frameworkRootLibs.includes(dest) && isMachOCandidate(dest)) {
+      frameworkRootLibs.push(dest);
+    }
+  }
 }
 
 function listFiles(root) {
@@ -272,7 +327,8 @@ function shouldRewriteDependency(dep) {
     || dep.startsWith('/Library/Frameworks/GStreamer.framework/')
     || dep.startsWith('@executable_path/../Frameworks/GStreamer.framework/')
     || dep.startsWith('@executable_path/../Resources/gstreamer/macos/GStreamer.framework/')
-    || dep.startsWith('@rpath/GStreamer.framework/');
+    || dep.startsWith('@rpath/GStreamer.framework/')
+    || dep.includes('/GStreamer.framework/');
 }
 
 function toPosix(value) {

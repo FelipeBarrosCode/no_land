@@ -20,10 +20,6 @@ name = "moonlight_config"
 path = "src/bin/moonlight_config.rs"
 required-features = ["moonlight-config-bin"]
 
-[[bin]]
-name = "noland-mic-sender"
-path = "src/bin/noland_mic_sender.rs"
-
 [build-dependencies]
 bindgen = "0.70.1"
 cc = "1.1.31"

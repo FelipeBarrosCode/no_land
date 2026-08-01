@@ -7,15 +7,18 @@ import { spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const srcTauriDir = join(repoRoot, 'src-tauri');
+const sidecarCrateDir = join(repoRoot, 'mic-sidecar');
 const mode = process.argv[2] ?? 'build';
 const passthroughArgs = process.argv.slice(3);
 const target = readTarget(passthroughArgs);
 const release = mode === 'build';
 const executableName = process.platform === 'win32' ? 'noland-mic-sender.exe' : 'noland-mic-sender';
 
-const cargoArgs = ['build', '--manifest-path', join(srcTauriDir, 'Cargo.toml'), '--bin', 'noland-mic-sender'];
+const cargoArgs = ['build', '--manifest-path', join(sidecarCrateDir, 'Cargo.toml')];
 if (release) cargoArgs.push('--release');
 if (target) cargoArgs.push('--target', target);
+
+const sidecarTargetDir = resolve(srcTauriDir, '.native-deps', 'mic-sidecar-target');
 
 const cargo = spawnSync('cargo', cargoArgs, {
   cwd: repoRoot,
@@ -23,6 +26,7 @@ const cargo = spawnSync('cargo', cargoArgs, {
   env: {
     ...process.env,
     NOLAND_SKIP_APP_BUILD_RS: '1',
+    CARGO_TARGET_DIR: sidecarTargetDir,
   },
 });
 
@@ -32,8 +36,8 @@ if (cargo.status !== 0) {
 
 const profileDir = release ? 'release' : 'debug';
 const builtBinary = target
-  ? join(srcTauriDir, 'target', target, profileDir, executableName)
-  : join(srcTauriDir, 'target', profileDir, executableName);
+  ? join(sidecarTargetDir, target, profileDir, executableName)
+  : join(sidecarTargetDir, profileDir, executableName);
 
 if (!existsSync(builtBinary)) {
   console.error(`Expected mic sidecar binary was not produced: ${builtBinary}`);
@@ -66,6 +70,8 @@ if (release && target) {
 } else {
   console.log(`Prepared mic sidecar for local ${mode}: ${builtBinary}`);
 }
+
+console.log(`Mic sidecar target dir: ${sidecarTargetDir}`);
 
 function readTarget(args) {
   const envTarget = process.env.NOLAND_MIC_SENDER_TARGET?.trim() || process.env.TAURI_ENV_TARGET_TRIPLE?.trim();

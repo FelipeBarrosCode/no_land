@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -9,22 +9,37 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 
 const target = readTarget(tauriArgs);
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgs];
+const prepEnv = {
+  ...process.env,
+  ...(target ? { NOLAND_MIC_SENDER_TARGET: target } : {}),
+};
+
 const prep = spawnSync(process.execPath, prepArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
-  env: {
-    ...process.env,
-    ...(target ? { NOLAND_MIC_SENDER_TARGET: target } : {}),
-  },
+  env: prepEnv,
 });
 if (prep.status !== 0) {
   process.exit(prep.status ?? 1);
 }
 
+const tauriEnv = {
+  ...process.env,
+};
+
+if (mode === 'dev') {
+  const sidecarTargetDir = join(repoRoot, 'src-tauri', '.native-deps', 'mic-sidecar-target');
+  const profileDir = 'debug';
+  const executableName = process.platform === 'win32' ? 'noland-mic-sender.exe' : 'noland-mic-sender';
+  tauriEnv.NOLAND_MIC_SENDER_BIN = target
+    ? join(sidecarTargetDir, target, profileDir, executableName)
+    : join(sidecarTargetDir, profileDir, executableName);
+}
+
 const tauri = spawnSync('npx', ['tauri', mode, ...tauriArgs], {
   cwd: repoRoot,
   stdio: 'inherit',
-  env: process.env,
+  env: tauriEnv,
 });
 if (tauri.status !== 0) {
   process.exit(tauri.status ?? 1);
