@@ -898,7 +898,14 @@ export const useAppStore = create<AppStore>((set, get) => {
     startPlayExisting: async (instanceId) => {
       beginProvisioningBlock("Reconnecting to your existing gaming instance.");
       try {
-        const mode = await startPlayExistingInstance(instanceId);
+        let mode: string;
+        try {
+          mode = await startPlayExistingInstance(instanceId);
+        } catch {
+          await reconnectInstanceWireguard(instanceId);
+          mode = await startPlayExistingInstance(instanceId);
+        }
+
         const appState = await getAppState();
         const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId).catch(() => null);
         set({ appState, embeddedMoonlightStatus });
@@ -1962,12 +1969,21 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.wireguard.reconnect",
-          label: "Reconnecting managed tunnel",
+          label: "Syncing connection",
           detail:
-            "Refreshing the remote tunnel state and local managed tunnel flow.",
+            "Refreshing Vast.ai endpoint details, reprovisioning the managed tunnel if needed, and checking Sunshine.",
           blocking: true,
         },
-        async () => await reconnectInstanceWireguard(instanceId),
+        async () => {
+          const result = await reconnectInstanceWireguard(instanceId);
+          const [appState, rentedInstances, embeddedMoonlightStatus] = await Promise.all([
+            getAppState(),
+            getRentedInstances().catch(() => get().rentedInstances),
+            getInstanceMoonlightPipelineStatus(instanceId).catch(() => null),
+          ]);
+          set({ appState, rentedInstances, embeddedMoonlightStatus });
+          return result;
+        },
         null,
       );
     },

@@ -66,7 +66,8 @@ fn main() {
     }
 
     prepare_gstreamer_bundle().expect("failed to prepare bundled GStreamer runtime");
-    ensure_mic_sender_external_bin().expect("failed to prepare mic sender sidecar bundle artifact");
+    ensure_managed_sidecar_bundle_artifacts()
+        .expect("failed to prepare managed tool sidecar bundle artifacts");
 
     let native_root = PathBuf::from("native");
     let manifest_dir =
@@ -298,7 +299,7 @@ fn main() {
     tauri_build::build()
 }
 
-fn ensure_mic_sender_external_bin() -> io::Result<()> {
+fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
     println!("cargo:rerun-if-env-changed=TAURI_ENV_TARGET_TRIPLE");
     println!("cargo:rerun-if-env-changed=PROFILE");
 
@@ -309,10 +310,72 @@ fn ensure_mic_sender_external_bin() -> io::Result<()> {
     let target_triple = env::var("TAURI_ENV_TARGET_TRIPLE")
         .or_else(|_| env::var("TARGET"))
         .unwrap_or_else(|_| format!("{}-{}", env::consts::ARCH, env::consts::OS));
-    let staged_name = if cfg!(target_os = "windows") {
-        format!("noland-mic-sender-{target_triple}.exe")
+    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let is_release = profile == "release";
+    let target_is_windows = target_triple.contains("windows");
+
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "noland-mic-sender",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        true,
+        "run the Tauri build through the npm wrapper so the mic sidecar is staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "gotatun",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        !target_is_windows,
+        "run the Tauri build through the npm wrapper so the managed tunnel sidecar is staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "wg",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        true,
+        "run the Tauri build through the npm wrapper so the bundled WireGuard helpers are staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "wg-quick",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        !target_is_windows,
+        "run the Tauri build through the npm wrapper so the bundled WireGuard helpers are staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "wireguard",
+        &target_triple,
+        true,
+        is_release,
+        target_is_windows,
+        "run the Tauri build through the npm wrapper so the Windows WireGuard service helper is staged first",
+    )?;
+
+    Ok(())
+}
+
+fn ensure_staged_bundle_binary(
+    binaries_dir: &Path,
+    stem: &str,
+    target_triple: &str,
+    uses_exe_suffix: bool,
+    is_release: bool,
+    required_in_release: bool,
+    release_hint: &str,
+) -> io::Result<()> {
+    let staged_name = if uses_exe_suffix {
+        format!("{stem}-{target_triple}.exe")
     } else {
-        format!("noland-mic-sender-{target_triple}")
+        format!("{stem}-{target_triple}")
     };
     let staged_path = binaries_dir.join(staged_name);
 
@@ -320,13 +383,13 @@ fn ensure_mic_sender_external_bin() -> io::Result<()> {
         return Ok(());
     }
 
-    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    if profile == "release" {
+    if is_release && required_in_release {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
-                "missing packaged mic sender sidecar '{}'; run the Tauri build through the npm wrapper so the sidecar is staged first",
-                staged_path.display()
+                "missing packaged managed tool sidecar '{}'; {}",
+                staged_path.display(),
+                release_hint,
             ),
         ));
     }

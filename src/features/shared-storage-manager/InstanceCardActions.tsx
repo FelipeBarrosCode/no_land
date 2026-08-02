@@ -105,7 +105,7 @@ export function InstanceCardActions({
           loadingText="Syncing files..."
           onClick={() => onSyncStorage(instance.instanceId)}
         >
-          Sync
+          Sync Files
         </Button>
 
         <Button
@@ -113,10 +113,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.wireguard.reconnect"}
-          loadingText="Opening..."
+          loadingText="Syncing..."
           onClick={() => onReconnect(instance.instanceId)}
         >
-          Open Connections
+          Sync Connection
         </Button>
       </div>
 

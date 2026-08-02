@@ -29,6 +29,7 @@ const infoPlistPath = join(contentsDir, 'Info.plist');
 const macosDir = join(contentsDir, 'MacOS');
 const frameworksDir = join(contentsDir, 'Frameworks');
 const resourcesDir = join(contentsDir, 'Resources');
+const resourcesBinariesDir = join(resourcesDir, 'binaries');
 const microphoneUsageDescription = 'Noland Connect needs microphone access to forward your local mic into your cloud gaming session.';
 const frameworkBundleSource = join(frameworksDir, 'GStreamer.framework');
 const frameworkBundleDir = join(resourcesDir, 'gstreamer', 'macos', 'GStreamer.framework');
@@ -80,7 +81,7 @@ if (existsSync(frameworkPluginDir)) {
 
 const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
 const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
-const macosFiles = listFiles(macosDir).filter(isMachOCandidate);
+const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
 const frameworkRootLibs = existsSync(frameworksDir)
   ? readdirSync(frameworksDir, { withFileTypes: true })
       .filter((entry) => entry.isFile())
@@ -89,7 +90,13 @@ const frameworkRootLibs = existsSync(frameworksDir)
   : [];
 
 ensureBundledSdl3(frameworksDir, frameworkRootLibs);
+ensureBundledWireguardSidecars(target, resourcesBinariesDir);
+pruneIrrelevantMacResourceSidecars(resourcesBinariesDir);
 ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
+
+const resourceBinaryFiles = existsSync(resourcesBinariesDir)
+  ? listFiles(resourcesBinariesDir).filter(isCodeSignableFile)
+  : [];
 
 const frameworkIndex = new Map();
 for (const file of frameworkFiles) {
@@ -127,7 +134,7 @@ for (const file of frameworkRootLibs) {
   setInstallId(file, `@rpath/${basename(file)}`);
 }
 
-adhocSign(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...macosFiles]);
+adhocSign(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...macosFiles]);
 rebuildDmg(appPath, dmgPath, productName);
 console.log(`Patched macOS bundle dependencies: ${appPath}`);
 
@@ -274,6 +281,38 @@ function setInstallId(file, id) {
   run('install_name_tool', ['-id', id, file], { allowFailure: true });
 }
 
+function ensureBundledWireguardSidecars(targetTriple, destinationDir) {
+  const stagedDir = join(repoRoot, 'src-tauri', 'binaries');
+  const stagedSidecars = [
+    `wg-${targetTriple}`,
+    `wg-quick-${targetTriple}`,
+  ].map((name) => ({
+    source: join(stagedDir, name),
+    dest: join(destinationDir, name),
+  }));
+
+  mkdirSync(destinationDir, { recursive: true });
+  for (const { source, dest } of stagedSidecars) {
+    if (!existsSync(source)) {
+      throw new Error(`Required staged WireGuard sidecar is missing: ${source}`);
+    }
+    copyFileSync(source, dest);
+    try {
+      chmodSync(dest, statSync(source).mode);
+    } catch {}
+  }
+}
+
+function pruneIrrelevantMacResourceSidecars(destinationDir) {
+  if (!existsSync(destinationDir)) return;
+
+  for (const entry of readdirSync(destinationDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    if (!/^wireguard-.*\.exe$/u.test(entry.name)) continue;
+    rmSync(join(destinationDir, entry.name), { force: true });
+  }
+}
+
 function ensureMicrophoneUsageDescription(infoPlist, message) {
   if (!existsSync(infoPlist)) return;
   const printResult = run('/usr/libexec/PlistBuddy', ['-c', 'Print :NSMicrophoneUsageDescription', infoPlist], { allowFailure: true });
@@ -336,12 +375,13 @@ function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
   const toCopy = [sdl3, ...companionCandidates.filter((candidate) => existsSync(candidate))];
   for (const source of toCopy) {
     const dest = join(frameworksDir, basename(source));
-    if (!existsSync(dest)) {
-      copyFileSync(source, dest);
-      try {
-        chmodSync(dest, statSync(source).mode);
-      } catch {}
+    if (existsSync(dest)) {
+      rmSync(dest, { force: true });
     }
+    copyFileSync(source, dest);
+    try {
+      chmodSync(dest, statSync(source).mode);
+    } catch {}
     if (!frameworkRootLibs.includes(dest) && isMachOCandidate(dest)) {
       frameworkRootLibs.push(dest);
     }
@@ -380,6 +420,17 @@ function isMachOCandidate(file) {
     }
     const info = run('file', ['-b', file], { allowFailure: true });
     return info.status === 0 && info.stdout.includes('Mach-O');
+  } catch {
+    return false;
+  }
+}
+
+function isCodeSignableFile(file) {
+  if (isMachOCandidate(file)) {
+    return true;
+  }
+  try {
+    return (statSync(file).mode & 0o111) !== 0;
   } catch {
     return false;
   }

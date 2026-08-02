@@ -191,41 +191,41 @@ impl OsDetection {
     }
 
     pub fn install_hint_for_tool(&self, tool: &str) -> String {
+        if matches!(
+            tool,
+            "gotatun"
+                | "wg"
+                | "wg.exe"
+                | "wg-quick"
+                | "wg-quick.exe"
+                | "wireguard.exe"
+                | "wireguard"
+        ) {
+            return "This tool is expected to be bundled and managed by Noland Connect. Reinstall or rebuild the app so the managed sidecars are packaged correctly, or explicitly point the app at the binary with the matching `NOLAND_*_BIN` override.".to_string();
+        }
+
         if self.is_macos() {
             return match tool {
-                "wg" | "wg-quick" => {
-                    "Install Homebrew, then run `brew install wireguard-tools`.".to_string()
-                }
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install Xcode Command Line Tools or OpenSSH client tools.".to_string()
                 }
-                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` and ensure it is available in PATH."),
             };
         }
 
         if self.is_linux() {
             return match tool {
-                "wg" | "wg-quick" => {
-                    "Install WireGuard tools (example: `sudo apt-get install -y wireguard-tools`)."
-                        .to_string()
-                }
                 "xdg-open" => "Install xdg-utils (`sudo apt-get install -y xdg-utils`).".to_string(),
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install OpenSSH client tools (example: `sudo apt-get install -y openssh-client`)."
                         .to_string()
                 }
-                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` with your package manager and ensure it is in PATH."),
             };
         }
 
         if self.is_windows() {
             return match tool {
-                "wg" | "wg-quick" | "wireguard.exe" => {
-                    "Install WireGuard from https://wireguard.com/install and reopen the app."
-                        .to_string()
-                }
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install or enable OpenSSH Client in Windows optional features.".to_string()
                 }
@@ -237,9 +237,21 @@ impl OsDetection {
     }
 
     pub fn install_command_for_tool(&self, tool: &str) -> Option<&'static str> {
+        if matches!(
+            tool,
+            "gotatun"
+                | "wg"
+                | "wg.exe"
+                | "wg-quick"
+                | "wg-quick.exe"
+                | "wireguard.exe"
+                | "wireguard"
+        ) {
+            return None;
+        }
+
         if self.is_macos() {
             return match tool {
-                "wg" | "wg-quick" => Some("brew install wireguard-tools"),
                 "ssh" | "ssh-keygen" | "ssh-add" => Some("xcode-select --install"),
                 _ => None,
             };
@@ -247,9 +259,6 @@ impl OsDetection {
 
         if self.is_linux() {
             return match tool {
-                "wg" | "wg-quick" => Some(
-                    "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y wireguard-tools; elif command -v yum >/dev/null 2>&1; then sudo yum install -y wireguard-tools; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm wireguard-tools; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install wireguard-tools; else exit 127; fi",
-                ),
                 "xdg-open" => Some(
                     "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xdg-utils; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y xdg-utils; elif command -v yum >/dev/null 2>&1; then sudo yum install -y xdg-utils; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm xdg-utils; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install xdg-utils; else exit 127; fi",
                 ),
@@ -262,9 +271,6 @@ impl OsDetection {
 
         if self.is_windows() {
             return match tool {
-                "wg" | "wg-quick" | "wireguard.exe" => Some(
-                    "winget install --id WireGuard.WireGuard -e --accept-package-agreements --accept-source-agreements",
-                ),
                 "ssh" | "ssh-keygen" | "ssh-add" => Some(
                     "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\"",
                 ),

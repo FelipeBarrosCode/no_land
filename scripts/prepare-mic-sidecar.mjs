@@ -68,11 +68,75 @@ if (packagingTarget) {
     chmodSync(stagedBinary, 0o755);
   }
   console.log(`Staged mic sidecar for packaging: ${stagedBinary}`);
+
+  for (const tool of managedToolSpecs(packagingTarget)) {
+    stageBundledTool(tool, packagingTarget, binariesDir);
+  }
 } else {
   console.log(`Prepared mic sidecar for local ${mode}: ${builtBinary}`);
 }
 
 console.log(`Mic sidecar target dir: ${sidecarTargetDir}`);
+
+function managedToolSpecs(targetTriple) {
+  if (isWindowsTarget(targetTriple)) {
+    return [
+      { lookupName: 'wg.exe', stagedStem: 'wg', envVarName: 'NOLAND_WG_BIN' },
+      { lookupName: 'wireguard.exe', stagedStem: 'wireguard', envVarName: 'NOLAND_WIREGUARD_EXE_BIN' },
+    ];
+  }
+
+  return [
+    { lookupName: 'gotatun', stagedStem: 'gotatun', envVarName: 'NOLAND_GOTATUN_BIN' },
+    { lookupName: 'wg', stagedStem: 'wg', envVarName: 'NOLAND_WG_BIN' },
+    { lookupName: 'wg-quick', stagedStem: 'wg-quick', envVarName: 'NOLAND_WG_QUICK_BIN' },
+  ];
+}
+
+function stageBundledTool(tool, targetTriple, binariesDir) {
+  const stagedBinary = join(
+    binariesDir,
+    `${tool.stagedStem}-${targetTriple}${isWindowsTarget(targetTriple) ? '.exe' : ''}`,
+  );
+  const sourcePath = resolveToolPath(tool, stagedBinary);
+  if (!sourcePath) {
+    console.error(`Required bundled tool '${tool.lookupName}' was not found. Set ${tool.envVarName}, pre-stage ${stagedBinary}, or install ${tool.lookupName} before building.`);
+    process.exit(1);
+  }
+
+  copyFileSync(sourcePath, stagedBinary);
+  if (!isWindowsTarget(targetTriple)) {
+    chmodSync(stagedBinary, 0o755);
+  }
+  console.log(`Staged ${tool.lookupName} sidecar for packaging: ${stagedBinary}`);
+}
+
+function resolveToolPath(tool, stagedBinary) {
+  const envOverride = process.env[tool.envVarName]?.trim();
+  if (envOverride && existsSync(envOverride)) {
+    return envOverride;
+  }
+  if (existsSync(stagedBinary)) {
+    return stagedBinary;
+  }
+
+  const locator = process.platform === 'win32' ? 'where' : 'which';
+  const resolved = spawnSync(locator, [tool.lookupName], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  if (resolved.status === 0) {
+    const candidate = resolved.stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && existsSync(line));
+    if (candidate) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
 
 function readTarget(args) {
   const envTarget = process.env.NOLAND_MIC_SENDER_TARGET?.trim() || process.env.TAURI_ENV_TARGET_TRIPLE?.trim();
@@ -86,6 +150,10 @@ function readTarget(args) {
     }
   }
   return undefined;
+}
+
+function isWindowsTarget(targetTriple) {
+  return typeof targetTriple === 'string' && targetTriple.includes('windows');
 }
 
 function defaultHostTarget() {

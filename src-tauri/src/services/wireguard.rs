@@ -6,8 +6,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-use std::env;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
@@ -172,36 +170,67 @@ fn monitor_repair_failure_streak() -> &'static Mutex<u32> {
     MONITOR_REPAIR_FAILURE_STREAK.get_or_init(|| Mutex::new(0))
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn gotatun_target_triple() -> &'static str {
+fn bundled_tool_target_triple() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "aarch64-apple-darwin",
+        ("macos", "x86_64") => "x86_64-apple-darwin",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+        ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         _ => "",
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn gotatun_binary_names() -> Vec<String> {
-    let mut names = vec!["gotatun".to_string()];
-    let triple = gotatun_target_triple();
-    if !triple.is_empty() {
-        names.push(format!("gotatun-{triple}"));
+fn managed_tool_spec(tool: &str) -> Option<(&'static str, &'static str, bool)> {
+    match tool {
+        "gotatun" => Some(("gotatun", "NOLAND_GOTATUN_BIN", false)),
+        "wg" | "wg.exe" => Some(("wg", "NOLAND_WG_BIN", cfg!(target_os = "windows"))),
+        "wg-quick" | "wg-quick.exe" => Some((
+            "wg-quick",
+            "NOLAND_WG_QUICK_BIN",
+            cfg!(target_os = "windows"),
+        )),
+        "wireguard" | "wireguard.exe" => Some(("wireguard", "NOLAND_WIREGUARD_EXE_BIN", true)),
+        _ => None,
     }
+}
+
+fn managed_tool_binary_names(tool: &str) -> Vec<String> {
+    let Some((stem, _env_var, uses_exe_suffix)) = managed_tool_spec(tool) else {
+        return vec![tool.to_string()];
+    };
+
+    let mut names = Vec::new();
+    if uses_exe_suffix {
+        names.push(format!("{stem}.exe"));
+    }
+    names.push(stem.to_string());
+
+    let triple = bundled_tool_target_triple();
+    if !triple.is_empty() {
+        if uses_exe_suffix {
+            names.push(format!("{stem}-{triple}.exe"));
+        }
+        names.push(format!("{stem}-{triple}"));
+    }
+
+    names.sort();
+    names.dedup();
     names
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn gotatun_candidate_paths() -> Vec<PathBuf> {
+fn bundled_tool_candidate_paths(tool: &str) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
-    let names = gotatun_binary_names();
+    let names = managed_tool_binary_names(tool);
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(exe_dir) = exe.parent() {
             for name in &names {
                 candidates.push(exe_dir.join(name));
                 candidates.push(exe_dir.join("binaries").join(name));
+                candidates.push(exe_dir.join("resources").join(name));
+                candidates.push(exe_dir.join("resources").join("binaries").join(name));
                 candidates.push(exe_dir.join("..").join("binaries").join(name));
                 candidates.push(exe_dir.join("..").join("Resources").join(name));
                 candidates.push(
@@ -215,7 +244,7 @@ fn gotatun_candidate_paths() -> Vec<PathBuf> {
         }
     }
 
-    if let Ok(cwd) = env::current_dir() {
+    if let Ok(cwd) = std::env::current_dir() {
         for name in &names {
             candidates.push(cwd.join(name));
             candidates.push(cwd.join("binaries").join(name));
@@ -226,7 +255,6 @@ fn gotatun_candidate_paths() -> Vec<PathBuf> {
     candidates
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn is_executable_file(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
@@ -244,9 +272,10 @@ fn is_executable_file(path: &Path) -> bool {
     true
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(crate) fn locate_gotatun_binary() -> Option<PathBuf> {
-    let env_override = std::env::var("NOLAND_GOTATUN_BIN")
+fn locate_managed_tool_binary(tool: &str) -> Option<PathBuf> {
+    let (lookup_name, env_var, _uses_exe_suffix) = managed_tool_spec(tool)?;
+
+    let env_override = std::env::var(env_var)
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -255,42 +284,75 @@ pub(crate) fn locate_gotatun_binary() -> Option<PathBuf> {
         return Some(path);
     }
 
+    if let Some(path) = bundled_tool_candidate_paths(lookup_name)
+        .into_iter()
+        .find(|candidate| is_executable_file(candidate))
+    {
+        return Some(path);
+    }
+
     let os = OsDetection::new();
-    if let Some(path) = os.resolve_command_path("gotatun") {
-        return Some(PathBuf::from(path));
-    }
-
-    for candidate in gotatun_candidate_paths() {
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-
-    None
+    os.resolve_command_path(tool).map(PathBuf::from)
 }
 
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-pub(crate) fn resolve_gotatun_binary() -> AppResult<String> {
-    if let Some(path) = locate_gotatun_binary() {
+fn resolve_managed_tool_binary(tool: &str) -> AppResult<String> {
+    let Some((lookup_name, env_var, _uses_exe_suffix)) = managed_tool_spec(tool) else {
+        return Err(AppError::Command(format!(
+            "No managed tool resolver exists for `{tool}`"
+        )));
+    };
+
+    if let Some(path) = locate_managed_tool_binary(tool) {
         return Ok(path.display().to_string());
     }
 
-    let searched = gotatun_candidate_paths()
+    let searched = bundled_tool_candidate_paths(lookup_name)
         .into_iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-
-    Err(AppError::Command(
-        format!(
-            "GotaTun is required for Noland's managed userspace tunnel, but no executable was found. Install or build `gotatun`, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path. Searched: {searched}"
-        ),
-    ))
+    Err(AppError::Command(format!(
+        "Required managed tool `{lookup_name}` was not found in the app bundle or PATH. Reinstall this app/build, place it in `src-tauri/binaries`, or set {env_var} to its full path. Searched: {searched}"
+    )))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-pub(crate) fn locate_gotatun_binary() -> Option<PathBuf> {
+pub(crate) fn locate_wg_binary() -> Option<PathBuf> {
+    locate_managed_tool_binary("wg")
+}
+
+fn resolve_wg_binary() -> AppResult<String> {
+    resolve_managed_tool_binary("wg")
+}
+
+pub(crate) fn locate_wg_quick_binary() -> Option<PathBuf> {
+    locate_managed_tool_binary("wg-quick")
+}
+
+fn resolve_wg_quick_binary() -> AppResult<String> {
+    resolve_managed_tool_binary("wg-quick")
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn locate_wireguard_exe_binary() -> Option<PathBuf> {
+    locate_managed_tool_binary("wireguard.exe")
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn locate_wireguard_exe_binary() -> Option<PathBuf> {
     None
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_wireguard_exe_binary() -> AppResult<String> {
+    resolve_managed_tool_binary("wireguard.exe")
+}
+
+pub(crate) fn locate_gotatun_binary() -> Option<PathBuf> {
+    locate_managed_tool_binary("gotatun")
+}
+
+pub(crate) fn resolve_gotatun_binary() -> AppResult<String> {
+    resolve_managed_tool_binary("gotatun")
 }
 
 fn note_monitor_repair_health(healthy: bool) -> u32 {
@@ -1691,18 +1753,11 @@ pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
 }
 
 pub fn read_local_wireguard_show_output() -> AppResult<String> {
-    let os = OsDetection::new();
-    if !os.command_exists("wg") {
+    let Ok(wg_program) = resolve_wg_binary() else {
         return Ok(String::new());
-    }
+    };
 
-    let wg_program = os
-        .resolve_command_path("wg")
-        .unwrap_or_else(|| "wg".to_string());
-    let mut command = Command::new(wg_program);
-    os.with_augmented_path(&mut command);
-
-    let output = command
+    let output = Command::new(wg_program)
         .arg("show")
         .output()
         .map_err(|error| AppError::Command(format!("Failed to run wg show: {error}")))?;
@@ -2062,50 +2117,25 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
 
 #[cfg(target_os = "macos")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
-    let os = OsDetection::new();
-    if os.command_exists("wg") && os.command_exists("wg-quick") {
-        let _ = resolve_gotatun_binary()?;
-        return Ok(());
-    }
-
-    Err(AppError::Command(
-        "WireGuard tools are missing (wg/wg-quick). Please install wireguard-tools and gotatun manually, then retry."
-            .to_string(),
-    ))
+    let _ = resolve_wg_binary()?;
+    let _ = resolve_wg_quick_binary()?;
+    let _ = resolve_gotatun_binary()?;
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
-    let os = OsDetection::new();
-    if os.command_exists("wg") && os.command_exists("wg-quick") {
-        let _ = resolve_gotatun_binary()?;
-        return Ok(());
-    }
-
-    Err(AppError::Command(
-        "WireGuard tools are missing (wg/wg-quick). Please install wireguard-tools and gotatun manually, then retry."
-            .to_string(),
-    ))
+    let _ = resolve_wg_binary()?;
+    let _ = resolve_wg_quick_binary()?;
+    let _ = resolve_gotatun_binary()?;
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn ensure_local_wireguard_tools() -> AppResult<()> {
-    let wg_status = Command::new("where").arg("wg").status();
-    let wireguard_exe_status = Command::new("where").arg("wireguard.exe").status();
-
-    let has_wg = wg_status.map(|status| status.success()).unwrap_or(false);
-    let has_wireguard_exe = wireguard_exe_status
-        .map(|status| status.success())
-        .unwrap_or(false);
-
-    if has_wg && has_wireguard_exe {
-        return Ok(());
-    }
-
-    Err(AppError::Command(
-        "WireGuard tools are not installed on Windows. Please install WireGuard from https://wireguard.com/install and retry."
-            .to_string(),
-    ))
+    let _ = resolve_wg_binary()?;
+    let _ = resolve_wireguard_exe_binary()?;
+    Ok(())
 }
 
 fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
@@ -2237,6 +2267,15 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
 
 #[cfg(target_os = "macos")]
 fn teardown_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
+    let wg_bin = resolve_wg_binary()?;
+    let wg_quick_bin = resolve_wg_quick_binary()?;
+    let sidecar_bin_dir = Path::new(&wg_bin)
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default()
+        .replace('"', "\\\"");
+    let wg_quick_bin = wg_quick_bin.replace('"', "\\\"");
+
     let request_path = macos_helper_request_path(config_path)
         .display()
         .to_string()
@@ -2247,7 +2286,7 @@ fn teardown_local_wireguard_client_macos(config_path: &Path) -> AppResult<String
         .replace('"', "\\\"");
 
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; if command -v wg-quick >/dev/null 2>&1; then wg-quick down {MACOS_LOCAL_CONF_PATH} >/dev/null 2>&1 || true; wg-quick down {MACOS_HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; fi; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 1; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill -9 \"$pid\" >/dev/null 2>&1 || true; done; rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name; rm -f \"{request_path}\" \"{status_path}\" {MACOS_LOCAL_CONF_PATH} {MACOS_HOMEBREW_CONF_PATH}"
+        "set -euo pipefail; cd /; export PATH=\"{sidecar_bin_dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; if [ -x \"{wg_quick_bin}\" ]; then \"{wg_quick_bin}\" down {MACOS_LOCAL_CONF_PATH} >/dev/null 2>&1 || true; \"{wg_quick_bin}\" down {MACOS_HOMEBREW_CONF_PATH} >/dev/null 2>&1 || true; fi; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill \"$pid\" >/dev/null 2>&1 || true; done; sleep 1; for pid in $(pgrep -x gotatun 2>/dev/null || true); do kill -9 \"$pid\" >/dev/null 2>&1 || true; done; rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name; rm -f \"{request_path}\" \"{status_path}\" {MACOS_LOCAL_CONF_PATH} {MACOS_HOMEBREW_CONF_PATH}"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -2280,6 +2319,12 @@ fn hard_reconnect_local_wireguard_client_macos(
 ) -> AppResult<String> {
     let expected = load_expected_local_tunnel(config_path)?;
     let gotatun_bin = resolve_gotatun_binary()?;
+    let wg_bin = resolve_wg_binary()?;
+    let wg_quick_bin = resolve_wg_quick_binary()?;
+    let sidecar_bin_dir = Path::new(&wg_bin)
+        .parent()
+        .map(|path| path.display().to_string())
+        .unwrap_or_default();
 
     let path = config_path.display().to_string().replace('"', "\\\"");
     let request_path = macos_helper_request_path(config_path)
@@ -2296,11 +2341,14 @@ fn hard_reconnect_local_wireguard_client_macos(
     let expected_endpoint_host = expected.endpoint_host.replace('"', "\\\"");
     let expected_endpoint_port = expected.endpoint_port;
     let gotatun_bin = gotatun_bin.replace('"', "\\\"");
+    let wg_bin = wg_bin.replace('"', "\\\"");
+    let wg_quick_bin = wg_quick_bin.replace('"', "\\\"");
+    let sidecar_bin_dir = sidecar_bin_dir.replace('"', "\\\"");
     let repair_script = format!(
         r#"#!/bin/sh
 set -eu
 
-export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+export PATH="{sidecar_bin_dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
 SOURCE_CONF_PATH="{path}"
 LOCAL_CONF_PATH="{MACOS_LOCAL_CONF_PATH}"
@@ -2315,6 +2363,9 @@ EXPECTED_ENDPOINT_PORT="{expected_endpoint_port}"
 APP_OWNER=$(stat -f '%Su' "$SOURCE_CONF_PATH" 2>/dev/null || true)
 APP_GROUP=$(stat -f '%Sg' "$SOURCE_CONF_PATH" 2>/dev/null || true)
 GOTATUN_BIN="{gotatun_bin}"
+WG_BIN="{wg_bin}"
+WG_QUICK_BIN="{wg_quick_bin}"
+export WG="$WG_BIN"
 export WG_QUICK_USERSPACE_IMPLEMENTATION="$GOTATUN_BIN"
 export WG_SUDO=1
 
@@ -2338,6 +2389,17 @@ write_status() {{
 
 compact_output() {{
   printf '%s' "$1" | tr '\n' ' ' | tr '\r' ' '
+}}
+
+cleanup_userspace_runtime() {{
+  for pid in $(pgrep -x gotatun 2>/dev/null || true); do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
+  sleep 1
+  for pid in $(pgrep -x gotatun 2>/dev/null || true); do
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+  rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name 2>/dev/null || true
 }}
 
 has_recent_handshake() {{
@@ -2416,7 +2478,7 @@ if [ ! -f "$CONF_PATH" ]; then
   exit 1
 fi
 
-CURRENT_SHOW=$(wg show 2>/dev/null || true)
+CURRENT_SHOW=$("$WG_BIN" show 2>/dev/null || true)
 CURRENT_STATUS=$(tunnel_freshness_status "$CURRENT_SHOW")
 if [ "$CURRENT_STATUS" = "ok" ]; then
   rm -f "$REQUEST_PATH" 2>/dev/null || true
@@ -2424,17 +2486,20 @@ if [ "$CURRENT_STATUS" = "ok" ]; then
   exit 0
 fi
 
-wg-quick down "$LOCAL_CONF_PATH" >/dev/null 2>&1 || true
-wg-quick down "$HOMEBREW_CONF_PATH" >/dev/null 2>&1 || true
-sleep 1
-if ! UP_OUTPUT=$(wg-quick up "$CONF_PATH" 2>&1); then
+"$WG_QUICK_BIN" down "$LOCAL_CONF_PATH" >/dev/null 2>&1 || true
+"$WG_QUICK_BIN" down "$HOMEBREW_CONF_PATH" >/dev/null 2>&1 || true
+cleanup_userspace_runtime
+if ! UP_OUTPUT=$("$WG_QUICK_BIN" up "$CONF_PATH" 2>&1); then
   SUMMARY=$(compact_output "$UP_OUTPUT")
+  if printf '%s' "$UP_OUTPUT" | grep -qi 'Unable to modify interface: Unknown error: -22'; then
+    cleanup_userspace_runtime
+  fi
   rm -f "$REQUEST_PATH" 2>/dev/null || true
   write_status "error" "wg-quick up failed: $SUMMARY"
   printf '%s\n' "$UP_OUTPUT"
   exit 1
 fi
-SHOW_OUTPUT=$(wg show 2>/dev/null || true)
+SHOW_OUTPUT=$("$WG_BIN" show 2>/dev/null || true)
 rm -f "$REQUEST_PATH" 2>/dev/null || true
 
 ATTEMPTS=10
@@ -2449,7 +2514,7 @@ while [ "$ATTEMPTS" -gt 0 ]; do
   ATTEMPTS=$((ATTEMPTS - 1))
   [ "$ATTEMPTS" -gt 0 ] || break
   sleep 1
-  SHOW_OUTPUT=$(wg show 2>/dev/null || true)
+  SHOW_OUTPUT=$("$WG_BIN" show 2>/dev/null || true)
 done
 
 SUMMARY=$(compact_output "$SHOW_OUTPUT")
@@ -2472,18 +2537,11 @@ exit 1
   </array>
   <key>RunAtLoad</key>
   <true/>
-  <key>KeepAlive</key>
-  <dict>
-    <key>NetworkState</key>
-    <true/>
-  </dict>
   <key>WatchPaths</key>
   <array>
     <string>{path}</string>
     <string>{request_path}</string>
   </array>
-  <key>StartInterval</key>
-  <integer>60</integer>
   <key>StandardOutPath</key>
   <string>/var/log/noland-wireguard.log</string>
   <key>StandardErrorPath</key>
@@ -2493,7 +2551,7 @@ exit 1
 "#
     );
     let shell_script = format!(
-        "set -euo pipefail; cd /; export PATH=\"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if ! command -v wg-quick >/dev/null 2>&1; then echo 'wg-quick not found. Install wireguard-tools first.' >&2; exit 1; fi; if [ ! -x \"{gotatun_bin}\" ] && ! command -v \"{gotatun_bin}\" >/dev/null 2>&1; then echo 'gotatun not found. Install gotatun first or set NOLAND_GOTATUN_BIN.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; wg show"
+        "set -euo pipefail; cd /; export PATH=\"{sidecar_bin_dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; if [ ! -x \"{wg_quick_bin}\" ]; then echo 'Bundled wg-quick sidecar not found.' >&2; exit 1; fi; if [ ! -x \"{wg_bin}\" ]; then echo 'Bundled wg sidecar not found.' >&2; exit 1; fi; if [ ! -x \"{gotatun_bin}\" ] && ! command -v \"{gotatun_bin}\" >/dev/null 2>&1; then echo 'gotatun not found. Install gotatun first or set NOLAND_GOTATUN_BIN.' >&2; exit 1; fi; mkdir -p /usr/local/etc/wireguard /opt/homebrew/etc/wireguard /usr/local/libexec; install -m 600 \"{path}\" {MACOS_LOCAL_CONF_PATH}; install -m 600 \"{path}\" {MACOS_HOMEBREW_CONF_PATH}; rm -f \"{request_path}\" \"{status_path}\"; cat > {MACOS_WIREGUARD_HELPER_SCRIPT_PATH} <<'EOF'\n{repair_script}\nEOF\nchmod 755 {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; cat > {MACOS_WIREGUARD_HELPER_PLIST_PATH} <<'EOF'\n{launchd_plist}\nEOF\nchown root:wheel {MACOS_WIREGUARD_HELPER_PLIST_PATH}; chmod 644 {MACOS_WIREGUARD_HELPER_PLIST_PATH}; launchctl bootout system/{MACOS_WIREGUARD_HELPER_LABEL} >/dev/null 2>&1 || true; {MACOS_WIREGUARD_HELPER_SCRIPT_PATH}; launchctl bootstrap system {MACOS_WIREGUARD_HELPER_PLIST_PATH}; \"{wg_bin}\" show"
     );
     let applescript = format!(
         "do shell script \"{}\" with administrator privileges",
@@ -2766,10 +2824,12 @@ fn enforce_single_control_plane_macos(config_path: &Path) -> AppResult<()> {
 fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     let expected = load_expected_local_tunnel(config_path)?;
     let gotatun_bin = resolve_gotatun_binary()?;
+    let wg_bin = resolve_wg_binary()?;
+    let wg_quick_bin = resolve_wg_quick_binary()?;
 
     let destination = LINUX_LOCAL_WIREGUARD_CONF_PATH;
     let interface_exists = Command::new("sudo")
-        .args(["wg", "show", LOCAL_WIREGUARD_TUNNEL_NAME])
+        .args([wg_bin.as_str(), "show", LOCAL_WIREGUARD_TUNNEL_NAME])
         .status()
         .map(|status| status.success())
         .unwrap_or(false);
@@ -2801,13 +2861,15 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     }
 
     let gotatun_env = format!("WG_QUICK_USERSPACE_IMPLEMENTATION={}", gotatun_bin);
+    let wg_env = format!("WG={}", wg_bin);
 
     let up = Command::new("sudo")
         .args([
             "env",
             gotatun_env.as_str(),
+            wg_env.as_str(),
             "WG_SUDO=1",
-            "wg-quick",
+            wg_quick_bin.as_str(),
             "up",
             destination,
         ])
@@ -2831,6 +2893,8 @@ fn setup_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
 fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<String> {
     let expected = load_expected_local_tunnel(config_path)?;
     let gotatun_bin = resolve_gotatun_binary()?;
+    let wg_bin = resolve_wg_binary()?;
+    let wg_quick_bin = resolve_wg_quick_binary()?;
     let destination = LINUX_LOCAL_WIREGUARD_CONF_PATH;
 
     let copy = Command::new("sudo")
@@ -2853,13 +2917,15 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
     }
 
     let gotatun_env = format!("WG_QUICK_USERSPACE_IMPLEMENTATION={}", gotatun_bin);
+    let wg_env = format!("WG={}", wg_bin);
 
     let _ = Command::new("sudo")
         .args([
             "env",
             gotatun_env.as_str(),
+            wg_env.as_str(),
             "WG_SUDO=1",
-            "wg-quick",
+            wg_quick_bin.as_str(),
             "down",
             destination,
         ])
@@ -2869,8 +2935,9 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
         .args([
             "env",
             gotatun_env.as_str(),
+            wg_env.as_str(),
             "WG_SUDO=1",
-            "wg-quick",
+            wg_quick_bin.as_str(),
             "up",
             destination,
         ])
@@ -2894,8 +2961,17 @@ fn reconnect_local_wireguard_client_linux(config_path: &Path) -> AppResult<Strin
 
 #[cfg(target_os = "linux")]
 fn teardown_local_wireguard_client_linux() -> AppResult<String> {
+    let wg_bin = resolve_wg_binary()?;
+    let wg_quick_bin = resolve_wg_quick_binary()?;
+    let wg_env = format!("WG={}", wg_bin);
     let output = Command::new("sudo")
-        .args(["wg-quick", "down", LINUX_LOCAL_WIREGUARD_CONF_PATH])
+        .args([
+            "env",
+            wg_env.as_str(),
+            wg_quick_bin.as_str(),
+            "down",
+            LINUX_LOCAL_WIREGUARD_CONF_PATH,
+        ])
         .output()
         .map_err(|error| AppError::Command(format!("Failed to stop local WireGuard: {error}")))?;
 
@@ -3064,12 +3140,15 @@ fn derive_public_key(private_key: &str) -> AppResult<String> {
 
 fn resolved_command(tool: &str) -> AppResult<Command> {
     let os = OsDetection::new();
-    let program = os.resolve_command_path(tool).ok_or_else(|| {
-        AppError::Command(format!(
-            "`{tool}` is not available in PATH. {}",
-            os.install_hint_for_tool(tool)
-        ))
-    })?;
+    let program = locate_managed_tool_binary(tool)
+        .map(|path| path.display().to_string())
+        .or_else(|| os.resolve_command_path(tool))
+        .ok_or_else(|| {
+            AppError::Command(format!(
+                "`{tool}` is not available in the app bundle or PATH. {}",
+                os.install_hint_for_tool(tool)
+            ))
+        })?;
     let mut command = Command::new(program);
     os.with_augmented_path(&mut command);
     Ok(command)

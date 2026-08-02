@@ -30,6 +30,29 @@ const tauriEnv = {
   ...process.env,
 };
 
+const hostWg = findHostTool(process.platform === 'win32' ? 'wg.exe' : 'wg', 'NOLAND_WG_BIN');
+const hostWgQuick = process.platform === 'win32'
+  ? undefined
+  : findHostTool('wg-quick', 'NOLAND_WG_QUICK_BIN');
+const hostWireguardExe = process.platform === 'win32'
+  ? findHostTool('wireguard.exe', 'NOLAND_WIREGUARD_EXE_BIN')
+  : undefined;
+const hostGotatun = process.platform === 'win32'
+  ? undefined
+  : findHostTool('gotatun', 'NOLAND_GOTATUN_BIN');
+if (hostWg) {
+  tauriEnv.NOLAND_WG_BIN = hostWg;
+}
+if (hostWgQuick) {
+  tauriEnv.NOLAND_WG_QUICK_BIN = hostWgQuick;
+}
+if (hostWireguardExe) {
+  tauriEnv.NOLAND_WIREGUARD_EXE_BIN = hostWireguardExe;
+}
+if (hostGotatun) {
+  tauriEnv.NOLAND_GOTATUN_BIN = hostGotatun;
+}
+
 if (mode === 'dev') {
   const sidecarTargetDir = join(repoRoot, 'src-tauri', '.native-deps', 'mic-sidecar-target');
   const profileDir = 'debug';
@@ -104,6 +127,30 @@ function defaultHostTarget() {
     if (process.arch === 'x64') return 'x86_64-unknown-linux-gnu';
     if (process.arch === 'arm64') return 'aarch64-unknown-linux-gnu';
   }
+  return undefined;
+}
+
+function findHostTool(toolName, envVarName) {
+  const envOverride = process.env[envVarName]?.trim();
+  if (envOverride && existsSync(envOverride)) {
+    return envOverride;
+  }
+
+  const locator = process.platform === 'win32' ? 'where' : 'which';
+  const resolved = spawnSync(locator, [toolName], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+  });
+  if (resolved.status === 0) {
+    const candidate = resolved.stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0 && existsSync(line));
+    if (candidate) {
+      return candidate;
+    }
+  }
+
   return undefined;
 }
 
