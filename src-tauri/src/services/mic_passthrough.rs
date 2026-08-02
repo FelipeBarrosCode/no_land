@@ -221,6 +221,8 @@ impl MicPassthroughService {
                 .await?;
         }
 
+        mic_client::ensure_microphone_access()?;
+
         let selected_device_id = normalize_device_id(&persisted_config.device_id);
         let selected_device_name =
             resolved_device_name(&selected_device_id, persisted_config.device_name.as_str());

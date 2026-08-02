@@ -8,8 +8,11 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? process.env.NOLAND_MIC_SENDER_TARGET ?? 'aarch64-apple-darwin';
 const productName = 'Noland Connect';
-const appPath = join(repoRoot, 'src-tauri', 'target', target, 'release', 'bundle', 'macos', `${productName}.app`);
-const dmgPath = join(repoRoot, 'src-tauri', 'target', target, 'release', 'bundle', 'dmg', `${productName}_0.1.0_${target.includes('aarch64') ? 'aarch64' : 'x64'}.dmg`);
+const tripleTargetDir = join(repoRoot, 'src-tauri', 'target', target, 'release');
+const defaultTargetDir = join(repoRoot, 'src-tauri', 'target', 'release');
+const targetReleaseDir = chooseTargetReleaseDir();
+const appPath = join(targetReleaseDir, 'bundle', 'macos', `${productName}.app`);
+const dmgPath = join(targetReleaseDir, 'bundle', 'dmg', `${productName}_0.1.0_${target.includes('aarch64') ? 'aarch64' : 'x64'}.dmg`);
 
 if (process.platform !== 'darwin') {
   console.log('Skipping macOS bundle dependency fix on non-macOS host');
@@ -22,11 +25,14 @@ if (!existsSync(appPath)) {
 }
 
 const contentsDir = join(appPath, 'Contents');
+const infoPlistPath = join(contentsDir, 'Info.plist');
 const macosDir = join(contentsDir, 'MacOS');
 const frameworksDir = join(contentsDir, 'Frameworks');
 const resourcesDir = join(contentsDir, 'Resources');
+const microphoneUsageDescription = 'Noland Connect needs microphone access to forward your local mic into your cloud gaming session.';
 const frameworkBundleSource = join(frameworksDir, 'GStreamer.framework');
 const frameworkBundleDir = join(resourcesDir, 'gstreamer', 'macos', 'GStreamer.framework');
+const bundledFrameworkBuildLibDir = toPosix(join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework', 'Versions', 'Current', 'lib'));
 
 if (existsSync(frameworkBundleSource) && !existsSync(frameworkBundleDir)) {
   mkdirSync(dirname(frameworkBundleDir), { recursive: true });
@@ -83,6 +89,7 @@ const frameworkRootLibs = existsSync(frameworksDir)
   : [];
 
 ensureBundledSdl3(frameworksDir, frameworkRootLibs);
+ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
 
 const frameworkIndex = new Map();
 for (const file of frameworkFiles) {
@@ -106,6 +113,9 @@ for (const file of [...allTargets]) {
 for (const file of [...allTargets]) {
   rewriteRemainingGStreamerDeps(file);
 }
+for (const file of [...allTargets]) {
+  rewriteBuildTreeGStreamerDeps(file);
+}
 
 for (const file of frameworkFiles) {
   setInstallId(file, frameworkIdFor(file));
@@ -120,6 +130,22 @@ for (const file of frameworkRootLibs) {
 adhocSign(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...macosFiles]);
 rebuildDmg(appPath, dmgPath, productName);
 console.log(`Patched macOS bundle dependencies: ${appPath}`);
+
+function chooseTargetReleaseDir() {
+  const candidates = [tripleTargetDir, defaultTargetDir]
+    .map((dir) => ({
+      dir,
+      app: join(dir, 'bundle', 'macos', `${productName}.app`),
+    }))
+    .filter((entry) => existsSync(entry.app));
+
+  if (candidates.length === 0) {
+    return existsSync(tripleTargetDir) ? tripleTargetDir : defaultTargetDir;
+  }
+
+  candidates.sort((a, b) => statSync(b.app).mtimeMs - statSync(a.app).mtimeMs);
+  return candidates[0].dir;
+}
 
 function patchFile(file) {
   const realFile = safeRealpath(file);
@@ -215,6 +241,17 @@ function rewriteRemainingGStreamerDeps(file) {
   }
 }
 
+function rewriteBuildTreeGStreamerDeps(file) {
+  for (const dep of listDependencies(file)) {
+    if (!dep.startsWith(`${bundledFrameworkBuildLibDir}/`)) continue;
+    const target = resolveBundledTarget(dep);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
+}
+
 function frameworkIdFor(file) {
   const rel = relative(frameworkLibDir, file);
   return `@rpath/GStreamer.framework/Versions/Current/lib/${toPosix(rel)}`;
@@ -235,6 +272,17 @@ function listDependencies(file) {
 function setInstallId(file, id) {
   if (!file.endsWith('.dylib')) return;
   run('install_name_tool', ['-id', id, file], { allowFailure: true });
+}
+
+function ensureMicrophoneUsageDescription(infoPlist, message) {
+  if (!existsSync(infoPlist)) return;
+  const printResult = run('/usr/libexec/PlistBuddy', ['-c', 'Print :NSMicrophoneUsageDescription', infoPlist], { allowFailure: true });
+  const escapedMessage = message.replace(/"/g, '\\"');
+  if (printResult.status === 0) {
+    run('/usr/libexec/PlistBuddy', ['-c', `Set :NSMicrophoneUsageDescription "${escapedMessage}"`, infoPlist], { allowFailure: false });
+    return;
+  }
+  run('/usr/libexec/PlistBuddy', ['-c', `Add :NSMicrophoneUsageDescription string "${escapedMessage}"`, infoPlist], { allowFailure: false });
 }
 
 function adhocSign(app, nestedFiles) {
@@ -258,13 +306,28 @@ function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
   const sdl2Compat = join(frameworksDir, 'libSDL2-2.0.0.dylib');
   if (!existsSync(sdl2Compat)) return;
 
+  const sdl3Dest = join(frameworksDir, 'libSDL3.dylib');
+  const sdl3CompatDest = join(frameworksDir, 'libSDL3.0.dylib');
+  if (existsSync(sdl3Dest) && existsSync(sdl3CompatDest)) {
+    for (const existing of [sdl3Dest, sdl3CompatDest]) {
+      if (!frameworkRootLibs.includes(existing) && isMachOCandidate(existing)) {
+        frameworkRootLibs.push(existing);
+      }
+    }
+    return;
+  }
+
   const sdl3Candidates = [
     '/opt/homebrew/opt/sdl3/lib/libSDL3.dylib',
+    '/opt/homebrew/lib/libSDL3.dylib',
     '/usr/local/opt/sdl3/lib/libSDL3.dylib',
+    '/usr/local/lib/libSDL3.dylib',
   ];
 
   const sdl3 = sdl3Candidates.find((candidate) => existsSync(candidate));
-  if (!sdl3) return;
+  if (!sdl3) {
+    throw new Error(`SDL3 companion library is required for ${sdl2Compat} but no libSDL3.dylib source was found`);
+  }
 
   const companionCandidates = [
     sdl3.replace(/libSDL3\.dylib$/, 'libSDL3.0.dylib'),
@@ -282,6 +345,10 @@ function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
     if (!frameworkRootLibs.includes(dest) && isMachOCandidate(dest)) {
       frameworkRootLibs.push(dest);
     }
+  }
+
+  if (!existsSync(sdl3Dest)) {
+    throw new Error(`Failed to bundle libSDL3.dylib into ${frameworksDir}`);
   }
 }
 
@@ -328,6 +395,7 @@ function shouldRewriteDependency(dep) {
     || dep.startsWith('@executable_path/../Frameworks/GStreamer.framework/')
     || dep.startsWith('@executable_path/../Resources/gstreamer/macos/GStreamer.framework/')
     || dep.startsWith('@rpath/GStreamer.framework/')
+    || dep.startsWith(`${bundledFrameworkBuildLibDir}/`)
     || dep.includes('/GStreamer.framework/');
 }
 

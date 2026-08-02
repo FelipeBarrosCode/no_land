@@ -2,7 +2,7 @@ use std::{
     ffi::c_void,
     sync::{
         atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
-        Arc, OnceLock, Weak,
+        mpsc, Arc, OnceLock, Weak,
     },
 };
 
@@ -148,13 +148,16 @@ pub fn install_native_stream_input<R: Runtime>(
 
     #[cfg(target_os = "macos")]
     {
-        let view = appkit_view_ptr(window)?;
-        let result = unsafe { noland_macos_input_install(view) };
-        if result != 0 {
-            return Err(MoonlightError::Native(format!(
-                "failed to install macOS native stream input bridge: {result}"
-            )));
-        }
+        run_on_window_main_thread(window, |window| {
+            let view = appkit_view_ptr(window)?;
+            let result = unsafe { noland_macos_input_install(view) };
+            if result != 0 {
+                return Err(MoonlightError::Native(format!(
+                    "failed to install macOS native stream input bridge: {result}"
+                )));
+            }
+            Ok(())
+        })?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -169,8 +172,11 @@ pub fn install_native_stream_input<R: Runtime>(
 pub fn uninstall_native_stream_input<R: Runtime>(window: &Window<R>) -> Result<(), MoonlightError> {
     #[cfg(target_os = "macos")]
     {
-        let view = appkit_view_ptr(window)?;
-        unsafe { noland_macos_input_uninstall(view) };
+        run_on_window_main_thread(window, |window| {
+            let view = appkit_view_ptr(window)?;
+            unsafe { noland_macos_input_uninstall(view) };
+            Ok(())
+        })?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -187,16 +193,19 @@ pub fn activate_native_stream_input<R: Runtime>(
 ) -> Result<bool, MoonlightError> {
     #[cfg(target_os = "macos")]
     {
-        let view = appkit_view_ptr(window)?;
-        let result =
-            unsafe { noland_macos_input_set_capture_active(view, true, native_capture_mode(mode)) };
-        return match result {
-            0 => Ok(true),
-            1 => Ok(false),
-            other => Err(MoonlightError::Native(format!(
-                "failed to activate macOS native stream input capture: {other}"
-            ))),
-        };
+        return run_on_window_main_thread(window, move |window| {
+            let view = appkit_view_ptr(window)?;
+            let result = unsafe {
+                noland_macos_input_set_capture_active(view, true, native_capture_mode(mode))
+            };
+            match result {
+                0 => Ok(true),
+                1 => Ok(false),
+                other => Err(MoonlightError::Native(format!(
+                    "failed to activate macOS native stream input capture: {other}"
+                ))),
+            }
+        });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -212,15 +221,17 @@ pub fn deactivate_native_stream_input<R: Runtime>(
 ) -> Result<bool, MoonlightError> {
     #[cfg(target_os = "macos")]
     {
-        let view = appkit_view_ptr(window)?;
-        let result = unsafe { noland_macos_input_set_capture_active(view, false, 0) };
-        return match result {
-            0 => Ok(true),
-            1 => Ok(false),
-            other => Err(MoonlightError::Native(format!(
-                "failed to deactivate macOS native stream input capture: {other}"
-            ))),
-        };
+        return run_on_window_main_thread(window, |window| {
+            let view = appkit_view_ptr(window)?;
+            let result = unsafe { noland_macos_input_set_capture_active(view, false, 0) };
+            match result {
+                0 => Ok(true),
+                1 => Ok(false),
+                other => Err(MoonlightError::Native(format!(
+                    "failed to deactivate macOS native stream input capture: {other}"
+                ))),
+            }
+        });
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -262,9 +273,33 @@ fn appkit_view_ptr<R: Runtime>(_window: &Window<R>) -> Result<*mut c_void, Moonl
 #[cfg(target_os = "macos")]
 fn native_capture_mode(mode: MouseMode) -> i32 {
     match mode {
-        MouseMode::Relative => 1,
-        MouseMode::Absolute => 2,
+        MouseMode::Absolute => 1,
+        MouseMode::Relative => 2,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn run_on_window_main_thread<R, T, F>(window: &Window<R>, f: F) -> Result<T, MoonlightError>
+where
+    R: Runtime,
+    T: Send + 'static,
+    F: FnOnce(&Window<R>) -> Result<T, MoonlightError> + Send + 'static,
+{
+    let window = window.clone();
+    let main_thread_window = window.clone();
+    let (tx, rx) = mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let result = f(&main_thread_window);
+            let _ = tx.send(result);
+        })
+        .map_err(|error| MoonlightError::Native(error.to_string()))?;
+
+    rx.recv().map_err(|error| {
+        MoonlightError::Native(format!(
+            "failed to receive macOS main-thread input bridge result: {error}"
+        ))
+    })?
 }
 
 #[cfg(not(target_os = "macos"))]

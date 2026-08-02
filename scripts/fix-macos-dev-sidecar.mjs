@@ -187,6 +187,7 @@ function pruneBundledPlugins() {
 }
 
 function patchFile(file) {
+  if (!existsSync(file)) return;
   const realFile = safeRealpath(file);
   if (scanned.has(realFile)) return;
   scanned.add(realFile);
@@ -196,6 +197,7 @@ function patchFile(file) {
     if (!shouldRewriteDependency(dep)) continue;
     const bundledTarget = resolveBundledTarget(dep);
     if (!bundledTarget) continue;
+    if (!existsSync(bundledTarget)) continue;
     const desired = installNameForConsumer(file, bundledTarget);
     run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
     if (!allTargets.has(bundledTarget)) {

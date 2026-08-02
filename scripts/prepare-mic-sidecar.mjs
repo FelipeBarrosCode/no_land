@@ -38,6 +38,7 @@ const profileDir = release ? 'release' : 'debug';
 const builtBinary = target
   ? join(sidecarTargetDir, target, profileDir, executableName)
   : join(sidecarTargetDir, profileDir, executableName);
+const packagingTarget = release ? (target ?? defaultHostTarget()) : undefined;
 
 if (!existsSync(builtBinary)) {
   console.error(`Expected mic sidecar binary was not produced: ${builtBinary}`);
@@ -55,12 +56,12 @@ if (process.platform === 'darwin') {
   }
 }
 
-if (release && target) {
+if (packagingTarget) {
   const binariesDir = join(srcTauriDir, 'binaries');
   mkdirSync(binariesDir, { recursive: true });
   const stagedName = process.platform === 'win32'
-    ? `noland-mic-sender-${target}.exe`
-    : `noland-mic-sender-${target}`;
+    ? `noland-mic-sender-${packagingTarget}.exe`
+    : `noland-mic-sender-${packagingTarget}`;
   const stagedBinary = join(binariesDir, stagedName);
   copyFileSync(builtBinary, stagedBinary);
   if (process.platform !== 'win32') {
@@ -85,4 +86,20 @@ function readTarget(args) {
     }
   }
   return undefined;
+}
+
+function defaultHostTarget() {
+  if (process.platform === 'darwin') {
+    if (process.arch === 'arm64') return 'aarch64-apple-darwin';
+    if (process.arch === 'x64') return 'x86_64-apple-darwin';
+  }
+  if (process.platform === 'win32') {
+    if (process.arch === 'x64') return 'x86_64-pc-windows-msvc';
+    if (process.arch === 'arm64') return 'aarch64-pc-windows-msvc';
+  }
+  if (process.platform === 'linux') {
+    if (process.arch === 'x64') return 'x86_64-unknown-linux-gnu';
+    if (process.arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  }
+  return `${process.arch}-${process.platform}`;
 }

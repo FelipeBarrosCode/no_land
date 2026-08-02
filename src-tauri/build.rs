@@ -152,6 +152,10 @@ fn main() {
         "cargo:rerun-if-changed={}",
         PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        PathBuf::from("src/mic_client/macos_permissions.m").display()
+    );
 
     let mut cmake_config = cmake::Config::new(&native_root);
     cmake_config
@@ -234,6 +238,10 @@ fn main() {
             .file("src/moonlight/platform/macos_stream_input.m")
             .flag("-fobjc-arc")
             .compile("noland_macos_stream_input");
+        cc::Build::new()
+            .file("src/mic_client/macos_permissions.m")
+            .flag("-fobjc-arc")
+            .compile("noland_macos_permissions");
 
         for prefix in native_dep_prefixes(&target, &manifest_dir) {
             println!(

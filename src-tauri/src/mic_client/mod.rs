@@ -1,4 +1,5 @@
 pub mod device_list;
+mod permissions;
 mod runtime;
 
 use std::fs::OpenOptions;
@@ -9,6 +10,8 @@ use std::thread;
 use std::time::Duration;
 
 use tracing::info;
+
+pub use permissions::ensure_microphone_access;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::app_state::MicQualityProfile;
@@ -55,21 +58,25 @@ fn sidecar_log_paths() -> Vec<PathBuf> {
     candidates
 }
 
-fn prepare_sidecar_log_stdio() -> Option<(Stdio, Stdio)> {
+fn resolve_sidecar_log_path() -> Option<PathBuf> {
     for directory in sidecar_log_paths() {
         if std::fs::create_dir_all(&directory).is_err() {
             continue;
         }
-        let log_path = directory.join("noland-mic-sender.log");
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)
-            .ok()?;
-        let stderr = file.try_clone().ok()?;
-        return Some((Stdio::from(file), Stdio::from(stderr)));
+        return Some(directory.join("noland-mic-sender.log"));
     }
     None
+}
+
+fn prepare_sidecar_log_stdio() -> Option<(Stdio, Stdio)> {
+    let log_path = resolve_sidecar_log_path()?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok()?;
+    let stderr = file.try_clone().ok()?;
+    Some((Stdio::from(file), Stdio::from(stderr)))
 }
 
 #[cfg(unix)]
@@ -170,12 +177,30 @@ pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
         command.arg("--device-id").arg(device_id);
     }
 
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         AppError::Command(format!(
             "Failed to start microphone sender sidecar '{}': {error}",
             sidecar.display()
         ))
     })?;
+
+    thread::sleep(Duration::from_millis(750));
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let log_hint = resolve_sidecar_log_path()
+                .map(|path| format!(" Check {} for sidecar logs.", path.display()))
+                .unwrap_or_default();
+            return Err(AppError::Command(format!(
+                "Microphone sender sidecar exited immediately with status {status}. macOS microphone permission may still be missing or the capture runtime failed to initialize.{log_hint}"
+            )));
+        }
+        Ok(None) => {}
+        Err(error) => {
+            return Err(AppError::Command(format!(
+                "Failed to verify microphone sender sidecar startup: {error}"
+            )));
+        }
+    }
 
     info!(
         session_id = config.session_id,

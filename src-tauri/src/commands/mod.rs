@@ -1596,6 +1596,11 @@ async fn start_embedded_stream_for_host(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
+        crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+        crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+    };
+    let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
 
     let state = moonlight
         .runtime
@@ -4373,6 +4378,11 @@ pub async fn moonlight_start_stream(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
+        crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+        crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+    };
+    let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
 
     let state = moonlight
         .runtime
