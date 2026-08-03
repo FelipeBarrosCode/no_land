@@ -161,7 +161,7 @@ impl MoonlightService {
 
         #[cfg(target_os = "linux")]
         {
-            return find_linux_moonlight_command().map(|_| PathBuf::from("moonlight"));
+            return find_linux_moonlight_command().map(|command| command.command_path);
         }
 
         #[allow(unreachable_code)]
@@ -463,9 +463,9 @@ impl MoonlightService {
 
         #[cfg(target_os = "linux")]
         {
-            if let Some((command, args)) = find_linux_moonlight_command() {
-                let mut child = Command::new(command);
-                child.args(args);
+            if let Some(command) = find_linux_moonlight_command() {
+                let mut child = Command::new(&command.command_path);
+                child.args(&command.args);
                 child.spawn().map_err(|error| {
                     AppError::Command(format!(
                         "Failed to launch Moonlight from the detected Linux command: {error}"
@@ -561,16 +561,21 @@ impl MoonlightService {
 
         #[cfg(target_os = "linux")]
         {
-            Command::new("moonlight")
-                .arg("pair")
-                .arg(host)
-                .spawn()
-                .map_err(|error| {
+            if let Some(command) = find_linux_moonlight_command() {
+                let mut child = Command::new(&command.command_path);
+                child.args(&command.args);
+                child.arg("pair").arg(host);
+                child.spawn().map_err(|error| {
                     AppError::Command(format!(
-                        "Failed to start Moonlight pairing via moonlight CLI: {error}"
+                        "Failed to start Moonlight pairing from the detected Linux command: {error}"
                     ))
                 })?;
-            return Ok(());
+                return Ok(());
+            }
+
+            return Err(AppError::NotFound(
+                "Moonlight desktop app was not found on this Linux machine. Install Moonlight, Flatpak Moonlight, or Snap Moonlight and try again.".to_string(),
+            ));
         }
 
         #[allow(unreachable_code)]
@@ -863,26 +868,39 @@ fn parse_reg_query_value(output: &str, value_name: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-fn find_linux_moonlight_command() -> Option<(OsString, Vec<OsString>)> {
-    if resolve_command_in_path("moonlight").is_some() {
-        return Some((OsString::from("moonlight"), Vec::new()));
+struct LinuxMoonlightCommand {
+    command_path: PathBuf,
+    args: Vec<OsString>,
+    launch_kind: &'static str,
+}
+
+#[cfg(target_os = "linux")]
+fn find_linux_moonlight_command() -> Option<LinuxMoonlightCommand> {
+    if let Some(path) = resolve_command_in_path("moonlight") {
+        return Some(LinuxMoonlightCommand {
+            command_path: path,
+            args: Vec::new(),
+            launch_kind: "path_lookup",
+        });
     }
 
-    if resolve_command_in_path("flatpak").is_some() {
-        return Some((
-            OsString::from("flatpak"),
-            vec![
+    if let Some(path) = resolve_command_in_path("flatpak") {
+        return Some(LinuxMoonlightCommand {
+            command_path: path,
+            args: vec![
                 OsString::from("run"),
                 OsString::from("com.moonlight_stream.Moonlight"),
             ],
-        ));
+            launch_kind: "flatpak",
+        });
     }
 
-    if resolve_command_in_path("snap").is_some() {
-        return Some((
-            OsString::from("snap"),
-            vec![OsString::from("run"), OsString::from("moonlight")],
-        ));
+    if let Some(path) = resolve_command_in_path("snap") {
+        return Some(LinuxMoonlightCommand {
+            command_path: path,
+            args: vec![OsString::from("run"), OsString::from("moonlight")],
+            launch_kind: "snap",
+        });
     }
 
     None

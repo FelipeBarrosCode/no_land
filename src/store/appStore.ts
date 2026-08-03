@@ -1212,7 +1212,30 @@ export const useAppStore = create<AppStore>((set, get) => {
           detail: "Restarting the local GotaTun-backed tunnel.",
         },
         async () => {
-          return await reconnectLocalWireguardClientQuick();
+          try {
+            const result = await reconnectLocalWireguardClientQuick();
+            const appState = await getAppState();
+            set({ appState });
+            return result;
+          } catch (error) {
+            try {
+              const verification = await verifyWireguard();
+              const appState = await getAppState();
+              set({ appState });
+
+              if (verification.reachable) {
+                if (verification.reachablePorts.length > 0) {
+                  return `Managed tunnel is connected (${verification.host}:${verification.reachablePorts[0]} reachable).`;
+                }
+
+                return `Managed tunnel is connected (${verification.host} reachable).`;
+              }
+            } catch {
+              // Fall through and surface the original reconnect error.
+            }
+
+            throw error;
+          }
         },
         null,
       );

@@ -13,15 +13,6 @@ fn native_dep_prefixes(target: &str, manifest_dir: &std::path::Path) -> Vec<Path
     }
 
     prefixes.push(manifest_dir.join(".native-deps").join(target));
-
-    if target == "x86_64-apple-darwin" {
-        prefixes.push(PathBuf::from("/usr/local"));
-        prefixes.push(PathBuf::from("/opt/homebrew"));
-    } else if target == "aarch64-apple-darwin" {
-        prefixes.push(PathBuf::from("/opt/homebrew"));
-        prefixes.push(PathBuf::from("/usr/local"));
-    }
-
     prefixes
 }
 
@@ -65,7 +56,7 @@ fn main() {
         return;
     }
 
-    prepare_gstreamer_bundle().expect("failed to prepare bundled GStreamer runtime");
+    prepare_gstreamer_bundle(&target).expect("failed to prepare bundled GStreamer runtime");
     ensure_managed_sidecar_bundle_artifacts()
         .expect("failed to prepare managed tool sidecar bundle artifacts");
 
@@ -359,6 +350,33 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         "run the Tauri build through the npm wrapper so the Windows WireGuard service helper is staged first",
     )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "ssh",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        true,
+        "run the Tauri build through the npm wrapper so the bundled OpenSSH client is staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "scp",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        true,
+        "run the Tauri build through the npm wrapper so the bundled OpenSSH scp client is staged first",
+    )?;
+    ensure_staged_bundle_binary(
+        &binaries_dir,
+        "ssh-keygen",
+        &target_triple,
+        target_is_windows,
+        is_release,
+        true,
+        "run the Tauri build through the npm wrapper so the bundled OpenSSH keygen client is staged first",
+    )?;
 
     Ok(())
 }
@@ -394,12 +412,11 @@ fn ensure_staged_bundle_binary(
         ));
     }
 
-    write_debug_sidecar_placeholder(&staged_path)
+    write_debug_sidecar_placeholder(&staged_path, target_triple.contains("windows"))
 }
 
-fn write_debug_sidecar_placeholder(path: &Path) -> io::Result<()> {
-    #[cfg(target_os = "windows")]
-    {
+fn write_debug_sidecar_placeholder(path: &Path, target_is_windows: bool) -> io::Result<()> {
+    if target_is_windows {
         fs::write(
             path,
             b"@echo off\r\necho noland-mic-sender debug placeholder. Run npm run tauri:dev or npm run prepare:mic-sidecar before launching the app.\r\nexit /b 1\r\n",
@@ -407,7 +424,7 @@ fn write_debug_sidecar_placeholder(path: &Path) -> io::Result<()> {
         return Ok(());
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
@@ -420,128 +437,72 @@ fn write_debug_sidecar_placeholder(path: &Path) -> io::Result<()> {
         fs::set_permissions(path, permissions)?;
         return Ok(());
     }
+
+    #[cfg(not(unix))]
+    {
+        fs::write(
+            path,
+            b"noland-mic-sender debug placeholder. Run npm run tauri:dev or npm run prepare:mic-sidecar before launching the app.\n",
+        )?;
+        Ok(())
+    }
 }
 
-fn prepare_gstreamer_bundle() -> io::Result<()> {
+fn prepare_gstreamer_bundle(target: &str) -> io::Result<()> {
     println!("cargo:rerun-if-env-changed=NOLAND_GSTREAMER_FRAMEWORK");
-    println!("cargo:rerun-if-env-changed=NOLAND_GSTREAMER_HOMEBREW_PREFIX");
 
-    if !cfg!(target_os = "macos") {
+    if !target.ends_with("apple-darwin") {
         return Ok(());
     }
 
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let bundled_root = manifest_dir.join("bundled").join("macos");
-    let bundled_framework = bundled_root.join("GStreamer.framework");
+    let bundled_framework = manifest_dir
+        .join("bundled")
+        .join("macos")
+        .join("GStreamer.framework");
 
-    if bundled_framework.exists() {
-        fs::remove_dir_all(&bundled_framework)?;
+    if has_macos_gstreamer_framework(&bundled_framework) {
+        println!(
+            "cargo:warning=Using staged project GStreamer framework {}",
+            bundled_framework.display()
+        );
+        return Ok(());
     }
-    fs::create_dir_all(&bundled_root)?;
 
     if let Some(source) = resolve_macos_gstreamer_framework_source() {
+        if let Some(parent) = bundled_framework.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if bundled_framework.exists() {
+            fs::remove_dir_all(&bundled_framework)?;
+        }
         copy_dir_all(&source, &bundled_framework)?;
         println!(
-            "cargo:warning=Bundling GStreamer framework from {}",
+            "cargo:warning=Staged GStreamer framework from {}",
             source.display()
         );
         return Ok(());
     }
 
-    if let Some(homebrew_prefix) = resolve_macos_gstreamer_homebrew_prefix() {
-        synthesize_framework_from_homebrew(&homebrew_prefix, &bundled_framework)?;
-        println!(
-            "cargo:warning=Bundling synthetic GStreamer framework from Homebrew prefix {}",
-            homebrew_prefix.display()
-        );
-        return Ok(());
-    }
-
-    fs::create_dir_all(bundled_framework.join("Versions").join("Current"))?;
-    println!("cargo:warning=No macOS GStreamer framework or Homebrew prefix found for bundling; install official GStreamer.framework or `brew install gstreamer`");
-
-    Ok(())
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "missing staged macOS GStreamer.framework; run node scripts/bootstrap-native-deps.mjs --target <triple> before building",
+    ))
 }
 
 fn resolve_macos_gstreamer_framework_source() -> Option<PathBuf> {
     env::var("NOLAND_GSTREAMER_FRAMEWORK")
         .ok()
         .map(PathBuf::from)
-        .filter(|path| path.exists())
-        .or_else(|| {
-            let default_path = PathBuf::from("/Library/Frameworks/GStreamer.framework");
-            default_path.exists().then_some(default_path)
-        })
+        .filter(|path| has_macos_gstreamer_framework(path))
 }
 
-fn resolve_macos_gstreamer_homebrew_prefix() -> Option<PathBuf> {
-    let env_override = env::var("NOLAND_GSTREAMER_HOMEBREW_PREFIX")
-        .ok()
-        .map(PathBuf::from)
-        .filter(|path| path.exists());
-    if env_override.is_some() {
-        return env_override;
-    }
-
-    let candidates = [
-        PathBuf::from("/opt/homebrew/opt/gstreamer"),
-        PathBuf::from("/usr/local/opt/gstreamer"),
-    ];
-    for candidate in candidates {
-        if candidate.join("lib/libgstreamer-1.0.dylib").is_file() {
-            return Some(candidate);
-        }
-    }
-
-    let output = std::process::Command::new("brew")
-        .args(["--prefix", "gstreamer"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let path = PathBuf::from(prefix);
-    path.join("lib/libgstreamer-1.0.dylib")
+fn has_macos_gstreamer_framework(path: &Path) -> bool {
+    path.join("Versions/Current/lib/libgstreamer-1.0.dylib")
         .is_file()
-        .then_some(path)
-}
-
-fn synthesize_framework_from_homebrew(prefix: &Path, bundled_framework: &Path) -> io::Result<()> {
-    let versions_dir = bundled_framework.join("Versions");
-    let current_dir = versions_dir.join("Current");
-    fs::create_dir_all(&current_dir)?;
-
-    copy_dir_all(&prefix.join("lib"), &current_dir.join("lib"))?;
-
-    let libexec = prefix.join("libexec");
-    if libexec.exists() {
-        copy_dir_all(&libexec, &current_dir.join("libexec"))?;
-    }
-
-    let share = prefix.join("share");
-    if share.exists() {
-        copy_dir_all(&share, &current_dir.join("share"))?;
-    }
-
-    create_symlink_or_copy(
-        Path::new("Versions/Current/lib"),
-        &bundled_framework.join("lib"),
-        true,
-    )?;
-    create_symlink_or_copy(
-        Path::new("Versions/Current/libexec"),
-        &bundled_framework.join("libexec"),
-        true,
-    )?;
-    create_symlink_or_copy(
-        Path::new("Versions/Current/share"),
-        &bundled_framework.join("share"),
-        true,
-    )?;
-    create_symlink_or_copy(Path::new("Current"), &versions_dir.join("A"), true)?;
-
-    Ok(())
+        || path
+            .join("Versions/Current/lib/libgstreamer-1.0.0.dylib")
+            .is_file()
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
@@ -573,43 +534,4 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn create_symlink_or_copy(target: &Path, destination: &Path, relative: bool) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        if destination.exists() {
-            if destination.is_dir() {
-                fs::remove_dir_all(destination)?;
-            } else {
-                fs::remove_file(destination)?;
-            }
-        }
-        let link_target = if relative {
-            target.to_path_buf()
-        } else {
-            target.to_path_buf()
-        };
-        std::os::unix::fs::symlink(link_target, destination)?;
-        return Ok(());
-    }
-
-    #[allow(unreachable_code)]
-    {
-        let source = if relative {
-            destination
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(target)
-        } else {
-            target.to_path_buf()
-        };
-        let resolved = source.canonicalize()?;
-        if resolved.is_dir() {
-            copy_dir_all(&resolved, destination)?;
-        } else {
-            fs::copy(resolved, destination)?;
-        }
-        Ok(())
-    }
 }

@@ -35,7 +35,11 @@
     "resources": [
       "binaries/wg-*",
       "binaries/wg-quick-*",
-      "binaries/wireguard-*"
+      "binaries/wireguard-*",
+      "binaries/ssh-*",
+      "binaries/scp-*",
+      "binaries/ssh-keygen-*",
+      "binaries/gstreamer/**/*"
     ],
     "macOS": {
       "frameworks": [

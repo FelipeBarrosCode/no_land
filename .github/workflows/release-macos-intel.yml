@@ -3,8 +3,6 @@ name: Build macOS Intel Binary
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
-  NOLAND_GSTREAMER_FRAMEWORK: /Library/Frameworks/GStreamer.framework
-  PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/Current/lib/pkgconfig
 
 on:
   workflow_dispatch:
@@ -37,14 +35,7 @@ jobs:
         with:
           targets: x86_64-apple-darwin
 
-      - name: Install macOS GStreamer framework
-        shell: bash
-        run: |
-          curl -L --retry 3 -o /tmp/gstreamer.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-${GSTREAMER_VERSION}-universal.pkg"
-          curl -L --retry 3 -o /tmp/gstreamer-devel.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-devel-${GSTREAMER_VERSION}-universal.pkg"
-          sudo installer -pkg /tmp/gstreamer.pkg -target /
-          sudo installer -pkg /tmp/gstreamer-devel.pkg -target /
-          pkg-config --modversion gstreamer-1.0
+
 
       - name: Environment diagnostics
         shell: bash
@@ -55,13 +46,7 @@ jobs:
           command -v ssh || true
           pkg-config --modversion gstreamer-1.0 || true
 
-      - name: Install macOS dependencies
-        shell: bash
-        run: |
-          brew install pkg-config sdl2
-          SDL2_PREFIX="$(brew --prefix sdl2)"
-          HOMEBREW_PREFIX="$(brew --prefix)"
-          echo "PKG_CONFIG_PATH=${SDL2_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+
 
       - name: Install dependencies
         run: npm ci

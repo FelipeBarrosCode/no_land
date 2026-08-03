@@ -12,6 +12,45 @@ use crate::errors::{AppError, AppResult};
 
 use super::{os_detection::OsDetection, vast_api::VastApiClient};
 
+fn locate_ssh_key_tool(tool: &str) -> Option<PathBuf> {
+    let os = OsDetection::new();
+
+    if os.is_macos() {
+        let system_path = match tool {
+            "ssh" => Some("/usr/bin/ssh"),
+            "ssh-keygen" => Some("/usr/bin/ssh-keygen"),
+            _ => None,
+        }?;
+
+        let system_path = PathBuf::from(system_path);
+        if system_path.is_file() {
+            return Some(system_path);
+        }
+    }
+
+    match tool {
+        "ssh" => os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows")),
+        "ssh-keygen" => os.locate_app_managed_binary(
+            "ssh-keygen",
+            "NOLAND_SSH_KEYGEN_BIN",
+            cfg!(target_os = "windows"),
+        ),
+        _ => None,
+    }
+}
+
+fn resolve_ssh_key_tool(tool: &str) -> AppResult<String> {
+    let os = OsDetection::new();
+    locate_ssh_key_tool(tool)
+        .map(|path| path.display().to_string())
+        .ok_or_else(|| {
+            AppError::Command(format!(
+                "`{tool}` is not available in the app bundle. {}",
+                os.install_hint_for_tool(tool)
+            ))
+        })
+}
+
 #[derive(Debug, Clone)]
 pub struct SshKeyPaths {
     pub private_key_path: PathBuf,
@@ -31,13 +70,7 @@ impl SshKeyService {
     }
 
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
-        let os = OsDetection::new();
-        if !os.command_exists("ssh-keygen") {
-            return Err(AppError::Command(format!(
-                "`ssh-keygen` is not available in PATH. {}",
-                os.install_hint_for_tool("ssh-keygen")
-            )));
-        }
+        let ssh_keygen_bin = resolve_ssh_key_tool("ssh-keygen")?;
 
         let keys_dir = root_dir.join("keys");
         fs::create_dir_all(&keys_dir).await?;
@@ -54,7 +87,7 @@ impl SshKeyService {
 
         let private_path_string = private_key_path.display().to_string();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new("ssh-keygen")
+            let output = Command::new(&ssh_keygen_bin)
                 .arg("-t")
                 .arg("ed25519")
                 .arg("-f")
@@ -120,89 +153,15 @@ impl SshKeyService {
         Ok((key_paths, uploaded))
     }
 
-    pub async fn load_key_into_agent(&self, key_path: &Path, passphrase: &str) -> AppResult<()> {
-        let os = OsDetection::new();
-        if !os.command_exists("ssh-add") {
-            return Err(AppError::Command(format!(
-                "`ssh-add` is not available in PATH. {}",
-                os.install_hint_for_tool("ssh-add")
+    pub async fn load_key_into_agent(&self, key_path: &Path, _passphrase: &str) -> AppResult<()> {
+        if !key_path.exists() {
+            return Err(AppError::NotFound(format!(
+                "SSH private key not found at {}",
+                key_path.display()
             )));
         }
 
-        let (auth_sock, agent_pid) = self.start_or_get_ssh_agent().await?;
-        if let Some(sock) = auth_sock.as_deref() {
-            std::env::set_var("SSH_AUTH_SOCK", sock);
-        }
-        if let Some(pid) = agent_pid.as_deref() {
-            std::env::set_var("SSH_AGENT_PID", pid);
-        }
-
-        let key_path_str = key_path.display().to_string();
-        let passphrase_owned = passphrase.to_string();
-        let auth_sock_owned = auth_sock.clone();
-        let os = OsDetection::new();
-
-        tokio::task::spawn_blocking(move || {
-            use std::io::Write;
-
-            if let Some(sock) = auth_sock_owned.as_deref() {
-                std::env::set_var("SSH_AUTH_SOCK", sock);
-            }
-            if let Some(ref pid_str) = agent_pid {
-                std::env::set_var("SSH_AGENT_PID", pid_str);
-            }
-
-            let mut add_command = Command::new("ssh-add");
-            add_command.args(os.ssh_add_args_for_key(&key_path_str));
-
-            let output = add_command
-                .output()
-                .map_err(|error| AppError::Command(format!("Failed to spawn ssh-add: {error}")))?;
-
-            if output.status.success() {
-                return Ok(());
-            }
-
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if stderr.contains("passphrase") || stderr.contains("bad passphrase") {
-                let mut child = Command::new("ssh-add")
-                    .args(os.ssh_add_stdin_args())
-                    .stdin(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped())
-                    .spawn()
-                    .map_err(|error| {
-                        AppError::Command(format!("Failed to spawn ssh-add stdin mode: {error}"))
-                    })?;
-
-                if let Some(ref mut stdin) = child.stdin {
-                    let payload = format!("{}\n", passphrase_owned);
-                    stdin.write_all(payload.as_bytes()).map_err(|error| {
-                        AppError::Command(format!("Failed to write passphrase: {error}"))
-                    })?;
-                }
-
-                let status = child
-                    .wait()
-                    .map_err(|error| AppError::Command(format!("ssh-add wait failed: {error}")))?;
-
-                if !status.success() {
-                    let output = child.wait_with_output().map_err(|error| {
-                        AppError::Command(format!("Failed to get ssh-add stderr: {error}"))
-                    })?;
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(AppError::Command(format!(
-                        "ssh-add failed with {}: {}",
-                        status, stderr
-                    )));
-                }
-
-                return Ok(());
-            }
-
-            return Err(AppError::Command(format!("ssh-add failed: {}", stderr)));
-        })
-        .await
-        .map_err(|error| AppError::Command(format!("ssh-add task join failure: {error}")))?
+        Ok(())
     }
 
     async fn start_or_get_ssh_agent(&self) -> AppResult<(Option<String>, Option<String>)> {

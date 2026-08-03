@@ -284,15 +284,9 @@ fn locate_managed_tool_binary(tool: &str) -> Option<PathBuf> {
         return Some(path);
     }
 
-    if let Some(path) = bundled_tool_candidate_paths(lookup_name)
+    bundled_tool_candidate_paths(lookup_name)
         .into_iter()
         .find(|candidate| is_executable_file(candidate))
-    {
-        return Some(path);
-    }
-
-    let os = OsDetection::new();
-    os.resolve_command_path(tool).map(PathBuf::from)
 }
 
 fn resolve_managed_tool_binary(tool: &str) -> AppResult<String> {
@@ -553,6 +547,20 @@ fn helper_status_recently_succeeded(status: &MacosHelperStatus) -> bool {
         .timestamp
         .zip(current_unix_timestamp().ok())
         .map(|(timestamp, now)| now.saturating_sub(timestamp) <= MACOS_HELPER_SUCCESS_GRACE_SECS)
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn reconcile_macos_helper_success(config_path: &Path, expected: &ExpectedLocalTunnel) -> bool {
+    if local_tunnel_runtime_is_healthy(expected) {
+        return true;
+    }
+
+    read_macos_helper_status(config_path)
+        .filter(helper_status_recently_succeeded)
+        .map(|_| {
+            local_tunnel_runtime_is_healthy(expected) || can_ping_tunnel_host(&expected.server_ip)
+        })
         .unwrap_or(false)
 }
 
@@ -2165,6 +2173,10 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
             continue;
         }
 
+        if cfg!(target_os = "macos") && in_interface_section && lower.starts_with("listenport") {
+            continue;
+        }
+
         if in_peer_section && lower.starts_with("allowedips") {
             normalized_lines.push(format!("AllowedIPs = {SCOPED_ALLOWED_IPS}"));
             replaced = true;
@@ -2215,7 +2227,7 @@ fn setup_local_wireguard_client_macos(config_path: &Path) -> AppResult<String> {
     ) {
         match request_macos_helper_repair(config_path, "setup-local-wireguard-client") {
             Ok(()) => {
-                if local_tunnel_runtime_is_healthy(&expected) {
+                if reconcile_macos_helper_success(config_path, &expected) {
                     return Ok(
                         "WireGuard client tunnel repaired on this Mac using the installed Noland helper"
                             .to_string(),
@@ -2249,7 +2261,7 @@ fn reconnect_local_wireguard_client_macos(config_path: &Path) -> AppResult<Strin
     ) {
         match request_macos_helper_repair(config_path, "reconnect-local-wireguard-client") {
             Ok(()) => {
-                if local_tunnel_runtime_is_healthy(&expected) {
+                if reconcile_macos_helper_success(config_path, &expected) {
                     return Ok(
                         "WireGuard client tunnel reconnected on this Mac using the installed Noland helper"
                             .to_string(),
@@ -2338,6 +2350,7 @@ fn hard_reconnect_local_wireguard_client_macos(
     let expected_peer = expected.peer_public_key.replace('"', "\\\"");
     let expected_allowed_ips = expected.allowed_ips.replace('"', "\\\"");
     let expected_server_ip = expected.server_ip.replace('"', "\\\"");
+    let expected_client_ip = expected.client_ip.replace('"', "\\\"");
     let expected_endpoint_host = expected.endpoint_host.replace('"', "\\\"");
     let expected_endpoint_port = expected.endpoint_port;
     let gotatun_bin = gotatun_bin.replace('"', "\\\"");
@@ -2358,6 +2371,7 @@ STATUS_PATH="{status_path}"
 EXPECTED_PEER="{expected_peer}"
 EXPECTED_ALLOWED_IPS="{expected_allowed_ips}"
 EXPECTED_SERVER_IP="{expected_server_ip}"
+EXPECTED_CLIENT_IP="{expected_client_ip}"
 EXPECTED_ENDPOINT_HOST="{expected_endpoint_host}"
 EXPECTED_ENDPOINT_PORT="{expected_endpoint_port}"
 APP_OWNER=$(stat -f '%Su' "$SOURCE_CONF_PATH" 2>/dev/null || true)
@@ -2395,9 +2409,19 @@ cleanup_userspace_runtime() {{
   for pid in $(pgrep -x gotatun 2>/dev/null || true); do
     kill "$pid" >/dev/null 2>&1 || true
   done
+  for pid in $(pgrep -f '/gotatun.*utun' 2>/dev/null || true); do
+    kill "$pid" >/dev/null 2>&1 || true
+  done
   sleep 1
   for pid in $(pgrep -x gotatun 2>/dev/null || true); do
     kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+  for pid in $(pgrep -f '/gotatun.*utun' 2>/dev/null || true); do
+    kill -9 "$pid" >/dev/null 2>&1 || true
+  done
+  for route_target in "$EXPECTED_SERVER_IP" "$EXPECTED_CLIENT_IP"; do
+    [ -n "$route_target" ] || continue
+    route -q -n delete -inet "$route_target" >/dev/null 2>&1 || true
   done
   rm -f /var/run/wireguard/*.sock /var/run/wireguard/*.name 2>/dev/null || true
 }}
@@ -2566,6 +2590,14 @@ exit 1
         .map_err(|error| AppError::Command(format!("Failed to run osascript: {error}")))?;
 
     if !output.status.success() {
+        if reconcile_macos_helper_success(config_path, &expected) {
+            return Ok(if is_setup {
+                "Managed GotaTun tunnel configured and activated on this Mac".to_string()
+            } else {
+                "Managed GotaTun tunnel reconnected on this Mac".to_string()
+            });
+        }
+
         return Err(AppError::Command(format!(
             "Failed to reconnect local WireGuard client (exit {}): stdout: {} | stderr: {}",
             output.status.code().unwrap_or(-1),
@@ -2727,11 +2759,10 @@ fn wait_for_macos_helper_result(config_path: &Path) -> AppResult<()> {
         }
 
         if let Some(status) = read_macos_helper_status(config_path) {
-            if matches!(
-                status.kind,
-                MacosHelperStatusKind::Healthy | MacosHelperStatusKind::Repaired
-            ) {
-                return Ok(());
+            if helper_status_recently_succeeded(&status) {
+                if reconcile_macos_helper_success(config_path, &expected) {
+                    return Ok(());
+                }
             }
             if matches!(status.kind, MacosHelperStatusKind::Error) {
                 return Err(AppError::Command(if status.message.trim().is_empty() {
@@ -2743,6 +2774,10 @@ fn wait_for_macos_helper_result(config_path: &Path) -> AppResult<()> {
         }
 
         std::thread::sleep(Duration::from_millis(500));
+    }
+
+    if reconcile_macos_helper_success(config_path, &expected) {
+        return Ok(());
     }
 
     Err(AppError::Command(
@@ -3140,15 +3175,23 @@ fn derive_public_key(private_key: &str) -> AppResult<String> {
 
 fn resolved_command(tool: &str) -> AppResult<Command> {
     let os = OsDetection::new();
-    let program = locate_managed_tool_binary(tool)
-        .map(|path| path.display().to_string())
-        .or_else(|| os.resolve_command_path(tool))
-        .ok_or_else(|| {
+    let program = if managed_tool_spec(tool).is_some() {
+        locate_managed_tool_binary(tool)
+            .map(|path| path.display().to_string())
+            .ok_or_else(|| {
+                AppError::Command(format!(
+                    "`{tool}` is not available in the app bundle. {}",
+                    os.install_hint_for_tool(tool)
+                ))
+            })?
+    } else {
+        os.resolve_command_path(tool).ok_or_else(|| {
             AppError::Command(format!(
-                "`{tool}` is not available in the app bundle or PATH. {}",
+                "`{tool}` is not available in PATH. {}",
                 os.install_hint_for_tool(tool)
             ))
-        })?;
+        })?
+    };
     let mut command = Command::new(program);
     os.with_augmented_path(&mut command);
     Ok(command)

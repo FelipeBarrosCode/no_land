@@ -27,13 +27,8 @@ const frameworkPluginValidateDir = join(frameworkPluginDir, 'validate');
 const frameworkShareValidateDir = join(frameworkRoot, 'share', 'gstreamer-1.0', 'validate');
 const frameworkSourceCandidates = [
   process.env.NOLAND_GSTREAMER_FRAMEWORK?.trim(),
-  '/Library/Frameworks/GStreamer.framework',
 ].filter(Boolean);
-const homebrewPrefixCandidates = [
-  process.env.NOLAND_GSTREAMER_HOMEBREW_PREFIX?.trim(),
-  '/opt/homebrew/opt/gstreamer',
-  '/usr/local/opt/gstreamer',
-].filter(Boolean);
+const nativePrefix = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim() ? resolve(process.env.NOLAND_NATIVE_DEPS_PREFIX.trim()) : null;
 const allowedGStreamerPlugins = new Set([
   'libgstcoreelements.dylib',
   'libgstaudioconvert.dylib',
@@ -92,18 +87,20 @@ adhocSign([sidecarPath, ...frameworkFiles, ...libexecFiles, ...externalLibs.valu
 console.log(`Patched macOS dev sidecar runtime: ${sidecarPath}`);
 
 function prepareBundledFramework() {
-  removeIfExists(frameworkDir);
+  if (hasFrameworkRuntime(frameworkDir)) {
+    pruneBundledPlugins();
+    return;
+  }
 
   const sourceFramework = resolveFrameworkSource();
-  if (sourceFramework) {
+  if (!sourceFramework) {
+    console.error('Unable to locate a staged macOS GStreamer runtime. Run node scripts/bootstrap-native-deps.mjs --target <triple> before local development builds.');
+    process.exit(1);
+  }
+
+  if (resolve(sourceFramework) !== resolve(frameworkDir)) {
+    removeIfExists(frameworkDir);
     copyDirResolved(sourceFramework, frameworkDir);
-  } else {
-    const prefix = resolveHomebrewPrefix();
-    if (!prefix) {
-      console.error('Unable to locate a macOS GStreamer runtime source. Install the official GStreamer.framework or ensure Homebrew gstreamer is installed for local development.');
-      process.exit(1);
-    }
-    synthesizeFrameworkFromHomebrew(prefix, frameworkDir);
   }
 
   pruneBundledPlugins();
@@ -113,59 +110,16 @@ function resolveFrameworkSource() {
   for (const candidate of frameworkSourceCandidates) {
     if (!candidate) continue;
     const path = resolve(candidate);
-    if (existsSync(join(path, 'Versions', 'Current', 'lib'))) {
+    if (hasFrameworkRuntime(path)) {
       return path;
     }
   }
   return null;
 }
 
-function resolveHomebrewPrefix() {
-  for (const candidate of homebrewPrefixCandidates) {
-    if (!candidate) continue;
-    const path = resolve(candidate);
-    if (hasGstreamerLib(path)) {
-      return path;
-    }
-  }
-
-  const output = run('brew', ['--prefix', 'gstreamer'], { allowFailure: true });
-  if (output.status === 0) {
-    const path = output.stdout.trim();
-    if (path && hasGstreamerLib(path)) {
-      return path;
-    }
-  }
-
-  return null;
-}
-
-function hasGstreamerLib(prefix) {
-  return existsSync(join(prefix, 'lib', 'libgstreamer-1.0.0.dylib'))
-    || existsSync(join(prefix, 'lib', 'libgstreamer-1.0.dylib'));
-}
-
-function synthesizeFrameworkFromHomebrew(prefix, bundledFramework) {
-  const versionsDir = join(bundledFramework, 'Versions');
-  const currentDir = join(versionsDir, 'Current');
-  mkdirSync(currentDir, { recursive: true });
-
-  copyDirResolved(join(prefix, 'lib'), join(currentDir, 'lib'));
-
-  const libexec = join(prefix, 'libexec');
-  if (existsSync(libexec)) {
-    copyDirResolved(libexec, join(currentDir, 'libexec'));
-  }
-
-  const share = join(prefix, 'share');
-  if (existsSync(share)) {
-    copyDirResolved(share, join(currentDir, 'share'));
-  }
-
-  createRelativeSymlinkOrCopy('Versions/Current/lib', join(bundledFramework, 'lib'));
-  createRelativeSymlinkOrCopy('Versions/Current/libexec', join(bundledFramework, 'libexec'));
-  createRelativeSymlinkOrCopy('Versions/Current/share', join(bundledFramework, 'share'));
-  createRelativeSymlinkOrCopy('Current', join(versionsDir, 'A'));
+function hasFrameworkRuntime(path) {
+  return existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'))
+    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'));
 }
 
 function pruneBundledPlugins() {
@@ -279,9 +233,20 @@ function setInstallId(file, id) {
   run('install_name_tool', ['-id', id, file], { allowFailure: true });
 }
 
+function isManagedNativeDependency(dep) {
+  if (!nativePrefix) {
+    return false;
+  }
+
+  const nativeLibDir = toPosix(join(nativePrefix, 'lib'));
+  const nativeLib64Dir = toPosix(join(nativePrefix, 'lib64'));
+  return dep.startsWith(`${nativeLibDir}/`) || dep.startsWith(`${nativeLib64Dir}/`);
+}
+
 function shouldRewriteDependency(dep) {
   return dep.startsWith('/opt/homebrew/')
     || dep.startsWith('/usr/local/')
+    || isManagedNativeDependency(dep)
     || dep.startsWith('/Library/Frameworks/GStreamer.framework/')
     || dep.startsWith('@rpath/GStreamer.framework/')
     || dep.startsWith('@executable_path/../Frameworks/GStreamer.framework/')

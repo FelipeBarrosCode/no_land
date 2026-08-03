@@ -131,7 +131,7 @@ pub fn cleanup_stale_pipeline_processes() -> AppResult<()> {
 
 /// Start the local microphone sender sidecar.
 pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = config;
         return Err(AppError::Command(

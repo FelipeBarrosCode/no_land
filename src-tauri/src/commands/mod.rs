@@ -638,10 +638,24 @@ fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
             install_error: None,
         };
 
+    let macos_ssh = if os.is_macos() {
+        Some(PathBuf::from("/usr/bin/ssh"))
+    } else {
+        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"))
+    };
+    let macos_ssh_keygen = if os.is_macos() {
+        Some(PathBuf::from("/usr/bin/ssh-keygen"))
+    } else {
+        os.locate_app_managed_binary(
+            "ssh-keygen",
+            "NOLAND_SSH_KEYGEN_BIN",
+            cfg!(target_os = "windows"),
+        )
+    };
+
     let mut checks = vec![
-        build_check("ssh", "remote commands and provisioning"),
-        build_check("ssh-keygen", "SSH key generation"),
-        build_check("ssh-add", "SSH agent key loading"),
+        bundled_check("ssh", "remote commands and provisioning", macos_ssh),
+        bundled_check("ssh-keygen", "SSH key generation", macos_ssh_keygen),
     ];
 
     if os.is_windows() {
@@ -2125,6 +2139,7 @@ pub async fn skip_pairing_and_continue(
 
 #[tauri::command]
 pub async fn setup_wireguard_client(
+    app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let preflight = local_environment_check(true);
@@ -2176,13 +2191,48 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    let message = setup_local_wireguard_client(Path::new(&config_path))?;
-
-    Ok(message)
+    match setup_local_wireguard_client(Path::new(&config_path)) {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            let verification = verify_wireguard_connection(&app, context.inner()).await;
+            match verification {
+                Ok(result) if result.reachable => {
+                    if let Some(port) = result.reachable_ports.first() {
+                        Ok(format!(
+                            "Managed tunnel is connected ({}:{} reachable) after setup verification.",
+                            result.host, port
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Managed tunnel is connected ({} reachable) after setup verification.",
+                            result.host
+                        ))
+                    }
+                }
+                Ok(result) => Err(AppError::Command(format!(
+                    "{} | verification after setup: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
+                    error,
+                    result.host,
+                    result.checked_ports,
+                    result.reachable_ports,
+                    result
+                        .error
+                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
+                ))
+                .into()),
+                Err(verification_error) => Err(AppError::Command(format!(
+                    "{} | verification after setup failed: {}",
+                    error, verification_error
+                ))
+                .into()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn reconnect_local_wireguard_client_quick(
+    app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let preflight = local_environment_check(true);
@@ -2234,9 +2284,43 @@ pub async fn reconnect_local_wireguard_client_quick(
         .into());
     }
 
-    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
-
-    Ok(message)
+    match reconnect_local_wireguard_client(Path::new(&config_path)) {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            let verification = verify_wireguard_connection(&app, context.inner()).await;
+            match verification {
+                Ok(result) if result.reachable => {
+                    if let Some(port) = result.reachable_ports.first() {
+                        Ok(format!(
+                            "Managed tunnel is connected ({}:{} reachable) after reconnect verification.",
+                            result.host, port
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Managed tunnel is connected ({} reachable) after reconnect verification.",
+                            result.host
+                        ))
+                    }
+                }
+                Ok(result) => Err(AppError::Command(format!(
+                    "{} | verification after reconnect: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
+                    error,
+                    result.host,
+                    result.checked_ports,
+                    result.reachable_ports,
+                    result
+                        .error
+                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
+                ))
+                .into()),
+                Err(verification_error) => Err(AppError::Command(format!(
+                    "{} | verification after reconnect failed: {}",
+                    error, verification_error
+                ))
+                .into()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -2424,10 +2508,19 @@ async fn validate_local_wireguard_tunnel(
                 );
                 return Ok(());
             }
-            return Err(AppError::Provisioning(
-                "WireGuard reconnect completed, but no local tunnel state is visible yet. macOS likely detached the interface; retry reconnect once more."
-                    .to_string(),
-            )
+            let platform_hint = if os.is_macos() {
+                " macOS may have detached the interface; retry reconnect once more."
+            } else if os.is_windows() {
+                " Windows may not have finished applying the managed tunnel yet; retry reconnect once more."
+            } else if os.is_linux() {
+                " Linux may not have finished applying the managed tunnel yet; retry reconnect once more."
+            } else {
+                " Retry reconnect once more."
+            };
+            return Err(AppError::Provisioning(format!(
+                "WireGuard reconnect completed, but no local tunnel state is visible yet.{}",
+                platform_hint
+            ))
             .into());
         }
 

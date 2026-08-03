@@ -1,19 +1,21 @@
 #!/usr/bin/env node
-import { existsSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
+const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim() || '1.24.13';
 const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsWithTarget];
+const nativeEnv = buildNativeEnv(target);
 const prepEnv = {
-  ...process.env,
+  ...nativeEnv,
   ...(target ? { NOLAND_MIC_SENDER_TARGET: target } : {}),
 };
 
@@ -27,30 +29,30 @@ if (prep.status !== 0) {
 }
 
 const tauriEnv = {
-  ...process.env,
+  ...nativeEnv,
 };
 
-const hostWg = findHostTool(process.platform === 'win32' ? 'wg.exe' : 'wg', 'NOLAND_WG_BIN');
-const hostWgQuick = process.platform === 'win32'
+const managedWg = findManagedTool(process.platform === 'win32' ? 'wg' : 'wg', target, 'NOLAND_WG_BIN');
+const managedWgQuick = process.platform === 'win32'
   ? undefined
-  : findHostTool('wg-quick', 'NOLAND_WG_QUICK_BIN');
-const hostWireguardExe = process.platform === 'win32'
-  ? findHostTool('wireguard.exe', 'NOLAND_WIREGUARD_EXE_BIN')
+  : findManagedTool('wg-quick', target, 'NOLAND_WG_QUICK_BIN');
+const managedWireguardExe = process.platform === 'win32'
+  ? findManagedTool('wireguard', target, 'NOLAND_WIREGUARD_EXE_BIN')
   : undefined;
-const hostGotatun = process.platform === 'win32'
+const managedGotatun = process.platform === 'win32'
   ? undefined
-  : findHostTool('gotatun', 'NOLAND_GOTATUN_BIN');
-if (hostWg) {
-  tauriEnv.NOLAND_WG_BIN = hostWg;
+  : findManagedTool('gotatun', target, 'NOLAND_GOTATUN_BIN');
+if (managedWg) {
+  tauriEnv.NOLAND_WG_BIN = managedWg;
 }
-if (hostWgQuick) {
-  tauriEnv.NOLAND_WG_QUICK_BIN = hostWgQuick;
+if (managedWgQuick) {
+  tauriEnv.NOLAND_WG_QUICK_BIN = managedWgQuick;
 }
-if (hostWireguardExe) {
-  tauriEnv.NOLAND_WIREGUARD_EXE_BIN = hostWireguardExe;
+if (managedWireguardExe) {
+  tauriEnv.NOLAND_WIREGUARD_EXE_BIN = managedWireguardExe;
 }
-if (hostGotatun) {
-  tauriEnv.NOLAND_GOTATUN_BIN = hostGotatun;
+if (managedGotatun) {
+  tauriEnv.NOLAND_GOTATUN_BIN = managedGotatun;
 }
 
 if (mode === 'dev') {
@@ -60,6 +62,10 @@ if (mode === 'dev') {
   tauriEnv.NOLAND_MIC_SENDER_BIN = target
     ? join(sidecarTargetDir, target, profileDir, executableName)
     : join(sidecarTargetDir, profileDir, executableName);
+
+  if (process.platform === 'darwin' && target?.endsWith('apple-darwin')) {
+    stageMacosDevRuntimeDeps(target);
+  }
 }
 
 const tauri = spawnSync('npx', ['tauri', mode, ...tauriArgsWithTarget], {
@@ -76,26 +82,26 @@ if (process.platform === 'darwin' && mode === 'build') {
   let fix = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'fix-macos-bundle-deps.mjs'), targetTriple], {
     cwd: repoRoot,
     stdio: 'inherit',
-    env: process.env,
+    env: nativeEnv,
   });
   if (fix.status !== 0) {
     process.exit(fix.status ?? 1);
   }
 
-  if (!bundleHasBundledSdl3(targetTriple)) {
-    console.warn('First macOS bundle dependency fix did not leave libSDL3.dylib in the finished app bundle; retrying fix step once.');
+  if (!bundleHasRequiredSdl3(targetTriple)) {
+    console.warn('First macOS bundle dependency fix did not leave the required SDL3 companion in the finished app bundle; retrying fix step once.');
     fix = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'fix-macos-bundle-deps.mjs'), targetTriple], {
       cwd: repoRoot,
       stdio: 'inherit',
-      env: process.env,
+      env: nativeEnv,
     });
     if (fix.status !== 0) {
       process.exit(fix.status ?? 1);
     }
   }
 
-  if (!bundleHasBundledSdl3(targetTriple)) {
-    console.error('macOS bundle verification failed: libSDL3.dylib is still missing from the finished app bundle.');
+  if (!bundleHasRequiredSdl3(targetTriple)) {
+    console.error('macOS bundle verification failed: the finished app bundle still references SDL3 without bundling libSDL3.dylib.');
     process.exit(1);
   }
 }
@@ -114,6 +120,135 @@ function readTarget(args) {
   return undefined;
 }
 
+function buildNativeEnv(targetTriple) {
+  const env = {
+    ...process.env,
+  };
+
+  if (!targetTriple) {
+    return env;
+  }
+
+  env.NOLAND_NATIVE_DEPS_PREFIX = join(repoRoot, 'src-tauri', '.native-deps', targetTriple);
+  env.OPENSSL_ROOT_DIR = env.NOLAND_NATIVE_DEPS_PREFIX;
+  env.OPENSSL_DIR = env.NOLAND_NATIVE_DEPS_PREFIX;
+
+  if (targetTriple.endsWith('apple-darwin')) {
+    env.NOLAND_GSTREAMER_FRAMEWORK = join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework');
+    env.PKG_CONFIG_PATH = [
+      ...resolveMacPkgConfigRoots(),
+      join(env.NOLAND_NATIVE_DEPS_PREFIX, 'lib', 'pkgconfig'),
+      join(env.NOLAND_NATIVE_DEPS_PREFIX, 'share', 'pkgconfig'),
+      process.env.PKG_CONFIG_PATH,
+    ].filter(Boolean).join(':');
+    return env;
+  }
+
+  if (targetTriple.includes('linux')) {
+    env.PKG_CONFIG_PATH = [
+      join(env.NOLAND_NATIVE_DEPS_PREFIX, 'lib', 'pkgconfig'),
+      join(env.NOLAND_NATIVE_DEPS_PREFIX, 'share', 'pkgconfig'),
+      process.env.PKG_CONFIG_PATH,
+    ].filter(Boolean).join(':');
+
+    const gstreamerRoot = resolveLinuxGstreamerRoot(targetTriple);
+    if (gstreamerRoot) {
+      env.NOLAND_GSTREAMER_ROOT = gstreamerRoot;
+      env.PKG_CONFIG_PATH = [
+        join(gstreamerRoot, 'lib', 'pkgconfig'),
+        join(gstreamerRoot, 'lib64', 'pkgconfig'),
+        env.PKG_CONFIG_PATH,
+      ].filter(Boolean).join(':');
+      env.LD_LIBRARY_PATH = [
+        join(gstreamerRoot, 'lib'),
+        join(gstreamerRoot, 'lib64'),
+        process.env.LD_LIBRARY_PATH,
+      ].filter(Boolean).join(':');
+    }
+    return env;
+  }
+
+  if (targetTriple.includes('windows')) {
+    const gstreamerRoot = resolveWindowsGstreamerRoot(targetTriple);
+    if (gstreamerRoot) {
+      env.NOLAND_GSTREAMER_ROOT = gstreamerRoot;
+      if (targetTriple.includes('aarch64')) {
+        env.GSTREAMER_1_0_ROOT_MSVC_ARM64 = gstreamerRoot;
+      } else {
+        env.GSTREAMER_1_0_ROOT_MSVC_X86_64 = gstreamerRoot;
+      }
+      env.PKG_CONFIG_PATH = [
+        join(gstreamerRoot, 'lib', 'pkgconfig'),
+        join(env.NOLAND_NATIVE_DEPS_PREFIX, 'lib', 'pkgconfig'),
+        process.env.PKG_CONFIG_PATH,
+      ].filter(Boolean).join(';');
+      env.PATH = [
+        join(gstreamerRoot, 'bin'),
+        process.env.PATH,
+      ].filter(Boolean).join(';');
+    }
+  }
+
+  return env;
+}
+
+function stageMacosDevRuntimeDeps(targetTriple) {
+  const prefix = join(repoRoot, 'src-tauri', '.native-deps', targetTriple, 'lib');
+  const targetRoot = join(repoRoot, 'src-tauri', 'target', targetTriple);
+  const debugDir = join(targetRoot, 'debug');
+  const frameworksDir = join(targetRoot, 'Frameworks');
+
+  mkdirSync(debugDir, { recursive: true });
+  mkdirSync(frameworksDir, { recursive: true });
+
+  for (const dylib of ['libopus.0.dylib', 'libSDL2-2.0.0.dylib']) {
+    const source = join(prefix, dylib);
+    if (!existsSync(source)) {
+      continue;
+    }
+    stageMacosRuntimeFile(source, join(debugDir, dylib));
+    stageMacosRuntimeFile(source, join(frameworksDir, dylib));
+  }
+}
+
+function stageMacosRuntimeFile(source, destination) {
+  copyFileSync(source, destination);
+  chmodSync(destination, 0o755);
+}
+
+function resolveMacPkgConfigRoots() {
+  const cacheRoot = join(repoRoot, 'src-tauri', '.native-deps', 'cache', `gstreamer-${gstreamerVersion}-macos-universal`, 'devel-expanded');
+  return [
+    join(cacheRoot, `base-system-1.0-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
+    join(cacheRoot, `gstreamer-1.0-core-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
+  ].filter((candidate) => existsSync(candidate));
+}
+
+function resolveLinuxGstreamerRoot(targetTriple) {
+  const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();
+  if (explicit && (existsSync(join(explicit, 'lib')) || existsSync(join(explicit, 'lib64')))) {
+    return explicit;
+  }
+
+  const candidate = join(repoRoot, 'src-tauri', '.native-deps', targetTriple, 'gstreamer');
+  return existsSync(join(candidate, 'lib')) || existsSync(join(candidate, 'lib64')) ? candidate : null;
+}
+
+function resolveWindowsGstreamerRoot(targetTriple) {
+  const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();
+  if (explicit && existsSync(join(explicit, 'bin'))) {
+    return explicit;
+  }
+
+  const archDir = targetTriple.includes('x86_64') ? 'msvc_x86_64' : targetTriple.includes('aarch64') ? 'msvc_arm64' : null;
+  if (!archDir) {
+    return null;
+  }
+
+  const candidate = join(repoRoot, 'src-tauri', '.native-deps', targetTriple, 'gstreamer', '1.0', archDir);
+  return existsSync(join(candidate, 'bin')) ? candidate : null;
+}
+
 function defaultHostTarget() {
   if (process.platform === 'darwin') {
     if (process.arch === 'arm64') return 'aarch64-apple-darwin';
@@ -130,31 +265,22 @@ function defaultHostTarget() {
   return undefined;
 }
 
-function findHostTool(toolName, envVarName) {
+function findManagedTool(toolStem, targetTriple, envVarName) {
   const envOverride = process.env[envVarName]?.trim();
   if (envOverride && existsSync(envOverride)) {
     return envOverride;
   }
 
-  const locator = process.platform === 'win32' ? 'where' : 'which';
-  const resolved = spawnSync(locator, [toolName], {
-    cwd: repoRoot,
-    encoding: 'utf8',
-  });
-  if (resolved.status === 0) {
-    const candidate = resolved.stdout
-      .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .find((line) => line.length > 0 && existsSync(line));
-    if (candidate) {
-      return candidate;
-    }
-  }
+  const extension = process.platform === 'win32' ? '.exe' : '';
+  const candidates = [
+    join(repoRoot, 'src-tauri', 'binaries', `${toolStem}-${targetTriple}${extension}`),
+    join(repoRoot, 'src-tauri', 'binaries', `${toolStem}${extension}`),
+  ];
 
-  return undefined;
+  return candidates.find((candidate) => existsSync(candidate));
 }
 
-function bundleHasBundledSdl3(targetTriple) {
+function bundleHasRequiredSdl3(targetTriple) {
   const productName = 'Noland Connect';
   const candidates = [
     join(repoRoot, 'src-tauri', 'target', 'release', 'bundle', 'macos', `${productName}.app`),
@@ -165,5 +291,25 @@ function bundleHasBundledSdl3(targetTriple) {
     return false;
   }
 
-  return candidates.some((appPath) => existsSync(join(appPath, 'Contents', 'Frameworks', 'libSDL3.dylib')));
+  return candidates.every((appPath) => {
+    const frameworksDir = join(appPath, 'Contents', 'Frameworks');
+    const sdl2Compat = join(frameworksDir, 'libSDL2-2.0.0.dylib');
+    if (!existsSync(sdl2Compat)) {
+      return true;
+    }
+
+    const deps = spawnSync('otool', ['-L', sdl2Compat], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+    });
+    if (deps.status !== 0) {
+      return false;
+    }
+
+    if (!deps.stdout.includes('libSDL3')) {
+      return true;
+    }
+
+    return existsSync(join(frameworksDir, 'libSDL3.dylib'));
+  });
 }
