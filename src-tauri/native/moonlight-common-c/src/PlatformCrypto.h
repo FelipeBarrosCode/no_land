@@ -13,6 +13,9 @@ typedef struct _PLT_CRYPTO_CONTEXT {
 #ifdef USE_MBEDTLS
     mbedtls_cipher_context_t ctx;
     bool initialized;
+#elif defined(_WIN32)
+    void* ctx;
+    bool initialized;
 #else
     EVP_CIPHER_CTX* ctx;
     bool initialized;

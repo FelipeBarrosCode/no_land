@@ -14,6 +14,41 @@ use crate::errors::{AppError, AppResult};
 
 use super::os_detection::OsDetection;
 
+fn locate_ssh_binary(tool: &str) -> Option<std::path::PathBuf> {
+    let os = OsDetection::new();
+
+    if os.is_macos() {
+        let system_path = match tool {
+            "ssh" => Some("/usr/bin/ssh"),
+            "scp" => Some("/usr/bin/scp"),
+            _ => None,
+        }?;
+
+        let system_path = std::path::PathBuf::from(system_path);
+        if system_path.is_file() {
+            return Some(system_path);
+        }
+    }
+
+    match tool {
+        "ssh" => os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows")),
+        "scp" => os.locate_app_managed_binary("scp", "NOLAND_SCP_BIN", cfg!(target_os = "windows")),
+        _ => None,
+    }
+}
+
+fn resolve_ssh_binary(tool: &str) -> AppResult<String> {
+    let os = OsDetection::new();
+    locate_ssh_binary(tool)
+        .map(|path| path.display().to_string())
+        .ok_or_else(|| {
+            AppError::Command(format!(
+                "`{tool}` is not available in the app bundle. {}",
+                os.install_hint_for_tool(tool)
+            ))
+        })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecOutput {
@@ -59,7 +94,7 @@ impl RemoteExec {
             port_str, connection_string, remote_command
         );
 
-        let mut command = Command::new("ssh");
+        let mut command = Command::new(resolve_ssh_binary("ssh")?);
         command
             .arg("-p")
             .arg(&port_str)
@@ -100,7 +135,7 @@ impl RemoteExec {
             port_str, connection_string, remote_command
         );
 
-        let mut command = Command::new("ssh");
+        let mut command = Command::new(resolve_ssh_binary("ssh")?);
         command
             .arg("-p")
             .arg(&port_str)
@@ -140,7 +175,7 @@ impl RemoteExec {
     ) -> AppResult<ExecOutput> {
         ensure_command_available("scp")?;
         let os = OsDetection::new();
-        let mut command = Command::new("scp");
+        let mut command = Command::new(resolve_ssh_binary("scp")?);
         command
             .arg("-i")
             .arg(&self.private_key_path)
@@ -166,13 +201,13 @@ impl RemoteExec {
 }
 
 fn ensure_command_available(command: &str) -> AppResult<()> {
-    let os = OsDetection::new();
-    if os.command_exists(command) {
+    if locate_ssh_binary(command).is_some() {
         return Ok(());
     }
 
+    let os = OsDetection::new();
     Err(AppError::Command(format!(
-        "`{command}` is not available in PATH. {}",
+        "`{command}` is not available in the app bundle. {}",
         os.install_hint_for_tool(command)
     )))
 }

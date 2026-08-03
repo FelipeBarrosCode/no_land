@@ -446,7 +446,7 @@ void oblas_get_impl(struct oblas_impl *impl)
     impl->axpyb32 = obl_axpyb32_ref;
     impl->align_size = sizeof(void *);
 
-#if defined(OBLAS_ARCH_X86)
+#if defined(OBLAS_ARCH_X86) && !defined(OBLAS_DISABLE_RUNTIME_CPU_DETECT)
     if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("gfni")) {
         impl->axpy = obl_axpy_avx512_gfni;
         impl->scal = obl_scal_avx512_gfni;

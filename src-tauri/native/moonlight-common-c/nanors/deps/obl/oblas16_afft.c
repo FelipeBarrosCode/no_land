@@ -524,7 +524,7 @@ void oblas16_afft_get_impl(struct oblas16_afft_impl *impl)
     impl->bfly_inv = oblas16_afft_bfly_inv_ref;
     impl->align_size = sizeof(void *);
 
-#if defined(OBLAS_ARCH_X86)
+#if defined(OBLAS_ARCH_X86) && !defined(OBLAS_DISABLE_RUNTIME_CPU_DETECT)
 #if !defined(_MSC_VER) || defined(__AVX512F__)
     if (__builtin_cpu_supports("avx512f") && __builtin_cpu_supports("gfni")) {
         impl->bfly_fwd = oblas16_afft_bfly_fwd_avx512_gfni;
@@ -607,7 +607,7 @@ void oblas16_afft_init(void)
 
     oblas16_init();
     oblas16_afft_init_twiddles();
-#if defined(OBLAS_ARCH_X86)
+#if defined(OBLAS_ARCH_X86) && !defined(OBLAS_DISABLE_RUNTIME_CPU_DETECT)
     if (__builtin_cpu_supports("gfni")) {
         gfni_twiddles = (uint64_t (*)[4])obl_alloc(65536, 32, 64);
         for (int i = 0; i < 65536; i++) {
@@ -620,7 +620,7 @@ void oblas16_afft_init(void)
                                  std_twiddles[i][4], std_twiddles[i][5], std_twiddles[i][6], std_twiddles[i][7]);
         }
     }
-#elif defined(OBLAS_ARCH_ARM) || (defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector))
+#elif defined(OBLAS_ARCH_X86) || defined(OBLAS_ARCH_ARM) || (defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector))
     std_twiddles = (uint8_t (*)[8][16])obl_alloc(65536, 128, 64);
     for (int i = 0; i < 65536; i++) {
         for (int j = 0; j < 16; j++) {

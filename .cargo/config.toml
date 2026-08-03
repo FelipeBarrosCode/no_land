@@ -1,5 +1,2 @@
-[env]
-PKG_CONFIG_PATH = "/Library/Frameworks/GStreamer.framework/Versions/Current/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig"
-
 [target.'cfg(target_os = "macos")']
 rustflags = ["-C", "link-arg=-Wl,-headerpad_max_install_names"]

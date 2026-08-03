@@ -1140,8 +1140,8 @@ export function SettingsScreen({
             : clientPanel;
 
   return (
-    <main className="crt-surface h-screen overflow-hidden bg-hero-glow px-4 pt-6 md:px-8">
-      <div className="mx-auto flex h-full w-full max-w-7xl flex-col gap-4 overflow-hidden">
+    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-6 pt-6 md:px-8">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <div className="flex shrink-0 items-center justify-between gap-4">
           <div className="flex items-center gap-3">
             <div>
@@ -1170,7 +1170,7 @@ export function SettingsScreen({
           </div>
         </div>
 
-        <section className="grid min-h-0 flex-1 items-start gap-4 overflow-hidden md:grid-cols-[240px_minmax(0,1fr)]">
+        <section className="grid items-start gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
           <Card className="pixel-frame self-start overflow-hidden md:sticky md:top-6">
             <div className="grid gap-2">
               <Button
@@ -1206,7 +1206,7 @@ export function SettingsScreen({
             </div>
           </Card>
 
-          <div className="min-h-0 min-w-0 self-stretch overflow-y-auto overscroll-contain pr-1 pb-6">
+          <div className="min-w-0 pr-1">
             {panel}
           </div>
         </section>
