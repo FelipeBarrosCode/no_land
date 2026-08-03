@@ -109,6 +109,7 @@ int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
 
   DWORD buffer_frames = (DWORD)(((uint64_t)ctx->sample_rate * (uint64_t)WAVEOUT_BUFFER_MS) / 1000ULL);
   DWORD buffer_bytes = buffer_frames * wfx.nBlockAlign;
+  int prepared_buffer_count = 0;
 
   for (int i = 0; i < WAVEOUT_BUFFER_COUNT; i++) {
     ctx->buffers[i] = calloc(buffer_frames, wfx.nBlockAlign);
@@ -126,6 +127,7 @@ int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
       ctx->buffers[i] = NULL;
       goto cleanup_buffers;
     }
+    prepared_buffer_count = i + 1;
   }
 
   ctx->buffer_index = 0;
@@ -140,7 +142,7 @@ int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
   return 0;
 
 cleanup_buffers:
-  for (int j = 0; j < i; j++) {
+  for (int j = 0; j < prepared_buffer_count; j++) {
     if (ctx->buffers[j] != NULL) {
       waveOutUnprepareHeader(ctx->waveout, &ctx->headers[j], sizeof(WAVEHDR));
       free(ctx->buffers[j]);

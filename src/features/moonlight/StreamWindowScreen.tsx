@@ -175,12 +175,12 @@ export function StreamWindowScreen() {
 
   const captureHint = useMemo(() => {
     if (preferredMouseMode === "absolute") {
-      return "Native stream window active — click stream to capture desktop mouse · Ctrl+Alt+Shift+Z to release";
+      return "Native stream window active — desktop mouse capture should activate automatically · Ctrl+Alt+Shift+Z to release";
     }
     if (preferredMouseMode === "relative") {
-      return "Native stream window active — click stream to capture relative mouse · Ctrl+Alt+Shift+Z to release";
+      return "Native stream window active — relative mouse capture should activate automatically · Ctrl+Alt+Shift+Z to release";
     }
-    return "Native stream window active — click stream to capture · Ctrl+Alt+Shift+Z to release";
+    return "Native stream window active — input capture should activate automatically · Ctrl+Alt+Shift+Z to release";
   }, [preferredMouseMode]);
 
   const detail = useMemo(() => {
@@ -252,7 +252,7 @@ export function StreamWindowScreen() {
           <div className="absolute bottom-4 right-4 max-w-lg rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
             <div>{detail}</div>
             <div className="mt-1 text-slate-300">
-              Click the stream window itself to enter capture
+              Input capture should begin automatically when the stream window opens
             </div>
             <div className="mt-1 text-slate-400">
               Ctrl+Alt+Shift+Z releases capture · Ctrl+Alt+Shift+Q remains a compatibility alias

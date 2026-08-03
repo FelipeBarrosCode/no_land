@@ -80,6 +80,7 @@ fn list_devices_via_sidecar() -> AppResult<Vec<MicrophoneDevice>> {
 
 #[cfg(target_os = "macos")]
 fn list_devices_macos() -> AppResult<Vec<MicrophoneDevice>> {
+    super::ensure_microphone_access()?;
     let mut command = Command::new("system_profiler");
     command
         .arg("SPAudioDataType")

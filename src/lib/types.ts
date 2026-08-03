@@ -465,7 +465,7 @@ export interface ReachabilityResult {
 
 export interface MoonlightDetectionResult {
   installed: boolean;
-  launchKind: "native_path" | "path_lookup" | "flatpak" | "unknown";
+  launchKind: "native_path" | "path_lookup" | "flatpak" | "snap" | "unknown";
   executablePath?: string;
   error?: string;
 }

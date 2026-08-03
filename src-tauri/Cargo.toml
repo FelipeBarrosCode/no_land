@@ -9,10 +9,16 @@ description = "Noland Connect desktop app"
 authors = ["Noland"]
 edition = "2021"
 default-run = "noland-connect"
+autobins = false
 
 [[bin]]
-name = "noland-mic-sender"
-path = "src/bin/noland_mic_sender.rs"
+name = "noland-connect"
+path = "src/main.rs"
+
+[[bin]]
+name = "moonlight_config"
+path = "src/bin/moonlight_config.rs"
+required-features = ["moonlight-config-bin"]
 
 [build-dependencies]
 bindgen = "0.70.1"
@@ -61,3 +67,4 @@ gstreamer = "0.23"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+moonlight-config-bin = []

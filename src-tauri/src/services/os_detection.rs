@@ -1,4 +1,4 @@
-use std::{env, process::Command};
+use std::{env, path::PathBuf, process::Command};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsKind {
@@ -152,6 +152,83 @@ impl OsDetection {
         }
     }
 
+    pub fn managed_binary_target_triple(&self) -> &'static str {
+        match (env::consts::OS, env::consts::ARCH) {
+            ("macos", "aarch64") => "aarch64-apple-darwin",
+            ("macos", "x86_64") => "x86_64-apple-darwin",
+            ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
+            ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
+            ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+            ("windows", "aarch64") => "aarch64-pc-windows-msvc",
+            _ => "",
+        }
+    }
+
+    pub fn locate_app_managed_binary(
+        &self,
+        stem: &str,
+        env_var: &str,
+        uses_exe_suffix: bool,
+    ) -> Option<PathBuf> {
+        let env_override = env::var(env_var)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from);
+        if let Some(path) = env_override.filter(|path| is_executable_file(path)) {
+            return Some(path);
+        }
+
+        let mut names = Vec::new();
+        if uses_exe_suffix {
+            names.push(format!("{stem}.exe"));
+        }
+        names.push(stem.to_string());
+
+        let triple = self.managed_binary_target_triple();
+        if !triple.is_empty() {
+            if uses_exe_suffix {
+                names.push(format!("{stem}-{triple}.exe"));
+            }
+            names.push(format!("{stem}-{triple}"));
+        }
+        names.sort();
+        names.dedup();
+
+        let mut candidates = Vec::new();
+        if let Ok(exe) = env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                for name in &names {
+                    candidates.push(exe_dir.join(name));
+                    candidates.push(exe_dir.join("binaries").join(name));
+                    candidates.push(exe_dir.join("resources").join(name));
+                    candidates.push(exe_dir.join("resources").join("binaries").join(name));
+                    candidates.push(exe_dir.join("..").join("binaries").join(name));
+                    candidates.push(exe_dir.join("..").join("Resources").join(name));
+                    candidates.push(
+                        exe_dir
+                            .join("..")
+                            .join("Resources")
+                            .join("binaries")
+                            .join(name),
+                    );
+                }
+            }
+        }
+
+        if let Ok(cwd) = env::current_dir() {
+            for name in &names {
+                candidates.push(cwd.join(name));
+                candidates.push(cwd.join("binaries").join(name));
+                candidates.push(cwd.join("src-tauri").join("binaries").join(name));
+            }
+        }
+
+        candidates
+            .into_iter()
+            .find(|candidate| is_executable_file(candidate))
+    }
+
     pub fn default_path_prefixes(&self) -> &'static [&'static str] {
         if self.is_macos() {
             &[
@@ -191,41 +268,44 @@ impl OsDetection {
     }
 
     pub fn install_hint_for_tool(&self, tool: &str) -> String {
+        if matches!(
+            tool,
+            "gotatun"
+                | "wg"
+                | "wg.exe"
+                | "wg-quick"
+                | "wg-quick.exe"
+                | "wireguard.exe"
+                | "wireguard"
+                | "ssh"
+                | "scp"
+                | "ssh-keygen"
+        ) {
+            return "This tool is expected to be bundled and managed by Noland Connect. Reinstall or rebuild the app so the managed sidecars are packaged correctly, or explicitly point the app at the binary with the matching `NOLAND_*_BIN` override.".to_string();
+        }
+
         if self.is_macos() {
             return match tool {
-                "wg" | "wg-quick" => {
-                    "Install Homebrew, then run `brew install wireguard-tools`.".to_string()
-                }
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install Xcode Command Line Tools or OpenSSH client tools.".to_string()
                 }
-                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` and ensure it is available in PATH."),
             };
         }
 
         if self.is_linux() {
             return match tool {
-                "wg" | "wg-quick" => {
-                    "Install WireGuard tools (example: `sudo apt-get install -y wireguard-tools`)."
-                        .to_string()
-                }
                 "xdg-open" => "Install xdg-utils (`sudo apt-get install -y xdg-utils`).".to_string(),
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install OpenSSH client tools (example: `sudo apt-get install -y openssh-client`)."
                         .to_string()
                 }
-                "gotatun" => "Install or build the `gotatun` executable, place it in PATH or `src-tauri/binaries`, or set `NOLAND_GOTATUN_BIN` to its full path.".to_string(),
                 _ => format!("Install `{tool}` with your package manager and ensure it is in PATH."),
             };
         }
 
         if self.is_windows() {
             return match tool {
-                "wg" | "wg-quick" | "wireguard.exe" => {
-                    "Install WireGuard from https://wireguard.com/install and reopen the app."
-                        .to_string()
-                }
                 "ssh" | "ssh-keygen" | "ssh-add" => {
                     "Install or enable OpenSSH Client in Windows optional features.".to_string()
                 }
@@ -237,9 +317,24 @@ impl OsDetection {
     }
 
     pub fn install_command_for_tool(&self, tool: &str) -> Option<&'static str> {
+        if matches!(
+            tool,
+            "gotatun"
+                | "wg"
+                | "wg.exe"
+                | "wg-quick"
+                | "wg-quick.exe"
+                | "wireguard.exe"
+                | "wireguard"
+                | "ssh"
+                | "scp"
+                | "ssh-keygen"
+        ) {
+            return None;
+        }
+
         if self.is_macos() {
             return match tool {
-                "wg" | "wg-quick" => Some("brew install wireguard-tools"),
                 "ssh" | "ssh-keygen" | "ssh-add" => Some("xcode-select --install"),
                 _ => None,
             };
@@ -247,9 +342,6 @@ impl OsDetection {
 
         if self.is_linux() {
             return match tool {
-                "wg" | "wg-quick" => Some(
-                    "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y wireguard wireguard-tools; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y wireguard-tools; elif command -v yum >/dev/null 2>&1; then sudo yum install -y wireguard-tools; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm wireguard-tools; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install wireguard-tools; else exit 127; fi",
-                ),
                 "xdg-open" => Some(
                     "if command -v apt-get >/dev/null 2>&1; then sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y xdg-utils; elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y xdg-utils; elif command -v yum >/dev/null 2>&1; then sudo yum install -y xdg-utils; elif command -v pacman >/dev/null 2>&1; then sudo pacman -Sy --noconfirm xdg-utils; elif command -v zypper >/dev/null 2>&1; then sudo zypper --non-interactive install xdg-utils; else exit 127; fi",
                 ),
@@ -262,9 +354,6 @@ impl OsDetection {
 
         if self.is_windows() {
             return match tool {
-                "wg" | "wg-quick" | "wireguard.exe" => Some(
-                    "winget install --id WireGuard.WireGuard -e --accept-package-agreements --accept-source-agreements",
-                ),
                 "ssh" | "ssh-keygen" | "ssh-add" => Some(
                     "powershell -NoProfile -ExecutionPolicy Bypass -Command \"Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0\"",
                 ),
@@ -305,4 +394,22 @@ impl OsDetection {
 
         Ok(self.command_exists(tool))
     }
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        return metadata.permissions().mode() & 0o111 != 0;
+    }
+
+    #[allow(unreachable_code)]
+    true
 }

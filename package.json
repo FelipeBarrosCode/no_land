@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "bootstrap:native-deps": "node scripts/bootstrap-native-deps.mjs",
     "prepare:mic-sidecar": "node scripts/prepare-mic-sidecar.mjs",
     "vast:auth": "node scripts/vast-ai-bootstrap-session.mjs",
     "vast:api-key": "node scripts/vast-ai-create-api-key.mjs",
