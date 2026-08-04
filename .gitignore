@@ -1,14 +1,20 @@
 node_modules/
 dist/
+
+# Tauri / Rust build outputs
 src-tauri/target/
 src-tauri/gen/
 src-tauri/bundled/
-src-tauri/binaries/noland-mic-sender-*
 src-tauri/.native-deps/
 src-tauri/native/build/
+src-tauri/binaries/noland-mic-sender-*
+
+# Sidecar build outputs
 .tmp-sidecar-isolated/
 mic-sidecar/target/
 vm-cloud-mic-agent/target/
+.tmp-sidecar-isolated/
+
 *.log
 .DS_Store
 .env
