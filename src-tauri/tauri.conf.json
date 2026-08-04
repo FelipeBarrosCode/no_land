@@ -32,6 +32,15 @@
       "binaries/gotatun",
       "binaries/noland-mic-sender"
     ],
+    "resources": [
+      "binaries/wg-*",
+      "binaries/wg-quick-*",
+      "binaries/wireguard-*",
+      "binaries/ssh-*",
+      "binaries/scp-*",
+      "binaries/ssh-keygen-*",
+      "binaries/gstreamer/**/*"
+    ],
     "macOS": {
       "frameworks": [
         "bundled/macos/GStreamer.framework"

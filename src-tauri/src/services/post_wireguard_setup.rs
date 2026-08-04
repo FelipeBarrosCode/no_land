@@ -241,7 +241,45 @@ pub async fn setup_wireguard_app_handoff(
     )
     .await;
 
-    let activation_message = setup_local_wireguard_client(&config_path)?;
+    let activation_message = match setup_local_wireguard_client(&config_path) {
+        Ok(message) => message,
+        Err(error) => {
+            let verification = verify_wireguard_connection(app, context).await;
+            match verification {
+                Ok(result) if result.reachable => {
+                    if let Some(port) = result.reachable_ports.first() {
+                        format!(
+                            "Managed tunnel is connected ({}:{} reachable) after setup verification.",
+                            result.host, port
+                        )
+                    } else {
+                        format!(
+                            "Managed tunnel is connected ({} reachable) after setup verification.",
+                            result.host
+                        )
+                    }
+                }
+                Ok(result) => {
+                    return Err(AppError::Command(format!(
+                        "{} | verification after setup: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
+                        error,
+                        result.host,
+                        result.checked_ports,
+                        result.reachable_ports,
+                        result
+                            .error
+                            .unwrap_or_else(|| "tunnel host still unreachable".to_string())
+                    )));
+                }
+                Err(verification_error) => {
+                    return Err(AppError::Command(format!(
+                        "{} | verification after setup failed: {}",
+                        error, verification_error
+                    )));
+                }
+            }
+        }
+    };
 
     context
         .update_state(|state| {
@@ -558,7 +596,11 @@ pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<Moonligh
     let launch_kind = if !installed {
         "unknown"
     } else if os.is_linux() {
-        "path_lookup"
+        match executable_path.as_deref() {
+            Some(path) if path.ends_with("flatpak") => "flatpak",
+            Some(path) if path.ends_with("snap") => "snap",
+            _ => "path_lookup",
+        }
     } else {
         "native_path"
     };
@@ -569,7 +611,15 @@ pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<Moonligh
         error: if installed {
             None
         } else {
-            Some("Moonlight is not installed on this machine. Install the desktop app from the official website and ensure Moonlight.exe is in PATH or registered in App Paths.".to_string())
+            Some(if os.is_windows() {
+                "Moonlight is not installed on this Windows machine. Install the desktop app from the official website and ensure Moonlight.exe is in PATH or registered in App Paths.".to_string()
+            } else if os.is_linux() {
+                "Moonlight is not installed on this Linux machine. Install Moonlight from the official website, Flatpak, or Snap and try again.".to_string()
+            } else if os.is_macos() {
+                "Moonlight is not installed on this Mac. Install the desktop app from the official website and try again.".to_string()
+            } else {
+                "Moonlight is not installed on this machine. Install the desktop app from the official website and try again.".to_string()
+            })
         },
     };
 

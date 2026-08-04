@@ -52,7 +52,6 @@ fn framework_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
         }
     }
 
-    candidates.push(PathBuf::from("/Library/Frameworks/GStreamer.framework"));
     candidates
 }
 
@@ -63,6 +62,77 @@ fn resolve_framework_root(current_exe: &Path) -> Option<PathBuf> {
             path.join("Versions/Current/lib/libgstreamer-1.0.dylib")
                 .is_file()
         })
+}
+
+fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let target_triple = mic_sender_target_triple();
+
+    if let Ok(explicit) = std::env::var("NOLAND_GSTREAMER_ROOT") {
+        let trimmed = explicit.trim();
+        if !trimmed.is_empty() {
+            candidates.push(PathBuf::from(trimmed));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        let native_root = cwd.join("src-tauri").join(".native-deps").join(target_triple);
+        if cfg!(target_os = "windows") {
+            candidates.push(native_root.join("gstreamer").join("1.0").join(windows_gstreamer_arch_dir()));
+            candidates.push(cwd.join("src-tauri").join("binaries").join("gstreamer").join(target_triple));
+            candidates.push(cwd.join("binaries").join("gstreamer").join(target_triple));
+        } else if cfg!(target_os = "linux") {
+            candidates.push(native_root.join("gstreamer"));
+        }
+    }
+
+    if let Some(exe_dir) = current_exe.parent() {
+        if cfg!(target_os = "windows") {
+            candidates.push(exe_dir.join("gstreamer").join(target_triple));
+            candidates.push(exe_dir.join("binaries").join("gstreamer").join(target_triple));
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("Resources")
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("Resources")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
+        } else if cfg!(target_os = "linux") {
+            candidates.push(exe_dir.join("gstreamer").join(target_triple));
+            candidates.push(exe_dir.join("binaries").join("gstreamer").join(target_triple));
+        }
+    }
+
+    candidates
+}
+
+fn resolve_gstreamer_root(current_exe: &Path) -> Option<PathBuf> {
+    gstreamer_root_candidate_paths(current_exe)
+        .into_iter()
+        .find(|path| is_valid_gstreamer_root(path))
+}
+
+fn is_valid_gstreamer_root(path: &Path) -> bool {
+    if cfg!(target_os = "windows") {
+        return path.join("bin/gstreamer-1.0-0.dll").is_file();
+    }
+
+    if cfg!(target_os = "linux") {
+        return path.join("lib/libgstreamer-1.0.so").is_file()
+            || path.join("lib/libgstreamer-1.0.so.0").is_file()
+            || path.join("lib64/libgstreamer-1.0.so").is_file()
+            || path.join("lib64/libgstreamer-1.0.so.0").is_file();
+    }
+
+    false
 }
 
 fn is_executable_file(path: &Path) -> bool {
@@ -90,8 +160,23 @@ fn mic_sender_target_triple() -> &'static str {
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
+        ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         _ => "",
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_gstreamer_arch_dir() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "msvc_x86_64",
+        "aarch64" => "msvc_arm64",
+        _ => "msvc_x86_64",
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_gstreamer_arch_dir() -> &'static str {
+    "msvc_x86_64"
 }
 
 fn mic_sender_binary_names() -> Vec<String> {
@@ -184,53 +269,27 @@ fn is_app_bundle_executable(current_exe: &Path) -> bool {
         .any(|component| component.as_os_str().to_string_lossy().ends_with(".app"))
 }
 
-pub fn configure_gstreamer_command(command: &mut Command, current_exe: &Path) {
-    if cfg!(target_os = "macos") {
-        if let Some(cache_dir) = dirs::cache_dir() {
-            let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
-            let _ = std::fs::create_dir_all(&registry_dir);
-            command.env(
-                "GST_REGISTRY_1_0",
-                registry_dir.join("registry-macos.bin").as_os_str(),
-            );
-        }
+fn prepend_env_path(command: &mut Command, key: &str, prefix: &Path, separator: &str) {
+    let existing = std::env::var_os(key).unwrap_or_default();
+    let mut value = prefix.as_os_str().to_os_string();
+    if !existing.is_empty() {
+        value.push(separator);
+        value.push(existing);
+    }
+    command.env(key, value);
+}
 
-        if !is_app_bundle_executable(current_exe) {
-            if let Some(framework) = resolve_framework_root(current_exe) {
-                let versions_current = framework.join("Versions/Current");
-                let framework_parent = framework.parent().map(Path::to_path_buf);
-                let lib_dir = versions_current.join("lib");
-                let plugin_dir = lib_dir.join("gstreamer-1.0");
-                let scanner = versions_current
-                    .join("libexec")
-                    .join("gstreamer-1.0")
-                    .join("gst-plugin-scanner");
-                let typelib_dir = lib_dir.join("girepository-1.0");
+fn configure_macos_gstreamer_command(command: &mut Command, current_exe: &Path) {
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
+        let _ = std::fs::create_dir_all(&registry_dir);
+        command.env(
+            "GST_REGISTRY_1_0",
+            registry_dir.join("registry-macos.bin").as_os_str(),
+        );
+    }
 
-                if let Some(parent) = framework_parent {
-                    command.env("DYLD_FRAMEWORK_PATH", parent.as_os_str());
-                }
-                command.env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.as_os_str());
-                command.env("GST_PLUGIN_PATH_1_0", plugin_dir.as_os_str());
-                command.env("DYLD_FALLBACK_LIBRARY_PATH", lib_dir.as_os_str());
-                if typelib_dir.is_dir() {
-                    command.env("GI_TYPELIB_PATH", typelib_dir.as_os_str());
-                }
-                if scanner.is_file() {
-                    command.env("GST_PLUGIN_SCANNER_1_0", scanner.as_os_str());
-                }
-                return;
-            }
-
-            command.env_remove("DYLD_FRAMEWORK_PATH");
-            command.env_remove("GST_PLUGIN_SYSTEM_PATH_1_0");
-            command.env_remove("GST_PLUGIN_PATH_1_0");
-            command.env_remove("GST_PLUGIN_SCANNER_1_0");
-            command.env_remove("GI_TYPELIB_PATH");
-            command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
-            return;
-        }
-
+    if !is_app_bundle_executable(current_exe) {
         if let Some(framework) = resolve_framework_root(current_exe) {
             let versions_current = framework.join("Versions/Current");
             let framework_parent = framework.parent().map(Path::to_path_buf);
@@ -254,6 +313,122 @@ pub fn configure_gstreamer_command(command: &mut Command, current_exe: &Path) {
             if scanner.is_file() {
                 command.env("GST_PLUGIN_SCANNER_1_0", scanner.as_os_str());
             }
+            return;
         }
+
+        command.env_remove("DYLD_FRAMEWORK_PATH");
+        command.env_remove("GST_PLUGIN_SYSTEM_PATH_1_0");
+        command.env_remove("GST_PLUGIN_PATH_1_0");
+        command.env_remove("GST_PLUGIN_SCANNER_1_0");
+        command.env_remove("GI_TYPELIB_PATH");
+        command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+        return;
+    }
+
+    if let Some(framework) = resolve_framework_root(current_exe) {
+        let versions_current = framework.join("Versions/Current");
+        let framework_parent = framework.parent().map(Path::to_path_buf);
+        let lib_dir = versions_current.join("lib");
+        let plugin_dir = lib_dir.join("gstreamer-1.0");
+        let scanner = versions_current
+            .join("libexec")
+            .join("gstreamer-1.0")
+            .join("gst-plugin-scanner");
+        let typelib_dir = lib_dir.join("girepository-1.0");
+
+        if let Some(parent) = framework_parent {
+            command.env("DYLD_FRAMEWORK_PATH", parent.as_os_str());
+        }
+        command.env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.as_os_str());
+        command.env("GST_PLUGIN_PATH_1_0", plugin_dir.as_os_str());
+        command.env("DYLD_FALLBACK_LIBRARY_PATH", lib_dir.as_os_str());
+        if typelib_dir.is_dir() {
+            command.env("GI_TYPELIB_PATH", typelib_dir.as_os_str());
+        }
+        if scanner.is_file() {
+            command.env("GST_PLUGIN_SCANNER_1_0", scanner.as_os_str());
+        }
+    }
+}
+
+fn configure_windows_gstreamer_command(command: &mut Command, current_exe: &Path) {
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
+        let _ = std::fs::create_dir_all(&registry_dir);
+        command.env(
+            "GST_REGISTRY_1_0",
+            registry_dir.join("registry-windows.bin").as_os_str(),
+        );
+    }
+
+    if let Some(root) = resolve_gstreamer_root(current_exe) {
+        let bin_dir = root.join("bin");
+        let plugin_dir = root.join("lib").join("gstreamer-1.0");
+        let typelib_dir = root.join("lib").join("girepository-1.0");
+        let scanner_candidates = [
+            root.join("libexec").join("gstreamer-1.0").join("gst-plugin-scanner.exe"),
+            root.join("bin").join("gst-plugin-scanner.exe"),
+        ];
+
+        prepend_env_path(command, "PATH", &bin_dir, ";");
+        command.env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.as_os_str());
+        command.env("GST_PLUGIN_PATH_1_0", plugin_dir.as_os_str());
+        if let Some(scanner) = scanner_candidates.into_iter().find(|path| path.is_file()) {
+            command.env("GST_PLUGIN_SCANNER_1_0", scanner.as_os_str());
+        }
+        if typelib_dir.is_dir() {
+            command.env("GI_TYPELIB_PATH", typelib_dir.as_os_str());
+        }
+    }
+}
+
+fn configure_linux_gstreamer_command(command: &mut Command, current_exe: &Path) {
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
+        let _ = std::fs::create_dir_all(&registry_dir);
+        command.env(
+            "GST_REGISTRY_1_0",
+            registry_dir.join("registry-linux.bin").as_os_str(),
+        );
+    }
+
+    if let Some(root) = resolve_gstreamer_root(current_exe) {
+        let lib_dir = if root.join("lib").is_dir() {
+            root.join("lib")
+        } else {
+            root.join("lib64")
+        };
+        let plugin_dir = lib_dir.join("gstreamer-1.0");
+        let typelib_dir = lib_dir.join("girepository-1.0");
+        let scanner_candidates = [
+            root.join("libexec").join("gstreamer-1.0").join("gst-plugin-scanner"),
+            lib_dir.join("gstreamer-1.0").join("gst-plugin-scanner"),
+        ];
+
+        prepend_env_path(command, "LD_LIBRARY_PATH", &lib_dir, ":");
+        command.env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.as_os_str());
+        command.env("GST_PLUGIN_PATH_1_0", plugin_dir.as_os_str());
+        if let Some(scanner) = scanner_candidates.into_iter().find(|path| path.is_file()) {
+            command.env("GST_PLUGIN_SCANNER_1_0", scanner.as_os_str());
+        }
+        if typelib_dir.is_dir() {
+            command.env("GI_TYPELIB_PATH", typelib_dir.as_os_str());
+        }
+    }
+}
+
+pub fn configure_gstreamer_command(command: &mut Command, current_exe: &Path) {
+    if cfg!(target_os = "macos") {
+        configure_macos_gstreamer_command(command, current_exe);
+        return;
+    }
+
+    if cfg!(target_os = "windows") {
+        configure_windows_gstreamer_command(command, current_exe);
+        return;
+    }
+
+    if cfg!(target_os = "linux") {
+        configure_linux_gstreamer_command(command, current_exe);
     }
 }

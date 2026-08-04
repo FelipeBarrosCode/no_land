@@ -36,6 +36,8 @@ typedef struct nl_macos_video_context {
   int height;
   int redraw_rate;
   CVDisplayLinkRef display_link;
+  CFTimeInterval layer_not_ready_since;
+  uint64_t consecutive_layer_not_ready_frames;
 } nl_macos_video_context_t;
 
 static void nl_run_on_main_sync(dispatch_block_t block) {
@@ -64,6 +66,32 @@ static nl_macos_video_context_t* nl_macos_ensure_context(nl_video_renderer_t* re
   }
   renderer->platform_context = context;
   return context;
+}
+
+static CFTimeInterval nl_macos_now(void) {
+  return CACurrentMediaTime();
+}
+
+static void nl_macos_reset_layer_backpressure(nl_macos_video_context_t* context) {
+  if (context == NULL) {
+    return;
+  }
+  context->layer_not_ready_since = 0;
+  context->consecutive_layer_not_ready_frames = 0;
+}
+
+static bool nl_macos_should_recover_for_backpressure(nl_macos_video_context_t* context) {
+  CFTimeInterval now;
+  if (context == NULL) {
+    return false;
+  }
+  now = nl_macos_now();
+  if (context->layer_not_ready_since <= 0) {
+    context->layer_not_ready_since = now;
+  }
+  context->consecutive_layer_not_ready_frames += 1U;
+  return context->consecutive_layer_not_ready_frames >= 60U &&
+         now - context->layer_not_ready_since >= 2.0;
 }
 
 static void nl_macos_free_parameter_set(uint8_t** bytes, size_t* length) {
@@ -433,6 +461,7 @@ void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, co
       context->layer = [NolandSampleDisplayLayer layer];
       context->layer.videoGravity = AVLayerVideoGravityResizeAspect;
       context->layer.backgroundColor = NSColor.blackColor.CGColor;
+      context->layer.opaque = YES;
       context->layer.needsDisplayOnBoundsChange = YES;
       context->layer.frame = view.bounds;
       context->layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
@@ -456,6 +485,7 @@ void nl_video_renderer_platform_detach_surface(nl_video_renderer_t* renderer) {
       context->layer = nil;
     }
   });
+  nl_macos_reset_layer_backpressure(context);
   context->view = nil;
 }
 
@@ -489,11 +519,13 @@ static void nl_macos_recover_display_layer(nl_macos_video_context_t* context) {
   context->layer = [NolandSampleDisplayLayer layer];
   context->layer.videoGravity = AVLayerVideoGravityResizeAspect;
   context->layer.backgroundColor = NSColor.blackColor.CGColor;
+  context->layer.opaque = YES;
   context->layer.needsDisplayOnBoundsChange = YES;
   context->layer.frame = context->view.bounds;
   context->layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
   [context->view.layer addSublayer:context->layer];
   nl_macos_reset_format_description(context);
+  nl_macos_reset_layer_backpressure(context);
 }
 
 static CVReturn nl_macos_display_link_callback(CVDisplayLinkRef displayLink,
@@ -564,6 +596,7 @@ void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) {
       [context->layer flushAndRemoveImage];
     }
   });
+  nl_macos_reset_layer_backpressure(context);
 
   if (context->display_link != NULL) {
     CVDisplayLinkStop(context->display_link);
@@ -594,6 +627,7 @@ void nl_video_renderer_platform_stop(nl_video_renderer_t* renderer) {
       [context->layer flushAndRemoveImage];
     }
   });
+  nl_macos_reset_layer_backpressure(context);
 }
 
 void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer) {
@@ -619,6 +653,7 @@ int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const
   nl_macos_video_context_t* context = nl_macos_context(renderer);
   const DECODE_UNIT* decode_unit = (const DECODE_UNIT*)raw_decode_unit;
   CMSampleBufferRef sample_buffer = NULL;
+  __block bool request_idr = false;
   (void)frame;
 
   if (context == NULL || decode_unit == NULL || context->layer == nil) {
@@ -647,17 +682,28 @@ int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const
   CFRetain(sample_buffer);
   nl_run_on_main_sync(^{
     if (context->layer == nil) {
+      nl_macos_reset_layer_backpressure(context);
       CFRelease(sample_buffer);
       return;
     }
     if (context->layer.status == AVQueuedSampleBufferRenderingStatusFailed) {
       nl_macos_recover_display_layer(context);
+      request_idr = true;
+      CFRelease(sample_buffer);
+      return;
+    }
+    if (!context->layer.readyForMoreMediaData && nl_macos_should_recover_for_backpressure(context)) {
+      nl_macos_recover_display_layer(context);
+      request_idr = true;
       CFRelease(sample_buffer);
       return;
     }
     [context->layer enqueueSampleBuffer:sample_buffer];
+    if (context->layer.readyForMoreMediaData) {
+      nl_macos_reset_layer_backpressure(context);
+    }
     CFRelease(sample_buffer);
   });
   CFRelease(sample_buffer);
-  return DR_OK;
+  return request_idr ? DR_NEED_IDR : DR_OK;
 }

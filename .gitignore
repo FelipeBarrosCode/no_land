@@ -10,6 +10,7 @@ src-tauri/native/build/
 src-tauri/binaries/noland-mic-sender-*
 
 # Sidecar build outputs
+.tmp-sidecar-isolated/
 mic-sidecar/target/
 vm-cloud-mic-agent/target/
 .tmp-sidecar-isolated/

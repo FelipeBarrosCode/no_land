@@ -34,6 +34,7 @@ use crate::{
             SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
+        vast::VastInstance,
     },
     moonlight::{
         application::{
@@ -86,9 +87,10 @@ use crate::{
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
         wireguard::{
-            locate_gotatun_binary, read_local_wireguard_show_output,
+            locate_gotatun_binary, locate_wg_binary, locate_wg_quick_binary,
+            locate_wireguard_exe_binary, read_local_wireguard_show_output,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
-            teardown_local_wireguard_client,
+            teardown_local_wireguard_client, WireGuardProvisionMode, WireGuardService,
         },
     },
     utils::redact::redact_secret,
@@ -114,6 +116,13 @@ pub struct LocalEnvironmentCheck {
     pub arch: String,
     pub ok: bool,
     pub checks: Vec<ToolCheck>,
+}
+
+#[derive(Debug, Default)]
+struct RemoteInstanceServiceHealth {
+    pub sunshine_active: bool,
+    pub wireguard_active: bool,
+    pub wireguard_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -618,48 +627,63 @@ fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
             install_error,
         }
     };
+    let bundled_check =
+        |tool: &str, required_for: &str, resolved_path: Option<PathBuf>| ToolCheck {
+            tool: tool.to_string(),
+            found: resolved_path.is_some(),
+            path: resolved_path.map(|path| path.display().to_string()),
+            required_for: required_for.to_string(),
+            install_hint: os.install_hint_for_tool(tool),
+            install_attempted: false,
+            install_error: None,
+        };
+
+    let macos_ssh = if os.is_macos() {
+        Some(PathBuf::from("/usr/bin/ssh"))
+    } else {
+        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"))
+    };
+    let macos_ssh_keygen = if os.is_macos() {
+        Some(PathBuf::from("/usr/bin/ssh-keygen"))
+    } else {
+        os.locate_app_managed_binary(
+            "ssh-keygen",
+            "NOLAND_SSH_KEYGEN_BIN",
+            cfg!(target_os = "windows"),
+        )
+    };
 
     let mut checks = vec![
-        build_check("ssh", "remote commands and provisioning"),
-        build_check("ssh-keygen", "SSH key generation"),
-        build_check("ssh-add", "SSH agent key loading"),
+        bundled_check("ssh", "remote commands and provisioning", macos_ssh),
+        bundled_check("ssh-keygen", "SSH key generation", macos_ssh_keygen),
     ];
 
     if os.is_windows() {
-        let mut install_attempted = false;
-        let mut install_error = None;
-        if attempt_install && !os.command_exists("wireguard.exe") {
-            install_attempted = true;
-            if let Err(error) = os.try_install_tool("wireguard.exe") {
-                install_error = Some(error);
-            }
-        }
-        checks.push(ToolCheck {
-            tool: "wireguard.exe".to_string(),
-            found: os.command_exists("wireguard.exe"),
-            path: os.resolve_command_path("wireguard.exe"),
-            required_for:
-                "legacy WireGuard runtime on Windows until the GotaTun/Wintun service is bundled"
-                    .to_string(),
-            install_hint: os.install_hint_for_tool("wireguard.exe"),
-            install_attempted,
-            install_error,
-        });
+        checks.push(bundled_check(
+            "wg",
+            "WireGuard control-plane configuration on Windows",
+            locate_wg_binary(),
+        ));
+        checks.push(bundled_check(
+            "wireguard.exe",
+            "managed WireGuard tunnel service runtime on Windows",
+            locate_wireguard_exe_binary(),
+        ));
     } else {
-        let gotatun_path = locate_gotatun_binary().map(|path| path.display().to_string());
-        checks.push(ToolCheck {
-            tool: "gotatun".to_string(),
-            found: gotatun_path.is_some(),
-            path: gotatun_path,
-            required_for: "managed userspace WireGuard tunnel runtime".to_string(),
-            install_hint: os.install_hint_for_tool("gotatun"),
-            install_attempted: false,
-            install_error: None,
-        });
-        checks.push(build_check("wg", "WireGuard control-plane configuration"));
-        checks.push(build_check(
+        checks.push(bundled_check(
+            "gotatun",
+            "managed userspace WireGuard tunnel runtime",
+            locate_gotatun_binary(),
+        ));
+        checks.push(bundled_check(
+            "wg",
+            "WireGuard control-plane configuration",
+            locate_wg_binary(),
+        ));
+        checks.push(bundled_check(
             "wg-quick",
             "managed userspace tunnel activation",
+            locate_wg_quick_binary(),
         ));
     }
 
@@ -1596,6 +1620,11 @@ async fn start_embedded_stream_for_host(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
+        crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+        crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+    };
+    let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
 
     let state = moonlight
         .runtime
@@ -2110,6 +2139,7 @@ pub async fn skip_pairing_and_continue(
 
 #[tauri::command]
 pub async fn setup_wireguard_client(
+    app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let preflight = local_environment_check(true);
@@ -2161,13 +2191,48 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    let message = setup_local_wireguard_client(Path::new(&config_path))?;
-
-    Ok(message)
+    match setup_local_wireguard_client(Path::new(&config_path)) {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            let verification = verify_wireguard_connection(&app, context.inner()).await;
+            match verification {
+                Ok(result) if result.reachable => {
+                    if let Some(port) = result.reachable_ports.first() {
+                        Ok(format!(
+                            "Managed tunnel is connected ({}:{} reachable) after setup verification.",
+                            result.host, port
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Managed tunnel is connected ({} reachable) after setup verification.",
+                            result.host
+                        ))
+                    }
+                }
+                Ok(result) => Err(AppError::Command(format!(
+                    "{} | verification after setup: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
+                    error,
+                    result.host,
+                    result.checked_ports,
+                    result.reachable_ports,
+                    result
+                        .error
+                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
+                ))
+                .into()),
+                Err(verification_error) => Err(AppError::Command(format!(
+                    "{} | verification after setup failed: {}",
+                    error, verification_error
+                ))
+                .into()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
 pub async fn reconnect_local_wireguard_client_quick(
+    app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let preflight = local_environment_check(true);
@@ -2219,9 +2284,43 @@ pub async fn reconnect_local_wireguard_client_quick(
         .into());
     }
 
-    let message = reconnect_local_wireguard_client(Path::new(&config_path))?;
-
-    Ok(message)
+    match reconnect_local_wireguard_client(Path::new(&config_path)) {
+        Ok(message) => Ok(message),
+        Err(error) => {
+            let verification = verify_wireguard_connection(&app, context.inner()).await;
+            match verification {
+                Ok(result) if result.reachable => {
+                    if let Some(port) = result.reachable_ports.first() {
+                        Ok(format!(
+                            "Managed tunnel is connected ({}:{} reachable) after reconnect verification.",
+                            result.host, port
+                        ))
+                    } else {
+                        Ok(format!(
+                            "Managed tunnel is connected ({} reachable) after reconnect verification.",
+                            result.host
+                        ))
+                    }
+                }
+                Ok(result) => Err(AppError::Command(format!(
+                    "{} | verification after reconnect: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
+                    error,
+                    result.host,
+                    result.checked_ports,
+                    result.reachable_ports,
+                    result
+                        .error
+                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
+                ))
+                .into()),
+                Err(verification_error) => Err(AppError::Command(format!(
+                    "{} | verification after reconnect failed: {}",
+                    error, verification_error
+                ))
+                .into()),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -2409,10 +2508,19 @@ async fn validate_local_wireguard_tunnel(
                 );
                 return Ok(());
             }
-            return Err(AppError::Provisioning(
-                "WireGuard reconnect completed, but no local tunnel state is visible yet. macOS likely detached the interface; retry reconnect once more."
-                    .to_string(),
-            )
+            let platform_hint = if os.is_macos() {
+                " macOS may have detached the interface; retry reconnect once more."
+            } else if os.is_windows() {
+                " Windows may not have finished applying the managed tunnel yet; retry reconnect once more."
+            } else if os.is_linux() {
+                " Linux may not have finished applying the managed tunnel yet; retry reconnect once more."
+            } else {
+                " Retry reconnect once more."
+            };
+            return Err(AppError::Provisioning(format!(
+                "WireGuard reconnect completed, but no local tunnel state is visible yet.{}",
+                platform_hint
+            ))
             .into());
         }
 
@@ -3670,6 +3778,372 @@ async fn build_remote_exec_for_instance(
     })
 }
 
+fn parse_wireguard_endpoint_from_config(
+    config_path: &Path,
+) -> Result<Option<(String, u16)>, AppError> {
+    if !config_path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(config_path).map_err(|error| {
+        AppError::Command(format!(
+            "Failed reading WireGuard client config {}: {error}",
+            config_path.display()
+        ))
+    })?;
+
+    let endpoint_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| line.to_ascii_lowercase().starts_with("endpoint ="));
+    let Some(endpoint_line) = endpoint_line else {
+        return Ok(None);
+    };
+
+    let Some((_, endpoint)) = endpoint_line.split_once('=') else {
+        return Ok(None);
+    };
+    let endpoint = endpoint.trim();
+
+    if let Some(rest) = endpoint.strip_prefix('[') {
+        if let Some((host, port)) = rest.split_once("]:") {
+            if let Ok(port) = port.trim().parse::<u16>() {
+                return Ok(Some((host.trim().to_string(), port)));
+            }
+        }
+        return Ok(None);
+    }
+
+    let Some((host, port)) = endpoint.rsplit_once(':') else {
+        return Ok(None);
+    };
+    let Ok(port) = port.trim().parse::<u16>() else {
+        return Ok(None);
+    };
+
+    Ok(Some((host.trim().to_string(), port)))
+}
+
+async fn inspect_remote_instance_services(
+    remote: &RemoteExec,
+) -> Result<RemoteInstanceServiceHealth, AppError> {
+    let command = r#"sunshine_status=$(systemctl is-active sunshine.service 2>/dev/null || true)
+wireguard_status=$(systemctl is-active wg-quick@wg0.service 2>/dev/null || true)
+wireguard_addresses=$(ip -o addr show wg0 2>/dev/null | awk '{print $4}' | paste -sd ',' -)
+printf 'sunshine=%s\nwireguard=%s\nwireguard_addresses=%s\n' "$sunshine_status" "$wireguard_status" "$wireguard_addresses""#;
+    let remote = remote.clone();
+    let output = tokio::task::spawn_blocking(move || remote.ssh(command, Duration::from_secs(20)))
+        .await
+        .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
+
+    if output.status_code != 0 {
+        return Err(AppError::Provisioning(format!(
+            "Failed checking remote service health: {}",
+            output.stderr.trim()
+        )));
+    }
+
+    let mut result = RemoteInstanceServiceHealth::default();
+    for line in output.stdout.lines() {
+        let Some((key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = raw_value.trim();
+        match key.trim() {
+            "sunshine" => {
+                result.sunshine_active = value.eq_ignore_ascii_case("active");
+            }
+            "wireguard" => {
+                result.wireguard_active = value.eq_ignore_ascii_case("active");
+            }
+            "wireguard_addresses" => {
+                result.wireguard_addresses = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+
+    Ok(result)
+}
+
+async fn refresh_instance_connection_state(
+    context: &AppContext,
+    instance: &VastInstance,
+    result: &crate::services::wireguard::WireGuardProvisionResult,
+) -> Result<(), AppError> {
+    let config_path = result.client_config_path.display().to_string();
+    let config_text = std::fs::read_to_string(&result.client_config_path).map_err(|error| {
+        AppError::Command(format!(
+            "Failed reading refreshed WireGuard config {}: {error}",
+            result.client_config_path.display()
+        ))
+    })?;
+    let moonlight_host = if !result.server_ip.trim().is_empty() {
+        result.server_ip.clone()
+    } else {
+        instance.wireguard_host_ip.trim().to_string()
+    };
+
+    context
+        .update_state(|state| {
+            let index = state
+                .provisioned_servers
+                .iter()
+                .position(|record| record.instance_id == instance.id)
+                .unwrap_or_else(|| {
+                    state.provisioned_servers.push(
+                        crate::models::app_state::ProvisionedServerState::new(instance.id),
+                    );
+                    state.provisioned_servers.len() - 1
+                });
+            let record = &mut state.provisioned_servers[index];
+            record.status = instance.status.clone();
+            record.ssh_host = instance.ssh_host.clone();
+            record.ssh_port = instance.ssh_port;
+            record.ssh_command = instance.ssh_command.clone();
+            record.connection_provider = ConnectionProvider::Wireguard;
+            record.wireguard_server_ip = result.server_ip.clone();
+            record.wireguard_client_ip = result.client_ip.clone();
+            record.wireguard_server_public_key = result.server_public_key.clone();
+            record.wireguard_client_public_key = result.client_public_key.clone();
+            record.wireguard_config_path = config_path.clone();
+            if !moonlight_host.trim().is_empty() {
+                record.moonlight_host_address = moonlight_host.clone();
+            }
+
+            state.instance.instance_id = Some(instance.id);
+            state.instance.status = instance.status.clone();
+            state.instance.ssh_host = instance.ssh_host.clone();
+            state.instance.ssh_port = instance.ssh_port;
+            state.instance.ssh_command = instance.ssh_command.clone();
+            state.wireguard.server_ip = result.server_ip.clone();
+            state.wireguard.client_ip = result.client_ip.clone();
+            state.wireguard.server_public_key = result.server_public_key.clone();
+            state.wireguard.client_public_key = result.client_public_key.clone();
+            state.wireguard.config_path = config_path.clone();
+            state.connection_provider = ConnectionProvider::Wireguard;
+            state.moonlight.host_address = moonlight_host.clone();
+            state.post_wireguard_setup.current_instance_id = Some(instance.id);
+            state.post_wireguard_setup.wireguard_config = config_text.clone();
+            state.post_wireguard_setup.wireguard_export_path.clear();
+            state.post_wireguard_setup.wireguard_verified_host = result.server_ip.clone();
+            state.post_wireguard_setup.moonlight_host = moonlight_host.clone();
+            state.post_wireguard_setup.last_error = None;
+            state.last_error = None;
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn sync_instance_connection_internal(
+    app: &AppHandle,
+    context: &AppContext,
+    instance_id: u64,
+) -> Result<String, AppError> {
+    let snapshot = context.load_state().await;
+    if snapshot.credentials.vast_api_key.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "Vast API key is missing. Add it in settings before syncing the connection."
+                .to_string(),
+        ));
+    }
+
+    let vast = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        snapshot.credentials.vast_api_key.clone(),
+    );
+    let instance = vast.get_instance(instance_id).await.map_err(|error| {
+        AppError::Provisioning(format!(
+            "Failed to refresh Vast.ai instance {} before syncing the connection: {}",
+            instance_id, error
+        ))
+    })?;
+
+    let endpoint_host = instance.wireguard_endpoint_host();
+    let endpoint_port = instance.wireguard_port;
+    if endpoint_host.trim().is_empty() || endpoint_port == 0 {
+        return Err(AppError::Provisioning(format!(
+            "Instance {} does not expose a valid WireGuard endpoint on Vast (host='{}' port={}).",
+            instance_id, endpoint_host, endpoint_port
+        )));
+    }
+
+    let previous_config_path = snapshot
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == instance_id)
+        .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
+        .filter(|path| !path.as_os_str().is_empty())
+        .or_else(|| {
+            if snapshot.instance.instance_id == Some(instance_id)
+                && !snapshot.wireguard.config_path.trim().is_empty()
+            {
+                Some(PathBuf::from(snapshot.wireguard.config_path.clone()))
+            } else {
+                None
+            }
+        });
+    let previous_endpoint = previous_config_path
+        .as_deref()
+        .map(parse_wireguard_endpoint_from_config)
+        .transpose()?
+        .flatten();
+
+    context
+        .update_state(|state| {
+            let index = state
+                .provisioned_servers
+                .iter()
+                .position(|record| record.instance_id == instance.id)
+                .unwrap_or_else(|| {
+                    state.provisioned_servers.push(
+                        crate::models::app_state::ProvisionedServerState::new(instance.id),
+                    );
+                    state.provisioned_servers.len() - 1
+                });
+            let record = &mut state.provisioned_servers[index];
+            record.status = instance.status.clone();
+            record.ssh_host = instance.ssh_host.clone();
+            record.ssh_port = instance.ssh_port;
+            record.ssh_command = instance.ssh_command.clone();
+            state.instance.instance_id = Some(instance.id);
+            state.instance.status = instance.status.clone();
+            state.instance.ssh_host = instance.ssh_host.clone();
+            state.instance.ssh_port = instance.ssh_port;
+            state.instance.ssh_command = instance.ssh_command.clone();
+        })
+        .await?;
+
+    let remote = build_remote_exec_for_instance(context, instance_id).await?;
+    let app_data_dir = context.state_store.path().parent().ok_or_else(|| {
+        AppError::State("Could not resolve app data directory from state file path".to_string())
+    })?;
+    let wireguard = WireGuardService {
+        defaults: context.config.wireguard.clone(),
+    };
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
+    let wireguard_result = wireguard
+        .configure(
+            &remote,
+            app_data_dir,
+            instance.id,
+            &endpoint_host,
+            endpoint_port,
+            WireGuardProvisionMode::ReinitializeExisting,
+        )
+        .await?;
+    refresh_instance_connection_state(context, &instance, &wireguard_result).await?;
+
+    let reconnect_message =
+        reconnect_local_wireguard_client(wireguard_result.client_config_path.as_path())?;
+    let reachability = verify_wireguard_connection(app, context).await?;
+    let remote_health = inspect_remote_instance_services(&remote).await?;
+
+    let (sunshine_username, sunshine_password) = {
+        let state = context.state.read().await;
+        (
+            state.credentials.app_username.clone(),
+            state.credentials.app_password.clone(),
+        )
+    };
+    let sunshine_summary = if reachability.reachable
+        && !sunshine_username.trim().is_empty()
+        && !sunshine_password.trim().is_empty()
+    {
+        let sunshine = verify_sunshine_api(app, context).await?;
+        if sunshine.reachable && sunshine.authenticated {
+            "Sunshine API reachable and authenticated.".to_string()
+        } else if sunshine.reachable {
+            format!(
+                "Sunshine API reachable, but authentication/setup still needs attention: {}",
+                sunshine
+                    .error
+                    .unwrap_or_else(|| "unknown Sunshine authentication state".to_string())
+            )
+        } else {
+            format!(
+                "Sunshine service is active on the remote, but the tunneled API check failed: {}",
+                sunshine
+                    .error
+                    .unwrap_or_else(|| "unknown Sunshine API error".to_string())
+            )
+        }
+    } else if !remote_health.sunshine_active {
+        "Sunshine service is not active on the remote instance.".to_string()
+    } else if !reachability.reachable {
+        "Skipped tunneled Sunshine API verification because 10.77.0.1 is still unreachable locally."
+            .to_string()
+    } else {
+        "Skipped tunneled Sunshine API verification because stored Sunshine credentials are missing."
+            .to_string()
+    };
+
+    let endpoint_change_summary = match previous_endpoint {
+        Some((previous_host, previous_port))
+            if previous_host.trim() != endpoint_host.trim() || previous_port != endpoint_port =>
+        {
+            format!(
+                "WireGuard endpoint updated from {}:{} to {}:{}.",
+                previous_host, previous_port, endpoint_host, endpoint_port
+            )
+        }
+        Some((previous_host, previous_port)) => format!(
+            "WireGuard endpoint still matches {}:{}.",
+            previous_host, previous_port
+        ),
+        None => format!(
+            "WireGuard endpoint set to {}:{}.",
+            endpoint_host, endpoint_port
+        ),
+    };
+
+    let remote_wireguard_summary = if remote_health.wireguard_active {
+        if remote_health.wireguard_addresses.is_empty() {
+            "Remote wg0 is active.".to_string()
+        } else {
+            format!(
+                "Remote wg0 is active with addresses {}.",
+                remote_health.wireguard_addresses.join(", ")
+            )
+        }
+    } else {
+        "Remote wg0 is not active on the instance.".to_string()
+    };
+
+    let summary = format!(
+        "Synced connection for instance {}. {} {} {} {} {}",
+        instance_id,
+        endpoint_change_summary,
+        reconnect_message,
+        if reachability.reachable {
+            "Local tunnel reached 10.77.0.1 successfully."
+        } else {
+            "Local tunnel still could not reach 10.77.0.1."
+        },
+        remote_wireguard_summary,
+        sunshine_summary,
+    );
+
+    if !reachability.reachable {
+        let tunnel_error = reachability
+            .error
+            .unwrap_or_else(|| "WireGuard verification failed after sync".to_string());
+        return Err(AppError::Provisioning(format!(
+            "{} {}",
+            summary, tunnel_error
+        )));
+    }
+
+    Ok(summary)
+}
+
 #[tauri::command]
 pub async fn get_shared_storage_settings(
     context: State<'_, AppContext>,
@@ -3895,11 +4369,13 @@ pub async fn reset_instance_sunshine_settings(
 
 #[tauri::command]
 pub async fn reconnect_instance_wireguard(
-    _context: State<'_, AppContext>,
-    _instance_id: u64,
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    instance_id: u64,
 ) -> Result<String, FrontendError> {
-    open_wireguard_app().map_err(FrontendError::from)?;
-    Ok("Opened WireGuard app.".to_string())
+    sync_instance_connection_internal(&app, context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
 }
 
 async fn teardown_local_instance_session(
@@ -4373,6 +4849,11 @@ pub async fn moonlight_start_stream(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
+        crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+        crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+    };
+    let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
 
     let state = moonlight
         .runtime

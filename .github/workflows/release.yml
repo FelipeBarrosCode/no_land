@@ -3,8 +3,6 @@ name: Build Desktop Binaries
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
-  NOLAND_GSTREAMER_FRAMEWORK: /Library/Frameworks/GStreamer.framework
-  PKG_CONFIG_PATH: /Library/Frameworks/GStreamer.framework/Versions/Current/lib/pkgconfig
 
 on:
   workflow_dispatch:
@@ -68,6 +66,8 @@ jobs:
           sudo apt-get install -y \
             ca-certificates \
             curl \
+            openssh-client \
+            wireguard-tools \
             xdg-utils \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
@@ -81,24 +81,14 @@ jobs:
             libpulse-dev \
             patchelf
 
-      - name: Install macOS GStreamer framework
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          curl -L --retry 3 -o /tmp/gstreamer.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-${GSTREAMER_VERSION}-universal.pkg"
-          curl -L --retry 3 -o /tmp/gstreamer-devel.pkg "https://gstreamer.freedesktop.org/data/pkg/osx/${GSTREAMER_VERSION}/gstreamer-1.0-devel-${GSTREAMER_VERSION}-universal.pkg"
-          sudo installer -pkg /tmp/gstreamer.pkg -target /
-          sudo installer -pkg /tmp/gstreamer-devel.pkg -target /
-          pkg-config --modversion gstreamer-1.0
+      - name: Install Windows managed tool dependencies
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: choco install wireguard -y --no-progress
 
-      - name: Install macOS dependencies
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          brew install pkg-config sdl2
-          SDL2_PREFIX="$(brew --prefix sdl2)"
-          HOMEBREW_PREFIX="$(brew --prefix)"
-          echo "PKG_CONFIG_PATH=${SDL2_PREFIX}/lib/pkgconfig:${HOMEBREW_PREFIX}/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+      - name: Stage CI managed tools
+        if: matrix.platform == 'linux' || matrix.platform == 'windows'
+        run: node scripts/stage-ci-managed-tools.mjs --target ${{ matrix.target }}
 
       - name: Environment diagnostics
         shell: bash
@@ -107,13 +97,20 @@ jobs:
           node -v
           npm -v
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            where ssh || true
-            where wg || true
+            where.exe ssh || true
+            where.exe scp || true
+            where.exe ssh-keygen || true
+            where.exe wg || true
+            where.exe wireguard || true
           else
             command -v ssh || true
+            command -v scp || true
+            command -v ssh-keygen || true
             command -v wg || true
+            command -v wg-quick || true
             command -v xdg-open || true
           fi
+          env | grep '^NOLAND_' || true
 
       - name: Install dependencies
         run: npm ci
