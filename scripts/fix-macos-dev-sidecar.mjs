@@ -119,7 +119,9 @@ function resolveFrameworkSource() {
 
 function hasFrameworkRuntime(path) {
   return existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'))
-    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'));
+    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'))
+    || existsSync(join(path, 'lib', 'libgstreamer-1.0.0.dylib'))
+    || existsSync(join(path, 'lib', 'libgstreamer-1.0.dylib'));
 }
 
 function pruneBundledPlugins() {

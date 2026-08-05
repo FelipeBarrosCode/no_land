@@ -476,7 +476,9 @@ function windowsGstreamerArch(targetTriple) {
 function hasGstreamerFramework(path) {
   if (!path) return false;
   return existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'))
-    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'));
+    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'))
+    || existsSync(join(path, 'Versions', 'Current', 'GStreamer'))
+    || existsSync(join(path, 'GStreamer'));
 }
 
 function hasLinuxGstreamerRoot(path) {
@@ -527,7 +529,7 @@ function stageDirectory(source, destination) {
 
 function extractFlatPkg(pkgPath, extractionRoot, expandedDir) {
   rmSync(expandedDir, { recursive: true, force: true });
-  mkdirSync(expandedDir, { recursive: true });
+  mkdirSync(dirname(expandedDir), { recursive: true });
   run('pkgutil', ['--expand-full', pkgPath, expandedDir]);
 
   const payloads = findFilesNamed(expandedDir, 'Payload');
