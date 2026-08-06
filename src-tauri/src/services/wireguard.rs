@@ -14,7 +14,12 @@ use serde::Serialize;
 use tokio::fs;
 use tracing::{info, warn};
 
-use crate::errors::{AppError, AppResult};
+use crate::{
+    errors::{AppError, AppResult},
+    utils::managed_binaries::{
+        bundled_binary_candidate_paths, bundled_binary_names, locate_bundled_binary,
+    },
+};
 
 use super::{
     app_config::WireGuardDefaults, app_context::AppContext, os_detection::OsDetection,
@@ -201,92 +206,25 @@ fn managed_tool_binary_names(tool: &str) -> Vec<String> {
         return vec![tool.to_string()];
     };
 
-    let mut names = Vec::new();
-    if uses_exe_suffix {
-        names.push(format!("{stem}.exe"));
-    }
-    names.push(stem.to_string());
-
-    let triple = bundled_tool_target_triple();
-    if !triple.is_empty() {
-        if uses_exe_suffix {
-            names.push(format!("{stem}-{triple}.exe"));
-        }
-        names.push(format!("{stem}-{triple}"));
-    }
-
-    names.sort();
-    names.dedup();
-    names
+    bundled_binary_names(stem, uses_exe_suffix, bundled_tool_target_triple())
 }
 
 fn bundled_tool_candidate_paths(tool: &str) -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    let names = managed_tool_binary_names(tool);
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(exe_dir) = exe.parent() {
-            for name in &names {
-                candidates.push(exe_dir.join(name));
-                candidates.push(exe_dir.join("binaries").join(name));
-                candidates.push(exe_dir.join("resources").join(name));
-                candidates.push(exe_dir.join("resources").join("binaries").join(name));
-                candidates.push(exe_dir.join("..").join("binaries").join(name));
-                candidates.push(exe_dir.join("..").join("Resources").join(name));
-                candidates.push(
-                    exe_dir
-                        .join("..")
-                        .join("Resources")
-                        .join("binaries")
-                        .join(name),
-                );
-            }
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        for name in &names {
-            candidates.push(cwd.join(name));
-            candidates.push(cwd.join("binaries").join(name));
-            candidates.push(cwd.join("src-tauri").join("binaries").join(name));
-        }
-    }
-
-    candidates
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        return metadata.permissions().mode() & 0o111 != 0;
-    }
-
-    #[allow(unreachable_code)]
-    true
+    bundled_binary_candidate_paths(
+        &managed_tool_binary_names(tool),
+        std::env::current_exe().ok().as_deref(),
+        std::env::current_dir().ok().as_deref(),
+    )
 }
 
 fn locate_managed_tool_binary(tool: &str) -> Option<PathBuf> {
-    let (lookup_name, env_var, _uses_exe_suffix) = managed_tool_spec(tool)?;
-
-    let env_override = std::env::var(env_var)
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = env_override.filter(|path| is_executable_file(path)) {
-        return Some(path);
-    }
-
-    bundled_tool_candidate_paths(lookup_name)
-        .into_iter()
-        .find(|candidate| is_executable_file(candidate))
+    let (lookup_name, env_var, uses_exe_suffix) = managed_tool_spec(tool)?;
+    locate_bundled_binary(
+        lookup_name,
+        env_var,
+        uses_exe_suffix,
+        bundled_tool_target_triple(),
+    )
 }
 
 fn resolve_managed_tool_binary(tool: &str) -> AppResult<String> {
