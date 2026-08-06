@@ -563,7 +563,7 @@ function stageDirectory(source, destination) {
 
 function extractFlatPkg(pkgPath, extractionRoot, expandedDir) {
   rmSync(expandedDir, { recursive: true, force: true });
-  mkdirSync(expandedDir, { recursive: true });
+  mkdirSync(dirname(expandedDir), { recursive: true });
   run('pkgutil', ['--expand-full', pkgPath, expandedDir]);
 
   const payloads = findFilesNamed(expandedDir, 'Payload');

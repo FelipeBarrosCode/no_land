@@ -297,7 +297,7 @@ impl VastApiClient {
     }
 
     pub async fn list_instances(&self) -> AppResult<Vec<VastInstance>> {
-        let url = format!("{}/api/v0/instances/", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/api/v1/instances/", self.base_url.trim_end_matches('/'));
 
         info!("Vast request list_instances endpoint={}", url);
         let started = Instant::now();
@@ -409,7 +409,7 @@ impl VastApiClient {
             "{}/api/v0/instances/{instance_id}/",
             self.base_url.trim_end_matches('/')
         );
-        let payload = json!({ "target_state": "stopped" });
+        let payload = json!({ "state": "stopped" });
 
         info!(
             "Vast request pause_instance instance_id={} endpoint={}",

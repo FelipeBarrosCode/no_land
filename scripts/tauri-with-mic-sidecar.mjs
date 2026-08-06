@@ -12,6 +12,9 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
+const tauriCliArgs = mode === 'build'
+  ? ensureCargoFeature(tauriArgsWithTarget, 'moonlight-config-bin')
+  : tauriArgsWithTarget;
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsWithTarget];
 const nativeEnv = buildNativeEnv(target);
 const prepEnv = {
@@ -66,7 +69,7 @@ if (mode === 'dev') {
   }
 }
 
-const tauri = spawnSync('npx', ['tauri', mode, ...tauriArgsWithTarget], {
+const tauri = spawnSync('npx', ['tauri', mode, ...tauriCliArgs], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: tauriEnv,
@@ -105,6 +108,30 @@ if (process.platform === 'darwin' && mode === 'build') {
 }
 
 process.exit(0);
+
+function ensureCargoFeature(args, feature) {
+  const cloned = [...args];
+
+  for (let i = 0; i < cloned.length; i += 1) {
+    if (cloned[i] === '--features' && cloned[i + 1]) {
+      const features = new Set(cloned[i + 1].split(',').map((value) => value.trim()).filter(Boolean));
+      features.add(feature);
+      cloned[i + 1] = [...features].join(',');
+      return cloned;
+    }
+
+    if (cloned[i].startsWith('--features=')) {
+      const existing = cloned[i].slice('--features='.length);
+      const features = new Set(existing.split(',').map((value) => value.trim()).filter(Boolean));
+      features.add(feature);
+      cloned[i] = `--features=${[...features].join(',')}`;
+      return cloned;
+    }
+  }
+
+  cloned.push('--features', feature);
+  return cloned;
+}
 
 function readTarget(args) {
   for (let i = 0; i < args.length; i += 1) {
