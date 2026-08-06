@@ -488,7 +488,11 @@ function ensureBash(prefix, targetTriple) {
     '--disable-history',
   ], { cwd: buildDir, env });
   run('make', ['-j', cpuCount()], { cwd: buildDir, env });
-  run('make', ['install-bin', 'install-headers'], { cwd: buildDir, env });
+  run('make', ['install'], { cwd: buildDir, env });
+
+  if (!existsSync(bashPath)) {
+    throw new Error(`Bash install completed but ${bashPath} was not produced`);
+  }
 }
 
 function nativePrefix(targetTriple) {
