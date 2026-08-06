@@ -541,13 +541,22 @@ function extractFlatPkg(pkgPath, extractionRoot, expandedDir) {
 
   // Newer flat packages may not produce Payload files — check if
   // pkgutil already laid out the files directly in expandedDir.
+  // Preserve symlinks here because framework bundles commonly contain
+  // relative symlinks that only resolve correctly once the entire tree
+  // is copied into place.
   for (const entry of readdirSync(expandedDir, { withFileTypes: true })) {
     const source = join(expandedDir, entry.name);
+    const destination = join(extractionRoot, entry.name);
     if (entry.isDirectory()) {
-      cpSync(source, join(extractionRoot, entry.name), { recursive: true, force: true, dereference: true });
+      cpSync(source, destination, {
+        recursive: true,
+        force: true,
+        dereference: false,
+        verbatimSymlinks: true,
+      });
     } else if (entry.isFile()) {
-      mkdirSync(dirname(join(extractionRoot, entry.name)), { recursive: true });
-      copyFileSync(source, join(extractionRoot, entry.name));
+      mkdirSync(dirname(destination), { recursive: true });
+      copyFileSync(source, destination);
     }
   }
 }
