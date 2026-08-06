@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -19,7 +20,9 @@ const srcTauriDir = join(repoRoot, 'src-tauri');
 const nativeDepsRoot = join(srcTauriDir, '.native-deps');
 const bundledMacosDir = join(srcTauriDir, 'bundled', 'macos');
 const bundledGstreamerFramework = join(bundledMacosDir, 'GStreamer.framework');
-const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim() || '1.24.13';
+const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
+  || process.env.GSTREAMER_VERSION?.trim()
+  || '1.24.13';
 const args = process.argv.slice(2);
 const target = readTarget(args)
   || process.env.NOLAND_NATIVE_TARGET?.trim()
@@ -221,8 +224,8 @@ function ensureExpandedMacGstreamerPackages() {
   const glibPkgConfigDir = join(glibComponentDir, 'Payload', 'lib', 'pkgconfig');
   const gstreamerPkgConfigDir = join(gstreamerComponentDir, 'Payload', 'lib', 'pkgconfig');
 
-  downloadFile(runtimeUrl, runtimePkg);
-  downloadFile(develUrl, develPkg);
+  downloadFile(runtimeUrl, runtimePkg, { expectedKind: 'xar-pkg' });
+  downloadFile(develUrl, develPkg, { expectedKind: 'xar-pkg' });
 
   if (!existsSync(join(runtimeExpandedDir, 'Distribution'))) {
     expandMacPkg(runtimePkg, runtimeExpandedDir);
@@ -339,8 +342,8 @@ function ensureWindowsGstreamerRoot(prefix, targetTriple) {
   const develUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-devel-msvc-${downloadArch}-${gstreamerVersion}.msi`;
 
   mkdirSync(cacheRoot, { recursive: true });
-  downloadFile(runtimeUrl, runtimeMsi);
-  downloadFile(develUrl, develMsi);
+  downloadFile(runtimeUrl, runtimeMsi, { expectedKind: 'msi' });
+  downloadFile(develUrl, develMsi, { expectedKind: 'msi' });
 
   rmSync(extractedRoot, { recursive: true, force: true });
   mkdirSync(extractedRoot, { recursive: true });
@@ -366,6 +369,8 @@ function ensureOpenSsl(prefix, targetTriple) {
   }
 
   const tarball = join(nativeDepsRoot, 'src', 'openssl-3.3.2.tar.gz');
+  const tarballUrl = 'https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz';
+  downloadFile(tarballUrl, tarball, { expectedKind: 'tar.gz' });
   const extractRoot = join(nativeDepsRoot, `build-openssl-src-${targetTriple}`);
   const buildDir = extractTarballSource(tarball, extractRoot, 'openssl-3.3.2');
 
@@ -394,6 +399,11 @@ function ensureOpus(prefix, targetTriple) {
     return;
   }
 
+  ensureExtractedSourceTarball(
+    'https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz',
+    'opus-1.5.2.tar.gz',
+    'opus-1.5.2',
+  );
   const sourceDir = join(nativeDepsRoot, 'src', 'opus-1.5.2');
   const buildDir = join(nativeDepsRoot, `build-opus-${targetTriple}`);
   rmSync(buildDir, { recursive: true, force: true });
@@ -427,6 +437,11 @@ function ensureSdl2(prefix, targetTriple) {
     return;
   }
 
+  ensureExtractedSourceTarball(
+    'https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.tar.gz',
+    'SDL2-2.30.10.tar.gz',
+    'SDL2-2.30.10',
+  );
   const sourceDir = join(nativeDepsRoot, 'src', 'SDL2-2.30.10');
   const buildDir = join(nativeDepsRoot, `build-sdl2-${targetTriple}`);
   rmSync(buildDir, { recursive: true, force: true });
@@ -458,7 +473,7 @@ function ensureBash(prefix, targetTriple) {
 
   const tarball = join(nativeDepsRoot, 'src', 'bash-5.2.tar.gz');
   const tarballUrl = 'https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz';
-  downloadFile(tarballUrl, tarball);
+  downloadFile(tarballUrl, tarball, { expectedKind: 'tar.gz' });
 
   const extractRoot = join(nativeDepsRoot, `build-bash-src-${targetTriple}`);
   const buildDir = extractTarballSource(tarball, extractRoot, 'bash-5.2');
@@ -675,18 +690,91 @@ function extractWindowsMsi(msiPath, extractionRoot) {
   ]);
 }
 
-function downloadFile(url, destination) {
-  if (existsSync(destination)) {
+function downloadFile(url, destination, options = {}) {
+  const { expectedKind } = options;
+
+  if (existsSync(destination) && validateDownloadedFile(destination, expectedKind)) {
     return;
   }
+
+  if (existsSync(destination)) {
+    rmSync(destination, { force: true });
+  }
+
   mkdirSync(dirname(destination), { recursive: true });
-  run('curl', ['-L', '--retry', '3', '-o', destination, url]);
+  const tempDestination = `${destination}.partial`;
+  rmSync(tempDestination, { force: true });
+  run('curl', ['-fL', '--retry', '3', '--retry-all-errors', '-o', tempDestination, url]);
+
+  if (!validateDownloadedFile(tempDestination, expectedKind)) {
+    const preview = readFileSync(tempDestination)
+      .subarray(0, 256)
+      .toString('utf8')
+      .replace(/\s+/g, ' ')
+      .trim();
+    rmSync(tempDestination, { force: true });
+    throw new Error(`Downloaded file from ${url} to ${destination} but it was not a valid ${expectedKind || 'artifact'}. First bytes: ${preview || '<binary/empty>'}`);
+  }
+
+  renameSync(tempDestination, destination);
+}
+
+function validateDownloadedFile(path, expectedKind) {
+  if (!existsSync(path)) {
+    return false;
+  }
+
+  const stats = statSync(path, { throwIfNoEntry: false });
+  if (!stats || !stats.isFile() || stats.size <= 0) {
+    return false;
+  }
+
+  if (!expectedKind) {
+    return true;
+  }
+
+  const header = readFileSync(path).subarray(0, 512);
+  const headerUtf8 = header.toString('utf8').trimStart().toLowerCase();
+  if (headerUtf8.startsWith('<!doctype html') || headerUtf8.startsWith('<html') || headerUtf8.startsWith('<?xml')) {
+    return false;
+  }
+
+  if (expectedKind === 'tar.gz') {
+    return header.length >= 2 && header[0] === 0x1f && header[1] === 0x8b;
+  }
+
+  if (expectedKind === 'msi') {
+    const msiMagic = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+    return msiMagic.every((byte, index) => header[index] === byte);
+  }
+
+  if (expectedKind === 'xar-pkg') {
+    return header.length >= 4
+      && header[0] === 0x78
+      && header[1] === 0x61
+      && header[2] === 0x72
+      && header[3] === 0x21;
+  }
+
+  return true;
 }
 
 function prepareBuildDir(sourceDir, buildDir) {
   rmSync(buildDir, { recursive: true, force: true });
   mkdirSync(dirname(buildDir), { recursive: true });
   cpSync(sourceDir, buildDir, { recursive: true, force: true, dereference: true });
+}
+
+function ensureExtractedSourceTarball(url, tarballName, extractedDirName) {
+  const tarballPath = join(nativeDepsRoot, 'src', tarballName);
+  const extractedPath = join(nativeDepsRoot, 'src', extractedDirName);
+  if (existsSync(extractedPath)) {
+    return extractedPath;
+  }
+  downloadFile(url, tarballPath, { expectedKind: 'tar.gz' });
+  const extractRoot = join(nativeDepsRoot, 'src');
+  run('tar', ['-xzf', tarballPath, '-C', extractRoot]);
+  return extractedPath;
 }
 
 function extractTarballSource(tarballPath, extractRoot, extractedDirName) {
