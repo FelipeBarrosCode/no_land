@@ -667,6 +667,7 @@ export function DashboardScreen({
         onSelectOffer={async (offerId, storageGb) => {
           await onSelectOffer(offerId, storageGb);
           setPickerOpen(false);
+          navigate("/provisioning");
         }}
         onUpdateServerPreferences={onSaveServerPreferences}
       />

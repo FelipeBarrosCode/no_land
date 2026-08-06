@@ -70,12 +70,11 @@ export function PostWireguardModal({
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
-  const [pairingCopyState, setPairingCopyState] = useState<
-    "idle" | "copied" | "failed"
-  >("idle");
+
   void onVerifyWireguard;
   void onDetectMoonlight;
   void onOpenWireguardApp;
+  void onDownloadWireguardConfig;
 
   const setup = appState.postWireguardSetup;
   const activeInstanceId = appState.instance.instanceId;
@@ -115,7 +114,7 @@ export function PostWireguardModal({
   const pairingSession = activeMoonlightPairing;
   const instructions = useMemo(
     () => [
-      "Click Start Managed Tunnel below.",
+      "Click Setup Tunnel below.",
       "Approve elevation if your operating system prompts for it.",
       "Let Noland verify tunnel connectivity automatically before continuing.",
     ],
@@ -135,28 +134,11 @@ export function PostWireguardModal({
     }
   }
 
-  async function copyPairingPin() {
-    if (!pairingSession) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(pairingSession.pin);
-      setPairingCopyState("copied");
-    } catch {
-      setPairingCopyState("failed");
-    }
-  }
+
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
       <div className="glass-panel pixel-frame crt-surface w-full max-w-3xl p-6">
-        <button
-          onClick={() => window.history.back()}
-          className="absolute right-4 top-4 text-[#b9caf0] transition hover:text-white"
-          aria-label="Close modal"
-        >
-          <SpriteIcon icon="close" />
-        </button>
         <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2">
           <h3
             className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
@@ -208,7 +190,7 @@ export function PostWireguardModal({
             {!configMatchesActiveInstance && (
               <p className="mt-4 text-[1rem] text-[#9ab0cc]">
                 Loading the current tunnel config for this instance. If this
-                does not update, click Start Managed Tunnel.
+                does not update, click Setup Tunnel.
               </p>
             )}
 
@@ -231,26 +213,21 @@ export function PostWireguardModal({
               </div>
             )}
             <div className="mt-4 flex flex-wrap gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => void onDownloadWireguardConfig()}
-                disabled={busy}
-              >
-                Download .conf
-              </Button>
-              <Button
-                onClick={() => void onSetupWireguardAppHandoff()}
-                disabled={busy}
-              >
-                Start Managed Tunnel
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => void onSetupMoonlightSunshine()}
-                disabled={busy}
-              >
-                Continue to Moonlight Setup
-              </Button>
+              {setup.stage !== "wireguard_connected" ? (
+                <Button
+                  onClick={() => void onSetupWireguardAppHandoff()}
+                  disabled={busy}
+                >
+                  Setup Tunnel
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => void onSetupMoonlightSunshine()}
+                  disabled={busy}
+                >
+                  Continue
+                </Button>
+              )}
             </div>
 
             {copyState === "copied" && (
@@ -260,7 +237,7 @@ export function PostWireguardModal({
             )}
             {copyState === "failed" && (
               <p className="mt-2 text-[1rem] text-[#ffb2bf]">
-                Clipboard copy failed. Use Download .conf instead.
+                Clipboard copy failed. Please try again.
               </p>
             )}
             {!!setup.wireguardExportPath && (
@@ -348,13 +325,6 @@ export function PostWireguardModal({
                     </p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Button
-                        variant="secondary"
-                        onClick={() => void copyPairingPin()}
-                      >
-                        <SpriteIcon icon="copy" />
-                        <span className="ml-1">Copy PIN</span>
-                      </Button>
-                      <Button
                         onClick={() =>
                           void onCompleteMoonlightPairingHandoff(
                             pairingSession.pin,
@@ -362,19 +332,10 @@ export function PostWireguardModal({
                         }
                         disabled={busy}
                       >
-                        Complete Pairing
+                        Pair
                       </Button>
                     </div>
-                    {pairingCopyState === "copied" && (
-                      <p className="mt-2 text-[1rem] text-neon-lime">
-                        PIN copied to clipboard.
-                      </p>
-                    )}
-                    {pairingCopyState === "failed" && (
-                      <p className="mt-2 text-[1rem] text-[#ffb2bf]">
-                        Copy failed. Use the PIN shown above.
-                      </p>
-                    )}
+
                   </div>
                 ) : (
                   <div className="mt-4 flex flex-wrap gap-2">

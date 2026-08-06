@@ -3,7 +3,6 @@ import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { InputField } from "../../components/ui/InputField";
 import type { LocationState, OfferCandidate, ServerPreferences } from "../../lib/types";
 
 interface Props {
@@ -101,7 +100,6 @@ export function ServerPickerModal({
   const [geolocationCountryCode, setGeolocationCountryCode] = useState(
     serverPreferences.geolocationCountryCode || "US"
   );
-  const [selectedStorage, setSelectedStorage] = useState(storageGb);
   const [minPrice, setMinPrice] = useState(serverPreferences.minHourlyPrice.toString());
   const [maxPrice, setMaxPrice] = useState(
     serverPreferences.maxHourlyPrice > 0 ? serverPreferences.maxHourlyPrice.toString() : ""
@@ -137,6 +135,16 @@ export function ServerPickerModal({
     () => busy || searchingOffers || !geolocationCountryCode.trim(),
     [busy, searchingOffers, geolocationCountryCode]
   );
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && open) {
+        onClose();
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
 
   if (!open) {
     return null;
@@ -206,7 +214,7 @@ export function ServerPickerModal({
                 Select Server
               </h2>
               <p className="text-[1.25rem] leading-none text-[#b4c8de]">
-                Search uses region plus Vast geolocation country code.
+                Select a country to find available servers.
               </p>
             </div>
             <AIPromptHelper topic="Server Selection Market" promptText={APP_PROMPTS.serverPickerModalHeader} variant="icon" />
@@ -223,17 +231,11 @@ export function ServerPickerModal({
             </p>
           )}
 
-          <div className="mb-4 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto]">
-            <InputField
-              label="Region / State / Province"
-              value={region}
-              onChange={(event) => setRegion(event.target.value)}
-              placeholder="California"
-            />
+          <div className="mb-4 flex items-end gap-3">
             <div>
               <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Country</span>
               <select
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
+                className="h-11 w-64 border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
                 value={geolocationCountryCode}
                 onChange={(event) => setGeolocationCountryCode(event.target.value)}
               >
@@ -245,30 +247,15 @@ export function ServerPickerModal({
               </select>
             </div>
 
-            <div className="flex items-end gap-2">
-              <span className="pb-1 text-[1.2rem] text-[#b4c8de]">Storage</span>
-              <input
-                className="h-11 w-24 border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-right text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={30}
-                max={4000}
-                value={selectedStorage}
-                onChange={(event) => setSelectedStorage(Number.parseInt(event.target.value, 10) || 100)}
-              />
-              <span className="pb-1 text-[1.2rem] text-[#b4c8de]">GB</span>
-            </div>
-
-            <div className="flex items-end">
-              <Button
-                variant="secondary"
-                disabled={disabledSearch}
-                loading={searchingOffers}
-                loadingText="Searching..."
-                onClick={runRegionCountrySearch}
-              >
-                Find Offers
-              </Button>
-            </div>
+            <Button
+              variant="secondary"
+              disabled={disabledSearch}
+              loading={searchingOffers}
+              loadingText="Searching..."
+              onClick={runRegionCountrySearch}
+            >
+              Find Offers
+            </Button>
           </div>
 
           {/* Price Range and Filters */}
@@ -520,9 +507,9 @@ export function ServerPickerModal({
                       disabled={busy}
                       loading={busy && isSelected}
                       loadingText="Selecting..."
-                      onClick={() => onSelectOffer(offer.id, selectedStorage)}
+                      onClick={() => onSelectOffer(offer.id, storageGb)}
                     >
-                      {isSelected ? "Selected" : "Select"}
+                      {isSelected ? "Selected" : "Select & Provision"}
                     </Button>
                   </Card>
                 );
