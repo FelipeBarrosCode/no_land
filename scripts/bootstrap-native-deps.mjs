@@ -591,7 +591,14 @@ function findWindowsGstreamerRoot(root) {
 }
 
 function stageFrameworkCopy(source, destination) {
-  stageDirectory(source, destination);
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(dirname(destination), { recursive: true });
+  cpSync(source, destination, {
+    recursive: true,
+    force: true,
+    dereference: false,
+    verbatimSymlinks: true,
+  });
 }
 
 function stageDirectory(source, destination) {
