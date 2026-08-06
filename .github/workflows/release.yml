@@ -3,6 +3,7 @@ name: Build Desktop Binaries
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
+  NOLAND_GSTREAMER_VERSION: 1.24.13
 
 on:
   workflow_dispatch:
