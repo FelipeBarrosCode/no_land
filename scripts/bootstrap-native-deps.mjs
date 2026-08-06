@@ -144,7 +144,23 @@ function ensureExtractedMacGstreamerFramework() {
   mkdirSync(extractedRoot, { recursive: true });
   extractFlatPkg(runtimePkg, extractedRoot, join(cacheRoot, 'runtime-expanded'));
 
-  return hasGstreamerFramework(extractedFramework) ? extractedFramework : null;
+  if (hasGstreamerFramework(extractedFramework)) {
+    return extractedFramework;
+  }
+
+  const discoveredFramework = findDirectoriesNamed(extractedRoot, 'GStreamer.framework')
+    .find((candidate) => hasGstreamerFramework(candidate));
+  if (discoveredFramework) {
+    return discoveredFramework;
+  }
+
+  const runtimeExpandedFramework = findDirectoriesNamed(join(cacheRoot, 'runtime-expanded'), 'GStreamer.framework')
+    .find((candidate) => hasGstreamerFramework(candidate));
+  if (runtimeExpandedFramework) {
+    return runtimeExpandedFramework;
+  }
+
+  return null;
 }
 
 function ensureExpandedMacGstreamerPackages() {
@@ -630,6 +646,28 @@ function findFilesNamed(root, name) {
         stack.push(full);
       } else if (entry.isFile() && entry.name === name) {
         found.push(full);
+      }
+    }
+  }
+  return found;
+}
+
+function findDirectoriesNamed(root, name) {
+  if (!existsSync(root)) {
+    return [];
+  }
+
+  const found = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name === name) {
+          found.push(full);
+        }
+        stack.push(full);
       }
     }
   }
