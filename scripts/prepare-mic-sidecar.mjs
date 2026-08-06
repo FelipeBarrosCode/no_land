@@ -104,6 +104,7 @@ console.log(`Mic sidecar target dir: ${sidecarTargetDir}`);
 function managedToolSpecs(targetTriple) {
   if (isWindowsTarget(targetTriple)) {
     return [
+      { lookupName: 'gotatun.exe', stagedStem: 'gotatun', envVarName: 'NOLAND_GOTATUN_BIN' },
       { lookupName: 'wg.exe', stagedStem: 'wg', envVarName: 'NOLAND_WG_BIN' },
       { lookupName: 'wireguard.exe', stagedStem: 'wireguard', envVarName: 'NOLAND_WIREGUARD_EXE_BIN' },
       { lookupName: 'ssh.exe', stagedStem: 'ssh', envVarName: 'NOLAND_SSH_BIN' },

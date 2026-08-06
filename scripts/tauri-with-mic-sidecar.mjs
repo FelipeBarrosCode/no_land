@@ -42,9 +42,7 @@ const managedWgQuick = process.platform === 'win32'
 const managedWireguardExe = process.platform === 'win32'
   ? findManagedTool('wireguard', target, 'NOLAND_WIREGUARD_EXE_BIN')
   : undefined;
-const managedGotatun = process.platform === 'win32'
-  ? undefined
-  : findManagedTool('gotatun', target, 'NOLAND_GOTATUN_BIN');
+const managedGotatun = findManagedTool('gotatun', target, 'NOLAND_GOTATUN_BIN');
 if (managedWg) {
   tauriEnv.NOLAND_WG_BIN = managedWg;
 }

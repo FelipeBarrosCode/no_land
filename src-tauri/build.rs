@@ -320,7 +320,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         &target_triple,
         target_is_windows,
         is_release,
-        !target_is_windows,
+        true,
         "run the Tauri build through the npm wrapper so the managed tunnel sidecar is staged first",
     )?;
     ensure_staged_bundle_binary(
