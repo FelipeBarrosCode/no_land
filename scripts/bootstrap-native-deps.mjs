@@ -134,8 +134,15 @@ function ensureMacGstreamerFramework() {
     return;
   }
 
+  const discoveredInstalled = findDirectoriesNamed('/Library/Frameworks', 'GStreamer.framework');
+  const discoveredExtracted = findDirectoriesNamed(macGstreamerCacheRoot(), 'GStreamer.framework');
   throw new Error(
-    'Could not stage a macOS GStreamer framework. Set NOLAND_GSTREAMER_FRAMEWORK to a valid GStreamer.framework path or let bootstrap install or extract the official framework packages.',
+    [
+      'Could not stage a macOS GStreamer framework.',
+      'Set NOLAND_GSTREAMER_FRAMEWORK to a valid GStreamer.framework path or let bootstrap install or extract the official framework packages.',
+      `Installed candidates: ${discoveredInstalled.length > 0 ? discoveredInstalled.join(', ') : 'none'}`,
+      `Extracted candidates: ${discoveredExtracted.length > 0 ? discoveredExtracted.join(', ') : 'none'}`,
+    ].join(' '),
   );
 }
 
@@ -155,6 +162,9 @@ function installMacGstreamerRuntimeFramework(runtimePkg, systemFramework) {
 
   const stderr = [install.stderr, install.stdout].filter(Boolean).join('\n').trim();
   console.warn(`macOS GStreamer runtime installer did not produce a usable framework: ${stderr || `status ${install.status}`}`);
+  if (existsSync(systemFramework)) {
+    console.warn(`System framework path exists but did not validate: ${systemFramework}`);
+  }
   return hasGstreamerFramework(systemFramework) ? systemFramework : null;
 }
 
@@ -535,8 +545,10 @@ function hasGstreamerFramework(path) {
   ];
 
   return versionRoots.some((root) => (
-    existsSync(join(root, 'lib', 'libgstreamer-1.0.dylib'))
+    existsSync(join(root, 'lib', 'GStreamer'))
+    || existsSync(join(root, 'lib', 'libgstreamer-1.0.dylib'))
     || existsSync(join(root, 'lib', 'libgstreamer-1.0.0.dylib'))
+    || existsSync(join(root, 'Libraries', 'GStreamer'))
     || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.dylib'))
     || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.0.dylib'))
   ));
