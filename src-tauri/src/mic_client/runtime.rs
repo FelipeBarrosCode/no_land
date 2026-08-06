@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::errors::{AppError, AppResult};
+use crate::{
+    errors::{AppError, AppResult},
+    utils::managed_binaries::locate_bundled_binary,
+};
 
 fn framework_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -76,10 +79,23 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        let native_root = cwd.join("src-tauri").join(".native-deps").join(target_triple);
+        let native_root = cwd
+            .join("src-tauri")
+            .join(".native-deps")
+            .join(target_triple);
         if cfg!(target_os = "windows") {
-            candidates.push(native_root.join("gstreamer").join("1.0").join(windows_gstreamer_arch_dir()));
-            candidates.push(cwd.join("src-tauri").join("binaries").join("gstreamer").join(target_triple));
+            candidates.push(
+                native_root
+                    .join("gstreamer")
+                    .join("1.0")
+                    .join(windows_gstreamer_arch_dir()),
+            );
+            candidates.push(
+                cwd.join("src-tauri")
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
             candidates.push(cwd.join("binaries").join("gstreamer").join(target_triple));
         } else if cfg!(target_os = "linux") {
             candidates.push(native_root.join("gstreamer"));
@@ -89,7 +105,12 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
     if let Some(exe_dir) = current_exe.parent() {
         if cfg!(target_os = "windows") {
             candidates.push(exe_dir.join("gstreamer").join(target_triple));
-            candidates.push(exe_dir.join("binaries").join("gstreamer").join(target_triple));
+            candidates.push(
+                exe_dir
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
             candidates.push(
                 exe_dir
                     .join("..")
@@ -107,7 +128,12 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
             );
         } else if cfg!(target_os = "linux") {
             candidates.push(exe_dir.join("gstreamer").join(target_triple));
-            candidates.push(exe_dir.join("binaries").join("gstreamer").join(target_triple));
+            candidates.push(
+                exe_dir
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
         }
     }
 
@@ -133,24 +159,6 @@ fn is_valid_gstreamer_root(path: &Path) -> bool {
     }
 
     false
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o111 != 0;
-    }
-
-    #[allow(unreachable_code)]
-    true
 }
 
 fn mic_sender_target_triple() -> &'static str {
@@ -203,57 +211,37 @@ fn mic_sender_binary_names() -> Vec<String> {
 }
 
 pub fn resolve_mic_sender_binary() -> AppResult<PathBuf> {
-    let env_override = std::env::var("NOLAND_MIC_SENDER_BIN")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
-    if let Some(path) = env_override.filter(|path| is_executable_file(path)) {
+    if let Some(path) = locate_bundled_binary(
+        "noland-mic-sender",
+        "NOLAND_MIC_SENDER_BIN",
+        cfg!(target_os = "windows"),
+        mic_sender_target_triple(),
+    ) {
         return Ok(path);
     }
 
     let names = mic_sender_binary_names();
-    let mut candidates = Vec::new();
-    if let Ok(current_exe) = std::env::current_exe() {
-        if let Some(exe_dir) = current_exe.parent() {
-            for name in &names {
-                candidates.push(exe_dir.join(name));
-                candidates.push(exe_dir.join("binaries").join(name));
-                candidates.push(exe_dir.join("..").join("Resources").join(name));
-                candidates.push(
-                    exe_dir
-                        .join("..")
-                        .join("Resources")
-                        .join("binaries")
-                        .join(name),
-                );
-            }
-        }
-    }
     if let Ok(cwd) = std::env::current_dir() {
         for name in &names {
-            candidates.push(
+            for candidate in [
                 cwd.join("src-tauri")
                     .join("target")
                     .join("debug")
                     .join(name),
-            );
-            candidates.push(
                 cwd.join("src-tauri")
                     .join("target")
                     .join("release")
                     .join(name),
-            );
-            candidates.push(cwd.join("src-tauri").join("binaries").join(name));
-            candidates.push(cwd.join("target").join("debug").join(name));
-            candidates.push(cwd.join("target").join("release").join(name));
-            candidates.push(cwd.join("binaries").join(name));
-        }
-    }
-
-    for candidate in candidates {
-        if is_executable_file(&candidate) {
-            return Ok(candidate);
+                cwd.join("target").join("debug").join(name),
+                cwd.join("target").join("release").join(name),
+            ] {
+                if std::fs::metadata(&candidate)
+                    .map(|meta| meta.is_file())
+                    .unwrap_or(false)
+                {
+                    return Ok(candidate);
+                }
+            }
         }
     }
 
@@ -366,7 +354,9 @@ fn configure_windows_gstreamer_command(command: &mut Command, current_exe: &Path
         let plugin_dir = root.join("lib").join("gstreamer-1.0");
         let typelib_dir = root.join("lib").join("girepository-1.0");
         let scanner_candidates = [
-            root.join("libexec").join("gstreamer-1.0").join("gst-plugin-scanner.exe"),
+            root.join("libexec")
+                .join("gstreamer-1.0")
+                .join("gst-plugin-scanner.exe"),
             root.join("bin").join("gst-plugin-scanner.exe"),
         ];
 
@@ -401,7 +391,9 @@ fn configure_linux_gstreamer_command(command: &mut Command, current_exe: &Path) 
         let plugin_dir = lib_dir.join("gstreamer-1.0");
         let typelib_dir = lib_dir.join("girepository-1.0");
         let scanner_candidates = [
-            root.join("libexec").join("gstreamer-1.0").join("gst-plugin-scanner"),
+            root.join("libexec")
+                .join("gstreamer-1.0")
+                .join("gst-plugin-scanner"),
             lib_dir.join("gstreamer-1.0").join("gst-plugin-scanner"),
         ];
 

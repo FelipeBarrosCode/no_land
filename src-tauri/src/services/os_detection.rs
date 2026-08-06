@@ -1,5 +1,7 @@
 use std::{env, path::PathBuf, process::Command};
 
+use crate::utils::managed_binaries::locate_bundled_binary;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsKind {
     Macos,
@@ -170,63 +172,12 @@ impl OsDetection {
         env_var: &str,
         uses_exe_suffix: bool,
     ) -> Option<PathBuf> {
-        let env_override = env::var(env_var)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from);
-        if let Some(path) = env_override.filter(|path| is_executable_file(path)) {
-            return Some(path);
-        }
-
-        let mut names = Vec::new();
-        if uses_exe_suffix {
-            names.push(format!("{stem}.exe"));
-        }
-        names.push(stem.to_string());
-
-        let triple = self.managed_binary_target_triple();
-        if !triple.is_empty() {
-            if uses_exe_suffix {
-                names.push(format!("{stem}-{triple}.exe"));
-            }
-            names.push(format!("{stem}-{triple}"));
-        }
-        names.sort();
-        names.dedup();
-
-        let mut candidates = Vec::new();
-        if let Ok(exe) = env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                for name in &names {
-                    candidates.push(exe_dir.join(name));
-                    candidates.push(exe_dir.join("binaries").join(name));
-                    candidates.push(exe_dir.join("resources").join(name));
-                    candidates.push(exe_dir.join("resources").join("binaries").join(name));
-                    candidates.push(exe_dir.join("..").join("binaries").join(name));
-                    candidates.push(exe_dir.join("..").join("Resources").join(name));
-                    candidates.push(
-                        exe_dir
-                            .join("..")
-                            .join("Resources")
-                            .join("binaries")
-                            .join(name),
-                    );
-                }
-            }
-        }
-
-        if let Ok(cwd) = env::current_dir() {
-            for name in &names {
-                candidates.push(cwd.join(name));
-                candidates.push(cwd.join("binaries").join(name));
-                candidates.push(cwd.join("src-tauri").join("binaries").join(name));
-            }
-        }
-
-        candidates
-            .into_iter()
-            .find(|candidate| is_executable_file(candidate))
+        locate_bundled_binary(
+            stem,
+            env_var,
+            uses_exe_suffix,
+            self.managed_binary_target_triple(),
+        )
     }
 
     pub fn default_path_prefixes(&self) -> &'static [&'static str] {
