@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {
+  copyFileSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -533,12 +534,23 @@ function extractFlatPkg(pkgPath, extractionRoot, expandedDir) {
   run('pkgutil', ['--expand-full', pkgPath, expandedDir]);
 
   const payloads = findFilesNamed(expandedDir, 'Payload');
-  if (payloads.length === 0) {
-    throw new Error(`No Payload files found while extracting ${pkgPath}`);
+  if (payloads.length > 0) {
+    for (const payload of payloads) {
+      extractPayloadArchive(payload, extractionRoot, pkgPath);
+    }
+    return;
   }
 
-  for (const payload of payloads) {
-    extractPayloadArchive(payload, extractionRoot, pkgPath);
+  // Newer flat packages may not produce Payload files — check if
+  // pkgutil already laid out the files directly in expandedDir.
+  for (const entry of readdirSync(expandedDir, { withFileTypes: true })) {
+    const source = join(expandedDir, entry.name);
+    if (entry.isDirectory()) {
+      cpSync(source, join(extractionRoot, entry.name), { recursive: true, force: true, dereference: true });
+    } else if (entry.isFile()) {
+      mkdirSync(dirname(join(extractionRoot, entry.name)), { recursive: true });
+      copyFileSync(source, join(extractionRoot, entry.name));
+    }
   }
 }
 
