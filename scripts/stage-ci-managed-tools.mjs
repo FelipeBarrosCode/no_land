@@ -32,7 +32,7 @@ function stageLinuxTools(targetTriple) {
     fail(`Linux CI managed-tool staging for ${targetTriple} must run on a Linux host.`);
   }
 
-  const gotatunPath = buildLinuxGotatun(targetTriple);
+  const gotatunPath = buildGotatun(targetTriple);
   const envAssignments = {
     NOLAND_GOTATUN_BIN: gotatunPath,
     NOLAND_WG_BIN: requireExistingPath('/usr/bin/wg', 'wireguard-tools package did not provide /usr/bin/wg'),
@@ -60,9 +60,11 @@ function stageWindowsTools(targetTriple) {
     fail(`Windows CI managed-tool staging for ${targetTriple} must run on a Windows host.`);
   }
 
+  const gotatunPath = buildGotatun(targetTriple);
   const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
   const wireguardDir = join(programFiles, 'WireGuard');
   const envAssignments = {
+    NOLAND_GOTATUN_BIN: gotatunPath,
     NOLAND_WG_BIN: locateFirstExisting([
       process.env.NOLAND_WG_BIN,
       join(wireguardDir, 'wg.exe'),
@@ -94,7 +96,7 @@ function stageWindowsTools(targetTriple) {
   logAssignments(envAssignments);
 }
 
-function buildLinuxGotatun(targetTriple) {
+function buildGotatun(targetTriple) {
   const explicit = process.env.NOLAND_GOTATUN_BIN?.trim();
   if (explicit && existsSync(explicit)) {
     console.log(`Using preconfigured gotatun from ${explicit}`);
@@ -104,7 +106,8 @@ function buildLinuxGotatun(targetTriple) {
   const cacheRoot = join(repoRoot, 'src-tauri', '.native-deps', 'cache', 'gotatun');
   const sourceDir = join(cacheRoot, 'src');
   const cargoTargetDir = join(cacheRoot, 'target');
-  const builtBinary = join(cargoTargetDir, targetTriple, 'release', 'gotatun');
+  const ext = targetTriple.includes('windows') ? '.exe' : '';
+  const builtBinary = join(cargoTargetDir, targetTriple, 'release', `gotatun${ext}`);
 
   mkdirSync(cacheRoot, { recursive: true });
 
