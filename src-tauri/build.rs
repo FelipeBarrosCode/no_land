@@ -498,11 +498,18 @@ fn resolve_macos_gstreamer_framework_source() -> Option<PathBuf> {
 }
 
 fn has_macos_gstreamer_framework(path: &Path) -> bool {
-    path.join("Versions/Current/lib/libgstreamer-1.0.dylib")
-        .is_file()
-        || path
-            .join("Versions/Current/lib/libgstreamer-1.0.0.dylib")
-            .is_file()
+    [
+        path.join("Versions/Current/lib/GStreamer"),
+        path.join("Versions/Current/lib/libgstreamer-1.0.dylib"),
+        path.join("Versions/Current/lib/libgstreamer-1.0.0.dylib"),
+        path.join("Versions/1.0/lib/GStreamer"),
+        path.join("Versions/1.0/lib/libgstreamer-1.0.dylib"),
+        path.join("Versions/1.0/lib/libgstreamer-1.0.0.dylib"),
+        path.join("Versions/Current/Libraries/GStreamer"),
+        path.join("Versions/1.0/Libraries/GStreamer"),
+    ]
+    .iter()
+    .any(|candidate| candidate.is_file())
 }
 
 fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {

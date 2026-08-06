@@ -49,7 +49,9 @@ pub fn generate_headless_edid_base64(
 
     let mut bytes = STANDARD
         .decode(HEADLESS_EDID_TEMPLATE_BASE64)
-        .map_err(|error| AppError::Serialization(format!("Failed to decode EDID template: {error}")))?;
+        .map_err(|error| {
+            AppError::Serialization(format!("Failed to decode EDID template: {error}"))
+        })?;
 
     if bytes.len() < 128 {
         return Err(AppError::Serialization(
@@ -120,7 +122,11 @@ pub fn generate_headless_edid_base64(
     // Update range limits descriptor so requested refresh is within advertised range.
     // Descriptor starts at byte 108: 00 00 00 FD 00 [min_v][max_v][min_h][max_h][max_pclk_10mhz] ...
     let range = 108usize;
-    if bytes[range] == 0x00 && bytes[range + 1] == 0x00 && bytes[range + 2] == 0x00 && bytes[range + 3] == 0xFD {
+    if bytes[range] == 0x00
+        && bytes[range + 1] == 0x00
+        && bytes[range + 2] == 0x00
+        && bytes[range + 3] == 0xFD
+    {
         let min_v = EDID_MIN_REFRESH_HZ.min(refresh_hz).max(1);
         let max_v = refresh_hz.max(60).min(255);
         let min_h = 15u32;
@@ -528,7 +534,8 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         }
         if headless_edid_base64.trim().is_empty() {
             return Err(AppError::InvalidInput(
-                "Headless EDID is missing. Regenerate EDID from Settings before provisioning.".to_string(),
+                "Headless EDID is missing. Regenerate EDID from Settings before provisioning."
+                    .to_string(),
             ));
         }
 

@@ -33,9 +33,7 @@ impl AudioLatencyService {
     }
 
     pub async fn configure(&self, remote: &RemoteExec) -> AppResult<AudioSetupResult> {
-        let normalized_script = AUDIO_SETUP_SCRIPT
-            .replace("\r\n", "\n")
-            .replace('\r', "\n");
+        let normalized_script = AUDIO_SETUP_SCRIPT.replace("\r\n", "\n").replace('\r', "\n");
         let encoded_script = STANDARD.encode(normalized_script.as_bytes());
         let mut args = format!(
             "--target-user {} --profile {}",
