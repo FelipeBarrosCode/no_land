@@ -119,16 +119,43 @@ function ensureMacGstreamerFramework() {
     return;
   }
 
+  const { runtimePkg } = ensureExpandedMacGstreamerPackages();
+  const installedFramework = installMacGstreamerRuntimeFramework(runtimePkg, systemFramework);
+  if (installedFramework) {
+    stageFrameworkCopy(installedFramework, bundledGstreamerFramework);
+    console.log(`Staged GStreamer framework from installed runtime at ${installedFramework}`);
+    return;
+  }
+
   const extractedFramework = ensureExtractedMacGstreamerFramework();
   if (extractedFramework) {
     stageFrameworkCopy(extractedFramework, bundledGstreamerFramework);
-    console.log(`Staged GStreamer framework from project cache for ${gstreamerVersion}`);
+    console.log(`Staged GStreamer framework from extracted runtime package for ${gstreamerVersion}`);
     return;
   }
 
   throw new Error(
-    'Could not stage a macOS GStreamer framework. Set NOLAND_GSTREAMER_FRAMEWORK to a valid GStreamer.framework path or let bootstrap download the official framework packages.',
+    'Could not stage a macOS GStreamer framework. Set NOLAND_GSTREAMER_FRAMEWORK to a valid GStreamer.framework path or let bootstrap install or extract the official framework packages.',
   );
+}
+
+function installMacGstreamerRuntimeFramework(runtimePkg, systemFramework) {
+  if (!runtimePkg || !existsSync(runtimePkg)) {
+    return null;
+  }
+
+  const install = run('sudo', ['installer', '-pkg', runtimePkg, '-target', '/'], {
+    allowFailure: true,
+    captureOutput: true,
+  });
+
+  if (install.status === 0 && hasGstreamerFramework(systemFramework)) {
+    return systemFramework;
+  }
+
+  const stderr = [install.stderr, install.stdout].filter(Boolean).join('\n').trim();
+  console.warn(`macOS GStreamer runtime installer did not produce a usable framework: ${stderr || `status ${install.status}`}`);
+  return hasGstreamerFramework(systemFramework) ? systemFramework : null;
 }
 
 function ensureExtractedMacGstreamerFramework() {
