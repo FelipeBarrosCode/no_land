@@ -295,10 +295,11 @@ function ensureWindowsGstreamerRoot(prefix, targetTriple) {
 
   const cacheRoot = join(nativeDepsRoot, 'cache', `gstreamer-${gstreamerVersion}-${windowsGstreamerArch(targetTriple)}`);
   const extractedRoot = join(cacheRoot, 'root');
-  const runtimeMsi = join(cacheRoot, `gstreamer-1.0-msvc-${windowsGstreamerArch(targetTriple)}-${gstreamerVersion}.msi`);
-  const develMsi = join(cacheRoot, `gstreamer-1.0-devel-msvc-${windowsGstreamerArch(targetTriple)}-${gstreamerVersion}.msi`);
-  const runtimeUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-msvc-${windowsGstreamerArch(targetTriple)}-${gstreamerVersion}.msi`;
-  const develUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-devel-msvc-${windowsGstreamerArch(targetTriple)}-${gstreamerVersion}.msi`;
+  const downloadArch = windowsGstreamerDownloadArch(targetTriple);
+  const runtimeMsi = join(cacheRoot, `gstreamer-1.0-msvc-${downloadArch}-${gstreamerVersion}.msi`);
+  const develMsi = join(cacheRoot, `gstreamer-1.0-devel-msvc-${downloadArch}-${gstreamerVersion}.msi`);
+  const runtimeUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-msvc-${downloadArch}-${gstreamerVersion}.msi`;
+  const develUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-devel-msvc-${downloadArch}-${gstreamerVersion}.msi`;
 
   mkdirSync(cacheRoot, { recursive: true });
   downloadFile(runtimeUrl, runtimeMsi);
@@ -490,10 +491,28 @@ function windowsGstreamerArch(targetTriple) {
   throw new Error(`Unsupported Windows GStreamer target: ${targetTriple}`);
 }
 
+function windowsGstreamerDownloadArch(targetTriple) {
+  if (targetTriple.includes('x86_64')) return 'x86_64';
+  if (targetTriple.includes('aarch64')) return 'arm64';
+  throw new Error(`Unsupported Windows GStreamer download target: ${targetTriple}`);
+}
+
 function hasGstreamerFramework(path) {
   if (!path) return false;
-  return existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'))
-    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'));
+
+  const versionRoots = [
+    join(path, 'Versions', 'Current'),
+    join(path, 'Versions', '1.0'),
+    join(path, 'Versions', gstreamerVersion),
+    path,
+  ];
+
+  return versionRoots.some((root) => (
+    existsSync(join(root, 'lib', 'libgstreamer-1.0.dylib'))
+    || existsSync(join(root, 'lib', 'libgstreamer-1.0.0.dylib'))
+    || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.dylib'))
+    || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.0.dylib'))
+  ));
 }
 
 function hasLinuxGstreamerRoot(path) {
