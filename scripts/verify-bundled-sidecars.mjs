@@ -110,15 +110,17 @@ function verifyMacBundleTree(root, targetTriple, label) {
 
 function verifyBundleTree(root, targetTriple, label) {
   verifyRequiredSidecars(root, targetTriple, label);
+  verifyRequiredRuntimeFiles(root, targetTriple, label);
+  verifyBundledMicReceiverSource(root, label);
+}
 
-  for (const runtimeFile of requiredRuntimeFiles(targetTriple)) {
-    const found = findFirstPath(root, (path) => basename(path) === runtimeFile);
+function verifyRequiredRuntimeFiles(root, targetTriple, label) {
+  for (const candidates of requiredRuntimeFileCandidates(targetTriple)) {
+    const found = findFirstPath(root, (path) => candidates.includes(basename(path)));
     if (!found) {
-      fail(`Missing required bundled runtime file '${runtimeFile}' in ${label}`);
+      fail(`Missing required bundled runtime file (${candidates.join(' or ')}) in ${label}`);
     }
   }
-
-  verifyBundledMicReceiverSource(root, label);
 }
 
 function verifyBundledMicReceiverSource(root, label) {
@@ -168,29 +170,29 @@ function requiredSidecarCandidates(targetTriple) {
   return groups;
 }
 
-function requiredRuntimeFiles(targetTriple) {
+function requiredRuntimeFileCandidates(targetTriple) {
   if (targetTriple.includes('windows')) {
     return [
-      'gstreamer-1.0-0.dll',
-      'gst-plugin-scanner.exe',
-      'libgstwasapi.dll',
-      'libgstaudioconvert.dll',
-      'libgstaudioresample.dll',
-      'libgstopus.dll',
-      'libgstrtp.dll',
-      'libgstudp.dll',
+      ['gstreamer-1.0-0.dll'],
+      ['gst-plugin-scanner.exe'],
+      ['libgstwasapi.dll', 'libgstwasapi2.dll'],
+      ['libgstaudioconvert.dll'],
+      ['libgstaudioresample.dll'],
+      ['libgstopus.dll'],
+      ['libgstrtp.dll'],
+      ['libgstudp.dll'],
     ];
   }
 
   return [
-    'gst-plugin-scanner',
-    'libgstreamer-1.0.so.0',
-    'libgstpipewire.so',
-    'libgstaudioconvert.so',
-    'libgstaudioresample.so',
-    'libgstopus.so',
-    'libgstrtp.so',
-    'libgstudp.so',
+    ['gst-plugin-scanner'],
+    ['libgstreamer-1.0.so.0', 'libgstreamer-1.0.so'],
+    ['libgstpipewire.so'],
+    ['libgstaudioconvert.so'],
+    ['libgstaudioresample.so'],
+    ['libgstopus.so'],
+    ['libgstrtp.so'],
+    ['libgstudp.so'],
   ];
 }
 
