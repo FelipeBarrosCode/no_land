@@ -110,13 +110,17 @@ jobs:
           }
 
       - name: Import Apple Developer certificate
-        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != ''
+        if: matrix.platform == 'macos'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "APPLE_CERTIFICATE is not configured; skipping macOS signing setup."
+            exit 0
+          fi
           echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security default-keychain -s build.keychain
@@ -127,9 +131,15 @@ jobs:
           security find-identity -v -p codesigning build.keychain
 
       - name: Resolve Apple signing identity
-        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != ''
+        if: matrix.platform == 'macos'
         shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
         run: |
+          if [[ -z "$APPLE_CERTIFICATE" ]]; then
+            echo "APPLE_CERTIFICATE is not configured; skipping signing identity resolution."
+            exit 0
+          fi
           CERT_LINE=$(security find-identity -v -p codesigning build.keychain | grep -E 'Developer ID Application|Apple Distribution' | head -n 1)
           CERT_ID=$(echo "$CERT_LINE" | awk -F'"' '{print $2}')
           if [[ -z "$CERT_ID" ]]; then
@@ -137,29 +147,6 @@ jobs:
             exit 1
           fi
           echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
-
-      - name: Install Azure Artifact Signing CLI
-        if: matrix.platform == 'windows' && secrets.TRUSTED_SIGNING_ENDPOINT != ''
-        shell: pwsh
-        run: cargo install artifact-signing-cli --locked
-
-      - name: Write Windows Azure Artifact Signing config
-        if: matrix.platform == 'windows' && secrets.TRUSTED_SIGNING_ENDPOINT != ''
-        shell: pwsh
-        env:
-          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
-        run: |
-          $signCommand = "artifact-signing-cli -e `"$env:TRUSTED_SIGNING_ENDPOINT`" -a `"$env:TRUSTED_SIGNING_ACCOUNT_NAME`" -c `"$env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`" -d `"Noland Connect`" %1"
-          $config = @{
-            bundle = @{
-              windows = @{
-                signCommand = $signCommand
-              }
-            }
-          }
-          $config | ConvertTo-Json -Depth 10 | Set-Content -Path src-tauri/tauri.windows.signing.conf.json
 
       - name: Stage CI managed tools
         if: matrix.platform == 'linux' || matrix.platform == 'windows'
@@ -199,16 +186,8 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          EXTRA_ARGS=()
-          if [[ "${{ matrix.platform }}" == "windows" && -f src-tauri/tauri.windows.signing.conf.json ]]; then
-            EXTRA_ARGS+=(--config src-tauri/tauri.windows.signing.conf.json)
-          fi
-          npm run tauri:build -- --target "${{ matrix.target }}" "${EXTRA_ARGS[@]}"
+          npm run tauri:build -- --target "${{ matrix.target }}"
 
       - name: Create macOS app zip
         if: matrix.platform == 'macos'
@@ -255,29 +234,6 @@ jobs:
         shell: pwsh
         run: choco install wireguard -y --no-progress
 
-      - name: Install Azure Artifact Signing CLI
-        if: secrets.TRUSTED_SIGNING_ENDPOINT != ''
-        shell: pwsh
-        run: cargo install artifact-signing-cli --locked
-
-      - name: Write Windows Azure Artifact Signing config
-        if: secrets.TRUSTED_SIGNING_ENDPOINT != ''
-        shell: pwsh
-        env:
-          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
-        run: |
-          $signCommand = "artifact-signing-cli -e `"$env:TRUSTED_SIGNING_ENDPOINT`" -a `"$env:TRUSTED_SIGNING_ACCOUNT_NAME`" -c `"$env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`" -d `"Noland Connect`" %1"
-          $config = @{
-            bundle = @{
-              windows = @{
-                signCommand = $signCommand
-              }
-            }
-          }
-          $config | ConvertTo-Json -Depth 10 | Set-Content -Path src-tauri/tauri.windows.signing.conf.json
-
       - name: Stage CI managed tools
         run: node scripts/stage-ci-managed-tools.mjs --target x86_64-pc-windows-msvc
 
@@ -286,17 +242,8 @@ jobs:
 
       - name: Build Microsoft Store Windows installer
         shell: bash
-        env:
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
-          EXTRA_ARGS=(--config src-tauri/tauri.microsoftstore.conf.json)
-          if [[ -f src-tauri/tauri.windows.signing.conf.json ]]; then
-            EXTRA_ARGS+=(--config src-tauri/tauri.windows.signing.conf.json)
-          fi
-          npm run tauri:build -- --target x86_64-pc-windows-msvc "${EXTRA_ARGS[@]}"
+          npm run tauri:build -- --target x86_64-pc-windows-msvc --config src-tauri/tauri.microsoftstore.conf.json
 
       - name: Collect Microsoft Store installer artifact
         shell: bash
