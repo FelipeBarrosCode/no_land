@@ -1,9 +1,14 @@
 name: Build Desktop Binaries
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
   NOLAND_GSTREAMER_VERSION: 1.24.13
+  MAIN_PRERELEASE_TAG: main-latest
 
 on:
   workflow_dispatch:
@@ -18,6 +23,7 @@ permissions:
 
 jobs:
   build:
+    environment: Secrets
     strategy:
       fail-fast: false
       matrix:
@@ -26,7 +32,7 @@ jobs:
             platform: macos
             arch: arm64
             target: aarch64-apple-darwin
-          - os: macos-14
+          - os: macos-15-intel
             platform: macos
             arch: x64
             target: x86_64-apple-darwin
@@ -42,6 +48,10 @@ jobs:
             platform: windows
             arch: x64
             target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            platform: windows
+            arch: arm64
+            target: aarch64-pc-windows-msvc
 
     runs-on: ${{ matrix.os }}
 
@@ -92,7 +102,64 @@ jobs:
       - name: Install Windows managed tool dependencies
         if: matrix.platform == 'windows'
         shell: pwsh
-        run: choco install wireguard -y --no-progress
+        run: |
+          if ('${{ matrix.arch }}' -eq 'arm64') {
+            winget install --exact --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements
+          } else {
+            choco install wireguard -y --no-progress
+          }
+
+      - name: Import Apple Developer certificate
+        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != ''
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+          security find-identity -v -p codesigning build.keychain
+
+      - name: Resolve Apple signing identity
+        if: matrix.platform == 'macos' && secrets.APPLE_CERTIFICATE != ''
+        shell: bash
+        run: |
+          CERT_LINE=$(security find-identity -v -p codesigning build.keychain | grep -E 'Developer ID Application|Apple Distribution' | head -n 1)
+          CERT_ID=$(echo "$CERT_LINE" | awk -F'"' '{print $2}')
+          if [[ -z "$CERT_ID" ]]; then
+            echo "Unable to find an imported Apple signing identity in build.keychain" >&2
+            exit 1
+          fi
+          echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
+
+      - name: Install Azure Artifact Signing CLI
+        if: matrix.platform == 'windows' && secrets.TRUSTED_SIGNING_ENDPOINT != ''
+        shell: pwsh
+        run: cargo install artifact-signing-cli --locked
+
+      - name: Write Windows Azure Artifact Signing config
+        if: matrix.platform == 'windows' && secrets.TRUSTED_SIGNING_ENDPOINT != ''
+        shell: pwsh
+        env:
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+        run: |
+          $signCommand = "artifact-signing-cli -e `"$env:TRUSTED_SIGNING_ENDPOINT`" -a `"$env:TRUSTED_SIGNING_ACCOUNT_NAME`" -c `"$env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`" -d `"Noland Connect`" %1"
+          $config = @{
+            bundle = @{
+              windows = @{
+                signCommand = $signCommand
+              }
+            }
+          }
+          $config | ConvertTo-Json -Depth 10 | Set-Content -Path src-tauri/tauri.windows.signing.conf.json
 
       - name: Stage CI managed tools
         if: matrix.platform == 'linux' || matrix.platform == 'windows'
@@ -124,7 +191,34 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri:build -- --target ${{ matrix.target }}
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          EXTRA_ARGS=()
+          if [[ "${{ matrix.platform }}" == "windows" && -f src-tauri/tauri.windows.signing.conf.json ]]; then
+            EXTRA_ARGS+=(--config src-tauri/tauri.windows.signing.conf.json)
+          fi
+          npm run tauri:build -- --target "${{ matrix.target }}" "${EXTRA_ARGS[@]}"
+
+      - name: Create macOS app zip
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          PRODUCT_NAME=$(node -p "require('./src-tauri/tauri.conf.json').productName")
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          APP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${PRODUCT_NAME}.app"
+          ZIP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${PRODUCT_NAME}_${VERSION}_${{ matrix.arch }}.app.zip"
+          ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
       - name: Verify bundled sidecars and runtime
         if: matrix.platform == 'windows'
@@ -137,19 +231,46 @@ jobs:
           path: src-tauri/target/${{ matrix.target }}/release/bundle
           if-no-files-found: error
 
-      - name: Attach assets to GitHub release
-        if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    environment: Secrets
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Move main prerelease tag
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git tag -f "$MAIN_PRERELEASE_TAG" "$GITHUB_SHA"
+          git push origin "refs/tags/$MAIN_PRERELEASE_TAG" --force
+
+      - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'main-latest' }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || env.MAIN_PRERELEASE_TAG }}
           name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('main build {0}', github.sha) }}
-          prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+          prerelease: ${{ github.ref == 'refs/heads/main' }}
           target_commitish: ${{ github.sha }}
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') && 'true' || 'false' }}
+          generate_release_notes: true
+          overwrite_files: true
+          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') }}
           files: |
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.dmg
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.msi
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.exe
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.AppImage
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.deb
-            src-tauri/target/${{ matrix.target }}/release/bundle/**/*.rpm
+            release-assets/**/*.dmg
+            release-assets/**/*.zip
+            release-assets/**/*.exe
+            release-assets/**/*.AppImage
+            release-assets/**/*.deb
+            release-assets/**/*.rpm
+            release-assets/**/*.msi
