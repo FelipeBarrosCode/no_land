@@ -212,6 +212,7 @@ fn main() {
     let static_lib_dir = dst.join("lib/static");
     let moonlight_common_lib_dir = dst.join("build/moonlight-common-c");
     let enet_lib_dir = dst.join("build/moonlight-common-c/enet");
+    let windows_config = if is_windows { Some("Release") } else { None };
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!(
         "cargo:rustc-link-search=native={}",
@@ -222,6 +223,24 @@ fn main() {
         moonlight_common_lib_dir.display()
     );
     println!("cargo:rustc-link-search=native={}", enet_lib_dir.display());
+    if let Some(config) = windows_config {
+        println!(
+            "cargo:rustc-link-search=native={}",
+            lib_dir.join(config).display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            static_lib_dir.join(config).display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            moonlight_common_lib_dir.join(config).display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            enet_lib_dir.join(config).display()
+        );
+    }
     println!("cargo:rustc-link-lib=static=noland_moonlight");
     println!("cargo:rustc-link-lib=static=moonlight-common-c");
     println!("cargo:rustc-link-lib=static=enet");
