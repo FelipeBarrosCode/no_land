@@ -47,23 +47,18 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          node-version: 20
           cache: npm
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: ./src-tauri -> target
 
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
@@ -94,16 +89,13 @@ jobs:
             libpulse-dev \
             patchelf
 
-      - name: Install macOS managed tool dependencies
-        if: matrix.platform == 'macos'
-        run: brew install wireguard-tools
-
       - name: Install Windows managed tool dependencies
         if: matrix.platform == 'windows'
         shell: pwsh
         run: choco install wireguard -y --no-progress
 
       - name: Stage CI managed tools
+        if: matrix.platform == 'linux' || matrix.platform == 'windows'
         run: node scripts/stage-ci-managed-tools.mjs --target ${{ matrix.target }}
 
       - name: Environment diagnostics
@@ -113,10 +105,6 @@ jobs:
           node -v
           npm -v
           if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            where.exe node || true
-            where.exe npm || true
-            where.exe npx || true
-            where.exe 7z || true
             where.exe ssh || true
             where.exe scp || true
             where.exe ssh-keygen || true
@@ -135,16 +123,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build Tauri app (Windows)
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles nsis --verbose
-
-      - name: Build Tauri app (non-Windows)
-        if: matrix.platform != 'windows'
-        run: npm run tauri:build -- --target ${{ matrix.target }} --verbose
+      - name: Build Tauri app
+        run: npm run tauri:build -- --target ${{ matrix.target }}
 
       - name: Verify bundled sidecars and runtime
+        if: matrix.platform == 'windows'
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
       - name: Upload build artifacts
