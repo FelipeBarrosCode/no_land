@@ -104,10 +104,35 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ matrix.arch }}' -eq 'arm64') {
-            winget install --exact --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements
+            if (Get-Command winget -ErrorAction SilentlyContinue) {
+              winget install --exact --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements
+            } else {
+              choco install wireguard -y --no-progress
+            }
           } else {
             choco install wireguard -y --no-progress
           }
+
+      - name: Check Apple signing secret presence
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          check_secret() {
+            local name="$1"
+            local value="${!name:-}"
+            if [[ -n "$value" ]]; then
+              echo "$name: present"
+            else
+              echo "$name: missing"
+            fi
+          }
+          check_secret APPLE_CERTIFICATE
+          check_secret APPLE_CERTIFICATE_PASSWORD
+          check_secret KEYCHAIN_PASSWORD
 
       - name: Import Apple Developer certificate
         if: matrix.platform == 'macos'
