@@ -78,6 +78,12 @@ jobs:
             libunwind-dev \
             libgstreamer1.0-dev \
             libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-tools \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-pipewire \
+            rpm2cpio \
             libssl-dev \
             libopus-dev \
             libpulse-dev \
@@ -119,6 +125,10 @@ jobs:
 
       - name: Build Tauri app
         run: npm run tauri:build -- --target ${{ matrix.target }}
+
+      - name: Verify bundled sidecars and runtime
+        if: matrix.platform == 'linux' || matrix.platform == 'windows'
+        run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

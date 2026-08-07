@@ -1,0 +1,231 @@
+#!/usr/bin/env node
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, '..');
+const target = readTarget(process.argv.slice(2)) ?? defaultHostTarget();
+const releaseDir = chooseTargetReleaseDir(target);
+const bundleDir = join(releaseDir, 'bundle');
+
+if (!target) {
+  fail('Unable to determine target triple. Pass --target <triple>.');
+}
+if (!existsSync(bundleDir)) {
+  fail(`Bundle directory not found: ${bundleDir}`);
+}
+
+if (target.includes('linux')) {
+  verifyLinuxBundles(target, bundleDir);
+  process.exit(0);
+}
+
+if (target.includes('windows')) {
+  verifyWindowsBundles(target, bundleDir);
+  process.exit(0);
+}
+
+console.log(`No bundled sidecar verification required for ${target}`);
+
+function verifyLinuxBundles(targetTriple, bundleRoot) {
+  const appDir = findFirstPath(bundleRoot, (path) => path.endsWith('.AppDir'));
+  if (!appDir) {
+    fail(`Could not locate AppDir under ${bundleRoot}`);
+  }
+  verifyBundleTree(appDir, targetTriple, 'linux AppDir');
+
+  const deb = findFirstPath(bundleRoot, (path) => path.endsWith('.deb'));
+  if (deb) {
+    withExtractedTemp('linux-deb-', (extractRoot) => {
+      run('dpkg-deb', ['-x', deb, extractRoot]);
+      verifyBundleTree(extractRoot, targetTriple, `deb package ${basename(deb)}`);
+    });
+  }
+
+  const rpm = findFirstPath(bundleRoot, (path) => path.endsWith('.rpm'));
+  if (rpm) {
+    withExtractedTemp('linux-rpm-', (extractRoot) => {
+      runShell(`rpm2cpio '${escapeForSingleQuotes(rpm)}' | cpio -idm --quiet`, extractRoot);
+      verifyBundleTree(extractRoot, targetTriple, `rpm package ${basename(rpm)}`);
+    });
+  }
+
+  console.log(`Verified bundled Linux sidecars/runtime for ${targetTriple}`);
+}
+
+function verifyWindowsBundles(targetTriple, bundleRoot) {
+  const msi = findFirstPath(bundleRoot, (path) => path.endsWith('.msi'));
+  if (!msi) {
+    fail(`Could not locate MSI bundle under ${bundleRoot}`);
+  }
+
+  withExtractedTemp('windows-msi-', (extractRoot) => {
+    run('msiexec', ['/a', msi, '/qn', `TARGETDIR=${extractRoot}`]);
+    verifyBundleTree(extractRoot, targetTriple, `MSI package ${basename(msi)}`);
+  });
+
+  console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
+}
+
+function verifyBundleTree(root, targetTriple, label) {
+  for (const sidecar of requiredSidecars(targetTriple)) {
+    const found = findFirstPath(root, (path) => basename(path) === sidecar);
+    if (!found) {
+      fail(`Missing required bundled sidecar '${sidecar}' in ${label}`);
+    }
+  }
+
+  for (const runtimeFile of requiredRuntimeFiles(targetTriple)) {
+    const found = findFirstPath(root, (path) => basename(path) === runtimeFile);
+    if (!found) {
+      fail(`Missing required bundled runtime file '${runtimeFile}' in ${label}`);
+    }
+  }
+}
+
+function requiredSidecars(targetTriple) {
+  const windows = targetTriple.includes('windows');
+  const names = [
+    windows ? `noland-mic-sender-${targetTriple}.exe` : `noland-mic-sender-${targetTriple}`,
+    windows ? `gotatun-${targetTriple}.exe` : `gotatun-${targetTriple}`,
+    windows ? `wg-${targetTriple}.exe` : `wg-${targetTriple}`,
+    windows ? `ssh-${targetTriple}.exe` : `ssh-${targetTriple}`,
+    windows ? `scp-${targetTriple}.exe` : `scp-${targetTriple}`,
+    windows ? `ssh-keygen-${targetTriple}.exe` : `ssh-keygen-${targetTriple}`,
+  ];
+
+  if (windows) {
+    names.push(`wireguard-${targetTriple}.exe`);
+  } else {
+    names.push(`wg-quick-${targetTriple}`);
+  }
+
+  return names;
+}
+
+function requiredRuntimeFiles(targetTriple) {
+  if (targetTriple.includes('windows')) {
+    return [
+      'gstreamer-1.0-0.dll',
+      'gst-plugin-scanner.exe',
+      'libgstwasapi.dll',
+      'libgstaudioconvert.dll',
+      'libgstaudioresample.dll',
+      'libgstopus.dll',
+      'libgstrtp.dll',
+      'libgstudp.dll',
+    ];
+  }
+
+  return [
+    'gst-plugin-scanner',
+    'libgstreamer-1.0.so.0',
+    'libgstpipewire.so',
+    'libgstaudioconvert.so',
+    'libgstaudioresample.so',
+    'libgstopus.so',
+    'libgstrtp.so',
+    'libgstudp.so',
+  ];
+}
+
+function chooseTargetReleaseDir(targetTriple) {
+  const tripleDir = join(repoRoot, 'src-tauri', 'target', targetTriple, 'release');
+  if (existsSync(tripleDir)) {
+    return tripleDir;
+  }
+  return join(repoRoot, 'src-tauri', 'target', 'release');
+}
+
+function withExtractedTemp(prefix, fn) {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  try {
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function findFirstPath(root, predicate) {
+  if (!existsSync(root)) {
+    return null;
+  }
+
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (predicate(current)) {
+      return current;
+    }
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      if (predicate(full)) {
+        return full;
+      }
+      if (entry.isDirectory()) {
+        stack.push(full);
+      }
+    }
+  }
+  return null;
+}
+
+function run(command, args) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    fail(`Command failed: ${command} ${args.join(' ')}`);
+  }
+}
+
+function runShell(command, cwd) {
+  const result = spawnSync('sh', ['-c', command], {
+    cwd,
+    stdio: 'inherit',
+  });
+  if (result.status !== 0) {
+    fail(`Command failed: ${command}`);
+  }
+}
+
+function readTarget(argv) {
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--target' && argv[i + 1]) {
+      return argv[i + 1];
+    }
+    if (argv[i].startsWith('--target=')) {
+      return argv[i].slice('--target='.length);
+    }
+  }
+  return undefined;
+}
+
+function defaultHostTarget() {
+  if (process.platform === 'darwin') {
+    if (process.arch === 'arm64') return 'aarch64-apple-darwin';
+    if (process.arch === 'x64') return 'x86_64-apple-darwin';
+  }
+  if (process.platform === 'linux') {
+    if (process.arch === 'x64') return 'x86_64-unknown-linux-gnu';
+    if (process.arch === 'arm64') return 'aarch64-unknown-linux-gnu';
+  }
+  if (process.platform === 'win32') {
+    if (process.arch === 'x64') return 'x86_64-pc-windows-msvc';
+    if (process.arch === 'arm64') return 'aarch64-pc-windows-msvc';
+  }
+  return undefined;
+}
+
+function escapeForSingleQuotes(value) {
+  return String(value).replace(/'/g, `"'"'`);
+}
+
+function fail(message) {
+  console.error(message);
+  process.exit(1);
+}
