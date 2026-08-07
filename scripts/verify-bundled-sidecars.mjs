@@ -84,16 +84,17 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
 
 function verifyWindowsBundles(targetTriple, bundleRoot) {
   const msi = findFirstPath(bundleRoot, (path) => path.endsWith('.msi'));
-  if (!msi) {
-    fail(`Could not locate MSI bundle under ${bundleRoot}`);
+  if (msi) {
+    withExtractedTemp('windows-msi-', (extractRoot) => {
+      run('msiexec', ['/a', msi, '/qn', `TARGETDIR=${extractRoot}`]);
+      verifyBundleTree(extractRoot, targetTriple, `MSI package ${basename(msi)}`);
+    });
+    console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
+    return;
   }
 
-  withExtractedTemp('windows-msi-', (extractRoot) => {
-    run('msiexec', ['/a', msi, '/qn', `TARGETDIR=${extractRoot}`]);
-    verifyBundleTree(extractRoot, targetTriple, `MSI package ${basename(msi)}`);
-  });
-
-  console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
+  verifyBundleTree(bundleRoot, targetTriple, 'Windows bundle output');
+  console.log(`Verified bundled Windows sidecars/runtime/resources in bundle output for ${targetTriple}`);
 }
 
 function verifyMacBundleTree(root, targetTriple, label) {
@@ -104,30 +105,12 @@ function verifyMacBundleTree(root, targetTriple, label) {
     }
   }
 
-  const macRuntimeFiles = [
-    'GStreamer.framework',
-    'vm-cloud-mic-agent',
-    'Cargo.toml',
-    'main.rs',
-    'receiver.rs',
-  ];
-
   const frameworkFound = findFirstPath(root, (path) => basename(path) === 'GStreamer.framework');
   if (!frameworkFound) {
     fail(`Missing bundled GStreamer.framework in ${label}`);
   }
 
-  const receiverDir = findFirstPath(root, (path) => basename(path) === 'vm-cloud-mic-agent' && existsSync(join(path, 'Cargo.toml')));
-  if (!receiverDir) {
-    fail(`Missing bundled vm-cloud-mic-agent source directory in ${label}`);
-  }
-
-  for (const relativePath of ['Cargo.toml', 'src/main.rs', 'src/receiver.rs']) {
-    const candidate = join(receiverDir, relativePath);
-    if (!existsSync(candidate)) {
-      fail(`Missing bundled vm-cloud-mic-agent file '${relativePath}' in ${label}`);
-    }
-  }
+  verifyBundledMicReceiverSource(root, label);
 }
 
 function verifyBundleTree(root, targetTriple, label) {
@@ -142,6 +125,22 @@ function verifyBundleTree(root, targetTriple, label) {
     const found = findFirstPath(root, (path) => basename(path) === runtimeFile);
     if (!found) {
       fail(`Missing required bundled runtime file '${runtimeFile}' in ${label}`);
+    }
+  }
+
+  verifyBundledMicReceiverSource(root, label);
+}
+
+function verifyBundledMicReceiverSource(root, label) {
+  const receiverDir = findFirstPath(root, (path) => basename(path) === 'vm-cloud-mic-agent' && existsSync(join(path, 'Cargo.toml')));
+  if (!receiverDir) {
+    fail(`Missing bundled vm-cloud-mic-agent source directory in ${label}`);
+  }
+
+  for (const relativePath of ['Cargo.toml', 'src/main.rs', 'src/receiver.rs']) {
+    const candidate = join(receiverDir, relativePath);
+    if (!existsSync(candidate)) {
+      fail(`Missing bundled vm-cloud-mic-agent file '${relativePath}' in ${label}`);
     }
   }
 }
