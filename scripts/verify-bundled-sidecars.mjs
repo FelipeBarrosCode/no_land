@@ -98,12 +98,7 @@ function verifyWindowsBundles(targetTriple, bundleRoot) {
 }
 
 function verifyMacBundleTree(root, targetTriple, label) {
-  for (const sidecar of requiredSidecars(targetTriple)) {
-    const found = findFirstPath(root, (path) => basename(path) === sidecar);
-    if (!found) {
-      fail(`Missing required bundled sidecar '${sidecar}' in ${label}`);
-    }
-  }
+  verifyRequiredSidecars(root, targetTriple, label);
 
   const frameworkFound = findFirstPath(root, (path) => basename(path) === 'GStreamer.framework');
   if (!frameworkFound) {
@@ -114,12 +109,7 @@ function verifyMacBundleTree(root, targetTriple, label) {
 }
 
 function verifyBundleTree(root, targetTriple, label) {
-  for (const sidecar of requiredSidecars(targetTriple)) {
-    const found = findFirstPath(root, (path) => basename(path) === sidecar);
-    if (!found) {
-      fail(`Missing required bundled sidecar '${sidecar}' in ${label}`);
-    }
-  }
+  verifyRequiredSidecars(root, targetTriple, label);
 
   for (const runtimeFile of requiredRuntimeFiles(targetTriple)) {
     const found = findFirstPath(root, (path) => basename(path) === runtimeFile);
@@ -145,24 +135,37 @@ function verifyBundledMicReceiverSource(root, label) {
   }
 }
 
-function requiredSidecars(targetTriple) {
+function verifyRequiredSidecars(root, targetTriple, label) {
+  for (const candidates of requiredSidecarCandidates(targetTriple)) {
+    const found = findFirstPath(root, (path) => candidates.includes(basename(path)));
+    if (!found) {
+      fail(`Missing required bundled sidecar (${candidates.join(' or ')}) in ${label}`);
+    }
+  }
+}
+
+function requiredSidecarCandidates(targetTriple) {
   const windows = targetTriple.includes('windows');
-  const names = [
-    windows ? `noland-mic-sender-${targetTriple}.exe` : `noland-mic-sender-${targetTriple}`,
-    windows ? `gotatun-${targetTriple}.exe` : `gotatun-${targetTriple}`,
-    windows ? `wg-${targetTriple}.exe` : `wg-${targetTriple}`,
-    windows ? `ssh-${targetTriple}.exe` : `ssh-${targetTriple}`,
-    windows ? `scp-${targetTriple}.exe` : `scp-${targetTriple}`,
-    windows ? `ssh-keygen-${targetTriple}.exe` : `ssh-keygen-${targetTriple}`,
+  const suffix = windows ? '.exe' : '';
+  const withTarget = (stem) => `${stem}-${targetTriple}${suffix}`;
+  const plain = (stem) => `${stem}${suffix}`;
+
+  const groups = [
+    [withTarget('noland-mic-sender'), plain('noland-mic-sender')],
+    [withTarget('gotatun'), plain('gotatun')],
+    [withTarget('wg'), plain('wg')],
+    [withTarget('ssh'), plain('ssh')],
+    [withTarget('scp'), plain('scp')],
+    [withTarget('ssh-keygen'), plain('ssh-keygen')],
   ];
 
   if (windows) {
-    names.push(`wireguard-${targetTriple}.exe`);
+    groups.push([withTarget('wireguard'), plain('wireguard')]);
   } else {
-    names.push(`wg-quick-${targetTriple}`);
+    groups.push([withTarget('wg-quick'), plain('wg-quick')]);
   }
 
-  return names;
+  return groups;
 }
 
 function requiredRuntimeFiles(targetTriple) {
