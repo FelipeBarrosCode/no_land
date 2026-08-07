@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
 const repoRoot = resolve(__dirname, '..');
 const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
   || process.env.GSTREAMER_VERSION?.trim()
@@ -73,12 +75,19 @@ if (mode === 'dev') {
   }
 }
 
-const tauri = spawnSync('npx', ['tauri', mode, ...tauriCliArgs], {
+const tauriInvocation = resolveTauriCliInvocation();
+console.log(`Launching Tauri CLI: ${tauriInvocation.command} ${[...tauriInvocation.args, mode, ...tauriCliArgs].join(' ')}`);
+const tauri = spawnSync(tauriInvocation.command, [...tauriInvocation.args, mode, ...tauriCliArgs], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: tauriEnv,
 });
+if (tauri.error) {
+  console.error(`Failed to launch Tauri CLI via ${tauriInvocation.command}: ${tauri.error.message}`);
+  process.exit(1);
+}
 if (tauri.status !== 0) {
+  console.error(`Tauri CLI exited with status ${tauri.status ?? 'unknown'}${tauri.signal ? ` (signal ${tauri.signal})` : ''}`);
   process.exit(tauri.status ?? 1);
 }
 
@@ -324,6 +333,36 @@ function findManagedTool(toolStem, targetTriple, envVarName) {
   ];
 
   return candidates.find((candidate) => existsSync(candidate));
+}
+
+function resolveTauriCliInvocation() {
+  const npmExecPath = process.env.npm_execpath?.trim();
+  if (npmExecPath && existsSync(npmExecPath)) {
+    return {
+      command: process.execPath,
+      args: [npmExecPath, 'exec', '--yes', '--', 'tauri'],
+    };
+  }
+
+  try {
+    const packageJsonPath = require.resolve('@tauri-apps/cli/package.json');
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    const binEntry = typeof packageJson.bin === 'string'
+      ? packageJson.bin
+      : packageJson.bin?.tauri;
+
+    if (!binEntry) {
+      throw new Error(`@tauri-apps/cli package at ${packageJsonPath} does not declare a tauri bin entry`);
+    }
+
+    return {
+      command: process.execPath,
+      args: [resolve(dirname(packageJsonPath), binEntry)],
+    };
+  } catch (error) {
+    console.error(`Unable to resolve a local Tauri CLI entrypoint. Did npm install complete successfully? ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  }
 }
 
 function bundleHasRequiredSdl3(targetTriple) {
