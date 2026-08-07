@@ -316,6 +316,13 @@ function ensureLinuxGstreamerRoot(prefix, targetTriple) {
     return expectedRoot;
   }
 
+  const systemRoot = discoverLinuxSystemGstreamer();
+  if (systemRoot) {
+    stageLinuxSystemGstreamerRoot(systemRoot, expectedRoot);
+    console.log(`Staged Linux GStreamer runtime from system packages under ${systemRoot.libDir}`);
+    return expectedRoot;
+  }
+
   return null;
 }
 
@@ -535,6 +542,204 @@ function cmakeTargetArgs(targetTriple) {
 
 function linuxGstreamerRoot(prefix, targetTriple) {
   return join(prefix, 'gstreamer');
+}
+
+function discoverLinuxSystemGstreamer() {
+  if (process.platform !== 'linux') {
+    return null;
+  }
+
+  const libDir = pkgConfigVariable('gstreamer-1.0', 'libdir');
+  if (!libDir || !existsSync(libDir)) {
+    return null;
+  }
+
+  const pluginsDir = locateExistingPath([
+    pkgConfigVariable('gstreamer-1.0', 'pluginsdir'),
+    join(libDir, 'gstreamer-1.0'),
+  ]);
+  const scannerPath = locateExistingPath([
+    join(pkgConfigVariable('gstreamer-1.0', 'libexecdir') || '', 'gstreamer-1.0', 'gst-plugin-scanner'),
+    join(libDir, 'gstreamer-1.0', 'gst-plugin-scanner'),
+    '/usr/libexec/gstreamer-1.0/gst-plugin-scanner',
+    '/usr/lib/gstreamer-1.0/gst-plugin-scanner',
+  ]);
+  const pkgConfigPath = locateExistingPath([
+    join(libDir, 'pkgconfig', 'gstreamer-1.0.pc'),
+    '/usr/lib/pkgconfig/gstreamer-1.0.pc',
+    '/usr/share/pkgconfig/gstreamer-1.0.pc',
+  ]);
+
+  if (!pluginsDir || !pkgConfigPath) {
+    return null;
+  }
+
+  return {
+    libDir,
+    pluginsDir,
+    scannerPath,
+    pkgConfigPath,
+    typelibDir: locateExistingPath([
+      join(libDir, 'girepository-1.0'),
+      '/usr/lib/girepository-1.0',
+      '/usr/lib64/girepository-1.0',
+    ]),
+  };
+}
+
+function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
+  rmSync(destination, { recursive: true, force: true });
+
+  const libDest = join(destination, 'lib');
+  const pluginDest = join(libDest, 'gstreamer-1.0');
+  const libexecDest = join(destination, 'libexec', 'gstreamer-1.0');
+  const pkgConfigDest = join(libDest, 'pkgconfig');
+  const typelibDest = join(libDest, 'girepository-1.0');
+
+  mkdirSync(libDest, { recursive: true });
+  mkdirSync(pluginDest, { recursive: true });
+  mkdirSync(libexecDest, { recursive: true });
+  mkdirSync(pkgConfigDest, { recursive: true });
+
+  const requiredPluginNames = new Set([
+    'libgstcoreelements.so',
+    'libgstaudioconvert.so',
+    'libgstaudioresample.so',
+    'libgstaudiorate.so',
+    'libgstpipewire.so',
+    'libgstopus.so',
+    'libgstrtp.so',
+    'libgstrtpmanager.so',
+    'libgstudp.so',
+    'libgsttypefindfunctions.so',
+    'libgstvolume.so',
+  ]);
+
+  const stagedFiles = [];
+  stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.libDir, libDest, /^libgst.+\.so(?:\..+)?$/u));
+  stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.pluginsDir, pluginDest, (name) => requiredPluginNames.has(name)));
+
+  if (systemRoot.scannerPath && existsSync(systemRoot.scannerPath)) {
+    const scannerDest = join(libexecDest, 'gst-plugin-scanner');
+    copyFileWithMode(systemRoot.scannerPath, scannerDest);
+    stagedFiles.push(scannerDest);
+  }
+
+  if (systemRoot.pkgConfigPath && existsSync(systemRoot.pkgConfigPath)) {
+    copyFileWithMode(systemRoot.pkgConfigPath, join(pkgConfigDest, 'gstreamer-1.0.pc'));
+  }
+
+  if (systemRoot.typelibDir && existsSync(systemRoot.typelibDir)) {
+    stageDirectory(systemRoot.typelibDir, typelibDest);
+  }
+
+  stageLinuxDependencyClosure(stagedFiles, libDest);
+}
+
+function stageLinuxDependencyClosure(seedFiles, libDest) {
+  const queue = [...seedFiles];
+  const seen = new Set();
+
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (!current || seen.has(current) || !existsSync(current)) {
+      continue;
+    }
+    seen.add(current);
+
+    for (const dep of linuxSharedLibraryDependencies(current)) {
+      if (shouldSkipLinuxBundledDependency(dep)) {
+        continue;
+      }
+
+      const dest = join(libDest, basename(dep));
+      if (!existsSync(dest)) {
+        copyFileWithMode(dep, dest);
+        queue.push(dest);
+      }
+    }
+  }
+}
+
+function linuxSharedLibraryDependencies(path) {
+  const result = run('ldd', [path], { allowFailure: true, captureOutput: true });
+  if (result.status !== 0) {
+    return [];
+  }
+
+  return result.stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const mapped = line.match(/=>\s+(\/[^\s]+)\s+\(/u);
+      if (mapped) return mapped[1];
+      const direct = line.match(/^(\/[^\s]+)\s+\(/u);
+      return direct ? direct[1] : null;
+    })
+    .filter((value) => value && existsSync(value));
+}
+
+function shouldSkipLinuxBundledDependency(dep) {
+  const base = basename(dep);
+  return [
+    /^ld-linux/u,
+    /^ld-musl/u,
+    /^libc\.so/u,
+    /^libm\.so/u,
+    /^libpthread\.so/u,
+    /^libdl\.so/u,
+    /^librt\.so/u,
+    /^libresolv\.so/u,
+    /^libutil\.so/u,
+  ].some((pattern) => pattern.test(base));
+}
+
+function copyDirectoryEntriesMatching(sourceDir, destinationDir, matcher) {
+  if (!existsSync(sourceDir)) {
+    return [];
+  }
+
+  const copied = [];
+  for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      continue;
+    }
+
+    const matches = typeof matcher === 'function'
+      ? matcher(entry.name)
+      : matcher.test(entry.name);
+    if (!matches) {
+      continue;
+    }
+
+    const source = join(sourceDir, entry.name);
+    const dest = join(destinationDir, entry.name);
+    copyFileWithMode(source, dest);
+    copied.push(dest);
+  }
+  return copied;
+}
+
+function copyFileWithMode(source, destination) {
+  mkdirSync(dirname(destination), { recursive: true });
+  copyFileSync(source, destination);
+  try {
+    chmodSync(destination, statSync(source).mode);
+  } catch {}
+}
+
+function locateExistingPath(candidates) {
+  return candidates.find((candidate) => candidate && existsSync(candidate)) ?? null;
+}
+
+function pkgConfigVariable(pkgName, variable) {
+  const result = run('pkg-config', [`--variable=${variable}`, pkgName], { allowFailure: true, captureOutput: true });
+  if (result.status !== 0) {
+    return null;
+  }
+  const value = result.stdout.trim();
+  return value || null;
 }
 
 function windowsGstreamerRoot(prefix, targetTriple) {
