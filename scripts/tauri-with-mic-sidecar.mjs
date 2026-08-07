@@ -73,14 +73,20 @@ if (mode === 'dev') {
   }
 }
 
-const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-const tauri = spawnSync(npxCommand, ['tauri', mode, ...tauriCliArgs], {
+const tauriCliScript = resolve(repoRoot, 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+const tauriCommand = process.platform === 'win32' && existsSync(tauriCliScript)
+  ? process.execPath
+  : 'npx';
+const tauriCommandArgs = process.platform === 'win32' && existsSync(tauriCliScript)
+  ? [tauriCliScript, mode, ...tauriCliArgs]
+  : ['tauri', mode, ...tauriCliArgs];
+const tauri = spawnSync(tauriCommand, tauriCommandArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
   env: tauriEnv,
 });
 if (tauri.error) {
-  console.error(`Failed to launch Tauri CLI via ${npxCommand}: ${tauri.error.message}`);
+  console.error(`Failed to launch Tauri CLI via ${tauriCommand}: ${tauri.error.message}`);
   process.exit(1);
 }
 if (tauri.status !== 0) {
