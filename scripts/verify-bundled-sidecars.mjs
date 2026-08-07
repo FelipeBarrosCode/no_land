@@ -202,12 +202,12 @@ function requiredRuntimeFileCandidates(targetTriple) {
     return [
       ['gstreamer-1.0-0.dll'],
       ['gst-plugin-scanner.exe'],
-      ['libgstwasapi.dll', 'libgstwasapi2.dll'],
-      ['libgstaudioconvert.dll'],
-      ['libgstaudioresample.dll'],
-      ['libgstopus.dll'],
-      ['libgstrtp.dll'],
-      ['libgstudp.dll'],
+      ['gstwasapi.dll', 'libgstwasapi.dll', 'gstwasapi2.dll', 'libgstwasapi2.dll'],
+      ['gstaudioconvert.dll', 'libgstaudioconvert.dll'],
+      ['gstaudioresample.dll', 'libgstaudioresample.dll'],
+      ['gstopus.dll', 'libgstopus.dll'],
+      ['gstrtp.dll', 'libgstrtp.dll', 'gstrtpmanager.dll', 'libgstrtpmanager.dll'],
+      ['gstudp.dll', 'libgstudp.dll'],
     ];
   }
 
