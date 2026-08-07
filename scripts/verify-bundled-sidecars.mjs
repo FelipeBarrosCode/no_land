@@ -93,6 +93,13 @@ function verifyWindowsBundles(targetTriple, bundleRoot) {
     return;
   }
 
+  const nsis = findFirstPath(bundleRoot, (path) => path.endsWith('-setup.exe'));
+  if (nsis) {
+    verifyWindowsNsisStaging(targetTriple, nsis);
+    console.log(`Verified staged Windows NSIS sidecars/runtime/resources for ${targetTriple}`);
+    return;
+  }
+
   verifyBundleTree(bundleRoot, targetTriple, 'Windows bundle output');
   console.log(`Verified bundled Windows sidecars/runtime/resources in bundle output for ${targetTriple}`);
 }
@@ -129,12 +136,32 @@ function verifyBundledMicReceiverSource(root, label) {
     fail(`Missing bundled vm-cloud-mic-agent source directory in ${label}`);
   }
 
+  verifyMicReceiverSourceDirectory(receiverDir, label);
+}
+
+function verifyMicReceiverSourceDirectory(receiverDir, label) {
   for (const relativePath of ['Cargo.toml', 'src/main.rs', 'src/receiver.rs']) {
     const candidate = join(receiverDir, relativePath);
     if (!existsSync(candidate)) {
       fail(`Missing bundled vm-cloud-mic-agent file '${relativePath}' in ${label}`);
     }
   }
+}
+
+function verifyWindowsNsisStaging(targetTriple, nsisInstallerPath) {
+  const binariesRoot = join(repoRoot, 'src-tauri', 'binaries');
+  if (!existsSync(binariesRoot)) {
+    fail(`Expected staged Windows bundle inputs under ${binariesRoot}`);
+  }
+
+  verifyRequiredSidecars(binariesRoot, targetTriple, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
+  verifyRequiredRuntimeFiles(binariesRoot, targetTriple, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
+
+  const receiverDir = join(repoRoot, 'vm-cloud-mic-agent');
+  if (!existsSync(join(receiverDir, 'Cargo.toml'))) {
+    fail(`Missing vm-cloud-mic-agent source directory for Windows NSIS staging: ${receiverDir}`);
+  }
+  verifyMicReceiverSourceDirectory(receiverDir, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
 }
 
 function verifyRequiredSidecars(root, targetTriple, label) {
