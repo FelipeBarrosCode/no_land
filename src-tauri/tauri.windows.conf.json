@@ -1,6 +1,30 @@
 {
   "bundle": {
     "targets": ["nsis"],
+    "resources": [
+      "binaries/wg-x86_64-pc-windows-msvc.exe",
+      "binaries/wireguard-x86_64-pc-windows-msvc.exe",
+      "binaries/ssh-x86_64-pc-windows-msvc.exe",
+      "binaries/scp-x86_64-pc-windows-msvc.exe",
+      "binaries/ssh-keygen-x86_64-pc-windows-msvc.exe",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/bin/*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/bin/gst-plugin-scanner.exe",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/libexec/gstreamer-1.0/gst-plugin-scanner.exe",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstcoreelements.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstaudioconvert.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstaudioresample.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstaudiorate.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstopus.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstrtp.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstrtpmanager.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstudp.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgsttypefindfunctions.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstvolume.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstwasapi.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/libgstwasapi2.dll",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*"
+    ],
     "windows": {
       "nsis": {
         "compression": "zlib"
