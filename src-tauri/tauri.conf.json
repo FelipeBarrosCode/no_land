@@ -39,7 +39,9 @@
       "binaries/ssh-*",
       "binaries/scp-*",
       "binaries/ssh-keygen-*",
-      "binaries/gstreamer/**/*"
+      "binaries/gstreamer/**/*",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*"
     ],
     "macOS": {
       "frameworks": [

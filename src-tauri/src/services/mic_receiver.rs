@@ -1,5 +1,6 @@
 use std::{
-    env,
+    collections::{HashSet, VecDeque},
+    env, fs,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -154,8 +155,140 @@ fn receiver_workspace_root() -> AppResult<PathBuf> {
     })
 }
 
+fn is_receiver_source_dir(path: &Path) -> bool {
+    path.join("Cargo.toml").is_file() && path.join("src").is_dir()
+}
+
+fn receiver_source_search_seeds() -> Vec<PathBuf> {
+    let mut seeds = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            push_path_ancestors(exe_dir, 6, &mut seeds, &mut seen);
+        }
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        push_path_ancestors(&cwd, 4, &mut seeds, &mut seen);
+    }
+
+    if let Ok(workspace_root) = receiver_workspace_root() {
+        push_path_ancestors(&workspace_root, 2, &mut seeds, &mut seen);
+    }
+
+    seeds
+}
+
+fn push_path_ancestors(
+    start: &Path,
+    levels: usize,
+    output: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    let mut current = Some(start);
+    for _ in 0..levels {
+        let Some(path) = current else {
+            break;
+        };
+        let owned = path.to_path_buf();
+        if seen.insert(owned.clone()) {
+            output.push(owned);
+        }
+        current = path.parent();
+    }
+}
+
+fn find_receiver_source_dir() -> AppResult<PathBuf> {
+    if let Ok(explicit) = env::var("NOLAND_MIC_RECEIVER_SOURCE_DIR") {
+        let explicit = PathBuf::from(explicit.trim());
+        if is_receiver_source_dir(&explicit) {
+            return Ok(explicit);
+        }
+    }
+
+    if let Ok(workspace_root) = receiver_workspace_root() {
+        let workspace_candidate = workspace_root.join("vm-cloud-mic-agent");
+        if is_receiver_source_dir(&workspace_candidate) {
+            return Ok(workspace_candidate);
+        }
+    }
+
+    let direct_relative_dirs = [
+        "vm-cloud-mic-agent",
+        "resources/vm-cloud-mic-agent",
+        "Resources/vm-cloud-mic-agent",
+        "resources/_up_/vm-cloud-mic-agent",
+        "Resources/_up_/vm-cloud-mic-agent",
+        "../Resources/vm-cloud-mic-agent",
+        "../resources/vm-cloud-mic-agent",
+        "../Resources/_up_/vm-cloud-mic-agent",
+        "../resources/_up_/vm-cloud-mic-agent",
+        "usr/lib/noland-connect/resources/vm-cloud-mic-agent",
+        "usr/lib/noland-connect/resources/_up_/vm-cloud-mic-agent",
+    ];
+
+    for seed in receiver_source_search_seeds() {
+        for relative in direct_relative_dirs {
+            let candidate = seed.join(relative);
+            if is_receiver_source_dir(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    for root in receiver_source_search_seeds() {
+        if let Some(found) = find_named_dir_recursively(&root, "vm-cloud-mic-agent", 6) {
+            if is_receiver_source_dir(&found) {
+                return Ok(found);
+            }
+        }
+    }
+
+    Err(AppError::NotFound(
+        "Could not find bundled vm-cloud-mic-agent source directory. Reinstall this app or set NOLAND_MIC_RECEIVER_SOURCE_DIR to a valid source tree."
+            .to_string(),
+    ))
+}
+
+fn find_named_dir_recursively(root: &Path, wanted: &str, max_depth: usize) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut visited = HashSet::new();
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            if entry.file_name().to_string_lossy() == wanted {
+                return Some(path);
+            }
+
+            if depth < max_depth {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    None
+}
+
 async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
-    let workspace_root = receiver_workspace_root()?;
+    let source_dir = find_receiver_source_dir()?;
     let archive_path = env::temp_dir().join("noland-mic-agent-src.tgz");
     if archive_path.exists() {
         std::fs::remove_file(&archive_path).map_err(|error| {
@@ -166,19 +299,37 @@ async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
         })?;
     }
 
+    let source_parent = source_dir.parent().ok_or_else(|| {
+        AppError::State(format!(
+            "Failed resolving parent directory for mic receiver source bundle at {}",
+            source_dir.display()
+        ))
+    })?;
+    let source_name = source_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            AppError::State(format!(
+                "Failed resolving directory name for mic receiver source bundle at {}",
+                source_dir.display()
+            ))
+        })?
+        .to_string();
     let archive_string = archive_path.display().to_string();
-    let workspace_string = workspace_root.display().to_string();
-    let tar_command = format!(
-        "COPYFILE_DISABLE=1 COPY_EXTENDED_ATTRIBUTES_DISABLE=1 tar --no-mac-metadata --no-xattrs -czf '{}' -C '{}' --exclude=vm-cloud-mic-agent/Cargo.lock --exclude=vm-cloud-mic-agent/target vm-cloud-mic-agent",
-        archive_string.replace('"', "\\\""),
-        workspace_string.replace('"', "\\\"")
-    );
+    let source_parent_string = source_parent.display().to_string();
     let output = tokio::task::spawn_blocking(move || {
-        RemoteExec::run_local(
-            "sh",
-            &["-c", tar_command.as_str()],
-            Duration::from_secs(120),
-        )
+        let mut args = vec!["-czf", archive_string.as_str()];
+        if cfg!(target_os = "macos") {
+            args.extend(["--no-mac-metadata", "--no-xattrs"]);
+        }
+        args.extend([
+            "-C",
+            source_parent_string.as_str(),
+            "--exclude=vm-cloud-mic-agent/Cargo.lock",
+            "--exclude=vm-cloud-mic-agent/target",
+            source_name.as_str(),
+        ]);
+        RemoteExec::run_local("tar", &args, Duration::from_secs(120))
     })
     .await
     .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
