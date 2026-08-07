@@ -73,11 +73,16 @@ if (mode === 'dev') {
   }
 }
 
-const tauri = spawnSync('npx', ['tauri', mode, ...tauriCliArgs], {
+const npxCommand = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+const tauri = spawnSync(npxCommand, ['tauri', mode, ...tauriCliArgs], {
   cwd: repoRoot,
   stdio: 'inherit',
   env: tauriEnv,
 });
+if (tauri.error) {
+  console.error(`Failed to launch Tauri CLI via ${npxCommand}: ${tauri.error.message}`);
+  process.exit(1);
+}
 if (tauri.status !== 0) {
   process.exit(tauri.status ?? 1);
 }
