@@ -20,7 +20,7 @@ if (release) cargoArgs.push('--release');
 if (target) cargoArgs.push('--target', target);
 
 const sidecarTargetDir = resolve(srcTauriDir, '.native-deps', 'mic-sidecar-target');
-const nativeEnv = buildNativeEnv(target);
+let nativeEnv = buildNativeEnv(target);
 const managedTarget = target ?? defaultHostTarget();
 
 if (target) {
@@ -32,6 +32,8 @@ if (target) {
   if (bootstrap.status !== 0) {
     process.exit(bootstrap.status ?? 1);
   }
+
+  nativeEnv = buildNativeEnv(target);
 }
 
 const cargo = spawnSync('cargo', cargoArgs, {
