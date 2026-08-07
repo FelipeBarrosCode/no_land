@@ -6,7 +6,9 @@ import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
-const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim() || '1.24.13';
+const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
+  || process.env.GSTREAMER_VERSION?.trim()
+  || '1.24.13';
 const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 
 const requestedTarget = readTarget(tauriArgs);
@@ -16,7 +18,7 @@ const tauriCliArgs = mode === 'build'
   ? ensureCargoFeature(tauriArgsWithTarget, 'moonlight-config-bin')
   : tauriArgsWithTarget;
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsWithTarget];
-const nativeEnv = buildNativeEnv(target);
+let nativeEnv = buildNativeEnv(target);
 const prepEnv = {
   ...nativeEnv,
   ...(target ? { NOLAND_MIC_SENDER_TARGET: target } : {}),
@@ -30,6 +32,8 @@ const prep = spawnSync(process.execPath, prepArgs, {
 if (prep.status !== 0) {
   process.exit(prep.status ?? 1);
 }
+
+nativeEnv = buildNativeEnv(target);
 
 const tauriEnv = {
   ...nativeEnv,
@@ -243,10 +247,27 @@ function stageMacosRuntimeFile(source, destination) {
 
 function resolveMacPkgConfigRoots() {
   const cacheRoot = join(repoRoot, 'src-tauri', '.native-deps', 'cache', `gstreamer-${gstreamerVersion}-macos-universal`, 'devel-expanded');
-  return [
+  const frameworkCandidates = [
+    process.env.NOLAND_GSTREAMER_FRAMEWORK?.trim(),
+    join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework'),
+    '/Library/Frameworks/GStreamer.framework',
+  ].filter(Boolean);
+
+  const roots = [
     join(cacheRoot, `base-system-1.0-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
     join(cacheRoot, `gstreamer-1.0-core-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
-  ].filter((candidate) => existsSync(candidate));
+  ];
+
+  for (const framework of frameworkCandidates) {
+    roots.push(
+      join(framework, 'Versions', 'Current', 'lib', 'pkgconfig'),
+      join(framework, 'Versions', '1.0', 'lib', 'pkgconfig'),
+      join(framework, 'lib', 'pkgconfig'),
+      join(framework, 'Libraries', 'pkgconfig'),
+    );
+  }
+
+  return [...new Set(roots.filter((candidate) => existsSync(candidate)))];
 }
 
 function resolveLinuxGstreamerRoot(targetTriple) {
