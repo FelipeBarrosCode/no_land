@@ -231,10 +231,99 @@ jobs:
           path: src-tauri/target/${{ matrix.target }}/release/bundle
           if-no-files-found: error
 
+  windows-store:
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    environment: Secrets
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Windows managed tool dependencies
+        shell: pwsh
+        run: choco install wireguard -y --no-progress
+
+      - name: Install Azure Artifact Signing CLI
+        if: secrets.TRUSTED_SIGNING_ENDPOINT != ''
+        shell: pwsh
+        run: cargo install artifact-signing-cli --locked
+
+      - name: Write Windows Azure Artifact Signing config
+        if: secrets.TRUSTED_SIGNING_ENDPOINT != ''
+        shell: pwsh
+        env:
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
+        run: |
+          $signCommand = "artifact-signing-cli -e `"$env:TRUSTED_SIGNING_ENDPOINT`" -a `"$env:TRUSTED_SIGNING_ACCOUNT_NAME`" -c `"$env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`" -d `"Noland Connect`" %1"
+          $config = @{
+            bundle = @{
+              windows = @{
+                signCommand = $signCommand
+              }
+            }
+          }
+          $config | ConvertTo-Json -Depth 10 | Set-Content -Path src-tauri/tauri.windows.signing.conf.json
+
+      - name: Stage CI managed tools
+        run: node scripts/stage-ci-managed-tools.mjs --target x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Microsoft Store Windows installer
+        shell: bash
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          EXTRA_ARGS=(--config src-tauri/tauri.microsoftstore.conf.json)
+          if [[ -f src-tauri/tauri.windows.signing.conf.json ]]; then
+            EXTRA_ARGS+=(--config src-tauri/tauri.windows.signing.conf.json)
+          fi
+          npm run tauri:build -- --target x86_64-pc-windows-msvc "${EXTRA_ARGS[@]}"
+
+      - name: Collect Microsoft Store installer artifact
+        shell: bash
+        run: |
+          PRODUCT_NAME=$(node -p "require('./src-tauri/tauri.conf.json').productName")
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          SOURCE_PATH=$(find src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis -maxdepth 1 -name '*-setup.exe' | head -n 1)
+          DEST_DIR=artifacts/windows-store
+          DEST_PATH="$DEST_DIR/${PRODUCT_NAME}_${VERSION}_x64-store-setup.exe"
+          mkdir -p "$DEST_DIR"
+          cp "$SOURCE_PATH" "$DEST_PATH"
+          printf '/S\n' > "$DEST_DIR/silent-install-args.txt"
+          printf 'x64\n' > "$DEST_DIR/architecture.txt"
+
+      - name: Upload Microsoft Store installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-windows-store-x64
+          path: artifacts/windows-store
+          if-no-files-found: error
+
   release:
     if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     environment: Secrets
-    needs: build
+    needs:
+      - build
+      - windows-store
     runs-on: ubuntu-latest
 
     steps:
