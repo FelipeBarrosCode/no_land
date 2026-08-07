@@ -13,7 +13,9 @@ const passthroughArgs = process.argv.slice(3);
 const target = readTarget(passthroughArgs) ?? defaultHostTarget();
 const release = mode === 'build';
 const executableName = process.platform === 'win32' ? 'noland-mic-sender.exe' : 'noland-mic-sender';
-const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim() || '1.24.13';
+const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
+  || process.env.GSTREAMER_VERSION?.trim()
+  || '1.24.13';
 
 const cargoArgs = ['build', '--manifest-path', join(sidecarCrateDir, 'Cargo.toml')];
 if (release) cargoArgs.push('--release');
@@ -403,10 +405,27 @@ function buildNativeEnv(targetTriple) {
 
 function resolveMacPkgConfigRoots() {
   const cacheRoot = join(srcTauriDir, '.native-deps', 'cache', `gstreamer-${gstreamerVersion}-macos-universal`, 'devel-expanded');
-  return [
+  const frameworkCandidates = [
+    process.env.NOLAND_GSTREAMER_FRAMEWORK?.trim(),
+    join(srcTauriDir, 'bundled', 'macos', 'GStreamer.framework'),
+    '/Library/Frameworks/GStreamer.framework',
+  ].filter(Boolean);
+
+  const roots = [
     join(cacheRoot, `base-system-1.0-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
     join(cacheRoot, `gstreamer-1.0-core-devel-${gstreamerVersion}-universal.pkg`, 'Payload', 'lib', 'pkgconfig'),
-  ].filter((candidate) => existsSync(candidate));
+  ];
+
+  for (const framework of frameworkCandidates) {
+    roots.push(
+      join(framework, 'Versions', 'Current', 'lib', 'pkgconfig'),
+      join(framework, 'Versions', '1.0', 'lib', 'pkgconfig'),
+      join(framework, 'lib', 'pkgconfig'),
+      join(framework, 'Libraries', 'pkgconfig'),
+    );
+  }
+
+  return [...new Set(roots.filter((candidate) => existsSync(candidate)))];
 }
 
 function defaultHostTarget() {
