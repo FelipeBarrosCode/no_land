@@ -21,20 +21,11 @@ Triggers:
 Targets in shared matrix:
 
 - macOS Apple Silicon (`aarch64-apple-darwin`)
-- macOS Intel (`x86_64-apple-darwin`)
+- macOS Intel (`x86_64-apple-darwin`, built on `macos-15-intel`)
 - Ubuntu x64 (`x86_64-unknown-linux-gnu`)
 - Ubuntu ARM64 (`aarch64-unknown-linux-gnu`)
 - Windows x64 (`x86_64-pc-windows-msvc`)
-
-### Dedicated macOS Intel build
-
-Workflow: `.github/workflows/release-macos-intel.yml`
-
-This workflow also builds `x86_64-apple-darwin` on `macos-13`. At the moment, Intel macOS artifacts are produced both here and in the shared matrix workflow.
-
-Target:
-
-- macOS Intel (`x86_64-apple-darwin`)
+- Windows ARM64 (`aarch64-pc-windows-msvc`)
 
 ### Release publishing behavior
 
