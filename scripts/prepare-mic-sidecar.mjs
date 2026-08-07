@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -190,13 +190,40 @@ function stageWindowsGstreamerRuntime(targetTriple, binariesDir) {
   }
 
   const destinationRoot = join(binariesDir, 'gstreamer', targetTriple);
-  rmSync(destinationRoot, { recursive: true, force: true });
-  mkdirSync(destinationRoot, { recursive: true });
+  const binSource = join(root, 'bin');
+  const pluginSource = join(root, 'lib', 'gstreamer-1.0');
+  const scannerSourceDir = join(root, 'libexec', 'gstreamer-1.0');
+  const binDest = join(destinationRoot, 'bin');
+  const pluginDest = join(destinationRoot, 'lib', 'gstreamer-1.0');
+  const scannerDestDir = join(destinationRoot, 'libexec', 'gstreamer-1.0');
+  const requiredPluginBases = [
+    'gstcoreelements',
+    'gstaudioconvert',
+    'gstaudioresample',
+    'gstaudiorate',
+    'gstopus',
+    'gstrtp',
+    'gstrtpmanager',
+    'gstudp',
+    'gsttypefindfunctions',
+    'gstvolume',
+    'gstwasapi',
+    'gstwasapi2',
+  ];
 
-  copyDirIfExists(join(root, 'bin'), join(destinationRoot, 'bin'));
-  copyDirIfExists(join(root, 'lib', 'gstreamer-1.0'), join(destinationRoot, 'lib', 'gstreamer-1.0'));
-  copyDirIfExists(join(root, 'libexec', 'gstreamer-1.0'), join(destinationRoot, 'libexec', 'gstreamer-1.0'));
-  copyDirIfExists(join(root, 'lib', 'girepository-1.0'), join(destinationRoot, 'lib', 'girepository-1.0'));
+  rmSync(destinationRoot, { recursive: true, force: true });
+  mkdirSync(binDest, { recursive: true });
+  mkdirSync(pluginDest, { recursive: true });
+  mkdirSync(scannerDestDir, { recursive: true });
+
+  copyDirectoryEntriesMatching(binSource, binDest, /\.dll$/iu);
+  copyDirectoryEntriesMatching(binSource, binDest, /^gst-plugin-scanner\.exe$/iu);
+  copyDirectoryEntriesMatching(scannerSourceDir, scannerDestDir, /^gst-plugin-scanner\.exe$/iu);
+  copyDirectoryEntriesMatching(
+    pluginSource,
+    pluginDest,
+    (name) => requiredPluginBases.some((base) => name === `${base}.dll` || name === `lib${base}.dll`),
+  );
 
   console.log(`Staged Windows GStreamer runtime for packaging: ${destinationRoot}`);
 }
@@ -256,6 +283,28 @@ function copyDirIfExists(source, destination) {
     return;
   }
   cpSync(source, destination, { recursive: true, force: true, dereference: true });
+}
+
+function copyDirectoryEntriesMatching(sourceDir, destinationDir, matcher) {
+  if (!existsSync(sourceDir)) {
+    return;
+  }
+
+  mkdirSync(destinationDir, { recursive: true });
+  for (const entry of readdirSync(sourceDir, { withFileTypes: true })) {
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      continue;
+    }
+
+    const matches = typeof matcher === 'function'
+      ? matcher(entry.name)
+      : matcher.test(entry.name);
+    if (!matches) {
+      continue;
+    }
+
+    copyFileSync(join(sourceDir, entry.name), join(destinationDir, entry.name));
+  }
 }
 
 function resolveLinuxGstreamerRoot(targetTriple) {
