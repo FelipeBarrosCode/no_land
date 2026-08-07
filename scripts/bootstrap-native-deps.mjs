@@ -554,16 +554,12 @@ function discoverLinuxSystemGstreamer() {
     return null;
   }
 
+  const libexecDir = pkgConfigVariable('gstreamer-1.0', 'libexecdir');
   const pluginsDir = locateExistingPath([
     pkgConfigVariable('gstreamer-1.0', 'pluginsdir'),
     join(libDir, 'gstreamer-1.0'),
   ]);
-  const scannerPath = locateExistingPath([
-    join(pkgConfigVariable('gstreamer-1.0', 'libexecdir') || '', 'gstreamer-1.0', 'gst-plugin-scanner'),
-    join(libDir, 'gstreamer-1.0', 'gst-plugin-scanner'),
-    '/usr/libexec/gstreamer-1.0/gst-plugin-scanner',
-    '/usr/lib/gstreamer-1.0/gst-plugin-scanner',
-  ]);
+  const scannerPath = discoverLinuxPluginScanner(libDir, libexecDir, pluginsDir);
   const pkgConfigPath = locateExistingPath([
     join(libDir, 'pkgconfig', 'gstreamer-1.0.pc'),
     '/usr/lib/pkgconfig/gstreamer-1.0.pc',
@@ -585,6 +581,36 @@ function discoverLinuxSystemGstreamer() {
       '/usr/lib64/girepository-1.0',
     ]),
   };
+}
+
+function discoverLinuxPluginScanner(libDir, libexecDir, pluginsDir) {
+  const directCandidates = locateExistingPath([
+    join(libexecDir || '', 'gstreamer-1.0', 'gst-plugin-scanner'),
+    join(libexecDir || '', 'gstreamer1.0', 'gstreamer-1.0', 'gst-plugin-scanner'),
+    join(libexecDir || '', 'gst-plugin-scanner'),
+    join(libDir, 'gstreamer-1.0', 'gst-plugin-scanner'),
+    '/usr/libexec/gstreamer-1.0/gst-plugin-scanner',
+    '/usr/lib/gstreamer-1.0/gst-plugin-scanner',
+  ]);
+  if (directCandidates) {
+    return directCandidates;
+  }
+
+  const searchRoots = [
+    libexecDir,
+    pluginsDir,
+    dirname(libDir),
+    libDir,
+  ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index && existsSync(candidate));
+
+  for (const root of searchRoots) {
+    const found = findFilesNamed(root, 'gst-plugin-scanner').find((candidate) => existsSync(candidate));
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
 }
 
 function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
@@ -788,6 +814,10 @@ function hasLinuxGstreamerRoot(path) {
   ) && (
     existsSync(join(path, 'lib', 'pkgconfig', 'gstreamer-1.0.pc'))
     || existsSync(join(path, 'lib64', 'pkgconfig', 'gstreamer-1.0.pc'))
+  ) && (
+    existsSync(join(path, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner'))
+    || existsSync(join(path, 'lib', 'gstreamer-1.0', 'gst-plugin-scanner'))
+    || existsSync(join(path, 'lib64', 'gstreamer-1.0', 'gst-plugin-scanner'))
   );
 }
 
