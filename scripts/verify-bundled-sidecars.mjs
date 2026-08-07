@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -90,17 +90,6 @@ function verifyWindowsBundles(targetTriple, bundleRoot) {
       verifyBundleTree(extractRoot, targetTriple, `MSI package ${basename(msi)}`);
     });
     console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
-    return;
-  }
-
-  const nsis = findFirstPath(bundleRoot, (path) => /(?:-setup|_setup|setup)\.exe$/iu.test(path))
-    || findFirstPath(bundleRoot, (path) => path.endsWith('.exe'));
-  if (nsis) {
-    withExtractedTemp('windows-nsis-', (extractRoot) => {
-      extractWindowsNsisBundle(nsis, extractRoot);
-      verifyBundleTree(extractRoot, targetTriple, `NSIS package ${basename(nsis)}`);
-    });
-    console.log(`Verified bundled Windows NSIS sidecars/runtime/resources for ${targetTriple}`);
     return;
   }
 
@@ -235,46 +224,7 @@ function withExtractedTemp(prefix, fn) {
   }
 }
 
-function extractWindowsNsisBundle(installerPath, extractRoot) {
-  const sevenZip = resolveWindowsArchiveTool();
-  const primaryExtractDir = join(extractRoot, 'primary');
-  mkdirSync(primaryExtractDir, { recursive: true });
-  run(sevenZip, ['x', '-y', `-o${primaryExtractDir}`, installerPath]);
-
-  const nestedArchives = [];
-  collectPaths(primaryExtractDir, (path) => {
-    if (/\.(?:7z|zip)$/iu.test(path)) {
-      nestedArchives.push(path);
-    }
-    return false;
-  });
-
-  for (const archivePath of nestedArchives) {
-    const nestedDir = join(dirname(archivePath), `${basename(archivePath)}.contents`);
-    mkdirSync(nestedDir, { recursive: true });
-    run(sevenZip, ['x', '-y', `-o${nestedDir}`, archivePath]);
-  }
-}
-
-function resolveWindowsArchiveTool() {
-  for (const candidate of ['7z', '7z.exe', '7zr', '7zr.exe']) {
-    const result = spawnSync(candidate, ['-h'], {
-      cwd: repoRoot,
-      stdio: 'ignore',
-    });
-    if (!result.error) {
-      return candidate;
-    }
-  }
-
-  fail('Unable to locate 7-Zip on the Windows runner, which is required to verify the NSIS installer payload.');
-}
-
 function findFirstPath(root, predicate) {
-  return collectPaths(root, predicate);
-}
-
-function collectPaths(root, predicate) {
   if (!existsSync(root)) {
     return null;
   }

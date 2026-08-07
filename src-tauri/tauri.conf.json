@@ -28,7 +28,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "useLocalToolsDir": true,
     "externalBin": [
       "binaries/gotatun",
       "binaries/noland-mic-sender"
@@ -48,16 +47,6 @@
       "frameworks": [
         "bundled/macos/GStreamer.framework"
       ]
-    },
-    "windows": {
-      "bundleVCRuntime": true,
-      "webviewInstallMode": {
-        "type": "embedBootstrapper",
-        "silent": true
-      },
-      "nsis": {
-        "installMode": "currentUser"
-      }
     },
     "icon": [
       "icons/32x32.png",
