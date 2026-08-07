@@ -356,24 +356,21 @@ function rebuildDmg(app, dmg, volumeName) {
   if (existsSync(dmg)) rmSync(dmg, { force: true });
 
   const tempDir = mkdtempSync(join(tmpdir(), 'noland-dmg-out-'));
+  const tempRoot = mkdtempSync(join(tmpdir(), 'noland-dmg-src-'));
   const tempDmg = join(tempDir, basename(dmg));
+  const stagedApp = join(tempRoot, basename(app));
   try {
-    run('hdiutil', ['create', '-volname', volumeName, '-srcfolder', app, '-ov', '-format', 'UDZO', tempDmg]);
+    run('ditto', [app, stagedApp]);
+    run('hdiutil', ['create', '-volname', volumeName, '-srcfolder', stagedApp, '-ov', '-format', 'UDZO', tempDmg]);
     copyFileSync(tempDmg, dmg);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
   }
 }
 
 function rebuildDmgFromFreshCopy(app, dmg, volumeName) {
-  const tempRoot = mkdtempSync(join(tmpdir(), 'noland-dmg-src-'));
-  const stagedApp = join(tempRoot, basename(app));
-  try {
-    run('ditto', [app, stagedApp]);
-    rebuildDmg(stagedApp, dmg, volumeName);
-  } finally {
-    rmSync(tempRoot, { recursive: true, force: true });
-  }
+  rebuildDmg(app, dmg, volumeName);
 }
 
 function cleanupStaleMacDmgArtifacts(releaseDir) {

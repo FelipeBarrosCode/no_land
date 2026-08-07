@@ -269,6 +269,18 @@ fn main() {
         println!("cargo:rustc-link-lib=winmm");
     }
     if is_linux {
+        for prefix in native_dep_prefixes(&target, &manifest_dir) {
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib").display()
+            );
+            println!(
+                "cargo:rustc-link-search=native={}",
+                prefix.join("lib64").display()
+            );
+        }
+
+        println!("cargo:rustc-link-lib=dylib=crypto");
         println!("cargo:rustc-link-lib=dylib=opus");
         println!("cargo:rustc-link-lib=dylib=pulse-simple");
         println!("cargo:rustc-link-lib=dylib=pulse");
