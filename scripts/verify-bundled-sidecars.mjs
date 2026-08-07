@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
+const productName = 'Noland Connect';
 const target = readTarget(process.argv.slice(2)) ?? defaultHostTarget();
 const releaseDir = chooseTargetReleaseDir(target);
 const bundleDir = join(releaseDir, 'bundle');
@@ -16,6 +17,11 @@ if (!target) {
 }
 if (!existsSync(bundleDir)) {
   fail(`Bundle directory not found: ${bundleDir}`);
+}
+
+if (target.includes('apple-darwin')) {
+  verifyMacBundles(target, bundleDir);
+  process.exit(0);
 }
 
 if (target.includes('linux')) {
@@ -29,6 +35,26 @@ if (target.includes('windows')) {
 }
 
 console.log(`No bundled sidecar verification required for ${target}`);
+
+function verifyMacBundles(targetTriple, bundleRoot) {
+  const appBundle = join(bundleRoot, 'macos', `${productName}.app`);
+  if (!existsSync(appBundle)) {
+    fail(`Could not locate macOS app bundle at ${appBundle}`);
+  }
+
+  verifyMacBundleTree(appBundle, targetTriple, 'macOS app bundle');
+
+  const dmg = findFirstPath(bundleRoot, (path) => path.endsWith('.dmg'));
+  if (!dmg) {
+    fail(`Could not locate DMG bundle under ${bundleRoot}`);
+  }
+
+  withMountedDmg(dmg, productName, (mountedApp) => {
+    verifyMacBundleTree(mountedApp, targetTriple, `DMG payload ${basename(dmg)}`);
+  });
+
+  console.log(`Verified bundled macOS sidecars/runtime/resources for ${targetTriple}`);
+}
 
 function verifyLinuxBundles(targetTriple, bundleRoot) {
   const appDir = findFirstPath(bundleRoot, (path) => path.endsWith('.AppDir'));
@@ -68,6 +94,40 @@ function verifyWindowsBundles(targetTriple, bundleRoot) {
   });
 
   console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
+}
+
+function verifyMacBundleTree(root, targetTriple, label) {
+  for (const sidecar of requiredSidecars(targetTriple)) {
+    const found = findFirstPath(root, (path) => basename(path) === sidecar);
+    if (!found) {
+      fail(`Missing required bundled sidecar '${sidecar}' in ${label}`);
+    }
+  }
+
+  const macRuntimeFiles = [
+    'GStreamer.framework',
+    'vm-cloud-mic-agent',
+    'Cargo.toml',
+    'main.rs',
+    'receiver.rs',
+  ];
+
+  const frameworkFound = findFirstPath(root, (path) => basename(path) === 'GStreamer.framework');
+  if (!frameworkFound) {
+    fail(`Missing bundled GStreamer.framework in ${label}`);
+  }
+
+  const receiverDir = findFirstPath(root, (path) => basename(path) === 'vm-cloud-mic-agent' && existsSync(join(path, 'Cargo.toml')));
+  if (!receiverDir) {
+    fail(`Missing bundled vm-cloud-mic-agent source directory in ${label}`);
+  }
+
+  for (const relativePath of ['Cargo.toml', 'src/main.rs', 'src/receiver.rs']) {
+    const candidate = join(receiverDir, relativePath);
+    if (!existsSync(candidate)) {
+      fail(`Missing bundled vm-cloud-mic-agent file '${relativePath}' in ${label}`);
+    }
+  }
 }
 
 function verifyBundleTree(root, targetTriple, label) {
@@ -140,6 +200,17 @@ function chooseTargetReleaseDir(targetTriple) {
   return join(repoRoot, 'src-tauri', 'target', 'release');
 }
 
+function withMountedDmg(dmg, volumeName, fn) {
+  const mountPoint = mkdtempSync(join(tmpdir(), 'noland-dmg-mount-'));
+  try {
+    run('hdiutil', ['attach', dmg, '-mountpoint', mountPoint, '-nobrowse', '-readonly']);
+    fn(join(mountPoint, `${volumeName}.app`));
+  } finally {
+    runAllowFailure('hdiutil', ['detach', mountPoint]);
+    rmSync(mountPoint, { recursive: true, force: true });
+  }
+}
+
 function withExtractedTemp(prefix, fn) {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   try {
@@ -181,6 +252,13 @@ function run(command, args) {
   if (result.status !== 0) {
     fail(`Command failed: ${command} ${args.join(' ')}`);
   }
+}
+
+function runAllowFailure(command, args) {
+  spawnSync(command, args, {
+    cwd: repoRoot,
+    stdio: 'inherit',
+  });
 }
 
 function runShell(command, cwd) {

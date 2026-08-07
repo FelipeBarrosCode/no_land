@@ -127,7 +127,6 @@ jobs:
         run: npm run tauri:build -- --target ${{ matrix.target }}
 
       - name: Verify bundled sidecars and runtime
-        if: matrix.platform == 'linux' || matrix.platform == 'windows'
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
       - name: Upload build artifacts
