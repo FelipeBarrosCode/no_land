@@ -15,6 +15,9 @@ pub mod os_detection_mod;
 #[path = "../services/moonlight.rs"]
 pub mod moonlight_mod;
 
+#[path = "../utils/mod.rs"]
+mod utils;
+
 mod models {
     pub use crate::app_state_mod as app_state;
     pub use crate::application_bundle_mod as application_bundle;
