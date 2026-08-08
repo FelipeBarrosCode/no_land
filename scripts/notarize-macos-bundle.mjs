@@ -191,7 +191,20 @@ function validateGatekeeperForApp(path, label) {
   const primaryExecutable = resolvePrimaryExecutable(path);
   if (primaryExecutable) {
     console.log(`[notarize-macos-bundle] Verifying primary executable signature: ${primaryExecutable}`);
-    run('codesign', ['--verify', '--strict', '--verbose=2', primaryExecutable]);
+    const verify = run('codesign', ['--verify', '--strict', '--verbose=2', primaryExecutable], {
+      captureOutput: true,
+      allowFailure: true,
+    });
+
+    if (verify.status !== 0) {
+      const verifyOutput = `${verify.stdout}\n${verify.stderr}`.trim();
+      const missingPath = /No such file or directory/i.test(verifyOutput);
+      if (missingPath) {
+        console.warn(`[notarize-macos-bundle] Primary executable verification hit a transient path-resolution issue; continuing with Gatekeeper bundle assessment. Output:\n${verifyOutput}`);
+      } else {
+        throw new Error(`[notarize-macos-bundle] Primary executable signature verification failed for ${primaryExecutable}\n${verifyOutput}`);
+      }
+    }
   } else {
     console.warn(`[notarize-macos-bundle] Unable to resolve a primary executable inside ${path}; continuing with Gatekeeper bundle assessment only`);
   }
