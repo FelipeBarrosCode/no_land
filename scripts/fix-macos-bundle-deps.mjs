@@ -83,6 +83,7 @@ if (existsSync(frameworkPluginDir)) {
   }
 }
 
+const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim() || '';
 const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
 const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
 const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
@@ -138,7 +139,7 @@ for (const file of frameworkRootLibs) {
   setInstallId(file, `@rpath/${basename(file)}`);
 }
 
-adhocSign(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...macosFiles]);
+resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...macosFiles, frameworkBundleDir]);
 cleanupStaleMacDmgArtifacts(targetReleaseDir);
 rebuildDmg(appPath, dmgPath, productName);
 if (!verifyDmgBundle(dmgPath, productName)) {
@@ -340,15 +341,33 @@ function ensureMicrophoneUsageDescription(infoPlist, message) {
   run('/usr/libexec/PlistBuddy', ['-c', `Add :NSMicrophoneUsageDescription string "${escapedMessage}"`, infoPlist], { allowFailure: false });
 }
 
-function adhocSign(app, nestedFiles) {
+function resignBundle(app, nestedFiles) {
   run('xattr', ['-cr', app], { allowFailure: true });
 
-  const uniqueNested = Array.from(new Set((nestedFiles || []).map(safeRealpath))).filter((file) => existsSync(file)).sort((a, b) => b.length - a.length);
+  const uniqueNested = Array.from(new Set((nestedFiles || []).map(safeRealpath)))
+    .filter((file) => existsSync(file))
+    .sort((a, b) => b.length - a.length);
+
   for (const file of uniqueNested) {
-    run('codesign', ['--force', '--sign', '-', '--timestamp=none', file], { allowFailure: false });
+    signCodeObject(file, { runtime: false });
   }
 
-  run('codesign', ['--force', '--sign', '-', '--timestamp=none', app], { allowFailure: false });
+  signCodeObject(app, { runtime: appleSigningIdentity !== '' });
+}
+
+function signCodeObject(path, { runtime }) {
+  const args = ['--force'];
+  if (appleSigningIdentity) {
+    args.push('--sign', appleSigningIdentity, '--timestamp');
+    if (runtime) {
+      args.push('--options', 'runtime');
+      args.push('--preserve-metadata=identifier,entitlements,flags,runtime,requirements');
+    }
+  } else {
+    args.push('--sign', '-', '--timestamp=none');
+  }
+  args.push(path);
+  run('codesign', args, { allowFailure: false });
 }
 
 function rebuildDmg(app, dmg, volumeName) {

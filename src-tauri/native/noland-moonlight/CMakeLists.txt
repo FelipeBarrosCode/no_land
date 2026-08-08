@@ -30,25 +30,37 @@ elseif(WIN32)
   target_link_libraries(noland_moonlight PRIVATE winmm)
 endif()
 
+find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS})
+find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS})
+
 if(WIN32)
-  include(FetchContent)
-  set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
-  set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
-  set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-  set(OPUS_STACK_PROTECTOR OFF CACHE BOOL "" FORCE)
-  set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
-  FetchContent_Declare(
-    opus_dep
-    URL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
-  )
-  FetchContent_MakeAvailable(opus_dep)
-  set(OPUS_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-opus-include")
-  file(MAKE_DIRECTORY "${OPUS_INCLUDE_DIR}/opus")
-  file(COPY "${opus_dep_SOURCE_DIR}/include/" DESTINATION "${OPUS_INCLUDE_DIR}/opus")
-  set(OPUS_LIBRARY_TARGET opus)
+  if(OPUS_INCLUDE_DIR AND OPUS_LIBRARY)
+    set(OPUS_LIBRARY_TARGET ${OPUS_LIBRARY})
+  else()
+    include(FetchContent)
+    set(OPUS_BUILD_SHARED_LIBRARY OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_STACK_PROTECTOR OFF CACHE BOOL "" FORCE)
+    set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+    FetchContent_Declare(
+      opus_dep
+      URL https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
+      DOWNLOAD_EXTRACT_TIMESTAMP true
+    )
+    FetchContent_MakeAvailable(opus_dep)
+    set(OPUS_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-opus-include")
+    file(MAKE_DIRECTORY "${OPUS_INCLUDE_DIR}/opus")
+    file(COPY "${opus_dep_SOURCE_DIR}/include/" DESTINATION "${OPUS_INCLUDE_DIR}/opus")
+    set(OPUS_LIBRARY_TARGET opus)
+  endif()
 else()
-  find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
-  find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
+  if(NOT OPUS_INCLUDE_DIR)
+    find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
+  endif()
+  if(NOT OPUS_LIBRARY)
+    find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
+  endif()
 endif()
 
 target_include_directories(noland_moonlight
