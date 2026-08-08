@@ -45,6 +45,7 @@ if (existsSync(frameworkBundleSource) && !existsSync(frameworkBundleDir)) {
 }
 
 const frameworkRoot = join(frameworkBundleDir, 'Versions', 'Current');
+const frameworkBinDir = join(frameworkRoot, 'bin');
 const frameworkLibDir = join(frameworkRoot, 'lib');
 const frameworkLibexecDir = join(frameworkRoot, 'libexec');
 const frameworkPluginDir = join(frameworkLibDir, 'gstreamer-1.0');
@@ -64,6 +65,10 @@ const allowedGStreamerPlugins = new Set([
   'libgstvolume.dylib',
 ]);
 
+if (existsSync(frameworkBinDir)) {
+  console.log(`[fix-macos-bundle-deps] Removing unused GStreamer command-line tools from ${frameworkBinDir}`);
+  rmSync(frameworkBinDir, { recursive: true, force: true });
+}
 if (existsSync(frameworkPluginValidateDir)) {
   rmSync(frameworkPluginValidateDir, { recursive: true, force: true });
 }
@@ -379,7 +384,7 @@ function resignBundle(app, nestedFiles) {
 
   console.log(`[fix-macos-bundle-deps] Signing ${uniqueNested.length} nested code objects`);
   for (const file of uniqueNested) {
-    signCodeObject(file, { runtime: false });
+    signCodeObject(file, { runtime: shouldEnableHardenedRuntime(file) });
   }
 
   console.log('[fix-macos-bundle-deps] Signing final .app bundle');
@@ -400,6 +405,18 @@ function signCodeObject(path, { runtime }) {
   }
   args.push(path);
   run('codesign', args, { allowFailure: false });
+}
+
+function shouldEnableHardenedRuntime(file) {
+  if (!appleSigningIdentity || !existsSync(file)) {
+    return false;
+  }
+  if (basename(file).endsWith('.dylib')) {
+    return false;
+  }
+
+  const info = run('file', ['-b', file], { allowFailure: true });
+  return info.status === 0 && info.stdout.includes('Mach-O');
 }
 
 function collectExplicitMacSidecarFiles(appMacosDir, appResourcesBinariesDir, targetTriple) {
