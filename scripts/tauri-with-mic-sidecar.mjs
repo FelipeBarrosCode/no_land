@@ -80,6 +80,7 @@ const tauriCommand = process.platform === 'win32' && existsSync(tauriCliScript)
 const tauriCommandArgs = process.platform === 'win32' && existsSync(tauriCliScript)
   ? [tauriCliScript, mode, ...tauriCliArgs]
   : ['tauri', mode, ...tauriCliArgs];
+console.log(`[tauri-with-mic-sidecar] Running Tauri ${mode} for target ${target}`);
 const tauri = spawnSync(tauriCommand, tauriCommandArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
@@ -95,6 +96,7 @@ if (tauri.status !== 0) {
 
 if (process.platform === 'darwin' && mode === 'build') {
   const targetTriple = target ?? 'aarch64-apple-darwin';
+  console.log(`[tauri-with-mic-sidecar] Starting macOS bundle dependency fix for ${targetTriple}`);
   let fix = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'fix-macos-bundle-deps.mjs'), targetTriple], {
     cwd: repoRoot,
     stdio: 'inherit',
@@ -104,6 +106,7 @@ if (process.platform === 'darwin' && mode === 'build') {
     process.exit(fix.status ?? 1);
   }
 
+  console.log(`[tauri-with-mic-sidecar] First macOS bundle dependency fix finished for ${targetTriple}`);
   if (!bundleHasRequiredSdl3(targetTriple)) {
     console.warn('First macOS bundle dependency fix did not leave the required SDL3 companion in the finished app bundle; retrying fix step once.');
     fix = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'fix-macos-bundle-deps.mjs'), targetTriple], {
@@ -114,6 +117,7 @@ if (process.platform === 'darwin' && mode === 'build') {
     if (fix.status !== 0) {
       process.exit(fix.status ?? 1);
     }
+    console.log(`[tauri-with-mic-sidecar] Second macOS bundle dependency fix finished for ${targetTriple}`);
   }
 
   if (!bundleHasRequiredSdl3(targetTriple)) {

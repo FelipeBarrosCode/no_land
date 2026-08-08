@@ -993,15 +993,20 @@ function ensureExtractedSourceTarball(url, tarballName, extractedDirName) {
   }
   downloadFile(url, tarballPath, { expectedKind: 'tar.gz' });
   const extractRoot = join(nativeDepsRoot, 'src');
-  run('tar', ['-xzf', tarballPath, '-C', extractRoot]);
+  extractTarGz(tarballPath, extractRoot);
   return extractedPath;
 }
 
 function extractTarballSource(tarballPath, extractRoot, extractedDirName) {
   rmSync(extractRoot, { recursive: true, force: true });
   mkdirSync(extractRoot, { recursive: true });
-  run('tar', ['-xzf', tarballPath, '-C', extractRoot]);
+  extractTarGz(tarballPath, extractRoot);
   return join(extractRoot, extractedDirName);
+}
+
+function extractTarGz(tarballPath, extractRoot) {
+  mkdirSync(extractRoot, { recursive: true });
+  run('cmake', ['-E', 'tar', 'xzf', tarballPath], { cwd: extractRoot });
 }
 
 function mergeFlags(existing, nextFlag) {

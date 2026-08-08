@@ -84,6 +84,9 @@ if (existsSync(frameworkPluginDir)) {
 }
 
 const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim() || '';
+console.log(`[fix-macos-bundle-deps] Preparing macOS bundle fix for ${target}`);
+console.log(`[fix-macos-bundle-deps] App bundle: ${appPath}`);
+console.log(`[fix-macos-bundle-deps] Signing identity: ${appleSigningIdentity || 'ad-hoc'}`);
 const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
 const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
 const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
@@ -140,8 +143,13 @@ for (const file of frameworkRootLibs) {
   setInstallId(file, `@rpath/${basename(file)}`);
 }
 
+console.log(`[fix-macos-bundle-deps] Framework dylibs: ${frameworkFiles.length}, libexec tools: ${libexecFiles.length}, root framework dylibs: ${frameworkRootLibs.length}`);
+console.log(`[fix-macos-bundle-deps] Resource binaries: ${resourceBinaryFiles.length}, explicit sidecars: ${explicitMacSidecarFiles.length}, app executables: ${macosFiles.length}`);
+console.log('[fix-macos-bundle-deps] Re-signing patched bundle contents');
 resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...explicitMacSidecarFiles, ...macosFiles, frameworkBundleDir]);
+console.log('[fix-macos-bundle-deps] Verifying explicitly managed macOS sidecars');
 verifySignedMacSidecars(explicitMacSidecarFiles);
+console.log('[fix-macos-bundle-deps] Rebuilding DMG payload');
 cleanupStaleMacDmgArtifacts(targetReleaseDir);
 rebuildDmg(appPath, dmgPath, productName);
 if (!verifyDmgBundle(dmgPath, productName)) {
@@ -350,14 +358,17 @@ function resignBundle(app, nestedFiles) {
     .filter((file) => existsSync(file))
     .sort((a, b) => b.length - a.length);
 
+  console.log(`[fix-macos-bundle-deps] Signing ${uniqueNested.length} nested code objects`);
   for (const file of uniqueNested) {
     signCodeObject(file, { runtime: false });
   }
 
+  console.log('[fix-macos-bundle-deps] Signing final .app bundle');
   signCodeObject(app, { runtime: appleSigningIdentity !== '' });
 }
 
 function signCodeObject(path, { runtime }) {
+  console.log(`[fix-macos-bundle-deps] Signing ${relative(appPath, path) || '.'}${runtime ? ' (runtime)' : ''}`);
   const args = ['--force'];
   if (appleSigningIdentity) {
     args.push('--sign', appleSigningIdentity, '--timestamp');
