@@ -222,6 +222,8 @@ function patchMacosWgQuickScript(path) {
   if (!existsSync(path)) {
     return;
   }
+
+  chmodSync(path, 0o755);
   let content = readFileSync(path, 'utf8');
   if (!content.includes('WG_CMD="${WG:-wg}"')) {
     content = content.replace(
