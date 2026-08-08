@@ -199,6 +199,10 @@ function requiredSidecarCandidates(targetTriple) {
 
 function requiredRuntimeFileCandidates(targetTriple) {
   if (targetTriple.includes('windows')) {
+    if (targetTriple.includes('aarch64')) {
+      return [];
+    }
+
     return [
       ['gstreamer-1.0-0.dll'],
       ['gst-plugin-scanner.exe'],
