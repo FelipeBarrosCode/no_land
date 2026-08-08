@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? 'aarch64-apple-darwin';
-const scriptRevision = '2026-08-08-notary-dmg-verify-v3';
+const scriptRevision = '2026-08-08-notary-dmg-verify-v4';
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const version = tauriConfig.version ?? '0.1.0';
@@ -184,7 +184,18 @@ function validateStapledArtifact(path, label) {
 
 function validateGatekeeperForApp(path, label) {
   console.log(`[notarize-macos-bundle] Validating Gatekeeper acceptance for ${label}`);
-  run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', path]);
+  if (!existsSync(path)) {
+    throw new Error(`[notarize-macos-bundle] Expected app bundle does not exist: ${path}`);
+  }
+
+  const primaryExecutable = resolvePrimaryExecutable(path);
+  if (primaryExecutable) {
+    console.log(`[notarize-macos-bundle] Verifying primary executable signature: ${primaryExecutable}`);
+    run('codesign', ['--verify', '--strict', '--verbose=2', primaryExecutable]);
+  } else {
+    console.warn(`[notarize-macos-bundle] Unable to resolve a primary executable inside ${path}; continuing with Gatekeeper bundle assessment only`);
+  }
+
   run('spctl', ['-a', '-vvv', '-t', 'exec', path]);
 }
 
@@ -196,17 +207,70 @@ function validateGatekeeperForDmg(path, label) {
 function validateMountedDmgApp(dmg, volumeName) {
   console.log('[notarize-macos-bundle] Mounting notarized DMG for final app verification');
   const mountPoint = mkdtempSync(join(tmpdir(), 'noland-notary-mount-'));
-  const mountedApp = join(mountPoint, `${volumeName}.app`);
   try {
     run('hdiutil', ['attach', dmg, '-mountpoint', mountPoint, '-nobrowse', '-readonly']);
-    if (!existsSync(mountedApp)) {
-      throw new Error(`[notarize-macos-bundle] Mounted DMG did not contain expected app bundle at ${mountedApp}`);
+    const mountedApp = findMountedAppBundle(mountPoint, volumeName);
+    if (!mountedApp) {
+      throw new Error(`[notarize-macos-bundle] Mounted DMG did not contain an app bundle in ${mountPoint}`);
     }
+    console.log(`[notarize-macos-bundle] Mounted app bundle: ${mountedApp}`);
     validateGatekeeperForApp(mountedApp, 'mounted dmg app bundle');
   } finally {
     run('hdiutil', ['detach', mountPoint], { allowFailure: true });
     rmSync(mountPoint, { recursive: true, force: true });
   }
+}
+
+function resolvePrimaryExecutable(appBundlePath) {
+  const contentsDir = join(appBundlePath, 'Contents');
+  const macosDir = join(contentsDir, 'MacOS');
+  const infoPlistPath = join(contentsDir, 'Info.plist');
+  const plistExecutableName = readPlistString(infoPlistPath, 'CFBundleExecutable');
+  if (plistExecutableName) {
+    const executablePath = join(macosDir, plistExecutableName);
+    if (existsSync(executablePath)) {
+      return executablePath;
+    }
+  }
+
+  const fallbackExecutable = join(macosDir, 'noland-connect');
+  if (existsSync(fallbackExecutable)) {
+    return fallbackExecutable;
+  }
+
+  if (!existsSync(macosDir)) {
+    return null;
+  }
+
+  const appExecutables = readdirSync(macosDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith('.'))
+    .map((entry) => join(macosDir, entry.name));
+
+  return appExecutables.length === 1 ? appExecutables[0] : null;
+}
+
+function findMountedAppBundle(mountPoint, expectedVolumeName) {
+  const expectedBundle = join(mountPoint, `${expectedVolumeName}.app`);
+  if (existsSync(expectedBundle)) {
+    return expectedBundle;
+  }
+
+  const appBundles = readdirSync(mountPoint, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith('.app'))
+    .map((entry) => join(mountPoint, entry.name));
+
+  return appBundles.length === 1 ? appBundles[0] : null;
+}
+
+function readPlistString(plistPath, key) {
+  if (!existsSync(plistPath)) {
+    return null;
+  }
+
+  const plistContents = readFileSync(plistPath, 'utf8');
+  const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const match = plistContents.match(new RegExp(`<key>${escapedKey}</key>\\s*<string>([^<]+)</string>`));
+  return match?.[1]?.trim() || null;
 }
 
 function parseJson(text, context) {

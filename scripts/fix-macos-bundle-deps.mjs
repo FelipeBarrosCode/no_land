@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -8,11 +8,13 @@ import { spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? process.env.NOLAND_MIC_SENDER_TARGET ?? 'aarch64-apple-darwin';
-const productName = 'Noland Connect';
+const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+const productName = tauriConfig.productName ?? 'Noland Connect';
+const version = tauriConfig.version ?? '0.1.0';
 const tripleTargetDir = join(repoRoot, 'src-tauri', 'target', target, 'release');
 const defaultTargetDir = join(repoRoot, 'src-tauri', 'target', 'release');
 const bundleAppRelativePath = join('bundle', 'macos', `${productName}.app`);
-const bundleDmgRelativePath = join('bundle', 'dmg', `${productName}_0.1.0_${target.includes('aarch64') ? 'aarch64' : 'x64'}.dmg`);
+const bundleDmgRelativePath = join('bundle', 'dmg', `${productName}_${version}_${target.includes('aarch64') ? 'aarch64' : 'x64'}.dmg`);
 const targetReleaseDir = chooseTargetReleaseDir();
 const appPath = join(targetReleaseDir, bundleAppRelativePath);
 const dmgPath = join(targetReleaseDir, bundleDmgRelativePath);
