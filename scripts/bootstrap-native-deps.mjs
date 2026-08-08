@@ -389,6 +389,15 @@ function ensureOpenSsl(prefix, targetTriple) {
     return;
   }
 
+  const localPrefix = resolveMacLocalOpenSslPrefix();
+  if (localPrefix) {
+    stageMacOpenSslPrefix(localPrefix, prefix);
+    if (existsSync(cryptoLib) && existsSync(sslLib)) {
+      console.log(`Staged OpenSSL for ${targetTriple} from local prefix ${localPrefix}`);
+      return;
+    }
+  }
+
   const tarball = join(nativeDepsRoot, 'src', 'openssl-3.3.2.tar.gz');
   const tarballUrl = 'https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz';
   downloadFile(tarballUrl, tarball, { expectedKind: 'tar.gz' });
@@ -755,6 +764,58 @@ function copyFileWithMode(source, destination) {
 
 function locateExistingPath(candidates) {
   return candidates.find((candidate) => candidate && existsSync(candidate)) ?? null;
+}
+
+function resolveMacLocalOpenSslPrefix() {
+  if (process.platform !== 'darwin') {
+    return null;
+  }
+
+  const envPrefix = process.env.OPENSSL_ROOT_DIR?.trim();
+  const brewPrefix = run('brew', ['--prefix', 'openssl@3'], { allowFailure: true, captureOutput: true }).stdout.trim();
+  const candidate = locateExistingPath([
+    envPrefix,
+    brewPrefix || null,
+    '/opt/homebrew/opt/openssl@3',
+    '/usr/local/opt/openssl@3',
+  ]);
+
+  if (!candidate) {
+    return null;
+  }
+
+  return existsSync(join(candidate, 'lib', 'libcrypto.3.dylib')) && existsSync(join(candidate, 'lib', 'libssl.3.dylib'))
+    ? candidate
+    : null;
+}
+
+function stageMacOpenSslPrefix(sourcePrefix, destinationPrefix) {
+  mkdirSync(join(destinationPrefix, 'include'), { recursive: true });
+  mkdirSync(join(destinationPrefix, 'lib'), { recursive: true });
+
+  const includeDir = join(sourcePrefix, 'include', 'openssl');
+  if (existsSync(includeDir)) {
+    cpSync(includeDir, join(destinationPrefix, 'include', 'openssl'), { recursive: true, force: true, dereference: true });
+  }
+
+  const libDir = join(sourcePrefix, 'lib');
+  for (const name of ['libcrypto.3.dylib', 'libssl.3.dylib', 'libcrypto.dylib', 'libssl.dylib']) {
+    const source = join(libDir, name);
+    if (existsSync(source)) {
+      copyFileWithMode(source, join(destinationPrefix, 'lib', name));
+    }
+  }
+
+  const pkgConfigDir = join(libDir, 'pkgconfig');
+  if (existsSync(pkgConfigDir)) {
+    mkdirSync(join(destinationPrefix, 'lib', 'pkgconfig'), { recursive: true });
+    for (const name of ['libcrypto.pc', 'libssl.pc', 'openssl.pc']) {
+      const source = join(pkgConfigDir, name);
+      if (existsSync(source)) {
+        copyFileWithMode(source, join(destinationPrefix, 'lib', 'pkgconfig', name));
+      }
+    }
+  }
 }
 
 function pkgConfigVariable(pkgName, variable) {
