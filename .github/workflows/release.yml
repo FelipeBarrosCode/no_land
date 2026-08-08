@@ -8,15 +8,12 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
   NOLAND_GSTREAMER_VERSION: 1.24.13
-  MAIN_PRERELEASE_TAG: main-latest
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
-    tags:
-      - "v*"
 
 permissions:
   contents: write
@@ -333,7 +330,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main'
     environment: Secrets
     needs:
       - build
@@ -351,24 +348,41 @@ jobs:
         with:
           path: release-assets
 
-      - name: Move main prerelease tag
-        if: github.ref == 'refs/heads/main'
+      - name: Determine next release version
+        id: version
+        shell: bash
+        run: |
+          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
+          if [[ -z "$latest_tag" ]]; then
+            next_tag="v0.0.1"
+          else
+            version="${latest_tag#v}"
+            IFS='.' read -r major minor patch <<< "$version"
+            next_patch=$((patch + 1))
+            next_tag="v${major}.${minor}.${next_patch}"
+          fi
+          echo "release_tag=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "Resolved next release tag: $next_tag"
+
+      - name: Create git release tag
+        shell: bash
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag -f "$MAIN_PRERELEASE_TAG" "$GITHUB_SHA"
-          git push origin "refs/tags/$MAIN_PRERELEASE_TAG" --force
+          git tag "${{ steps.version.outputs.release_tag }}" "$GITHUB_SHA"
+          git push origin "refs/tags/${{ steps.version.outputs.release_tag }}"
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || env.MAIN_PRERELEASE_TAG }}
-          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('main build {0}', github.sha) }}
-          prerelease: ${{ github.ref == 'refs/heads/main' }}
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          name: ${{ steps.version.outputs.release_name }}
+          prerelease: false
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           overwrite_files: true
-          make_latest: ${{ startsWith(github.ref, 'refs/tags/v') }}
+          make_latest: true
           files: |
             release-assets/**/*.dmg
             release-assets/**/*.zip
