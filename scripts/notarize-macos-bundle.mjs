@@ -8,7 +8,7 @@ import { spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? 'aarch64-apple-darwin';
-const scriptRevision = '2026-08-08-notary-log-v2';
+const scriptRevision = '2026-08-08-notary-dmg-verify-v3';
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const version = tauriConfig.version ?? '0.1.0';
@@ -41,6 +41,7 @@ if (!appleId || !applePassword || !appleTeamId) {
 console.log(`[notarize-macos-bundle] Script revision: ${scriptRevision}`);
 console.log(`[notarize-macos-bundle] Preparing notarization for ${target}`);
 console.log(`[notarize-macos-bundle] App bundle: ${appPath}`);
+console.log(`[notarize-macos-bundle] DMG bundle: ${dmgPath}`);
 
 const tempDir = mkdtempSync(join(tmpdir(), 'noland-notary-'));
 const zipPath = join(tempDir, `${productName}-${target}.zip`);
@@ -53,19 +54,26 @@ try {
 
   console.log('[notarize-macos-bundle] Stapling notarization ticket to app bundle');
   run('xcrun', ['stapler', 'staple', '-v', appPath]);
+  validateStapledArtifact(appPath, 'app bundle');
+  validateGatekeeperForApp(appPath, 'app bundle');
 
   console.log('[notarize-macos-bundle] Rebuilding DMG from stapled app bundle');
   rebuildDmg(appPath, dmgPath, productName);
 
-  if (existsSync(dmgPath)) {
-    console.log('[notarize-macos-bundle] Submitting DMG to Apple notary service');
-    submitForNotarization(dmgPath, 'dmg');
-
-    console.log('[notarize-macos-bundle] Stapling notarization ticket to DMG');
-    run('xcrun', ['stapler', 'staple', '-v', dmgPath]);
+  if (!existsSync(dmgPath)) {
+    throw new Error(`[notarize-macos-bundle] Expected DMG was not produced: ${dmgPath}`);
   }
 
-  console.log(`[notarize-macos-bundle] Notarization complete for ${appPath} (submission ${appSubmission.id})`);
+  console.log('[notarize-macos-bundle] Submitting DMG to Apple notary service');
+  const dmgSubmission = submitForNotarization(dmgPath, 'dmg');
+
+  console.log('[notarize-macos-bundle] Stapling notarization ticket to DMG');
+  run('xcrun', ['stapler', 'staple', '-v', dmgPath]);
+  validateStapledArtifact(dmgPath, 'dmg');
+  validateGatekeeperForDmg(dmgPath, 'dmg');
+  validateMountedDmgApp(dmgPath, productName);
+
+  console.log(`[notarize-macos-bundle] Notarization complete for ${dmgPath} (app submission ${appSubmission.id}, dmg submission ${dmgSubmission.id})`);
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
 }
@@ -166,6 +174,38 @@ function fetchNotarizationLog(submissionId) {
       stdout,
       stderr: result.stderr?.trim() || null,
     };
+  }
+}
+
+function validateStapledArtifact(path, label) {
+  console.log(`[notarize-macos-bundle] Validating stapled ticket for ${label}`);
+  run('xcrun', ['stapler', 'validate', '-v', path]);
+}
+
+function validateGatekeeperForApp(path, label) {
+  console.log(`[notarize-macos-bundle] Validating Gatekeeper acceptance for ${label}`);
+  run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', path]);
+  run('spctl', ['-a', '-vvv', '-t', 'exec', path]);
+}
+
+function validateGatekeeperForDmg(path, label) {
+  console.log(`[notarize-macos-bundle] Validating Gatekeeper acceptance for ${label}`);
+  run('spctl', ['-a', '-vvv', '-t', 'open', path]);
+}
+
+function validateMountedDmgApp(dmg, volumeName) {
+  console.log('[notarize-macos-bundle] Mounting notarized DMG for final app verification');
+  const mountPoint = mkdtempSync(join(tmpdir(), 'noland-notary-mount-'));
+  const mountedApp = join(mountPoint, `${volumeName}.app`);
+  try {
+    run('hdiutil', ['attach', dmg, '-mountpoint', mountPoint, '-nobrowse', '-readonly']);
+    if (!existsSync(mountedApp)) {
+      throw new Error(`[notarize-macos-bundle] Mounted DMG did not contain expected app bundle at ${mountedApp}`);
+    }
+    validateGatekeeperForApp(mountedApp, 'mounted dmg app bundle');
+  } finally {
+    run('hdiutil', ['detach', mountPoint], { allowFailure: true });
+    rmSync(mountPoint, { recursive: true, force: true });
   }
 }
 
