@@ -102,6 +102,7 @@ ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
 const resourceBinaryFiles = existsSync(resourcesBinariesDir)
   ? listFiles(resourcesBinariesDir).filter(isCodeSignableFile)
   : [];
+const explicitMacSidecarFiles = collectExplicitMacSidecarFiles(macosDir, resourcesBinariesDir, target);
 
 const frameworkIndex = new Map();
 for (const file of frameworkFiles) {
@@ -139,7 +140,8 @@ for (const file of frameworkRootLibs) {
   setInstallId(file, `@rpath/${basename(file)}`);
 }
 
-resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...macosFiles, frameworkBundleDir]);
+resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...explicitMacSidecarFiles, ...macosFiles, frameworkBundleDir]);
+verifySignedMacSidecars(explicitMacSidecarFiles);
 cleanupStaleMacDmgArtifacts(targetReleaseDir);
 rebuildDmg(appPath, dmgPath, productName);
 if (!verifyDmgBundle(dmgPath, productName)) {
@@ -368,6 +370,32 @@ function signCodeObject(path, { runtime }) {
   }
   args.push(path);
   run('codesign', args, { allowFailure: false });
+}
+
+function collectExplicitMacSidecarFiles(appMacosDir, appResourcesBinariesDir, targetTriple) {
+  const candidates = [
+    join(appMacosDir, 'gotatun'),
+    join(appMacosDir, `gotatun-${targetTriple}`),
+    join(appMacosDir, 'noland-mic-sender'),
+    join(appMacosDir, `noland-mic-sender-${targetTriple}`),
+    join(appResourcesBinariesDir, `wg-${targetTriple}`),
+    join(appResourcesBinariesDir, `wg-quick-${targetTriple}`),
+    join(appResourcesBinariesDir, `wg-bash-${targetTriple}`),
+    join(appResourcesBinariesDir, `wg-quick-real-${targetTriple}`),
+    join(appResourcesBinariesDir, `ssh-${targetTriple}`),
+    join(appResourcesBinariesDir, `scp-${targetTriple}`),
+    join(appResourcesBinariesDir, `ssh-keygen-${targetTriple}`),
+  ];
+  return candidates.filter((file, index, list) => existsSync(file) && list.indexOf(file) === index);
+}
+
+function verifySignedMacSidecars(files) {
+  for (const file of files) {
+    const verify = run('codesign', ['--verify', '--verbose=2', file], { allowFailure: true });
+    if (verify.status !== 0) {
+      throw new Error(`Bundled macOS sidecar is not signed correctly: ${file}\n${verify.stderr || verify.stdout}`);
+    }
+  }
 }
 
 function rebuildDmg(app, dmg, volumeName) {
