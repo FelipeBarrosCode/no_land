@@ -24,6 +24,11 @@ if (target.includes('windows')) {
   process.exit(0);
 }
 
+if (target.includes('apple-darwin')) {
+  stageMacosTools(target);
+  process.exit(0);
+}
+
 console.log(`No CI managed-tool staging required for ${target}`);
 process.exit(0);
 
@@ -90,6 +95,49 @@ function stageWindowsTools(targetTriple) {
       ...where('ssh-keygen.exe'),
       join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh-keygen.exe'),
     ], 'Unable to locate ssh-keygen.exe on the Windows runner'),
+  };
+
+  writeGitHubEnv(envAssignments);
+  logAssignments(envAssignments);
+}
+
+function stageMacosTools(targetTriple) {
+  if (process.platform !== 'darwin') {
+    fail(`macOS CI managed-tool staging for ${targetTriple} must run on a macOS host.`);
+  }
+
+  const gotatunPath = buildGotatun(targetTriple);
+  const envAssignments = {
+    NOLAND_GOTATUN_BIN: gotatunPath,
+    NOLAND_WG_BIN: locateFirstExisting([
+      process.env.NOLAND_WG_BIN,
+      '/opt/homebrew/bin/wg',
+      '/usr/local/bin/wg',
+      '/usr/bin/wg',
+      which('wg'),
+    ], 'Unable to locate wg on the macOS runner. Install wireguard-tools or set NOLAND_WG_BIN.'),
+    NOLAND_WG_QUICK_BIN: locateFirstExisting([
+      process.env.NOLAND_WG_QUICK_BIN,
+      '/opt/homebrew/bin/wg-quick',
+      '/usr/local/bin/wg-quick',
+      '/usr/bin/wg-quick',
+      which('wg-quick'),
+    ], 'Unable to locate wg-quick on the macOS runner. Install wireguard-tools or set NOLAND_WG_QUICK_BIN.'),
+    NOLAND_SSH_BIN: locateFirstExisting([
+      process.env.NOLAND_SSH_BIN,
+      '/usr/bin/ssh',
+      which('ssh'),
+    ], 'Unable to locate ssh on the macOS runner'),
+    NOLAND_SCP_BIN: locateFirstExisting([
+      process.env.NOLAND_SCP_BIN,
+      '/usr/bin/scp',
+      which('scp'),
+    ], 'Unable to locate scp on the macOS runner'),
+    NOLAND_SSH_KEYGEN_BIN: locateFirstExisting([
+      process.env.NOLAND_SSH_KEYGEN_BIN,
+      '/usr/bin/ssh-keygen',
+      which('ssh-keygen'),
+    ], 'Unable to locate ssh-keygen on the macOS runner'),
   };
 
   writeGitHubEnv(envAssignments);

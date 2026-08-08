@@ -132,6 +132,16 @@ jobs:
             throw "WireGuard installation completed but expected executables were not found in $wireGuardDir"
           }
 
+      - name: Install macOS managed tool dependencies
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then
+            echo "WireGuard tools already present"
+            exit 0
+          fi
+          brew install wireguard-tools
+
       - name: Check Apple signing secret presence
         if: matrix.platform == 'macos'
         shell: bash
@@ -198,7 +208,7 @@ jobs:
           echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
 
       - name: Stage CI managed tools
-        if: matrix.platform == 'linux' || matrix.platform == 'windows'
+        if: matrix.platform == 'linux' || matrix.platform == 'windows' || matrix.platform == 'macos'
         run: node scripts/stage-ci-managed-tools.mjs --target ${{ matrix.target }}
 
       - name: Environment diagnostics
