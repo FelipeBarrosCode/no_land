@@ -94,10 +94,12 @@ if (packagingTarget) {
   }
   console.log(`Staged mic sidecar for packaging: ${stagedBinary}`);
 
-  if (isWindowsTarget(packagingTarget)) {
+  if (isWindowsTarget(packagingTarget) && windowsTargetNeedsGstreamer(packagingTarget)) {
     stageWindowsGstreamerRuntime(packagingTarget, binariesDir);
   } else if (packagingTarget.includes('linux')) {
     stageLinuxGstreamerRuntime(packagingTarget, binariesDir);
+  } else if (isWindowsTarget(packagingTarget)) {
+    console.log(`Skipping bundled Windows GStreamer runtime for ${packagingTarget}; microphone passthrough falls back to an unsupported stub on this target.`);
   }
 } else {
   console.log(`Prepared mic sidecar for local ${mode}: ${builtBinary}`);
@@ -180,6 +182,10 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
     chmodSync(stagedBinary, 0o755);
   }
   console.log(`Staged ${tool.lookupName} sidecar for packaging: ${stagedBinary}`);
+}
+
+function windowsTargetNeedsGstreamer(targetTriple) {
+  return !targetTriple.includes('aarch64');
 }
 
 function stageWindowsGstreamerRuntime(targetTriple, binariesDir) {
