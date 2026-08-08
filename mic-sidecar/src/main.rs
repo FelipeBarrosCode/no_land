@@ -1,11 +1,15 @@
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 use std::collections::HashSet;
 use std::process;
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
 
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 use gst::prelude::*;
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 use gstreamer as gst;
 use serde::{Deserialize, Serialize};
 
@@ -34,8 +38,13 @@ use coreaudio_sys::{
 
 const SAMPLE_RATE: i32 = 48_000;
 const CHANNELS: i32 = 1;
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 const COMPLEXITY: i32 = 5;
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 const RTP_PAYLOAD_TYPE: i32 = 96;
+
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+const WINDOWS_ARM64_UNSUPPORTED_MESSAGE: &str = "Microphone passthrough is not yet supported on Windows ARM64 because the required GStreamer SDK is not published for that target.";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +143,7 @@ fn optional_arg(args: &[String], flag: &str) -> Option<String> {
         .map(|window| window[1].clone())
 }
 
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 fn list_devices() -> Result<Vec<MicrophoneDevice>, String> {
     gst::init().map_err(|error| format!("Failed initializing GStreamer: {error}"))?;
 
@@ -197,6 +207,12 @@ fn list_devices() -> Result<Vec<MicrophoneDevice>, String> {
     }
 }
 
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+fn list_devices() -> Result<Vec<MicrophoneDevice>, String> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 fn run_stream(args: StreamArgs) -> Result<(), String> {
     gst::init().map_err(|error| format!("Failed initializing GStreamer: {error}"))?;
 
@@ -243,7 +259,15 @@ fn run_stream(args: StreamArgs) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+fn run_stream(_args: StreamArgs) -> Result<(), String> {
+    Err(WINDOWS_ARM64_UNSUPPORTED_MESSAGE.to_string())
+}
+
+#[cfg(all(
+    target_os = "macos",
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
     let resolved_device = resolve_macos_stream_device(args.device_id.as_deref())?;
     eprintln!(
@@ -284,7 +308,10 @@ fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
     let pipeline = gst::Pipeline::new();
     let source = build_source(args.device_id.as_deref())?;
@@ -348,7 +375,10 @@ fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
     Ok(pipeline)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn build_source(device_id: Option<&str>) -> Result<gst::Element, String> {
     let source = if let Some(requested) = device_id.map(str::trim).filter(|value| !value.is_empty())
     {
@@ -367,7 +397,10 @@ fn build_source(device_id: Option<&str>) -> Result<gst::Element, String> {
     Ok(source)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn create_monitored_device_source(requested: &str) -> Result<gst::Element, String> {
     let device = list_audio_source_devices()?
         .into_iter()
@@ -387,7 +420,10 @@ fn create_monitored_device_source(requested: &str) -> Result<gst::Element, Strin
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn create_default_source() -> Result<gst::Element, String> {
     let factory_name = if cfg!(target_os = "windows") {
         "wasapisrc"
@@ -398,7 +434,10 @@ fn create_default_source() -> Result<gst::Element, String> {
     make_element(factory_name)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn list_audio_source_devices() -> Result<Vec<gst::Device>, String> {
     let monitor = gst::DeviceMonitor::new();
     let caps = gst::Caps::builder("audio/x-raw").build();
@@ -411,7 +450,10 @@ fn list_audio_source_devices() -> Result<Vec<gst::Device>, String> {
     Ok(devices)
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn create_source_for_device(device: &gst::Device) -> Result<gst::Element, String> {
     device.create_element(None).map_err(|error| {
         format!(
@@ -421,7 +463,10 @@ fn create_source_for_device(device: &gst::Device) -> Result<gst::Element, String
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    not(target_os = "macos"),
+    not(all(target_os = "windows", target_arch = "aarch64"))
+))]
 fn device_is_default(device: &gst::Device) -> bool {
     device
         .properties()
@@ -430,6 +475,7 @@ fn device_is_default(device: &gst::Device) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
 fn make_element(factory_name: &str) -> Result<gst::Element, String> {
     gst::ElementFactory::make(factory_name)
         .build()

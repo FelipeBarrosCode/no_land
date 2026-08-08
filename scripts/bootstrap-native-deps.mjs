@@ -95,11 +95,17 @@ function bootstrapWindowsTarget(targetTriple) {
   const prefix = nativePrefix(targetTriple);
   mkdirSync(prefix, { recursive: true });
 
-  const gstreamerRoot = ensureWindowsGstreamerRoot(prefix, targetTriple);
+  const gstreamerRoot = windowsTargetNeedsGstreamer(targetTriple)
+    ? ensureWindowsGstreamerRoot(prefix, targetTriple)
+    : null;
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
   console.log(`  prefix: ${prefix}`);
-  console.log(`  gstreamer: ${gstreamerRoot}`);
+  if (gstreamerRoot) {
+    console.log(`  gstreamer: ${gstreamerRoot}`);
+  } else {
+    console.log('  gstreamer: skipped (Windows ARM64 microphone sidecar uses a stub fallback because upstream GStreamer MSVC ARM64 packages are not published)');
+  }
 }
 
 function ensureMacGstreamerFramework() {
@@ -740,6 +746,10 @@ function pkgConfigVariable(pkgName, variable) {
   }
   const value = result.stdout.trim();
   return value || null;
+}
+
+function windowsTargetNeedsGstreamer(targetTriple) {
+  return !targetTriple.includes('aarch64');
 }
 
 function windowsGstreamerRoot(prefix, targetTriple) {

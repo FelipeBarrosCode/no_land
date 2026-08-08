@@ -124,6 +124,11 @@ fn cleanup_stale_stream_processes(sidecar: &Path) {
 fn cleanup_stale_stream_processes(_sidecar: &Path) {}
 
 pub fn cleanup_stale_pipeline_processes() -> AppResult<()> {
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        return Ok(());
+    }
+
     let sidecar = runtime::resolve_mic_sender_binary()?;
     cleanup_stale_stream_processes(&sidecar);
     Ok(())
@@ -131,6 +136,15 @@ pub fn cleanup_stale_pipeline_processes() -> AppResult<()> {
 
 /// Start the local microphone sender sidecar.
 pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        let _ = config;
+        return Err(AppError::Command(
+            "Microphone passthrough is not yet supported on Windows ARM64 because the required GStreamer SDK is not published for that target."
+                .to_string(),
+        ));
+    }
+
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         let _ = config;

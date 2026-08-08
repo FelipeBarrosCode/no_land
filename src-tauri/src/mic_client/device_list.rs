@@ -22,6 +22,11 @@ pub struct MicrophoneDevice {
 
 /// Enumerate all available recording devices.
 pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        return Ok(Vec::new());
+    }
+
     #[cfg(target_os = "macos")]
     {
         return list_devices_macos().or_else(|mac_error| {
