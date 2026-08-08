@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -580,11 +580,7 @@ function sanitizeBundleSymlinks(root) {
       const full = join(current, entry.name);
       const stats = lstatSync(full);
       if (stats.isSymbolicLink()) {
-        materializeSymlink(full, root);
-        const materializedStats = lstatSync(full);
-        if (materializedStats.isDirectory()) {
-          stack.push(full);
-        }
+        sanitizeSymlink(full, root);
         continue;
       }
       if (stats.isDirectory()) {
@@ -594,16 +590,25 @@ function sanitizeBundleSymlinks(root) {
   }
 }
 
-function materializeSymlink(path, bundleRoot) {
+function sanitizeSymlink(path, bundleRoot) {
   const rawTarget = readlinkSync(path);
   const resolvedTarget = resolve(dirname(path), rawTarget);
+  const bundleRootResolved = resolve(bundleRoot);
+  const relativePath = relative(bundleRootResolved, resolvedTarget);
+  const pointsOutsideBundle = relativePath === '' ? false : relativePath.startsWith('..');
+  const unsafeTarget = isAbsolute(rawTarget) || pointsOutsideBundle;
+
   if (!existsSync(resolvedTarget)) {
-    throw new Error(`Bundle contains a broken symlink: ${path} -> ${rawTarget}`);
+    console.warn(`[fix-macos-bundle-deps] Removing broken symlink ${relative(appPath, path) || '.'} -> ${rawTarget}`);
+    rmSync(path, { recursive: true, force: true });
+    return;
   }
 
-  const relativePath = relative(resolve(bundleRoot), resolvedTarget);
-  const pointsOutsideBundle = relativePath === '' ? false : relativePath.startsWith('..');
-  console.log(`[fix-macos-bundle-deps] Materializing symlink ${relative(appPath, path) || '.'} -> ${rawTarget}${pointsOutsideBundle ? ' (outside bundle)' : ''}`);
+  if (!unsafeTarget) {
+    return;
+  }
+
+  console.log(`[fix-macos-bundle-deps] Materializing unsafe symlink ${relative(appPath, path) || '.'} -> ${rawTarget}${pointsOutsideBundle ? ' (outside bundle)' : ''}`);
 
   rmSync(path, { recursive: true, force: true });
   const targetStats = statSync(resolvedTarget);
