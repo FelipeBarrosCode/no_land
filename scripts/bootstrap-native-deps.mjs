@@ -57,11 +57,18 @@ function bootstrapMacTarget(targetTriple) {
   const prefix = nativePrefix(targetTriple);
   mkdirSync(prefix, { recursive: true });
 
+  console.log(`[bootstrap-native-deps] macOS bootstrap start for ${targetTriple}`);
+  console.log('[bootstrap-native-deps] Ensuring expanded macOS GStreamer packages');
   const gstreamerPackages = ensureExpandedMacGstreamerPackages();
+  console.log('[bootstrap-native-deps] Ensuring staged macOS GStreamer framework');
   ensureMacGstreamerFramework();
+  console.log('[bootstrap-native-deps] Ensuring OpenSSL');
   ensureOpenSsl(prefix, targetTriple);
+  console.log('[bootstrap-native-deps] Ensuring Opus');
   ensureOpus(prefix, targetTriple);
+  console.log('[bootstrap-native-deps] Ensuring SDL2');
   ensureSdl2(prefix, targetTriple);
+  console.log('[bootstrap-native-deps] Ensuring Bash');
   ensureBash(prefix, targetTriple);
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
@@ -451,6 +458,8 @@ function ensureSdl2(prefix, targetTriple) {
     return;
   }
 
+  console.log(`[bootstrap-native-deps] Building SDL2 from source for ${targetTriple}`);
+
   ensureExtractedSourceTarball(
     'https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-2.30.10.tar.gz',
     'SDL2-2.30.10.tar.gz',
@@ -472,10 +481,13 @@ function ensureSdl2(prefix, targetTriple) {
     '-DSDL2_DISABLE_INSTALL_DOCS=ON',
     ...cmakeTargetArgs(targetTriple),
   ], { env: nativeBuildEnv(targetTriple) });
+  console.log(`[bootstrap-native-deps] SDL2 configure complete for ${targetTriple}`);
   run('cmake', ['--build', buildDir, '--config', 'Release', '--parallel', cpuCount()], {
     env: nativeBuildEnv(targetTriple),
   });
+  console.log(`[bootstrap-native-deps] SDL2 build complete for ${targetTriple}`);
   run('cmake', ['--install', buildDir, '--config', 'Release'], { env: nativeBuildEnv(targetTriple) });
+  console.log(`[bootstrap-native-deps] SDL2 install complete for ${targetTriple}`);
 }
 
 function ensureBash(prefix, targetTriple) {
@@ -484,6 +496,8 @@ function ensureBash(prefix, targetTriple) {
     console.log(`Using staged Bash for ${targetTriple}`);
     return;
   }
+
+  console.log(`[bootstrap-native-deps] Building Bash from source for ${targetTriple}`);
 
   const tarball = join(nativeDepsRoot, 'src', 'bash-5.2.tar.gz');
   const tarballUrl = 'https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz';
@@ -501,8 +515,11 @@ function ensureBash(prefix, targetTriple) {
     '--disable-readline',
     '--disable-history',
   ], { cwd: buildDir, env });
+  console.log(`[bootstrap-native-deps] Bash configure complete for ${targetTriple}`);
   run('make', ['-j', cpuCount()], { cwd: buildDir, env });
+  console.log(`[bootstrap-native-deps] Bash build complete for ${targetTriple}`);
   run('make', ['install'], { cwd: buildDir, env });
+  console.log(`[bootstrap-native-deps] Bash install complete for ${targetTriple}`);
 
   if (!existsSync(bashPath)) {
     throw new Error(`Bash install completed but ${bashPath} was not produced`);
