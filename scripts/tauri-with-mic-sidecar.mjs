@@ -14,10 +14,14 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
+const windowsArm64Config = target === 'aarch64-pc-windows-msvc' && !hasConfigOverride(tauriArgsWithTarget)
+  ? ['--config', 'src-tauri/tauri.windows.arm64.conf.json']
+  : [];
+const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsArm64Config];
 const tauriCliArgs = mode === 'build'
-  ? ensureCargoFeature(tauriArgsWithTarget, 'moonlight-config-bin')
-  : tauriArgsWithTarget;
-const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsWithTarget];
+  ? ensureCargoFeature(tauriArgsPrepared, 'moonlight-config-bin')
+  : tauriArgsPrepared;
+const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsPrepared];
 let nativeEnv = buildNativeEnv(target);
 const prepEnv = {
   ...nativeEnv,
@@ -186,6 +190,18 @@ function readTarget(args) {
     }
   }
   return undefined;
+}
+
+function hasConfigOverride(args) {
+  for (let i = 0; i < args.length; i += 1) {
+    if (args[i] === '--config' && args[i + 1]) {
+      return true;
+    }
+    if (args[i].startsWith('--config=')) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function buildNativeEnv(targetTriple) {

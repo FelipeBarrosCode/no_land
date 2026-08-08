@@ -1,0 +1,19 @@
+{
+  "bundle": {
+    "targets": ["nsis"],
+    "resources": [
+      "binaries/wg-*-pc-windows-msvc.exe",
+      "binaries/wireguard-*-pc-windows-msvc.exe",
+      "binaries/ssh-*-pc-windows-msvc.exe",
+      "binaries/scp-*-pc-windows-msvc.exe",
+      "binaries/ssh-keygen-*-pc-windows-msvc.exe",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*"
+    ],
+    "windows": {
+      "nsis": {
+        "compression": "zlib"
+      }
+    }
+  }
+}

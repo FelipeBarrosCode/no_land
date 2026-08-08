@@ -99,7 +99,7 @@ const frameworkRootLibs = existsSync(frameworksDir)
 
 ensureBundledSdl3(frameworksDir, frameworkRootLibs);
 ensureBundledWireguardSidecars(target, resourcesBinariesDir);
-pruneIrrelevantMacResourceSidecars(resourcesBinariesDir);
+pruneIrrelevantMacResourceSidecars(resourcesBinariesDir, target);
 ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
 
 const resourceBinaryFiles = existsSync(resourcesBinariesDir)
@@ -330,13 +330,32 @@ function ensureBundledWireguardSidecars(targetTriple, destinationDir) {
   }
 }
 
-function pruneIrrelevantMacResourceSidecars(destinationDir) {
+function pruneIrrelevantMacResourceSidecars(destinationDir, targetTriple) {
   if (!existsSync(destinationDir)) return;
+
+  const managedMacSidecarPrefixes = [
+    'wg-',
+    'wg-quick-',
+    'wg-bash-',
+    'wg-quick-real-',
+    'ssh-',
+    'scp-',
+    'ssh-keygen-',
+  ];
 
   for (const entry of readdirSync(destinationDir, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
-    if (!/^wireguard-.*\.exe$/u.test(entry.name)) continue;
-    rmSync(join(destinationDir, entry.name), { force: true });
+
+    if (/^wireguard-.*\.exe$/u.test(entry.name)) {
+      rmSync(join(destinationDir, entry.name), { force: true });
+      continue;
+    }
+
+    const isManagedMacSidecar = managedMacSidecarPrefixes.some((prefix) => entry.name.startsWith(prefix));
+    if (!isManagedMacSidecar) continue;
+    if (!entry.name.endsWith(targetTriple)) {
+      rmSync(join(destinationDir, entry.name), { force: true });
+    }
   }
 }
 

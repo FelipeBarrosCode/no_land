@@ -47,15 +47,7 @@ try {
   run('ditto', ['-c', '-k', '--keepParent', appPath, zipPath]);
 
   console.log('[notarize-macos-bundle] Submitting app zip to Apple notary service');
-  run('xcrun', [
-    'notarytool',
-    'submit',
-    zipPath,
-    '--apple-id', appleId,
-    '--password', applePassword,
-    '--team-id', appleTeamId,
-    '--wait',
-  ]);
+  const appSubmission = submitForNotarization(zipPath, 'app zip');
 
   console.log('[notarize-macos-bundle] Stapling notarization ticket to app bundle');
   run('xcrun', ['stapler', 'staple', '-v', appPath]);
@@ -65,21 +57,13 @@ try {
 
   if (existsSync(dmgPath)) {
     console.log('[notarize-macos-bundle] Submitting DMG to Apple notary service');
-    run('xcrun', [
-      'notarytool',
-      'submit',
-      dmgPath,
-      '--apple-id', appleId,
-      '--password', applePassword,
-      '--team-id', appleTeamId,
-      '--wait',
-    ]);
+    submitForNotarization(dmgPath, 'dmg');
 
     console.log('[notarize-macos-bundle] Stapling notarization ticket to DMG');
     run('xcrun', ['stapler', 'staple', '-v', dmgPath]);
   }
 
-  console.log(`[notarize-macos-bundle] Notarization complete for ${appPath}`);
+  console.log(`[notarize-macos-bundle] Notarization complete for ${appPath} (submission ${appSubmission.id})`);
 } finally {
   rmSync(tempDir, { recursive: true, force: true });
 }
@@ -116,13 +100,95 @@ function rebuildDmg(app, dmg, volumeName) {
   }
 }
 
-function run(command, args) {
+function notarizationAuthArgs() {
+  return [
+    '--apple-id', appleId,
+    '--password', applePassword,
+    '--team-id', appleTeamId,
+  ];
+}
+
+function submitForNotarization(path, label) {
+  const result = run('xcrun', [
+    'notarytool',
+    'submit',
+    path,
+    ...notarizationAuthArgs(),
+    '--wait',
+    '--output-format', 'json',
+  ], { captureOutput: true });
+
+  const payload = parseJson(result.stdout, `notarytool submit output for ${label}`);
+  const status = `${payload.status ?? ''}`.trim();
+  const submissionId = `${payload.id ?? ''}`.trim();
+  if (!submissionId) {
+    throw new Error(`[notarize-macos-bundle] Apple did not return a submission id for ${label}`);
+  }
+
+  console.log(`[notarize-macos-bundle] ${label} submission ${submissionId} completed with status: ${status || 'unknown'}`);
+
+  if (status.toLowerCase() === 'accepted') {
+    return payload;
+  }
+
+  const logPayload = fetchNotarizationLog(submissionId);
+  console.error(`[notarize-macos-bundle] ${label} notarization failed with status ${status || 'unknown'}`);
+  console.error(JSON.stringify(logPayload, null, 2));
+  throw new Error(`[notarize-macos-bundle] ${label} notarization failed with status ${status || 'unknown'} (submission ${submissionId})`);
+}
+
+function fetchNotarizationLog(submissionId) {
+  const result = run('xcrun', [
+    'notarytool',
+    'log',
+    submissionId,
+    ...notarizationAuthArgs(),
+    '--output-format', 'json',
+  ], { captureOutput: true, allowFailure: true });
+
+  const stdout = result.stdout?.trim();
+  if (!stdout) {
+    return {
+      submissionId,
+      error: 'No notarization log output was returned by Apple.',
+      stderr: result.stderr?.trim() || null,
+    };
+  }
+
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return {
+      submissionId,
+      error: 'Failed to parse notarization log JSON.',
+      stdout,
+      stderr: result.stderr?.trim() || null,
+    };
+  }
+}
+
+function parseJson(text, context) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new Error(`[notarize-macos-bundle] Failed to parse ${context}: ${error.message}\n${text}`);
+  }
+}
+
+function run(command, args, options = {}) {
+  const { captureOutput = false, allowFailure = false } = options;
   const result = spawnSync(command, args, {
     cwd: repoRoot,
     env: process.env,
-    stdio: 'inherit',
+    stdio: captureOutput ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    encoding: captureOutput ? 'utf8' : undefined,
   });
-  if (result.status !== 0) {
+  if (!allowFailure && result.status !== 0) {
     throw new Error(`Command failed: ${command} ${args.join(' ')}`);
   }
+  return {
+    status: result.status ?? 0,
+    stdout: typeof result.stdout === 'string' ? result.stdout : '',
+    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+  };
 }
