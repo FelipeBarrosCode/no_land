@@ -103,14 +103,33 @@ jobs:
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          $wireGuardDir = Join-Path ($env:ProgramFiles ?? 'C:\Program Files') 'WireGuard'
+          $wgExe = Join-Path $wireGuardDir 'wg.exe'
+          $wireguardExe = Join-Path $wireGuardDir 'wireguard.exe'
+
+          if ((Test-Path $wgExe) -and (Test-Path $wireguardExe)) {
+            Write-Host "WireGuard already present at $wireGuardDir"
+            exit 0
+          }
+
           if ('${{ matrix.arch }}' -eq 'arm64') {
-            if (Get-Command winget -ErrorAction SilentlyContinue) {
-              winget install --exact --id WireGuard.WireGuard --accept-source-agreements --accept-package-agreements
-            } else {
-              choco install wireguard -y --no-progress
+            $msiPath = Join-Path $env:TEMP 'wireguard-arm64-1.1.msi'
+            $logPath = Join-Path $env:TEMP 'wireguard-arm64-install.log'
+            Invoke-WebRequest -Uri 'https://download.wireguard.com/windows-client/wireguard-arm64-1.1.msi' -OutFile $msiPath
+            $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msiPath, '/qn', '/norestart', '/l*v', $logPath, 'DO_NOT_LAUNCH=1')
+            if ($process.ExitCode -ne 0) {
+              Write-Host "WireGuard ARM64 install failed with exit code $($process.ExitCode). MSI log: $logPath"
+              if (Test-Path $logPath) {
+                Get-Content $logPath -Tail 200
+              }
+              throw "WireGuard ARM64 MSI install failed"
             }
           } else {
             choco install wireguard -y --no-progress
+          }
+
+          if (-not ((Test-Path $wgExe) -and (Test-Path $wireguardExe))) {
+            throw "WireGuard installation completed but expected executables were not found in $wireGuardDir"
           }
 
       - name: Check Apple signing secret presence
@@ -165,12 +184,17 @@ jobs:
             echo "APPLE_CERTIFICATE is not configured; skipping signing identity resolution."
             exit 0
           fi
-          CERT_LINE=$(security find-identity -v -p codesigning build.keychain | grep -E 'Developer ID Application|Apple Distribution' | head -n 1)
+          IDENTITIES=$(security find-identity -v -p codesigning build.keychain || true)
+          echo "Available code-signing identities in build.keychain:"
+          echo "$IDENTITIES"
+          CERT_LINE=$(printf '%s\n' "$IDENTITIES" | grep -E 'Developer ID Application|Apple Distribution' | head -n 1 || true)
           CERT_ID=$(echo "$CERT_LINE" | awk -F'"' '{print $2}')
           if [[ -z "$CERT_ID" ]]; then
-            echo "Unable to find an imported Apple signing identity in build.keychain" >&2
+            echo "Unable to find a Developer ID Application or Apple Distribution identity in build.keychain." >&2
+            echo "This usually means the imported .p12 is the wrong certificate type, is missing the private key, or has a different subject name than expected." >&2
             exit 1
           fi
+          echo "Resolved Apple signing identity: $CERT_ID"
           echo "APPLE_SIGNING_IDENTITY=$CERT_ID" >> "$GITHUB_ENV"
 
       - name: Stage CI managed tools
@@ -257,7 +281,15 @@ jobs:
 
       - name: Install Windows managed tool dependencies
         shell: pwsh
-        run: choco install wireguard -y --no-progress
+        run: |
+          $wireGuardDir = Join-Path ($env:ProgramFiles ?? 'C:\Program Files') 'WireGuard'
+          $wgExe = Join-Path $wireGuardDir 'wg.exe'
+          $wireguardExe = Join-Path $wireGuardDir 'wireguard.exe'
+          if ((Test-Path $wgExe) -and (Test-Path $wireguardExe)) {
+            Write-Host "WireGuard already present at $wireGuardDir"
+            exit 0
+          }
+          choco install wireguard -y --no-progress
 
       - name: Stage CI managed tools
         run: node scripts/stage-ci-managed-tools.mjs --target x86_64-pc-windows-msvc
