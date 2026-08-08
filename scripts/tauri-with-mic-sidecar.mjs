@@ -14,10 +14,8 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
-const windowsArm64Config = target === 'aarch64-pc-windows-msvc' && !hasConfigOverride(tauriArgsWithTarget)
-  ? ['--config', 'src-tauri/tauri.windows.arm64.conf.json']
-  : [];
-const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsArm64Config];
+const windowsTargetConfig = resolveWindowsTargetConfig(target, tauriArgsWithTarget);
+const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsTargetConfig];
 const tauriCliArgs = mode === 'build'
   ? ensureCargoFeature(tauriArgsPrepared, 'moonlight-config-bin')
   : tauriArgsPrepared;
@@ -192,16 +190,40 @@ function readTarget(args) {
   return undefined;
 }
 
-function hasConfigOverride(args) {
+function hasConfigPath(args, configPath) {
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--config' && args[i + 1]) {
-      return true;
+      const values = args[i + 1].split(',').map((value) => value.trim()).filter(Boolean);
+      if (values.includes(configPath)) {
+        return true;
+      }
     }
     if (args[i].startsWith('--config=')) {
-      return true;
+      const values = args[i].slice('--config='.length).split(',').map((value) => value.trim()).filter(Boolean);
+      if (values.includes(configPath)) {
+        return true;
+      }
     }
   }
   return false;
+}
+
+function resolveWindowsTargetConfig(targetTriple, args) {
+  if (!targetTriple?.includes('windows')) {
+    return [];
+  }
+
+  const configPath = targetTriple === 'aarch64-pc-windows-msvc'
+    ? 'src-tauri/tauri.windows.arm64.conf.json'
+    : targetTriple === 'x86_64-pc-windows-msvc'
+      ? 'src-tauri/tauri.windows.x64.conf.json'
+      : null;
+
+  if (!configPath || hasConfigPath(args, configPath)) {
+    return [];
+  }
+
+  return ['--config', configPath];
 }
 
 function buildNativeEnv(targetTriple) {

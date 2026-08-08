@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? 'aarch64-apple-darwin';
+const scriptRevision = '2026-08-08-notary-log-v2';
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const version = tauriConfig.version ?? '0.1.0';
@@ -37,6 +38,7 @@ if (!appleId || !applePassword || !appleTeamId) {
   process.exit(1);
 }
 
+console.log(`[notarize-macos-bundle] Script revision: ${scriptRevision}`);
 console.log(`[notarize-macos-bundle] Preparing notarization for ${target}`);
 console.log(`[notarize-macos-bundle] App bundle: ${appPath}`);
 

@@ -13,11 +13,6 @@
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gsttypefindfunctions*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstvolume*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstwasapi*.dll"
-    ],
-    "windows": {
-      "webviewInstallMode": {
-        "type": "offlineInstaller"
-      }
-    }
+    ]
   }
 }
