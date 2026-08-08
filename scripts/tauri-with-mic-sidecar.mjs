@@ -39,6 +39,15 @@ const tauriEnv = {
   ...nativeEnv,
 };
 
+if (process.platform === 'darwin' && mode === 'build') {
+  delete tauriEnv.APPLE_ID;
+  delete tauriEnv.APPLE_PASSWORD;
+  delete tauriEnv.APPLE_TEAM_ID;
+  delete tauriEnv.APPLE_API_ISSUER;
+  delete tauriEnv.APPLE_API_KEY;
+  console.log('[tauri-with-mic-sidecar] Deferring macOS notarization until after bundle fix/signing completes');
+}
+
 const managedWg = findManagedTool(process.platform === 'win32' ? 'wg' : 'wg', target, 'NOLAND_WG_BIN');
 const managedWgQuick = process.platform === 'win32'
   ? undefined
@@ -123,6 +132,21 @@ if (process.platform === 'darwin' && mode === 'build') {
   if (!bundleHasRequiredSdl3(targetTriple)) {
     console.error('macOS bundle verification failed: the finished app bundle still references SDL3 without bundling libSDL3.dylib.');
     process.exit(1);
+  }
+
+  if (process.env.APPLE_ID && process.env.APPLE_PASSWORD && process.env.APPLE_TEAM_ID) {
+    console.log(`[tauri-with-mic-sidecar] Starting custom macOS notarization for ${targetTriple}`);
+    const notarize = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'notarize-macos-bundle.mjs'), targetTriple], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: nativeEnv,
+    });
+    if (notarize.status !== 0) {
+      process.exit(notarize.status ?? 1);
+    }
+    console.log(`[tauri-with-mic-sidecar] Custom macOS notarization finished for ${targetTriple}`);
+  } else {
+    console.log('[tauri-with-mic-sidecar] Skipping custom macOS notarization because APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID are not all configured');
   }
 }
 
