@@ -95,6 +95,7 @@ function bootstrapWindowsTarget(targetTriple) {
   const prefix = nativePrefix(targetTriple);
   mkdirSync(prefix, { recursive: true });
 
+  ensureOpus(prefix, targetTriple);
   const gstreamerRoot = windowsTargetNeedsGstreamer(targetTriple)
     ? ensureWindowsGstreamerRoot(prefix, targetTriple)
     : null;
