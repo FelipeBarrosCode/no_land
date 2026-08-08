@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -94,9 +94,7 @@ const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim() || '';
 console.log(`[fix-macos-bundle-deps] Preparing macOS bundle fix for ${target}`);
 console.log(`[fix-macos-bundle-deps] App bundle: ${appPath}`);
 console.log(`[fix-macos-bundle-deps] Signing identity: ${appleSigningIdentity || 'ad-hoc'}`);
-const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
-const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
-const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
+
 const frameworkRootLibs = existsSync(frameworksDir)
   ? readdirSync(frameworksDir, { withFileTypes: true })
       .filter((entry) => entry.isFile())
@@ -108,7 +106,11 @@ ensureBundledSdl3(frameworksDir, frameworkRootLibs);
 ensureBundledWireguardSidecars(target, resourcesBinariesDir);
 pruneIrrelevantMacResourceSidecars(resourcesBinariesDir, target);
 ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
+sanitizeBundleSymlinks(appPath);
 
+const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
+const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
+const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
 const resourceBinaryFiles = existsSync(resourcesBinariesDir)
   ? listFiles(resourcesBinariesDir).filter(isCodeSignableFile)
   : [];
@@ -566,6 +568,54 @@ function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
   if (!existsSync(sdl3Dest)) {
     throw new Error(`Failed to bundle libSDL3.dylib into ${frameworksDir}`);
   }
+}
+
+function sanitizeBundleSymlinks(root) {
+  if (!existsSync(root)) return;
+
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      const stats = lstatSync(full);
+      if (stats.isSymbolicLink()) {
+        materializeSymlink(full, root);
+        const materializedStats = lstatSync(full);
+        if (materializedStats.isDirectory()) {
+          stack.push(full);
+        }
+        continue;
+      }
+      if (stats.isDirectory()) {
+        stack.push(full);
+      }
+    }
+  }
+}
+
+function materializeSymlink(path, bundleRoot) {
+  const rawTarget = readlinkSync(path);
+  const resolvedTarget = resolve(dirname(path), rawTarget);
+  if (!existsSync(resolvedTarget)) {
+    throw new Error(`Bundle contains a broken symlink: ${path} -> ${rawTarget}`);
+  }
+
+  const relativePath = relative(resolve(bundleRoot), resolvedTarget);
+  const pointsOutsideBundle = relativePath === '' ? false : relativePath.startsWith('..');
+  console.log(`[fix-macos-bundle-deps] Materializing symlink ${relative(appPath, path) || '.'} -> ${rawTarget}${pointsOutsideBundle ? ' (outside bundle)' : ''}`);
+
+  rmSync(path, { recursive: true, force: true });
+  const targetStats = statSync(resolvedTarget);
+  if (targetStats.isDirectory()) {
+    cpSync(resolvedTarget, path, { recursive: true, force: true, dereference: true });
+    return;
+  }
+
+  copyFileSync(resolvedTarget, path);
+  try {
+    chmodSync(path, targetStats.mode);
+  } catch {}
 }
 
 function listFiles(root) {
