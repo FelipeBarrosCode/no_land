@@ -102,12 +102,37 @@ function rebuildDmg(app, dmg, volumeName) {
   const stagedApp = join(tempRoot, basename(app));
   try {
     run('ditto', [app, stagedApp]);
-    run('hdiutil', ['create', '-volname', volumeName, '-srcfolder', stagedApp, '-ov', '-format', 'UDZO', tempDmg]);
+    createDmgWithRetry(tempRoot, tempDmg, volumeName);
     copyFileSync(tempDmg, dmg);
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
     rmSync(tempRoot, { recursive: true, force: true });
   }
+}
+
+function createDmgWithRetry(sourceFolder, outputDmg, volumeName) {
+  const args = ['create', '-volname', volumeName, '-srcfolder', sourceFolder, '-ov', '-format', 'UDZO', outputDmg];
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = run('hdiutil', args, { captureOutput: true, allowFailure: true });
+    if (result.status === 0) {
+      return;
+    }
+
+    const output = `${result.stdout}\n${result.stderr}`.trim();
+    const resourceBusy = /Resource busy/i.test(output);
+    if (resourceBusy && attempt < 3) {
+      console.warn(`[notarize-macos-bundle] hdiutil create reported a transient resource-busy error on attempt ${attempt}; retrying. Output:\n${output}`);
+      sleepMs(2000);
+      continue;
+    }
+
+    throw new Error(`Command failed: hdiutil ${args.join(' ')}\n${output}`);
+  }
+}
+
+function sleepMs(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 }
 
 function notarizationAuthArgs() {
