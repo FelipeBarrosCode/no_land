@@ -36,11 +36,19 @@ Add these secrets to the `Secrets` environment used by `Code/noland/no_land/.git
 - `CLOUDFLARE_ACCOUNT_ID`
 - `CLOUDFLARE_R2_BUCKET`
 - `CLOUDFLARE_R2_PUBLIC_BASE_URL`
+- `RELEASE_PAT`
 
 Example values:
 
 - `CLOUDFLARE_R2_BUCKET=no-land-downloads`
 - `CLOUDFLARE_R2_PUBLIC_BASE_URL=https://downloads.noland.app`
+
+`RELEASE_PAT` should be a GitHub token that can:
+
+- push tags for commits that modify workflow files
+- create/update GitHub releases
+
+A classic PAT with `repo` and `workflow` scopes works. A fine-grained token also works if it has repository contents write access and workflow permission for this repository.
 
 ## Resulting Partner Center URL
 
