@@ -18,6 +18,8 @@ const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.c
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const appVersion = tauriConfig.version ?? '0.1.0';
 const [repositoryOwner = 'FelipeBarrosCode', repositoryName = 'no_land'] = (process.env.GITHUB_REPOSITORY || 'FelipeBarrosCode/no_land').split('/');
+const windowsStoreBaseUrl = process.env.WINDOWS_STORE_BASE_URL?.trim().replace(/\/$/u, '') || null;
+const windowsStorePathPrefix = sanitizePathPrefix(process.env.WINDOWS_STORE_PATH_PREFIX?.trim() || 'no_land');
 
 if (!existsSync(downloadedAssetsRoot)) {
   console.error(`Downloaded release assets directory does not exist: ${downloadedAssetsRoot}`);
@@ -53,12 +55,16 @@ for (const source of approvedFiles) {
 
 const windowsStoreInstaller = publishedAssets.find((file) => /_x64-store-setup\.exe$/iu.test(basename(file)));
 if (windowsStoreInstaller) {
-  const packageUrl = `https://github.com/${repositoryOwner}/${repositoryName}/releases/download/${releaseTag}/${basename(windowsStoreInstaller)}`;
+  const objectKey = [windowsStorePathPrefix, releaseTag, basename(windowsStoreInstaller)].filter(Boolean).join('/');
+  const packageUrl = windowsStoreBaseUrl
+    ? `${windowsStoreBaseUrl}/${objectKey}`
+    : `https://github.com/${repositoryOwner}/${repositoryName}/releases/download/${releaseTag}/${basename(windowsStoreInstaller)}`;
   const metadata = {
     product_name: productName,
     app_version: appVersion,
     release_tag: releaseTag,
     package_url: packageUrl,
+    object_key: objectKey,
     architecture: 'x64',
     installer_type: 'exe',
     silent_install_args: '/S',
@@ -66,6 +72,7 @@ if (windowsStoreInstaller) {
 
   writeFileSync(join(publishRoot, 'windows-store-x64-submission.json'), `${JSON.stringify(metadata, null, 2)}\n`);
   writeFileSync(join(publishRoot, 'windows-store-x64-package-url.txt'), `${packageUrl}\n`);
+  writeFileSync(join(publishRoot, 'windows-store-x64-object-key.txt'), `${objectKey}\n`);
   writeFileSync(
     join(publishRoot, 'windows-store-x64-submission.md'),
     [
@@ -75,11 +82,14 @@ if (windowsStoreInstaller) {
       `- App version: ${appVersion}`,
       `- Release tag: ${releaseTag}`,
       `- Package URL: ${packageUrl}`,
+      `- Object key: ${objectKey}`,
       '- Architecture: x64',
       '- Installer type: exe',
       '- Silent install args: `/S`',
       '',
-      'Use the package URL above in Microsoft Partner Center for the traditional desktop app submission.',
+      windowsStoreBaseUrl
+        ? 'Use the package URL above in Microsoft Partner Center for the traditional desktop app submission. The CI release job is configured to upload the Store installer to Cloudflare R2 using this object key.'
+        : 'Use the package URL above in Microsoft Partner Center for the traditional desktop app submission.',
       '',
     ].join('\n'),
   );
@@ -99,6 +109,10 @@ function shouldPublish(relativePath, baseName) {
 
   console.log(`[prepare-release-assets] Skipped ${relativePath}`);
   return false;
+}
+
+function sanitizePathPrefix(value) {
+  return value.replace(/^\/+|\/+$/gu, '');
 }
 
 function listFiles(root) {

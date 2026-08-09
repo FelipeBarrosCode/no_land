@@ -375,8 +375,35 @@ jobs:
 
       - name: Prepare curated release assets
         shell: bash
+        env:
+          WINDOWS_STORE_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+          WINDOWS_STORE_PATH_PREFIX: no_land
         run: |
           node scripts/prepare-release-assets.mjs "${{ steps.version.outputs.release_tag }}"
+
+      - name: Upload Windows Store installer to Cloudflare R2
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+          CLOUDFLARE_R2_PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
+        run: |
+          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" || -z "$CLOUDFLARE_R2_BUCKET" || -z "$CLOUDFLARE_R2_PUBLIC_BASE_URL" ]]; then
+            echo "Cloudflare R2 secrets are not fully configured; skipping Windows Store installer upload."
+            exit 0
+          fi
+
+          STORE_INSTALLER=$(find release-publish -maxdepth 1 -type f -name '*_x64-store-setup.exe' | head -n 1)
+          OBJECT_KEY=$(tr -d '\r\n' < release-publish/windows-store-x64-object-key.txt)
+
+          if [[ -z "$STORE_INSTALLER" || -z "$OBJECT_KEY" ]]; then
+            echo "No Windows Store installer or object key metadata was generated; skipping Cloudflare R2 upload."
+            exit 0
+          fi
+
+          npx --yes wrangler@4.29.1 r2 object put "$CLOUDFLARE_R2_BUCKET/$OBJECT_KEY" --file "$STORE_INSTALLER"
+          echo "Uploaded Windows Store installer to ${CLOUDFLARE_R2_PUBLIC_BASE_URL%/}/$OBJECT_KEY"
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
