@@ -214,7 +214,22 @@ function validateGatekeeperForApp(path, label) {
 
 function validateGatekeeperForDmg(path, label) {
   console.log(`[notarize-macos-bundle] Validating Gatekeeper acceptance for ${label}`);
-  run('spctl', ['-a', '-vvv', '-t', 'open', path]);
+  const assessment = run('spctl', ['-a', '-vvv', '-t', 'open', path], {
+    captureOutput: true,
+    allowFailure: true,
+  });
+
+  if (assessment.status === 0) {
+    return;
+  }
+
+  const assessmentOutput = `${assessment.stdout}\n${assessment.stderr}`.trim();
+  if (/Insufficient Context/i.test(assessmentOutput)) {
+    console.warn(`[notarize-macos-bundle] DMG Gatekeeper assessment returned insufficient context on this CI host; continuing because stapler validation already passed and the mounted app will be assessed separately. Output:\n${assessmentOutput}`);
+    return;
+  }
+
+  throw new Error(`[notarize-macos-bundle] Gatekeeper rejected ${label}\n${assessmentOutput}`);
 }
 
 function validateMountedDmgApp(dmg, volumeName) {
