@@ -40,7 +40,8 @@ if (approvedFiles.length === 0) {
 const publishedAssetNames = new Set();
 const publishedAssets = [];
 for (const source of approvedFiles) {
-  const name = basename(source);
+  const originalName = basename(source);
+  const name = sanitizePublishedAssetName(originalName);
   if (publishedAssetNames.has(name)) {
     console.error(`Duplicate published asset name detected: ${name}`);
     process.exit(1);
@@ -113,6 +114,10 @@ function shouldPublish(relativePath, baseName) {
 
 function sanitizePathPrefix(value) {
   return value.replace(/^\/+|\/+$/gu, '');
+}
+
+function sanitizePublishedAssetName(value) {
+  return value.replace(/\s+/gu, '.');
 }
 
 function listFiles(root) {

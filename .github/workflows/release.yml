@@ -402,7 +402,7 @@ jobs:
             exit 0
           fi
 
-          npx --yes wrangler@4.29.1 r2 object put "$CLOUDFLARE_R2_BUCKET/$OBJECT_KEY" --file "$STORE_INSTALLER"
+          npx --yes wrangler@4.29.1 r2 object put "$CLOUDFLARE_R2_BUCKET/$OBJECT_KEY" --file "$STORE_INSTALLER" --remote
           echo "Uploaded Windows Store installer to ${CLOUDFLARE_R2_PUBLIC_BASE_URL%/}/$OBJECT_KEY"
 
       - name: Publish GitHub release assets
