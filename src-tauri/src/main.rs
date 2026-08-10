@@ -33,6 +33,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            mic_client::configure_embedded_stream_runtime();
             let config = AppConfig::default();
 
             let app_data_dir = app
@@ -244,8 +245,6 @@ fn main() {
             disconnect_local_wireguard_client_command,
             setup_wireguard_app_handoff_command,
             verify_wireguard,
-            open_wireguard_app_command,
-            download_wireguard_config_command,
             get_setup_status_command,
             verify_sunshine,
             detect_moonlight,
@@ -255,20 +254,9 @@ fn main() {
             start_local_sleep_prevention,
             stop_local_sleep_prevention,
             get_provisioning_logs,
-            get_moonlight_download_url,
-            get_wireguard_download_url,
-            launch_moonlight_client,
-            configure_moonlight_client,
-            restore_moonlight_backup,
             get_rented_instances,
-            get_vast_browser_automation_status,
             get_vast_wallet_summary,
-            start_vast_browser_auth_session,
-            generate_vast_api_key_from_browser_session,
-            open_vast_billing_browser_session,
             update_vast_api_key,
-            update_tailscale_api_key,
-            update_connection_provider,
             update_platform_credentials,
             update_server_preferences,
             update_moonlight_preferences,

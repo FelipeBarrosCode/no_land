@@ -1,15 +1,16 @@
-use std::{
-    ffi::c_void,
-    sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
-        mpsc, Arc, OnceLock, Weak,
-    },
+#[cfg(target_os = "macos")]
+use std::ffi::c_void;
+use std::sync::{
+    atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering},
+    mpsc, Arc, OnceLock, Weak,
 };
 
 #[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tauri::{Runtime, Window};
 
+#[cfg(not(target_os = "macos"))]
+use crate::moonlight::native;
 use crate::{
     input::{
         event::{ButtonState, MouseButton},
@@ -43,7 +44,7 @@ unsafe extern "C" {
 
 #[derive(Debug, Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MacosInputDebugSnapshot {
+pub struct DesktopInputDebugSnapshot {
     pub capture_active: bool,
     pub capture_mode: i32,
     pub capture_requests: u64,
@@ -57,8 +58,8 @@ pub struct MacosInputDebugSnapshot {
     pub rust_key_callbacks: u64,
 }
 
-pub fn macos_input_debug_snapshot() -> MacosInputDebugSnapshot {
-    MacosInputDebugSnapshot {
+pub fn desktop_input_debug_snapshot() -> DesktopInputDebugSnapshot {
+    DesktopInputDebugSnapshot {
         capture_active: DEBUG_CAPTURE_ACTIVE.load(Ordering::Relaxed),
         capture_mode: DEBUG_CAPTURE_MODE.load(Ordering::Relaxed),
         capture_requests: DEBUG_CAPTURE_REQUESTS.load(Ordering::Relaxed),
@@ -162,8 +163,16 @@ pub fn install_native_stream_input<R: Runtime>(
 
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = window;
-        let _ = input;
+        run_on_window_main_thread(window, |window| {
+            let surface = super::window::stream_window_surface_descriptor(window)?.to_native();
+            let result = unsafe { native::nl_desktop_input_install(&surface) };
+            if result != 0 {
+                return Err(MoonlightError::Native(format!(
+                    "failed to install native desktop stream input bridge: {result}"
+                )));
+            }
+            Ok(())
+        })?;
     }
 
     Ok(())
@@ -182,6 +191,7 @@ pub fn uninstall_native_stream_input<R: Runtime>(window: &Window<R>) -> Result<(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = window;
+        unsafe { native::nl_desktop_input_uninstall() };
     }
 
     Ok(())
@@ -211,8 +221,15 @@ pub fn activate_native_stream_input<R: Runtime>(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = window;
-        let _ = mode;
-        Ok(false)
+        let result =
+            unsafe { native::nl_desktop_input_set_capture_active(true, native_capture_mode(mode)) };
+        match result {
+            0 => Ok(true),
+            1 => Ok(false),
+            other => Err(MoonlightError::Native(format!(
+                "failed to activate native desktop stream input capture: {other}"
+            ))),
+        }
     }
 }
 
@@ -237,7 +254,14 @@ pub fn deactivate_native_stream_input<R: Runtime>(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = window;
-        Ok(false)
+        let result = unsafe { native::nl_desktop_input_set_capture_active(false, 0) };
+        match result {
+            0 => Ok(true),
+            1 => Ok(false),
+            other => Err(MoonlightError::Native(format!(
+                "failed to deactivate native desktop stream input capture: {other}"
+            ))),
+        }
     }
 }
 
@@ -263,22 +287,13 @@ fn appkit_view_ptr<R: Runtime>(window: &Window<R>) -> Result<*mut c_void, Moonli
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn appkit_view_ptr<R: Runtime>(_window: &Window<R>) -> Result<*mut c_void, MoonlightError> {
-    Err(MoonlightError::Native(
-        "native stream input is only available on macOS".to_string(),
-    ))
-}
-
-#[cfg(target_os = "macos")]
 fn native_capture_mode(mode: MouseMode) -> i32 {
     match mode {
-        MouseMode::Absolute => 1,
-        MouseMode::Relative => 2,
+        MouseMode::Relative => 1,
+        MouseMode::Absolute => 2,
     }
 }
 
-#[cfg(target_os = "macos")]
 fn run_on_window_main_thread<R, T, F>(window: &Window<R>, f: F) -> Result<T, MoonlightError>
 where
     R: Runtime,
@@ -297,14 +312,9 @@ where
 
     rx.recv().map_err(|error| {
         MoonlightError::Native(format!(
-            "failed to receive macOS main-thread input bridge result: {error}"
+            "failed to receive main-thread input bridge result: {error}"
         ))
     })?
-}
-
-#[cfg(not(target_os = "macos"))]
-fn native_capture_mode(_mode: MouseMode) -> i32 {
-    0
 }
 
 #[unsafe(no_mangle)]
@@ -434,6 +444,61 @@ pub extern "C" fn noland_macos_input_debug_native_event(kind: i32) {
     }
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_relative_mouse(delta_x: f64, delta_y: f64) {
+    noland_macos_input_on_relative_mouse(delta_x, delta_y);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_absolute_mouse(
+    x: f64,
+    y: f64,
+    content_width: f64,
+    content_height: f64,
+) {
+    noland_macos_input_on_absolute_mouse(x, y, content_width, content_height);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_mouse_button(button: u8, pressed: bool) {
+    noland_macos_input_on_mouse_button(button, pressed);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_vertical_scroll(amount: f64, high_resolution: bool) {
+    noland_macos_input_on_vertical_scroll(amount, high_resolution);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_horizontal_scroll(amount: f64, high_resolution: bool) {
+    noland_macos_input_on_horizontal_scroll(amount, high_resolution);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_keyboard(virtual_key: u16, pressed: bool, modifiers: u8) {
+    noland_macos_input_on_keyboard(virtual_key, pressed, modifiers);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_focus_changed(focused: bool) {
+    noland_macos_input_on_focus_changed(focused);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_on_capture_changed(active: bool, mode: i32) {
+    noland_macos_input_on_capture_changed(active, mode);
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_request_capture() -> i32 {
+    noland_macos_input_request_capture()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn noland_desktop_input_debug_native_event(kind: i32) {
+    noland_macos_input_debug_native_event(kind);
+}
+
 fn map_mouse_button(button: u8) -> Option<MouseButton> {
     match button {
         0x01 => Some(MouseButton::Left),
@@ -442,5 +507,16 @@ fn map_mouse_button(button: u8) -> Option<MouseButton> {
         0x04 => Some(MouseButton::X1),
         0x05 => Some(MouseButton::X2),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{native_capture_mode, MouseMode};
+
+    #[test]
+    fn native_capture_modes_match_platform_bridges() {
+        assert_eq!(native_capture_mode(MouseMode::Relative), 1);
+        assert_eq!(native_capture_mode(MouseMode::Absolute), 2);
     }
 }

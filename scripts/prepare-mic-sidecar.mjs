@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -8,11 +8,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const srcTauriDir = join(repoRoot, 'src-tauri');
 const sidecarCrateDir = join(repoRoot, 'mic-sidecar');
+const netHelperCrateDir = join(srcTauriDir, 'crates', 'noland-net-helper');
 const mode = process.argv[2] ?? 'build';
 const passthroughArgs = process.argv.slice(3);
 const target = readTarget(passthroughArgs) ?? defaultHostTarget();
 const release = mode === 'build';
 const executableName = process.platform === 'win32' ? 'noland-mic-sender.exe' : 'noland-mic-sender';
+const netHelperExecutableName = isWindowsTarget(target)
+  ? 'noland-net-helper.exe'
+  : 'noland-net-helper';
 const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
   || process.env.GSTREAMER_VERSION?.trim()
   || '1.24.13';
@@ -22,6 +26,7 @@ if (release) cargoArgs.push('--release');
 if (target) cargoArgs.push('--target', target);
 
 const sidecarTargetDir = resolve(srcTauriDir, '.native-deps', 'mic-sidecar-target');
+const netHelperTargetDir = resolve(srcTauriDir, '.native-deps', 'net-helper-target');
 let nativeEnv = buildNativeEnv(target);
 const managedTarget = target ?? defaultHostTarget();
 
@@ -52,14 +57,39 @@ if (cargo.status !== 0) {
   process.exit(cargo.status ?? 1);
 }
 
+const netHelperCargoArgs = [
+  'build',
+  '--manifest-path', join(netHelperCrateDir, 'Cargo.toml'),
+];
+if (release) netHelperCargoArgs.push('--release');
+if (target) netHelperCargoArgs.push('--target', target);
+const netHelperCargo = spawnSync('cargo', netHelperCargoArgs, {
+  cwd: repoRoot,
+  stdio: 'inherit',
+  env: {
+    ...nativeEnv,
+    CARGO_TARGET_DIR: netHelperTargetDir,
+  },
+});
+if (netHelperCargo.status !== 0) {
+  process.exit(netHelperCargo.status ?? 1);
+}
+
 const profileDir = release ? 'release' : 'debug';
 const builtBinary = target
   ? join(sidecarTargetDir, target, profileDir, executableName)
   : join(sidecarTargetDir, profileDir, executableName);
 const packagingTarget = release ? (target ?? defaultHostTarget()) : undefined;
+const builtNetHelper = target
+  ? join(netHelperTargetDir, target, profileDir, netHelperExecutableName)
+  : join(netHelperTargetDir, profileDir, netHelperExecutableName);
 
 if (!existsSync(builtBinary)) {
   console.error(`Expected mic sidecar binary was not produced: ${builtBinary}`);
+  process.exit(1);
+}
+if (!existsSync(builtNetHelper)) {
+  console.error(`Expected Noland GotaTun helper binary was not produced: ${builtNetHelper}`);
   process.exit(1);
 }
 
@@ -80,6 +110,20 @@ mkdirSync(binariesDir, { recursive: true });
 if (managedTarget) {
   for (const tool of managedToolSpecs(managedTarget)) {
     stageBundledTool(tool, managedTarget, binariesDir);
+  }
+
+  const helperStagedName = isWindowsTarget(managedTarget)
+    ? `noland-net-helper-${managedTarget}.exe`
+    : `noland-net-helper-${managedTarget}`;
+  const helperStagedPath = join(binariesDir, helperStagedName);
+  copyFileSync(builtNetHelper, helperStagedPath);
+  if (!isWindowsTarget(managedTarget)) {
+    chmodSync(helperStagedPath, 0o755);
+  }
+  console.log(`Staged embedded GotaTun helper for packaging: ${helperStagedPath}`);
+
+  if (isWindowsTarget(managedTarget)) {
+    stageWindowsWintun(managedTarget, binariesDir);
   }
 }
 
@@ -110,9 +154,6 @@ console.log(`Mic sidecar target dir: ${sidecarTargetDir}`);
 function managedToolSpecs(targetTriple) {
   if (isWindowsTarget(targetTriple)) {
     return [
-      { lookupName: 'gotatun.exe', stagedStem: 'gotatun', envVarName: 'NOLAND_GOTATUN_BIN' },
-      { lookupName: 'wg.exe', stagedStem: 'wg', envVarName: 'NOLAND_WG_BIN' },
-      { lookupName: 'wireguard.exe', stagedStem: 'wireguard', envVarName: 'NOLAND_WIREGUARD_EXE_BIN' },
       { lookupName: 'ssh.exe', stagedStem: 'ssh', envVarName: 'NOLAND_SSH_BIN' },
       { lookupName: 'scp.exe', stagedStem: 'scp', envVarName: 'NOLAND_SCP_BIN' },
       { lookupName: 'ssh-keygen.exe', stagedStem: 'ssh-keygen', envVarName: 'NOLAND_SSH_KEYGEN_BIN' },
@@ -120,9 +161,6 @@ function managedToolSpecs(targetTriple) {
   }
 
   return [
-    { lookupName: 'gotatun', stagedStem: 'gotatun', envVarName: 'NOLAND_GOTATUN_BIN' },
-    { lookupName: 'wg', stagedStem: 'wg', envVarName: 'NOLAND_WG_BIN' },
-    { lookupName: 'wg-quick', stagedStem: 'wg-quick', envVarName: 'NOLAND_WG_QUICK_BIN' },
     { lookupName: 'ssh', stagedStem: 'ssh', envVarName: 'NOLAND_SSH_BIN' },
     { lookupName: 'scp', stagedStem: 'scp', envVarName: 'NOLAND_SCP_BIN' },
     { lookupName: 'ssh-keygen', stagedStem: 'ssh-keygen', envVarName: 'NOLAND_SSH_KEYGEN_BIN' },
@@ -148,32 +186,6 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
     process.exit(1);
   }
 
-  if (targetTriple.endsWith('apple-darwin') && tool.lookupName === 'wg-quick') {
-    const bashSource = resolveManagedBashPath(targetTriple);
-    const bashDest = join(binariesDir, `wg-bash-${targetTriple}`);
-    const realScript = join(binariesDir, `wg-quick-real-${targetTriple}`);
-    const wrapper = stagedBinary;
-    const sourceForReal = resolve(sourcePath) === resolve(wrapper) ? (existsSync(realScript) ? realScript : wrapper) : sourcePath;
-
-    if (!bashSource) {
-      console.error(`Project-managed Bash sidecar was not found for ${targetTriple}. Run bootstrap-native-deps first.`);
-      process.exit(1);
-    }
-
-    if (resolve(sourceForReal) === resolve(wrapper) && !existsSync(realScript)) {
-      copyFileSync(wrapper, realScript);
-    } else if (resolve(sourceForReal) !== resolve(realScript)) {
-      copyFileSync(sourceForReal, realScript);
-    }
-    patchMacosWgQuickScript(realScript);
-    copyFileSync(bashSource, bashDest);
-    chmodSync(realScript, 0o755);
-    chmodSync(bashDest, 0o755);
-    writeFileSyncSafe(wrapper, `#!/bin/sh\nSELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexport WG="$SELF_DIR/wg-${targetTriple}"\nexec "$SELF_DIR/${basename(bashDest)}" "$SELF_DIR/${basename(realScript)}" "$@"\n`);
-    chmodSync(wrapper, 0o755);
-    console.log(`Staged macOS wg-quick wrapper for packaging: ${wrapper}`);
-    return;
-  }
 
   if (resolve(sourcePath) !== resolve(stagedBinary)) {
     copyFileSync(sourcePath, stagedBinary);
@@ -182,6 +194,28 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
     chmodSync(stagedBinary, 0o755);
   }
   console.log(`Staged ${tool.lookupName} sidecar for packaging: ${stagedBinary}`);
+}
+
+function stageWindowsWintun(targetTriple, binariesDir) {
+  const stagedPath = join(binariesDir, `wintun-${targetTriple}.dll`);
+  const stagedLicense = join(binariesDir, 'wintun-LICENSE.txt');
+  const source = process.env.NOLAND_WINTUN_DLL?.trim();
+  if (source && existsSync(source)) {
+    const licenseSource = resolve(dirname(source), '..', '..', 'LICENSE.txt');
+    if (!existsSync(licenseSource)) {
+      console.error(`Wintun license was not found next to the staged DLL: ${licenseSource}`);
+      process.exit(1);
+    }
+    copyFileSync(source, stagedPath);
+    copyFileSync(licenseSource, stagedLicense);
+    console.log(`Staged Wintun adapter library: ${stagedPath}`);
+    return;
+  }
+  if (existsSync(stagedPath) && existsSync(stagedLicense)) {
+    return;
+  }
+  console.error('Required bundled Wintun adapter library/license was not found. Set NOLAND_WINTUN_DLL or run the CI managed-tool staging step.');
+  process.exit(1);
 }
 
 function windowsTargetNeedsGstreamer(targetTriple) {
@@ -224,35 +258,6 @@ function stageLinuxGstreamerRuntime(targetTriple, binariesDir) {
   console.log(`Staged Linux GStreamer runtime for packaging: ${destinationRoot}`);
 }
 
-function patchMacosWgQuickScript(path) {
-  if (!existsSync(path)) {
-    return;
-  }
-
-  chmodSync(path, 0o755);
-  let content = readFileSync(path, 'utf8');
-  if (!content.includes('WG_CMD="${WG:-wg}"')) {
-    content = content.replace(
-      'PROGRAM="${0##*/}"\nARGS=( "$@" )\n',
-      'PROGRAM="${0##*/}"\nARGS=( "$@" )\nWG_CMD="${WG:-wg}"\n',
-    );
-  }
-
-  const replacements = [
-    ['wg show interfaces', '"$WG_CMD" show interfaces'],
-    ['done < <(wg show "$REAL_INTERFACE" endpoints)', 'done < <("$WG_CMD" show "$REAL_INTERFACE" endpoints)'],
-    ['cmd wg addconf "$REAL_INTERFACE" <(echo "$WG_CONFIG")', 'cmd "$WG_CMD" addconf "$REAL_INTERFACE" <(echo "$WG_CONFIG")'],
-    ['current_config="$(cmd wg showconf "$REAL_INTERFACE")"', 'current_config="$(cmd "$WG_CMD" showconf "$REAL_INTERFACE")"'],
-    ['done < <(wg show "$REAL_INTERFACE" allowed-ips)', 'done < <("$WG_CMD" show "$REAL_INTERFACE" allowed-ips)'],
-    ['if ! get_real_interface || [[ " $(wg show interfaces) " != *" $REAL_INTERFACE "* ]]; then', 'if ! get_real_interface || [[ " $("$WG_CMD" show interfaces) " != *" $REAL_INTERFACE "* ]]; then'],
-  ];
-
-  for (const [from, to] of replacements) {
-    content = content.replaceAll(from, to);
-  }
-
-  writeFileSync(path, content, 'utf8');
-}
 
 function writeFileSyncSafe(path, content) {
   mkdirSync(dirname(path), { recursive: true });
@@ -292,15 +297,6 @@ function resolveWindowsGstreamerRoot(targetTriple) {
   return existsSync(join(candidate, 'bin')) ? candidate : null;
 }
 
-function resolveManagedBashPath(targetTriple) {
-  const envOverride = process.env.NOLAND_BASH_BIN?.trim();
-  if (envOverride && existsSync(envOverride)) {
-    return envOverride;
-  }
-
-  const candidate = join(srcTauriDir, '.native-deps', targetTriple, 'bin', 'bash');
-  return existsSync(candidate) ? candidate : null;
-}
 
 function resolveToolPath(tool, targetTriple, binariesDir, stagedBinary) {
   const envOverride = process.env[tool.envVarName]?.trim();

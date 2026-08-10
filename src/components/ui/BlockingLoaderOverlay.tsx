@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
+import { ModalFrame } from "./ModalFrame";
 
 export type BlockingLoaderMode = "indeterminate" | "determinate";
 
@@ -48,7 +49,10 @@ export function BlockingLoaderOverlay({ action, inline = false, className }: Pro
       aria-busy="true"
       aria-live="polite"
       className={clsx(
-        "glass-panel pixel-frame max-h-[80vh] w-full max-w-xl overflow-y-auto p-6 text-left shadow-[0_0_30px_rgba(68,214,255,0.2)]",
+        "w-full p-6 text-left",
+        inline
+          ? "glass-panel pixel-frame max-w-none shadow-[0_0_30px_rgba(68,214,255,0.2)]"
+          : "min-h-0 flex-1 overflow-y-auto",
         className
       )}
     >
@@ -92,8 +96,12 @@ export function BlockingLoaderOverlay({ action, inline = false, className }: Pro
   }
 
   return (
-    <div className="fixed inset-0 z-[110] flex items-center justify-center bg-[#02040be8] p-4 backdrop-blur-[2px]">
+    <ModalFrame
+      panelClassName="glass-panel pixel-frame max-w-xl shadow-[0_0_30px_rgba(68,214,255,0.2)]"
+      overlayClassName="bg-[#02040be8] backdrop-blur-[2px]"
+      zIndexClassName="z-[110]"
+    >
       {content}
-    </div>
+    </ModalFrame>
   );
 }

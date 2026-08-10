@@ -73,7 +73,6 @@ impl InstanceLifecycleService {
                 [
                     Some(server.wireguard_server_ip.as_str()),
                     Some(server.moonlight_host_address.as_str()),
-                    Some(server.tailscale_client_ip.as_str()),
                 ]
                 .into_iter()
                 .flatten()
@@ -145,13 +144,6 @@ impl InstanceLifecycleService {
                             record.moonlight_host_address =
                                 instance.wireguard_host_ip.trim().to_string();
                         }
-                    }
-
-                    if record.moonlight_host_address.trim().is_empty()
-                        && !record.tailscale_client_ip.trim().is_empty()
-                    {
-                        record.moonlight_host_address =
-                            record.tailscale_client_ip.trim().to_string();
                     }
                 }
             })

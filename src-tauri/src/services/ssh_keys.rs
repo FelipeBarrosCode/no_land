@@ -2,31 +2,19 @@ use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
     process::Command,
-    thread,
-    time::Duration,
 };
 
 use tokio::fs;
 
-use crate::errors::{AppError, AppResult};
+use crate::{
+    errors::{AppError, AppResult},
+    utils::managed_binaries::configure_bundled_linux_runtime,
+};
 
 use super::{os_detection::OsDetection, vast_api::VastApiClient};
 
 fn locate_ssh_key_tool(tool: &str) -> Option<PathBuf> {
     let os = OsDetection::new();
-
-    if os.is_macos() {
-        let system_path = match tool {
-            "ssh" => Some("/usr/bin/ssh"),
-            "ssh-keygen" => Some("/usr/bin/ssh-keygen"),
-            _ => None,
-        }?;
-
-        let system_path = PathBuf::from(system_path);
-        if system_path.is_file() {
-            return Some(system_path);
-        }
-    }
 
     match tool {
         "ssh" => os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows")),
@@ -39,16 +27,14 @@ fn locate_ssh_key_tool(tool: &str) -> Option<PathBuf> {
     }
 }
 
-fn resolve_ssh_key_tool(tool: &str) -> AppResult<String> {
+fn resolve_ssh_key_tool(tool: &str) -> AppResult<PathBuf> {
     let os = OsDetection::new();
-    locate_ssh_key_tool(tool)
-        .map(|path| path.display().to_string())
-        .ok_or_else(|| {
-            AppError::Command(format!(
-                "`{tool}` is not available in the app bundle. {}",
-                os.install_hint_for_tool(tool)
-            ))
-        })
+    locate_ssh_key_tool(tool).ok_or_else(|| {
+        AppError::Command(format!(
+            "`{tool}` is not available in the app bundle. {}",
+            os.install_hint_for_tool(tool)
+        ))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +73,14 @@ impl SshKeyService {
 
         let private_path_string = private_key_path.display().to_string();
         tokio::task::spawn_blocking(move || {
-            let output = Command::new(&ssh_keygen_bin)
+            let mut command = Command::new(&ssh_keygen_bin);
+            configure_bundled_linux_runtime(
+                &mut command,
+                &ssh_keygen_bin,
+                "ssh-runtime",
+                OsDetection::new().managed_binary_target_triple(),
+            );
+            let output = command
                 .arg("-t")
                 .arg("ed25519")
                 .arg("-f")
@@ -162,119 +155,6 @@ impl SshKeyService {
         }
 
         Ok(())
-    }
-
-    async fn start_or_get_ssh_agent(&self) -> AppResult<(Option<String>, Option<String>)> {
-        tokio::task::spawn_blocking(|| {
-            let os = OsDetection::new();
-
-            if let Ok(sock) = std::env::var("SSH_AUTH_SOCK") {
-                if !sock.is_empty() {
-                    let pid = std::env::var("SSH_AGENT_PID")
-                        .ok()
-                        .filter(|p| !p.is_empty());
-                    return Ok((Some(sock), pid));
-                }
-            }
-
-            if os.is_windows() {
-                let ensure_agent_running = Command::new("powershell")
-                    .args([
-                        "-NoProfile",
-                        "-ExecutionPolicy",
-                        "Bypass",
-                        "-Command",
-                        "$svc = Get-Service ssh-agent -ErrorAction SilentlyContinue; if (-not $svc) { Write-Error 'OpenSSH Authentication Agent service (ssh-agent) not found'; exit 2 }; if ($svc.Status -ne 'Running') { Start-Service ssh-agent -ErrorAction Stop; Start-Sleep -Milliseconds 300; $svc = Get-Service ssh-agent -ErrorAction Stop }; if ($svc.Status -ne 'Running') { Write-Error 'OpenSSH Authentication Agent service is not running'; exit 3 }; Write-Output 'running'",
-                    ])
-                    .output()
-                    .map_err(|error| AppError::Command(format!(
-                        "Failed to verify/start Windows ssh-agent service: {error}"
-                    )))?;
-
-                if !ensure_agent_running.status.success() {
-                    return Err(AppError::Command(format!(
-                        "Windows OpenSSH Agent service is unavailable or could not be started. Run Noland Connect as administrator once, or manually set OpenSSH Authentication Agent to Automatic and start it. Details: {}",
-                        String::from_utf8_lossy(&ensure_agent_running.stderr).trim()
-                    )));
-                }
-
-                let mut ready = false;
-                for _ in 0..6 {
-                    let probe = Command::new("ssh-add").arg("-l").output();
-                    if let Ok(output) = probe {
-                        let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
-                        if output.status.success()
-                            || stderr.contains("the agent has no identities")
-                            || stderr.contains("no identities")
-                        {
-                            ready = true;
-                            break;
-                        }
-                    }
-                    thread::sleep(Duration::from_millis(250));
-                }
-
-                if !ready {
-                    return Err(AppError::Command(
-                        "Windows OpenSSH Agent service started but is not ready to accept ssh-add requests. Please restart the ssh-agent service or Windows and retry.".to_string(),
-                    ));
-                }
-
-                return Ok((None, None));
-            }
-
-            let output = Command::new("ssh-agent")
-                .arg("-s")
-                .output()
-                .map_err(|error| {
-                    AppError::Command(format!("Failed to start ssh-agent: {error}"))
-                })?;
-
-            if !output.status.success() {
-                return Err(AppError::Command(format!(
-                    "ssh-agent failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )));
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut auth_sock = None;
-            let mut agent_pid = None;
-
-            for chunk in stdout.split(';') {
-                let trimmed = chunk.trim();
-                if let Some((key, value)) = trimmed.split_once('=') {
-                    let value = value.trim().trim_matches('"').trim_matches('\'');
-                    if key == "SSH_AUTH_SOCK" && !value.is_empty() {
-                        auth_sock = Some(value.to_string());
-                    } else if key == "SSH_AGENT_PID" && !value.is_empty() {
-                        agent_pid = Some(value.to_string());
-                    }
-                }
-            }
-
-            if auth_sock.is_none() {
-                for line in stdout.lines() {
-                    if let Some(sock) = line.strip_prefix("SSH_AUTH_SOCK=") {
-                        auth_sock = Some(sock.trim_matches(';').trim().to_string());
-                    } else if let Some(pid) = line.strip_prefix("SSH_AGENT_PID=") {
-                        let p = pid.trim_matches(';').trim();
-                        if !p.is_empty() {
-                            agent_pid = Some(p.to_string());
-                        }
-                    }
-                }
-            }
-
-            match auth_sock {
-                Some(sock) => Ok((Some(sock), agent_pid)),
-                None => Err(AppError::Command(
-                    "ssh-agent did not provide SSH_AUTH_SOCK".to_string(),
-                )),
-            }
-        })
-        .await
-        .map_err(|error| AppError::Command(format!("ssh-agent task join failure: {error}")))?
     }
 
     pub async fn upload_public_key_if_missing(

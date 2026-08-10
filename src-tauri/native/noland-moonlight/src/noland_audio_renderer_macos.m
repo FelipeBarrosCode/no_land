@@ -29,11 +29,17 @@ int nl_audio_renderer_init(nl_audio_renderer_t* renderer,
   (void)audio_configuration;
   (void)ar_flags;
 
+  uint32_t target_buffer_ms;
+  uint32_t maximum_buffer_ms;
   if (renderer == NULL || opus_config == NULL) {
     return -1;
   }
 
+  target_buffer_ms = renderer->target_buffer_ms;
+  maximum_buffer_ms = renderer->maximum_buffer_ms;
   nl_audio_renderer_cleanup(renderer);
+  renderer->target_buffer_ms = target_buffer_ms;
+  renderer->maximum_buffer_ms = maximum_buffer_ms;
 
   nl_audio_macos_context_t* ctx = calloc(1, sizeof(nl_audio_macos_context_t));
   if (ctx == NULL) {

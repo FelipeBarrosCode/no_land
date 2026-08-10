@@ -1,5 +1,5 @@
 [workspace]
-members = ["."]
+members = [".", "crates/noland-net-helper"]
 resolver = "2"
 
 [package]
@@ -10,10 +10,6 @@ authors = ["Noland"]
 edition = "2021"
 default-run = "noland-connect"
 
-[[bin]]
-name = "moonlight_config"
-path = "src/bin/moonlight_config.rs"
-required-features = ["moonlight-config-bin"]
 
 [build-dependencies]
 bindgen = "0.70.1"
@@ -42,6 +38,8 @@ sha1 = "0.10.6"
 sha2 = { version = "0.10.9", features = ["oid"] }
 serde_json = "1.0.133"
 form_urlencoded = "1"
+flate2 = "1"
+tar = "0.4"
 urlencoding = "2"
 ctrlc = "3.4.5"
 tauri = { version = "2.0.0", features = ["unstable"] }
@@ -53,13 +51,10 @@ tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "time", "
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "time"] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
-x25519-dalek = "2.0.1"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 x509-parser = "0.16.0"
 
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-gstreamer = "0.23"
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
-moonlight-config-bin = []

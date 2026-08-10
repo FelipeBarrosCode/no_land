@@ -2,6 +2,7 @@ use std::{
     collections::{HashSet, VecDeque},
     env, fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 const MAX_SEARCH_DEPTH: usize = 4;
@@ -41,6 +42,37 @@ pub fn is_executable_file(path: &Path) -> bool {
 
     #[allow(unreachable_code)]
     true
+}
+
+pub fn configure_bundled_linux_runtime(
+    command: &mut Command,
+    binary: &Path,
+    runtime_family: &str,
+    target_triple: &str,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(binary_dir) = binary.parent() else {
+            return;
+        };
+        let runtime_dir = binary_dir.join(runtime_family).join(target_triple);
+        if !runtime_dir.is_dir() {
+            return;
+        }
+
+        let mut paths = vec![runtime_dir];
+        if let Some(existing) = env::var_os("LD_LIBRARY_PATH") {
+            paths.extend(env::split_paths(&existing));
+        }
+        if let Ok(value) = env::join_paths(paths) {
+            command.env("LD_LIBRARY_PATH", value);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, binary, runtime_family, target_triple);
+    }
 }
 
 pub fn locate_bundled_binary(
@@ -166,8 +198,16 @@ fn candidate_relative_dirs() -> &'static [&'static str] {
         "usr/bin",
         "usr/lib",
         "usr/lib/binaries",
+        "usr/lib/noland-connect",
+        "usr/lib/noland-connect/binaries",
+        "usr/lib/noland-connect/resources",
+        "usr/lib/noland-connect/resources/binaries",
         "lib",
         "lib/binaries",
+        "lib/noland-connect",
+        "lib/noland-connect/binaries",
+        "lib/noland-connect/resources",
+        "lib/noland-connect/resources/binaries",
     ]
 }
 

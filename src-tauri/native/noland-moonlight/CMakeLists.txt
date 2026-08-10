@@ -13,21 +13,32 @@ add_library(noland_moonlight STATIC
   src/noland_video_renderer.c
 )
 
+find_path(SDL2_INCLUDE_ROOT SDL2/SDL.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
+find_library(SDL2_LIBRARY NAMES SDL2 SDL2-static HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
+target_include_directories(noland_moonlight PRIVATE ${SDL2_INCLUDE_ROOT} ${SDL2_INCLUDE_ROOT}/SDL2)
+target_link_libraries(noland_moonlight PRIVATE ${SDL2_LIBRARY})
+
 if(APPLE)
   target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m src/noland_audio_renderer_macos.m)
-  find_path(SDL2_INCLUDE_ROOT SDL2/SDL.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
-  find_library(SDL2_LIBRARY SDL2 HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
-  target_include_directories(noland_moonlight PRIVATE ${SDL2_INCLUDE_ROOT} ${SDL2_INCLUDE_ROOT}/SDL2)
-  target_link_libraries(noland_moonlight PRIVATE ${SDL2_LIBRARY})
 elseif(UNIX)
-  target_sources(noland_moonlight PRIVATE src/noland_audio_renderer_linux.c)
+  target_sources(noland_moonlight PRIVATE
+    src/noland_audio_renderer_sdl.c
+    src/noland_desktop_input_sdl.c
+    src/noland_video_renderer_linux.c
+  )
   find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBPULSE_SIMPLE REQUIRED libpulse-simple)
-  target_include_directories(noland_moonlight PRIVATE ${LIBPULSE_SIMPLE_INCLUDE_DIRS})
-  target_link_libraries(noland_moonlight PRIVATE ${LIBPULSE_SIMPLE_LIBRARIES})
+  pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+  target_include_directories(noland_moonlight PRIVATE ${GSTREAMER_INCLUDE_DIRS})
+  target_link_directories(noland_moonlight PRIVATE ${GSTREAMER_LIBRARY_DIRS})
+  target_link_libraries(noland_moonlight PRIVATE ${GSTREAMER_LIBRARIES})
 elseif(WIN32)
-  target_sources(noland_moonlight PRIVATE src/noland_audio_renderer_windows.c)
-  target_link_libraries(noland_moonlight PRIVATE winmm)
+  target_sources(noland_moonlight PRIVATE
+    src/noland_audio_renderer_sdl.c
+    src/noland_desktop_input_sdl.c
+    src/noland_video_renderer_windows.cpp
+  )
+  target_compile_features(noland_moonlight PRIVATE cxx_std_17)
+  target_link_libraries(noland_moonlight PRIVATE mf mfplat mfuuid ole32 user32 gdi32)
 endif()
 
 find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS})

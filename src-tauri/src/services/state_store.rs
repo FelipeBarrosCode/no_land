@@ -6,7 +6,7 @@ use tokio::fs;
 
 use crate::{
     errors::{AppError, AppResult},
-    models::app_state::PersistedAppState,
+    models::app_state::{ConnectionProvider, PersistedAppState},
 };
 
 #[async_trait]
@@ -42,6 +42,14 @@ impl JsonStateStore {
         merge_json(&mut baseline, &raw_value);
 
         let mut migrated: PersistedAppState = serde_json::from_value(baseline)?;
+        for server in &mut migrated.provisioned_servers {
+            server.connection_provider = ConnectionProvider::Wireguard;
+            server.embedded_moonlight_pipeline_enabled = true;
+            if server.embedded_moonlight_host_id.trim().is_empty() {
+                server.embedded_moonlight_host_id = format!("instance-{}", server.instance_id);
+            }
+        }
+        migrated.connection_provider = ConnectionProvider::Wireguard;
         migrated.version = self.current_version;
         migrated.server_preferences.template_hash =
             if migrated.server_preferences.template_hash.is_empty() {
@@ -159,7 +167,9 @@ mod tests {
     use tokio::fs;
 
     use super::{JsonStateStore, StateStore};
-    use crate::models::app_state::PersistedAppState;
+    use crate::models::app_state::{
+        ConnectionProvider, OrchestrationState, PersistedAppState, ProvisionedServerState,
+    };
 
     fn temp_state_path(name: &str) -> PathBuf {
         let base = std::env::temp_dir().join(format!(
@@ -168,6 +178,44 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         base.join("state.json")
+    }
+
+    #[test]
+    fn every_state_enables_embedded_moonlight_for_existing_servers() {
+        let store = JsonStateStore::new(PathBuf::from("state.json"), 2);
+        let mut state = PersistedAppState::default();
+        state.version = 2;
+        let mut server = ProvisionedServerState::new(42);
+        server.embedded_moonlight_pipeline_enabled = false;
+        server.embedded_moonlight_host_id.clear();
+        state.provisioned_servers.push(server);
+
+        let migrated = store
+            .migrate_value(serde_json::to_value(state).unwrap())
+            .unwrap();
+        let migrated_server = migrated.provisioned_servers.first().unwrap();
+
+        assert_eq!(migrated.version, 2);
+        assert!(migrated_server.embedded_moonlight_pipeline_enabled);
+        assert_eq!(migrated_server.embedded_moonlight_host_id, "instance-42");
+    }
+
+    #[test]
+    fn retired_provider_state_maps_to_managed_tunnel_state() {
+        let store = JsonStateStore::new(PathBuf::from("state.json"), 2);
+        let migrated = store
+            .migrate_value(json!({
+                "version": 2,
+                "connectionProvider": "tailscale",
+                "orchestrationState": "TailscaleConnected"
+            }))
+            .unwrap();
+
+        assert_eq!(migrated.connection_provider, ConnectionProvider::Wireguard);
+        assert_eq!(
+            migrated.orchestration_state,
+            OrchestrationState::WireGuardConnected
+        );
     }
 
     #[tokio::test]

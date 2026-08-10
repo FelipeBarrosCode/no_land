@@ -450,10 +450,8 @@ static void nl_video_start(void) {
   if (runtime == NULL) {
     return;
   }
-  nl_runtime_lock(runtime);
   nl_video_renderer_start(&runtime->renderer);
-  nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer started");
-  nl_runtime_unlock(runtime);
+  nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer started");
 }
 
 static void nl_video_stop(void) {
@@ -461,10 +459,8 @@ static void nl_video_stop(void) {
   if (runtime == NULL) {
     return;
   }
-  nl_runtime_lock(runtime);
   nl_video_renderer_stop(&runtime->renderer);
-  nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer stopped");
-  nl_runtime_unlock(runtime);
+  nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer stopped");
 }
 
 static void nl_video_cleanup(void) {
@@ -472,10 +468,8 @@ static void nl_video_cleanup(void) {
   if (runtime == NULL) {
     return;
   }
-  nl_runtime_lock(runtime);
   nl_video_renderer_cleanup(&runtime->renderer);
-  nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer cleaned up");
-  nl_runtime_unlock(runtime);
+  nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, "video renderer cleaned up");
 }
 
 static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit, const nl_video_frame_metadata_t* frame) {

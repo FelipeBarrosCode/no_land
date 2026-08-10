@@ -6,10 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
 
 #include <SDL.h>
-#include <pthread.h>
 
 #define NL_MAX_GAMEPADS 16
 
@@ -64,8 +63,8 @@ struct nl_controller_manager {
   bool thread_started;
   bool initialized;
   uint16_t gamepad_mask;
-  pthread_t thread;
-  pthread_mutex_t mutex;
+  SDL_Thread* thread;
+  SDL_mutex* mutex;
   nl_gamepad_state_t gamepads[NL_MAX_GAMEPADS];
 };
 
@@ -81,11 +80,11 @@ static const uint32_t k_button_map[] = {
 };
 
 static void nl_controller_manager_lock(nl_controller_manager_t* manager) {
-  pthread_mutex_lock(&manager->mutex);
+  SDL_LockMutex(manager->mutex);
 }
 
 static void nl_controller_manager_unlock(nl_controller_manager_t* manager) {
-  pthread_mutex_unlock(&manager->mutex);
+  SDL_UnlockMutex(manager->mutex);
 }
 
 static int nl_next_free_slot(nl_controller_manager_t* manager) {
@@ -532,7 +531,7 @@ static void nl_sync_controllers(nl_controller_manager_t* manager) {
   }
 }
 
-static void* nl_controller_thread_main(void* context) {
+static int SDLCALL nl_controller_thread_main(void* context) {
   nl_controller_manager_t* manager = (nl_controller_manager_t*)context;
 
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
@@ -545,14 +544,14 @@ static void* nl_controller_thread_main(void* context) {
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                  "[noland-controller] SDL_InitSubSystem(SDL_INIT_JOYSTICK) failed: %s",
                  SDL_GetError());
-    return NULL;
+    return -1;
   }
   if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0) {
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
                  "[noland-controller] SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) failed: %s",
                  SDL_GetError());
     SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
-    return NULL;
+    return -1;
   }
 
   nl_controller_manager_lock(manager);
@@ -603,7 +602,7 @@ static void* nl_controller_thread_main(void* context) {
   SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[noland-controller] thread stopping");
   SDL_QuitSubSystem(SDL_INIT_GAMECONTROLLER);
   SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
-  return NULL;
+  return 0;
 }
 
 nl_controller_manager_t* nl_controller_manager_create(void) {
@@ -611,7 +610,11 @@ nl_controller_manager_t* nl_controller_manager_create(void) {
   if (manager == NULL) {
     return NULL;
   }
-  pthread_mutex_init(&manager->mutex, NULL);
+  manager->mutex = SDL_CreateMutex();
+  if (manager->mutex == NULL) {
+    free(manager);
+    return NULL;
+  }
   return manager;
 }
 
@@ -620,7 +623,8 @@ void nl_controller_manager_destroy(nl_controller_manager_t* manager) {
     return;
   }
   nl_controller_manager_stop(manager);
-  pthread_mutex_destroy(&manager->mutex);
+  SDL_DestroyMutex(manager->mutex);
+  manager->mutex = NULL;
   free(manager);
 }
 
@@ -639,7 +643,8 @@ bool nl_controller_manager_start(nl_controller_manager_t* manager, nl_runtime_t*
 
   manager->runtime = runtime;
   manager->running = true;
-  if (pthread_create(&manager->thread, NULL, nl_controller_thread_main, manager) != 0) {
+  manager->thread = SDL_CreateThread(nl_controller_thread_main, "noland-controller", manager);
+  if (manager->thread == NULL) {
     manager->running = false;
     manager->runtime = NULL;
     nl_controller_manager_unlock(manager);
@@ -664,8 +669,9 @@ void nl_controller_manager_stop(nl_controller_manager_t* manager) {
   nl_controller_manager_unlock(manager);
 
   if (thread_started) {
-    pthread_join(manager->thread, NULL);
+    SDL_WaitThread(manager->thread, NULL);
     nl_controller_manager_lock(manager);
+    manager->thread = NULL;
     manager->thread_started = false;
     manager->runtime = NULL;
     nl_controller_manager_unlock(manager);

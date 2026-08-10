@@ -12,7 +12,6 @@ import type {
   MoonlightPairingSessionResponse,
 } from "../../lib/types";
 import { PostWireguardModal } from "./PostWireguardModal";
-import { ConnectionProviderModal } from "./ConnectionProviderModal";
 
 interface Props {
   appState: PersistedAppState;
@@ -20,10 +19,6 @@ interface Props {
   busy: boolean;
   blockingAction: BlockingActionState | null;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
-  onOpenWireguardApp: () => Promise<void>;
-  onDownloadWireguardConfig: () => Promise<string | null>;
-  onVerifyWireguard: () => Promise<unknown>;
-  onDetectMoonlight: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
   activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
@@ -49,10 +44,6 @@ export function ProvisioningScreen({
   busy,
   blockingAction,
   onSetupWireguardAppHandoff,
-  onOpenWireguardApp,
-  onDownloadWireguardConfig,
-  onVerifyWireguard,
-  onDetectMoonlight,
   onSetupMoonlightSunshine,
   activeMoonlightPairing,
   onPrepareMoonlightPairingHandoff,
@@ -74,7 +65,7 @@ export function ProvisioningScreen({
   };
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
+    <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-6xl flex-col gap-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -249,12 +240,6 @@ export function ProvisioningScreen({
         </section>
       </div>
 
-      <ConnectionProviderModal
-        open={appState.orchestrationState === "SelectingConnectionProvider"}
-        appState={appState}
-        busy={busy}
-        onSelectWireguard={onSetupWireguardAppHandoff}
-      />
 
       <PostWireguardModal
         open={
@@ -277,10 +262,6 @@ export function ProvisioningScreen({
         appState={appState}
         busy={busy}
         onSetupWireguardAppHandoff={onSetupWireguardAppHandoff}
-        onOpenWireguardApp={onOpenWireguardApp}
-        onDownloadWireguardConfig={onDownloadWireguardConfig}
-        onVerifyWireguard={onVerifyWireguard}
-        onDetectMoonlight={onDetectMoonlight}
         onSetupMoonlightSunshine={onSetupMoonlightSunshine}
         activeMoonlightPairing={activeMoonlightPairing}
         onPrepareMoonlightPairingHandoff={onPrepareMoonlightPairingHandoff}

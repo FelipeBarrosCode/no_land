@@ -1,16 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import type { LocationState, OfferCandidate, ServerPreferences } from "../../lib/types";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import type { OfferCandidate, ServerPreferences } from "../../lib/types";
+import { APP_PROMPTS } from "../../prompts/appPrompts";
 
 interface Props {
   open: boolean;
   onClose: () => void;
   offers: OfferCandidate[];
   selectedOfferId: number | null;
-  location: LocationState;
   serverPreferences: ServerPreferences;
   storageGb: number;
   searchingOffers: boolean;
@@ -28,7 +28,68 @@ interface Props {
     longitude: number;
   }) => Promise<void>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
-  onUpdateServerPreferences: (payload: Partial<ServerPreferences>) => Promise<void>;
+  onUpdateServerPreferences: (
+    payload: Partial<ServerPreferences>,
+  ) => Promise<void>;
+}
+
+type CountryOption = {
+  code: string;
+  label: string;
+};
+
+const FALLBACK_COUNTRIES: CountryOption[] = [
+  { code: "AU", label: "Australia" },
+  { code: "BR", label: "Brazil" },
+  { code: "CA", label: "Canada" },
+  { code: "FR", label: "France" },
+  { code: "DE", label: "Germany" },
+  { code: "IT", label: "Italy" },
+  { code: "JP", label: "Japan" },
+  { code: "NL", label: "Netherlands" },
+  { code: "NO", label: "Norway" },
+  { code: "PL", label: "Poland" },
+  { code: "SG", label: "Singapore" },
+  { code: "ES", label: "Spain" },
+  { code: "SE", label: "Sweden" },
+  { code: "GB", label: "United Kingdom" },
+  { code: "US", label: "United States" },
+];
+
+const COUNTRY_OPTIONS = buildCountryOptions();
+
+function buildCountryOptions(): CountryOption[] {
+  try {
+    const displayNames = new Intl.DisplayNames(["en"], { type: "region" });
+    const countries: CountryOption[] = [];
+
+    for (let first = 65; first <= 90; first += 1) {
+      for (let second = 65; second <= 90; second += 1) {
+        const code = String.fromCharCode(first, second);
+        const label = displayNames.of(code);
+        if (label && label !== code && !label.startsWith("Unknown Region")) {
+          countries.push({ code, label });
+        }
+      }
+    }
+
+    if (countries.length > 100) {
+      return countries.sort((left, right) =>
+        left.label.localeCompare(right.label),
+      );
+    }
+  } catch {
+    // Older webviews use the stable fallback list below.
+  }
+
+  return FALLBACK_COUNTRIES;
+}
+
+function resolveCountryName(code: string): string {
+  return (
+    COUNTRY_OPTIONS.find((item) => item.code === code.toUpperCase())?.label ??
+    code.toUpperCase()
+  );
 }
 
 function formatSpeed(mbps: number): string {
@@ -46,35 +107,44 @@ function formatTimeRemaining(hours: number): string {
 
   const days = Math.floor(hours / 24);
   const remainingHours = Math.floor(hours % 24);
-
-  if (days > 0) {
-    return `${days}d ${remainingHours}h`;
-  }
-
-  return `${remainingHours}h`;
+  return days > 0 ? `${days}d ${remainingHours}h` : `${remainingHours}h`;
 }
 
-const GEOLOCATION_OPTIONS = [
-  { code: "US", label: "United States" },
-  { code: "CA", label: "Canada" },
-  { code: "GB", label: "United Kingdom" },
-  { code: "DE", label: "Germany" },
-  { code: "FR", label: "France" },
-  { code: "NL", label: "Netherlands" },
-  { code: "SE", label: "Sweden" },
-  { code: "NO", label: "Norway" },
-  { code: "ES", label: "Spain" },
-  { code: "IT", label: "Italy" },
-  { code: "PL", label: "Poland" },
-  { code: "JP", label: "Japan" },
-  { code: "SG", label: "Singapore" },
-  { code: "AU", label: "Australia" },
-  { code: "BR", label: "Brazil" }
-];
+function offerSearchDocument(offer: OfferCandidate): string {
+  const labels = [
+    offer.isVerified ? "verified" : "unverified",
+    offer.isDatacenter ? "datacenter" : "community host",
+    offer.hasStaticIp ? "static ip" : "dynamic ip",
+    offer.hasAvx ? "avx" : "no avx",
+  ];
 
-function resolveCountryName(code: string): string {
-  const option = GEOLOCATION_OPTIONS.find((item) => item.code === code.toUpperCase());
-  return option?.label ?? code.toUpperCase();
+  return [
+    offer.id,
+    offer.hostId,
+    offer.hostLabel,
+    offer.locationLabel,
+    offer.city,
+    offer.region,
+    offer.country,
+    offer.gpuName,
+    offer.gpuRamMb,
+    offer.gpuCount,
+    offer.cpuName,
+    offer.cpuCores,
+    offer.internetDownMbps,
+    offer.internetUpMbps,
+    offer.hourlyPrice,
+    offer.availableStorageGb,
+    offer.estimatedDistanceKm,
+    offer.reliability,
+    offer.score,
+    offer.timeRemainingHours,
+    offer.offerType,
+    ...labels,
+  ]
+    .filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLocaleLowerCase();
 }
 
 export function ServerPickerModal({
@@ -82,7 +152,6 @@ export function ServerPickerModal({
   onClose,
   offers,
   selectedOfferId,
-  location,
   serverPreferences,
   storageGb,
   searchingOffers,
@@ -94,47 +163,16 @@ export function ServerPickerModal({
   onPreviousPage,
   onManualLocationSave,
   onSelectOffer,
-  onUpdateServerPreferences
+  onUpdateServerPreferences,
 }: Props) {
-  const [region, setRegion] = useState(location.region);
-  const [geolocationCountryCode, setGeolocationCountryCode] = useState(
-    serverPreferences.geolocationCountryCode || "US"
+  const [countryCode, setCountryCode] = useState(
+    serverPreferences.geolocationCountryCode || "US",
   );
-  const [minPrice, setMinPrice] = useState(serverPreferences.minHourlyPrice.toString());
-  const [maxPrice, setMaxPrice] = useState(
-    serverPreferences.maxHourlyPrice > 0 ? serverPreferences.maxHourlyPrice.toString() : ""
-  );
-  const [minGpuRamGb, setMinGpuRamGb] = useState(serverPreferences.minGpuRamGb.toString());
-  const [minCpuCores, setMinCpuCores] = useState(serverPreferences.minCpuCores.toString());
-  const [minDown, setMinDown] = useState(serverPreferences.minInetDownMbps.toString());
-  const [minUp, setMinUp] = useState(serverPreferences.minInetUpMbps.toString());
+  const [fullTextQuery, setFullTextQuery] = useState("");
 
   useEffect(() => {
-    setRegion(location.region);
-  }, [location.region]);
-
-  useEffect(() => {
-    setMinPrice(serverPreferences.minHourlyPrice.toString());
-    setMaxPrice(serverPreferences.maxHourlyPrice > 0 ? serverPreferences.maxHourlyPrice.toString() : "");
-    setMinGpuRamGb(serverPreferences.minGpuRamGb.toString());
-    setMinCpuCores(serverPreferences.minCpuCores.toString());
-    setMinDown(serverPreferences.minInetDownMbps.toString());
-    setMinUp(serverPreferences.minInetUpMbps.toString());
-    setGeolocationCountryCode(serverPreferences.geolocationCountryCode || "US");
-  }, [
-    serverPreferences.minHourlyPrice,
-    serverPreferences.maxHourlyPrice,
-    serverPreferences.minGpuRamGb,
-    serverPreferences.minCpuCores,
-    serverPreferences.minInetDownMbps,
-    serverPreferences.minInetUpMbps,
-    serverPreferences.geolocationCountryCode
-  ]);
-
-  const disabledSearch = useMemo(
-    () => busy || searchingOffers || !geolocationCountryCode.trim(),
-    [busy, searchingOffers, geolocationCountryCode]
-  );
+    setCountryCode(serverPreferences.geolocationCountryCode || "US");
+  }, [serverPreferences.geolocationCountryCode]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -142,408 +180,278 @@ export function ServerPickerModal({
         onClose();
       }
     }
+
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
+
+  const filteredOffers = useMemo(() => {
+    const terms = fullTextQuery
+      .trim()
+      .toLocaleLowerCase()
+      .split(/\s+/u)
+      .filter(Boolean);
+
+    if (terms.length === 0) {
+      return offers;
+    }
+
+    return offers.filter((offer) => {
+      const document = offerSearchDocument(offer);
+      return terms.every((term) => document.includes(term));
+    });
+  }, [fullTextQuery, offers]);
 
   if (!open) {
     return null;
   }
 
-  async function runRegionCountrySearch() {
+  async function runCountrySearch() {
     await onManualLocationSave({
       city: "",
-      region: region.trim(),
-      country: resolveCountryName(geolocationCountryCode),
+      region: "",
+      country: resolveCountryName(countryCode),
       latitude: 0,
-      longitude: 0
+      longitude: 0,
     });
 
-    // Save price filters
-    const minPriceValue = parseFloat(minPrice) || 0;
-    const maxPriceValue = parseFloat(maxPrice) || 0;
     await onUpdateServerPreferences({
-      minHourlyPrice: minPriceValue,
-      maxHourlyPrice: maxPriceValue,
+      minReliability: 0.8,
+      minHourlyPrice: 0,
+      maxHourlyPrice: 0,
+      requireVerified: false,
+      requireDatacenter: false,
+      includeOnDemand: true,
+      includeInterruptible: true,
+      includeReserved: true,
+      requireStaticIp: false,
+      requireAvx: false,
       minGpuCount: 1,
-      minGpuRamGb: Number.parseInt(minGpuRamGb, 10) || 0,
-      minCpuCores: Number.parseFloat(minCpuCores) || 0,
-      minInetDownMbps: Number.parseFloat(minDown) || 0,
-      minInetUpMbps: Number.parseFloat(minUp) || 0,
-      geolocationCountryCode,
-      requireStaticIp: false
+      minGpuRamGb: 0,
+      minCpuCores: 0,
+      minInetDownMbps: 0,
+      minInetUpMbps: 0,
+      geolocationCountryCode: countryCode,
     });
 
+    setFullTextQuery("");
     await onSearchOffers(1);
   }
 
-  async function toggleVerified() {
-    await onUpdateServerPreferences({
-      requireVerified: !serverPreferences.requireVerified
-    });
-  }
-
-  async function toggleDatacenter() {
-    await onUpdateServerPreferences({
-      requireDatacenter: !serverPreferences.requireDatacenter
-    });
-  }
-
-  async function toggleOfferType(key: "includeOnDemand" | "includeInterruptible" | "includeReserved") {
-    await onUpdateServerPreferences({
-      [key]: !serverPreferences[key]
-    });
-  }
-
-  async function toggleAvx() {
-    await onUpdateServerPreferences({
-      requireAvx: !serverPreferences.requireAvx
-    });
-  }
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
-      <div className="glass-panel pixel-frame max-h-[92vh] w-full max-w-6xl overflow-hidden">
-        <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
-          <div className="flex items-center gap-3">
-            <div>
-              <h2
-                className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
-                data-text="Select Server"
-              >
-                Select Server
-              </h2>
-              <p className="text-[1.25rem] leading-none text-[#b4c8de]">
-                Select a country to find available servers.
-              </p>
-            </div>
-            <AIPromptHelper topic="Server Selection Market" promptText={APP_PROMPTS.serverPickerModalHeader} variant="icon" />
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-6xl">
+      <div className="flex shrink-0 items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div>
+            <h2
+              className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
+              data-text="Select Server"
+            >
+              Select Server
+            </h2>
+            <p className="text-[1.25rem] leading-none text-[#b4c8de]">
+              Search the market by country, then filter the returned servers by
+              any text.
+            </p>
           </div>
-          <Button variant="ghost" onClick={onClose}>
-            Close
+          <AIPromptHelper
+            topic="Server Selection Market"
+            promptText={APP_PROMPTS.serverPickerModalHeader}
+            variant="icon"
+          />
+        </div>
+        <Button variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+
+      <ModalBody className="px-5 py-4">
+        {(busy || searchingOffers) && (
+          <p
+            className="mb-4 text-[1.1rem] text-[#9ec4df]"
+            aria-live="polite"
+            aria-busy="true"
+          >
+            {searchingOffers
+              ? "Searching available offers..."
+              : "Updating country search..."}
+          </p>
+        )}
+
+        <div className="mb-4 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,0.8fr)_auto_minmax(16rem,1.2fr)] md:items-end">
+          <label>
+            <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">
+              Country
+            </span>
+            <select
+              className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
+              value={countryCode}
+              onChange={(event) => setCountryCode(event.target.value)}
+            >
+              {COUNTRY_OPTIONS.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {option.label} ({option.code})
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <Button
+            variant="secondary"
+            disabled={busy || searchingOffers || !countryCode}
+            loading={searchingOffers}
+            loadingText="Searching..."
+            onClick={runCountrySearch}
+          >
+            Find Offers
           </Button>
+
+          <label>
+            <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">
+              Search returned offers
+            </span>
+            <input
+              className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-3 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731] placeholder:text-[#647695]"
+              type="search"
+              value={fullTextQuery}
+              onChange={(event) => setFullTextQuery(event.target.value)}
+              placeholder="State, city, GPU, CPU, host, price..."
+              aria-label="Search all returned offer fields"
+            />
+          </label>
         </div>
 
-        <div className="max-h-[80vh] overflow-y-auto px-5 py-4">
-          {(busy || searchingOffers) && (
-            <p className="mb-4 text-[1.1rem] text-[#9ec4df]" aria-live="polite" aria-busy="true">
-              {searchingOffers ? "Searching available offers..." : "Updating server filters..."}
-            </p>
+        <p className="mb-3 text-[1.05rem] text-[#9ec4df]" aria-live="polite">
+          Showing {filteredOffers.length} of {offers.length} returned offers on
+          market page {offersPage}.
+        </p>
+
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {offers.length === 0 ? (
+            <Card className="col-span-full text-[1.3rem] text-[#b4c8de]">
+              No offers yet. Select a country and click Find Offers.
+            </Card>
+          ) : filteredOffers.length === 0 ? (
+            <Card className="col-span-full text-[1.3rem] text-[#b4c8de]">
+              No returned offers match “{fullTextQuery.trim()}”. Try a broader
+              search or load another market page.
+            </Card>
+          ) : (
+            filteredOffers.map((offer) => {
+              const isSelected = offer.id === selectedOfferId;
+              return (
+                <Card
+                  key={offer.id}
+                  className={`border-2 transition ${
+                    isSelected
+                      ? "border-neon-lime shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#304126]"
+                      : "border-[#3a4068]"
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5">
+                      <h3 className="font-display text-[11px] leading-[1.45] text-white">
+                        {offer.hostLabel}
+                      </h3>
+                      <AIPromptHelper
+                        topic={`Instance Offering ${offer.hostLabel}`}
+                        promptText={APP_PROMPTS.serverInstanceCard}
+                        variant="icon"
+                      />
+                    </div>
+                    <span className="border border-[#43508b] bg-[#1a2042] px-2 py-1 font-display text-[10px] text-[#9ad9ff]">
+                      ${offer.hourlyPrice.toFixed(3)}/hr
+                    </span>
+                  </div>
+
+                  <p className="mt-2 text-[1.45rem] leading-[1.02] text-neon-cyan">
+                    {offer.gpuName}
+                  </p>
+
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {offer.isVerified && (
+                      <span className="border border-neon-lime/50 bg-neon-lime/10 px-1.5 py-0.5 text-[10px] text-neon-lime">
+                        ✓ Verified
+                      </span>
+                    )}
+                    <span className="border border-[#5a7fb5]/50 bg-[#5a7fb5]/10 px-1.5 py-0.5 text-[10px] text-[#9ad9ff]">
+                      {offer.isDatacenter ? "🏢 Datacenter" : "🧩 Community Host"}
+                    </span>
+                    <span className="border border-[#f2b84a]/50 bg-[#f2b84a]/10 px-1.5 py-0.5 text-[10px] text-[#ffd78a]">
+                      {offer.offerType || "on-demand"}
+                    </span>
+                    {offer.hasStaticIp && (
+                      <span className="border border-[#6ae6ce]/50 bg-[#6ae6ce]/10 px-1.5 py-0.5 text-[10px] text-[#8df1df]">
+                        🌐 Static IP
+                      </span>
+                    )}
+                    {offer.hasAvx && (
+                      <span className="border border-[#8ca8ff]/50 bg-[#8ca8ff]/10 px-1.5 py-0.5 text-[10px] text-[#b9c8ff]">
+                        ⚙ AVX
+                      </span>
+                    )}
+                    {offer.timeRemainingHours > 0 && (
+                      <span className="border border-[#ffa500]/50 bg-[#ffa500]/10 px-1.5 py-0.5 text-[10px] text-[#ffa500]">
+                        ⏱ {formatTimeRemaining(offer.timeRemainingHours)} left
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid grid-cols-2 gap-2 text-[1.2rem] leading-none text-[#c6dbf4]">
+                    <p>Location: {offer.locationLabel}</p>
+                    <p>VRAM: {(offer.gpuRamMb / 1024).toFixed(1)} GB</p>
+                    <p>GPU count: {offer.gpuCount}</p>
+                    <p>CPU: {offer.cpuName || "n/a"}</p>
+                    <p>
+                      Cores: {offer.cpuCores > 0 ? offer.cpuCores.toFixed(1) : "n/a"}
+                    </p>
+                    <p>Down: {formatSpeed(offer.internetDownMbps)}</p>
+                    <p>Up: {formatSpeed(offer.internetUpMbps)}</p>
+                    <p>Reliability: {(offer.reliability * 100).toFixed(1)}%</p>
+                  </div>
+
+                  <Button
+                    className="mt-3 w-full"
+                    variant={isSelected ? "secondary" : "primary"}
+                    disabled={busy}
+                    loading={busy && isSelected}
+                    loadingText="Provisioning..."
+                    onClick={() => onSelectOffer(offer.id, storageGb)}
+                  >
+                    {isSelected ? "Provisioning" : "Select & Provision"}
+                  </Button>
+                </Card>
+              );
+            })
           )}
+        </div>
 
-          <div className="mb-4 flex items-end gap-3">
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Country</span>
-              <select
-                className="h-11 w-64 border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                value={geolocationCountryCode}
-                onChange={(event) => setGeolocationCountryCode(event.target.value)}
-              >
-                {GEOLOCATION_OPTIONS.map((option) => (
-                  <option key={option.code} value={option.code}>
-                    {option.label} ({option.code})
-                  </option>
-                ))}
-              </select>
-            </div>
-
+        <div className="mt-4 flex items-center justify-between gap-3 border-t border-[#3e4270] pt-3">
+          <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ec4df]">
+            Market Page {offersPage}
+          </p>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              disabled={busy || searchingOffers || offersPage <= 1}
+              loading={searchingOffers}
+              loadingText="Loading..."
+              onClick={onPreviousPage}
+            >
+              Prev Page
+            </Button>
             <Button
               variant="secondary"
-              disabled={disabledSearch}
+              disabled={busy || searchingOffers || !offersHasNextPage}
               loading={searchingOffers}
-              loadingText="Searching..."
-              onClick={runRegionCountrySearch}
+              loadingText="Loading..."
+              onClick={onNextPage}
             >
-              Find Offers
+              Next Page
             </Button>
           </div>
-
-          {/* Price Range and Filters */}
-          <div className="mb-4 grid gap-3 md:grid-cols-[1fr_1fr_auto_auto] border border-[#3e4270] p-3 rounded">
-            <div className="md:col-span-4 flex items-center justify-between">
-              <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b4c8de]">Search Filters & Preferences</span>
-              <AIPromptHelper topic="Server Search & Filtering" promptText={APP_PROMPTS.serverSearchPreferences} variant="icon" />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min Price ($/hr)</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={0.001}
-                placeholder="0.000"
-                value={minPrice}
-                onChange={(event) => setMinPrice(event.target.value)}
-              />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Max Price ($/hr)</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={0.001}
-                placeholder="No limit"
-                value={maxPrice}
-                onChange={(event) => setMaxPrice(event.target.value)}
-              />
-            </div>
-
-            <div className="flex items-end gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={serverPreferences.requireVerified}
-                  onChange={toggleVerified}
-                  className="h-5 w-5 accent-neon-cyan"
-                />
-                <span className="text-[1.2rem] text-[#b4c8de]">Verified Only</span>
-              </label>
-            </div>
-
-            <div className="flex items-end gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={serverPreferences.requireDatacenter}
-                  onChange={toggleDatacenter}
-                  className="h-5 w-5 accent-neon-cyan"
-                />
-                <span className="text-[1.2rem] text-[#b4c8de]">Datacenter Only</span>
-              </label>
-            </div>
-          </div>
-
-          <div className="mb-4 grid gap-3 md:grid-cols-3 border border-[#3e4270] p-3 rounded">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={serverPreferences.includeOnDemand}
-                onChange={() => toggleOfferType("includeOnDemand")}
-                className="h-5 w-5 accent-neon-cyan"
-              />
-              <span className="text-[1.2rem] text-[#b4c8de]">On-demand</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={serverPreferences.includeInterruptible}
-                onChange={() => toggleOfferType("includeInterruptible")}
-                className="h-5 w-5 accent-neon-cyan"
-              />
-              <span className="text-[1.2rem] text-[#b4c8de]">Interruptible</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={serverPreferences.includeReserved}
-                onChange={() => toggleOfferType("includeReserved")}
-                className="h-5 w-5 accent-neon-cyan"
-              />
-              <span className="text-[1.2rem] text-[#b4c8de]">Reserved</span>
-            </label>
-          </div>
-
-          <div className="mb-4 grid gap-3 md:grid-cols-5 border border-[#3e4270] p-3 rounded">
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min GPU Count</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={1}
-                max={1}
-                step={1}
-                value={1}
-                disabled
-              />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min VRAM (GB)</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={1}
-                value={minGpuRamGb}
-                onChange={(event) => setMinGpuRamGb(event.target.value)}
-              />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min CPU Cores</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={0.5}
-                value={minCpuCores}
-                onChange={(event) => setMinCpuCores(event.target.value)}
-              />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min Down (Mbps)</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={1}
-                value={minDown}
-                onChange={(event) => setMinDown(event.target.value)}
-              />
-            </div>
-            <div>
-              <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">Min Up (Mbps)</span>
-              <input
-                className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-                type="number"
-                min={0}
-                step={1}
-                value={minUp}
-                onChange={(event) => setMinUp(event.target.value)}
-              />
-            </div>
-          </div>
-
-          <div className="mb-4 grid gap-3 md:grid-cols-2 border border-[#3e4270] p-3 rounded">
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked
-                disabled
-                className="h-5 w-5 accent-neon-cyan"
-              />
-              <span className="text-[1.2rem] text-[#b4c8de]">Static IP required</span>
-            </label>
-            <label className="flex items-center gap-2 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={serverPreferences.requireAvx}
-                onChange={toggleAvx}
-                className="h-5 w-5 accent-neon-cyan"
-              />
-              <span className="text-[1.2rem] text-[#b4c8de]">AVX CPU only</span>
-            </label>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-            {offers.length === 0 ? (
-              <Card className="col-span-full text-[1.3rem] text-[#b4c8de]">
-                No offers yet. Select a country and click Find Offers.
-              </Card>
-            ) : (
-              offers.map((offer) => {
-                const isSelected = offer.id === selectedOfferId;
-                return (
-                  <Card
-                    key={offer.id}
-                    className={`border-2 transition ${
-                      isSelected
-                        ? "border-neon-lime shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#304126]"
-                        : "border-[#3a4068]"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <h3 className="font-display text-[11px] leading-[1.45] text-white">{offer.hostLabel}</h3>
-                        <AIPromptHelper topic={`Instance Offering ${offer.hostLabel}`} promptText={APP_PROMPTS.serverInstanceCard} variant="icon" />
-                      </div>
-                      <span className="border border-[#43508b] bg-[#1a2042] px-2 py-1 font-display text-[10px] text-[#9ad9ff]">
-                        ${offer.hourlyPrice.toFixed(3)}/hr
-                      </span>
-                    </div>
-
-                    <p className="mt-2 text-[1.45rem] leading-[1.02] text-neon-cyan">{offer.gpuName}</p>
-
-                    {/* Host badges */}
-                    <div className="mt-2 flex flex-wrap gap-1">
-                      {offer.isVerified && (
-                        <span className="border border-neon-lime/50 bg-neon-lime/10 px-1.5 py-0.5 text-[10px] text-neon-lime">
-                          ✓ Verified
-                        </span>
-                      )}
-                      {offer.isDatacenter && (
-                        <span className="border border-[#5a7fb5]/50 bg-[#5a7fb5]/10 px-1.5 py-0.5 text-[10px] text-[#9ad9ff]">
-                          🏢 Datacenter
-                        </span>
-                      )}
-                      {!offer.isDatacenter && (
-                        <span className="border border-[#6b6f92]/50 bg-[#6b6f92]/10 px-1.5 py-0.5 text-[10px] text-[#c2c6df]">
-                          🧩 Community Host
-                        </span>
-                      )}
-                      <span className="border border-[#f2b84a]/50 bg-[#f2b84a]/10 px-1.5 py-0.5 text-[10px] text-[#ffd78a]">
-                        {offer.offerType || "on-demand"}
-                      </span>
-                      {offer.hasStaticIp && (
-                        <span className="border border-[#6ae6ce]/50 bg-[#6ae6ce]/10 px-1.5 py-0.5 text-[10px] text-[#8df1df]">
-                          🌐 Static IP
-                        </span>
-                      )}
-                      {offer.hasAvx && (
-                        <span className="border border-[#8ca8ff]/50 bg-[#8ca8ff]/10 px-1.5 py-0.5 text-[10px] text-[#b9c8ff]">
-                          ⚙ AVX
-                        </span>
-                      )}
-                      {offer.timeRemainingHours > 0 && (
-                        <span className="border border-[#ffa500]/50 bg-[#ffa500]/10 px-1.5 py-0.5 text-[10px] text-[#ffa500]">
-                          ⏱ {formatTimeRemaining(offer.timeRemainingHours)} left
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-[1.2rem] leading-none text-[#c6dbf4]">
-                      <p>Location: {offer.locationLabel}</p>
-                      <p>VRAM: {(offer.gpuRamMb / 1024).toFixed(1)} GB</p>
-                      <p>GPU count: {offer.gpuCount}</p>
-                      <p>CPU: {offer.cpuName || "n/a"}</p>
-                      <p>Cores: {offer.cpuCores > 0 ? offer.cpuCores.toFixed(1) : "n/a"}</p>
-                      <p>Down: {formatSpeed(offer.internetDownMbps)}</p>
-                      <p>Up: {formatSpeed(offer.internetUpMbps)}</p>
-                      <p>Reliability: {(offer.reliability * 100).toFixed(1)}%</p>
-                    </div>
-
-                    <Button
-                      className="mt-3 w-full"
-                      variant={isSelected ? "secondary" : "primary"}
-                      disabled={busy}
-                      loading={busy && isSelected}
-                      loadingText="Selecting..."
-                      onClick={() => onSelectOffer(offer.id, storageGb)}
-                    >
-                      {isSelected ? "Selected" : "Select & Provision"}
-                    </Button>
-                  </Card>
-                );
-              })
-            )}
-          </div>
-
-          <div className="mt-4 flex items-center justify-between gap-3 border-t border-[#3e4270] pt-3">
-            <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ec4df]">
-              Market Page {offersPage}
-            </p>
-            <div className="flex items-center gap-2">
-              <Button
-                variant="ghost"
-                disabled={busy || searchingOffers || offersPage <= 1}
-                loading={searchingOffers}
-                loadingText="Loading..."
-                onClick={onPreviousPage}
-              >
-                Prev Page
-              </Button>
-              <Button
-                variant="secondary"
-                disabled={busy || searchingOffers || !offersHasNextPage}
-                loading={searchingOffers}
-                loadingText="Loading..."
-                onClick={onNextPage}
-              >
-                Next Page
-              </Button>
-            </div>
-          </div>
         </div>
-      </div>
-    </div>
+      </ModalBody>
+    </ModalFrame>
   );
 }

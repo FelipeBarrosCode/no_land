@@ -9,6 +9,7 @@ import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { MicControls } from "../../components/ui/MicControls";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import {
@@ -57,11 +58,8 @@ interface Props {
   }) => Promise<void>;
   onLoadRentedInstances: () => Promise<void>;
   onRefreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
-  onOpenVastBillingBrowser: (
-    action?: VastBrowserBillingAction,
-  ) => Promise<unknown>;
   onStartPlayExisting: (instanceId: number) => Promise<string | null>;
-  onSelectOffer: (offerId: number, storageGb: number) => Promise<void>;
+  onSelectOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (
     payload: Partial<ServerPreferences>,
@@ -114,7 +112,6 @@ export function DashboardScreen({
   onManualLocationSave,
   onLoadRentedInstances,
   onRefreshVastWalletSummary,
-  onOpenVastBillingBrowser,
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
@@ -145,7 +142,6 @@ export function DashboardScreen({
   const blockingDetail = blockingAction?.detail ?? null;
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
 
-  void onOpenVastBillingBrowser;
 
   const walletAmountLabel = vastWalletSummary?.displayAmount || "--";
 
@@ -254,7 +250,7 @@ export function DashboardScreen({
   }
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-8 pt-6 md:px-8">
+    <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
@@ -298,7 +294,7 @@ export function DashboardScreen({
                 </p>
                 <div className="flex items-center gap-2">
                   <AIPromptHelper
-                    topic="Moonlight Client Download"
+                    topic="Embedded Streaming"
                     promptText={APP_PROMPTS.moonlightCard}
                     variant="icon"
                   />
@@ -653,7 +649,6 @@ export function DashboardScreen({
         onClose={() => setPickerOpen(false)}
         offers={offers}
         selectedOfferId={appState.selectedOffer?.id ?? null}
-        location={appState.location}
         serverPreferences={appState.serverPreferences}
         storageGb={appState.serverPreferences.storageGb}
         searchingOffers={searchingOffers}
@@ -665,16 +660,24 @@ export function DashboardScreen({
         onPreviousPage={onPreviousOffersPage}
         onManualLocationSave={onManualLocationSave}
         onSelectOffer={async (offerId, storageGb) => {
-          await onSelectOffer(offerId, storageGb);
+          const selected = await onSelectOffer(offerId, storageGb);
+          if (!selected) {
+            return;
+          }
+
           setPickerOpen(false);
+          await onStartPlay();
           navigate("/provisioning");
         }}
         onUpdateServerPreferences={onSaveServerPreferences}
       />
 
       {walletModalOpen ? (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
-          <div className="glass-panel pixel-frame crt-surface w-full max-w-lg p-6">
+        <ModalFrame
+          panelClassName="glass-panel pixel-frame crt-surface max-w-lg"
+          zIndexClassName="z-40"
+        >
+          <ModalBody className="p-6">
             <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-3">
               <div>
                 <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
@@ -743,8 +746,8 @@ export function DashboardScreen({
                 Refresh Balance
               </Button>
             </div>
-          </div>
-        </div>
+          </ModalBody>
+        </ModalFrame>
       ) : null}
 
       <SharedStorageSyncModal
@@ -766,8 +769,11 @@ export function DashboardScreen({
       />
 
       {connectionInfoModalType && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
-          <div className="glass-panel pixel-frame crt-surface w-full max-w-xl p-6">
+        <ModalFrame
+          panelClassName="glass-panel pixel-frame crt-surface max-w-xl"
+          zIndexClassName="z-40"
+        >
+          <ModalBody className="p-6">
             <div className="mb-4 flex items-center justify-between gap-2 border-b border-[#3e4270] pb-2">
               <h3
                 className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
@@ -799,7 +805,7 @@ export function DashboardScreen({
                   Requirements
                 </p>
                 <p className="text-[1.15rem] text-[#b9cce2]">
-                  No separate tunnel, Moonlight, Tailscale, or WireGuard setup is required from you. If macOS or Linux asks for elevation, just approve it so Noland can finish local configuration.
+                  No separate streaming client, VPN app, or networking-tool setup is required. If macOS or Linux asks for elevation, approve it so Noland can finish local configuration.
                 </p>
               </div>
             </div>
@@ -813,8 +819,8 @@ export function DashboardScreen({
               </Button>
 
             </div>
-          </div>
-        </div>
+          </ModalBody>
+        </ModalFrame>
       )}
     </main>
   );

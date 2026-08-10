@@ -9,9 +9,6 @@
     "preview": "vite preview",
     "bootstrap:native-deps": "node scripts/bootstrap-native-deps.mjs",
     "prepare:mic-sidecar": "node scripts/prepare-mic-sidecar.mjs",
-    "vast:auth": "node scripts/vast-ai-bootstrap-session.mjs",
-    "vast:api-key": "node scripts/vast-ai-create-api-key.mjs",
-    "vast:billing": "node scripts/vast-ai-open-billing-session.mjs",
     "tauri": "tauri",
     "tauri:dev": "node scripts/tauri-with-mic-sidecar.mjs dev",
     "tauri:build": "node scripts/tauri-with-mic-sidecar.mjs build"
@@ -20,7 +17,6 @@
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-opener": "^2.0.0",
     "clsx": "^2.1.1",
-    "playwright": "^1.56.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",

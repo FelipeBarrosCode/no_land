@@ -196,7 +196,7 @@ fn normalize_rtsp_session_url(session_url: Option<String>, host_address: &str) -
 fn default_client_video_capabilities() -> ClientVideoCapabilities {
     ClientVideoCapabilities {
         supports_h264: true,
-        supports_hevc: true,
+        supports_hevc: !cfg!(target_os = "windows"),
         supports_av1: false,
         supports_hdr10: false,
         supports_yuv444: false,

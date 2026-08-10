@@ -8,12 +8,6 @@ import type {
   PlatformCredentialsUpdate,
   PersistedAppState,
   ProvisioningEvent,
-  VastBrowserAuthSessionResult,
-  VastBrowserAutomationStatus,
-  VastBrowserBillingAction,
-  VastBrowserBillingSessionResult,
-  VastBrowserGeneratedApiKeyResult,
-  MoonlightConfigureResult,
   RentedInstanceSummary,
   ServerPreferencesUpdate,
   SshCredentialsUpdate,
@@ -125,13 +119,6 @@ export async function verifyWireguard(): Promise<ReachabilityResult> {
   return invokeSafe<ReachabilityResult>("verify_wireguard");
 }
 
-export async function openWireguardApp(): Promise<void> {
-  await invokeSafe<void>("open_wireguard_app_command");
-}
-
-export async function downloadWireguardConfig(): Promise<string> {
-  return invokeSafe<string>("download_wireguard_config_command");
-}
 
 export async function getSetupStatus(): Promise<PostWireGuardSetupState> {
   return invokeSafe<PostWireGuardSetupState>("get_setup_status_command");
@@ -180,45 +167,6 @@ export async function getProvisioningLogs(): Promise<ProvisioningEvent[]> {
   return invokeSafe<ProvisioningEvent[]>("get_provisioning_logs");
 }
 
-export async function resolveMoonlightDownloadUrl(): Promise<string> {
-  return invokeSafe<string>("get_moonlight_download_url");
-}
-
-export async function resolveWireguardDownloadUrl(): Promise<string> {
-  return invokeSafe<string>("get_wireguard_download_url");
-}
-
-export async function launchMoonlightClient(): Promise<void> {
-  await invokeSafe<void>("launch_moonlight_client");
-}
-
-export async function configureMoonlightClient(options?: {
-  apply?: boolean;
-  forceClose?: boolean;
-  native?: boolean;
-  network?: "lan" | "wifi" | "remote" | "auto";
-  preferCodec?: "auto" | "h264" | "hevc" | "av1";
-  maxBitrate?: number;
-  fps?: number;
-  resolution?: string;
-}): Promise<MoonlightConfigureResult> {
-  return invokeSafe<MoonlightConfigureResult>("configure_moonlight_client", {
-    apply: options?.apply ?? false,
-    forceClose: options?.forceClose ?? false,
-    native: options?.native ?? false,
-    network: options?.network ?? "auto",
-    preferCodec: options?.preferCodec ?? "auto",
-    maxBitrate: options?.maxBitrate ?? null,
-    fps: options?.fps ?? null,
-    resolution: options?.resolution ?? null,
-  });
-}
-
-export async function restoreMoonlightBackup(
-  backupFile: string,
-): Promise<string> {
-  return invokeSafe<string>("restore_moonlight_backup", { backupFile });
-}
 
 export async function getRentedInstances(): Promise<RentedInstanceSummary[]> {
   return invokeSafe<RentedInstanceSummary[]>("get_rented_instances");
@@ -230,53 +178,11 @@ export async function updateVastApiKey(
   return invokeSafe<PersistedAppState>("update_vast_api_key", { apiKey });
 }
 
-export async function getVastBrowserAutomationStatus(): Promise<VastBrowserAutomationStatus> {
-  return invokeSafe<VastBrowserAutomationStatus>(
-    "get_vast_browser_automation_status",
-  );
-}
-
-export async function startVastBrowserAuthSession(): Promise<VastBrowserAuthSessionResult> {
-  return invokeSafe<VastBrowserAuthSessionResult>(
-    "start_vast_browser_auth_session",
-  );
-}
-
-export async function generateVastApiKeyFromBrowserSession(payload?: {
-  apiKeyName?: string;
-}): Promise<VastBrowserGeneratedApiKeyResult> {
-  return invokeSafe<VastBrowserGeneratedApiKeyResult>(
-    "generate_vast_api_key_from_browser_session",
-    { payload: payload ?? null },
-  );
-}
-
-export async function openVastBillingBrowserSession(payload?: {
-  action?: VastBrowserBillingAction;
-}): Promise<VastBrowserBillingSessionResult> {
-  return invokeSafe<VastBrowserBillingSessionResult>(
-    "open_vast_billing_browser_session",
-    { payload: payload ?? null },
-  );
-}
 
 export async function getVastWalletSummary(): Promise<VastWalletSummary> {
   return invokeSafe<VastWalletSummary>("get_vast_wallet_summary");
 }
 
-export async function updateTailscaleApiKey(
-  apiKey: string,
-): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("update_tailscale_api_key", { apiKey });
-}
-
-export async function updateConnectionProvider(payload: {
-  connectionProvider: "wireguard" | "tailscale";
-}): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("update_connection_provider", {
-    payload,
-  });
-}
 
 export async function updatePlatformCredentials(
   payload: PlatformCredentialsUpdate,

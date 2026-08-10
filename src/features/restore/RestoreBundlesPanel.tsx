@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
-import { Card } from "../../components/ui/Card";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type {
   AppBundle,
   BundleIndex,
@@ -151,8 +151,11 @@ export function RestoreBundlesPanel({
   const actionDisabled = busy || instanceActionRunning;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
-      <Card className="w-full max-w-3xl max-h-[85vh] overflow-y-auto p-6">
+    <ModalFrame
+      panelClassName="glass-panel pixel-frame max-w-3xl"
+      overlayClassName="bg-black/70 backdrop-blur-sm"
+    >
+      <ModalBody className="p-6">
         {pendingAction && <BlockingLoaderOverlay action={pendingAction} inline className="mb-4 max-w-none p-4" />}
         <div className="flex items-center justify-between mb-4">
           <div>
@@ -272,8 +275,8 @@ export function RestoreBundlesPanel({
             </div>
           </>
         )}
-      </Card>
-    </div>
+      </ModalBody>
+    </ModalFrame>
   );
 }
 

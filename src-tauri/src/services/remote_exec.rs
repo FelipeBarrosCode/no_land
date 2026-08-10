@@ -10,25 +10,15 @@ use std::{
 use serde::Serialize;
 use tracing::{debug, info, warn};
 
-use crate::errors::{AppError, AppResult};
+use crate::{
+    errors::{AppError, AppResult},
+    utils::managed_binaries::configure_bundled_linux_runtime,
+};
 
 use super::os_detection::OsDetection;
 
 fn locate_ssh_binary(tool: &str) -> Option<std::path::PathBuf> {
     let os = OsDetection::new();
-
-    if os.is_macos() {
-        let system_path = match tool {
-            "ssh" => Some("/usr/bin/ssh"),
-            "scp" => Some("/usr/bin/scp"),
-            _ => None,
-        }?;
-
-        let system_path = std::path::PathBuf::from(system_path);
-        if system_path.is_file() {
-            return Some(system_path);
-        }
-    }
 
     match tool {
         "ssh" => os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows")),
@@ -37,16 +27,14 @@ fn locate_ssh_binary(tool: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-fn resolve_ssh_binary(tool: &str) -> AppResult<String> {
+fn resolve_ssh_binary(tool: &str) -> AppResult<std::path::PathBuf> {
     let os = OsDetection::new();
-    locate_ssh_binary(tool)
-        .map(|path| path.display().to_string())
-        .ok_or_else(|| {
-            AppError::Command(format!(
-                "`{tool}` is not available in the app bundle. {}",
-                os.install_hint_for_tool(tool)
-            ))
-        })
+    locate_ssh_binary(tool).ok_or_else(|| {
+        AppError::Command(format!(
+            "`{tool}` is not available in the app bundle. {}",
+            os.install_hint_for_tool(tool)
+        ))
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,12 +56,6 @@ pub struct RemoteExec {
 }
 
 impl RemoteExec {
-    pub fn run_local(program: &str, args: &[&str], timeout: Duration) -> AppResult<ExecOutput> {
-        let mut command = Command::new(program);
-        command.args(args);
-        run_with_timeout(command, Some(timeout))
-    }
-
     pub fn ssh(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
         ensure_command_available("ssh")?;
         self.ssh_with_key(remote_command, timeout)
@@ -94,7 +76,14 @@ impl RemoteExec {
             port_str, connection_string, remote_command
         );
 
-        let mut command = Command::new(resolve_ssh_binary("ssh")?);
+        let ssh_binary = resolve_ssh_binary("ssh")?;
+        let mut command = Command::new(&ssh_binary);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &ssh_binary,
+            "ssh-runtime",
+            os.managed_binary_target_triple(),
+        );
         command
             .arg("-p")
             .arg(&port_str)
@@ -135,7 +124,14 @@ impl RemoteExec {
             port_str, connection_string, remote_command
         );
 
-        let mut command = Command::new(resolve_ssh_binary("ssh")?);
+        let ssh_binary = resolve_ssh_binary("ssh")?;
+        let mut command = Command::new(&ssh_binary);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &ssh_binary,
+            "ssh-runtime",
+            os.managed_binary_target_triple(),
+        );
         command
             .arg("-p")
             .arg(&port_str)
@@ -175,7 +171,14 @@ impl RemoteExec {
     ) -> AppResult<ExecOutput> {
         ensure_command_available("scp")?;
         let os = OsDetection::new();
-        let mut command = Command::new(resolve_ssh_binary("scp")?);
+        let scp_binary = resolve_ssh_binary("scp")?;
+        let mut command = Command::new(&scp_binary);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &scp_binary,
+            "ssh-runtime",
+            os.managed_binary_target_triple(),
+        );
         command
             .arg("-i")
             .arg(&self.private_key_path)

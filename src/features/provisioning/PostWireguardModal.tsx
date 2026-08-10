@@ -1,7 +1,8 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import { Button } from "../../components/ui/Button";
-import { SpriteIcon } from "../../components/ui/SpriteIcon";
+
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 
 import type {
@@ -16,10 +17,6 @@ interface Props {
   appState: PersistedAppState;
   busy: boolean;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
-  onOpenWireguardApp: () => Promise<void>;
-  onDownloadWireguardConfig: () => Promise<string | null>;
-  onVerifyWireguard: () => Promise<unknown>;
-  onDetectMoonlight: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
   activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
@@ -57,24 +54,13 @@ export function PostWireguardModal({
   appState,
   busy,
   onSetupWireguardAppHandoff,
-  onOpenWireguardApp,
-  onDownloadWireguardConfig,
-  onVerifyWireguard,
-  onDetectMoonlight,
   onSetupMoonlightSunshine,
   activeMoonlightPairing,
   onPrepareMoonlightPairingHandoff,
   onCompleteMoonlightPairingHandoff,
   onRetrySetupStage,
 }: Props) {
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
-    "idle",
-  );
 
-  void onVerifyWireguard;
-  void onDetectMoonlight;
-  void onOpenWireguardApp;
-  void onDownloadWireguardConfig;
 
   const setup = appState.postWireguardSetup;
   const activeInstanceId = appState.instance.instanceId;
@@ -92,8 +78,7 @@ export function PostWireguardModal({
     wireguardStages.has(setup.stage) &&
     !streamingPrepStages.has(setup.stage) &&
     !pinStages.has(setup.stage);
-  const canShowWireguardConfig =
-    configMatchesActiveInstance && setup.wireguardConfig.trim().length > 0;
+
   const isStreamingPrepPhase = streamingPrepStages.has(setup.stage);
   const stageShowsPinSubmission = pinStages.has(setup.stage);
   const showPairingHandoff = stageShowsPinSubmission;
@@ -125,21 +110,13 @@ export function PostWireguardModal({
     return null;
   }
 
-  async function copyConfig() {
-    try {
-      await navigator.clipboard.writeText(setup.wireguardConfig);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
-    }
-  }
-
-
 
   return (
-    <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#02040bdd] p-4">
-      <div className="glass-panel pixel-frame crt-surface w-full max-w-3xl p-6">
-        <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-2">
+    <ModalFrame
+      panelClassName="glass-panel pixel-frame crt-surface max-w-3xl"
+      zIndexClassName="z-40"
+    >
+        <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#3e4270] px-6 py-4">
           <h3
             className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
             data-text={
@@ -167,6 +144,7 @@ export function PostWireguardModal({
           />
         </div>
 
+        <ModalBody className="px-6 pb-6 pt-2">
         {isWireguardPhase ? (
           <>
             <p className="mt-3 text-[1.15rem] leading-snug text-[#d9efff]">
@@ -194,24 +172,7 @@ export function PostWireguardModal({
               </p>
             )}
 
-            {canShowWireguardConfig && (
-              <div className="mt-4">
-                <div className="mb-2 flex items-center justify-between">
-                  <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#b9caf0]">
-                    Managed Tunnel Configuration
-                  </span>
-                  <Button variant="primary" onClick={() => void copyConfig()}>
-                    <SpriteIcon icon="copy" />
-                    <span className="ml-1">Copy to Clipboard</span>
-                  </Button>
-                </div>
-                <textarea
-                  readOnly
-                  value={setup.wireguardConfig}
-                  className="min-h-52 w-full border border-[#3d426f] bg-[#10152f] p-3 font-mono text-[0.9rem] text-[#d9efff]"
-                />
-              </div>
-            )}
+
             <div className="mt-4 flex flex-wrap gap-2">
               {setup.stage !== "wireguard_connected" ? (
                 <Button
@@ -230,21 +191,6 @@ export function PostWireguardModal({
               )}
             </div>
 
-            {copyState === "copied" && (
-              <p className="mt-2 text-[1rem] text-neon-lime">
-                Config copied to clipboard.
-              </p>
-            )}
-            {copyState === "failed" && (
-              <p className="mt-2 text-[1rem] text-[#ffb2bf]">
-                Clipboard copy failed. Please try again.
-              </p>
-            )}
-            {!!setup.wireguardExportPath && (
-              <p className="mt-2 text-[1rem] text-[#9ab0cc]">
-                Export path: {setup.wireguardExportPath}
-              </p>
-            )}
           </>
         ) : (
           <>
@@ -451,7 +397,7 @@ export function PostWireguardModal({
             )}
           </div>
         )}
-      </div>
-    </div>
+        </ModalBody>
+    </ModalFrame>
   );
 }

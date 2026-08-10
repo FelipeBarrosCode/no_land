@@ -1,5 +1,5 @@
 import { Button } from "../../components/ui/Button";
-import { Card } from "../../components/ui/Card";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type { TutorialStep } from "./tutorialSteps";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
@@ -31,8 +31,8 @@ export function TutorialModal({
   const isLastStep = stepIndex === steps.length - 1;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
-      <Card className="pixel-frame w-full max-w-lg animate-fade-in p-6 md:p-8">
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-lg animate-fade-in">
+      <ModalBody className="p-6 md:p-8">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="flex items-center gap-3">
@@ -95,7 +95,7 @@ export function TutorialModal({
             <Button onClick={onNext}>{isLastStep ? "Start Setup" : "Next"}</Button>
           </div>
         </div>
-      </Card>
-    </div>
+      </ModalBody>
+    </ModalFrame>
   );
 }

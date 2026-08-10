@@ -21,23 +21,24 @@
   box-sizing: border-box;
 }
 
-html,
-body,
-#root {
-  margin: 0;
-  width: 100%;
-  max-width: 100vw;
+html {
   min-height: 100%;
   background: var(--bg);
-  overflow-x: hidden;
+  overflow-x: clip;
   overscroll-behavior: none;
-  touch-action: pan-y;
+  scrollbar-gutter: stable;
 }
 
 body {
+  margin: 0;
+  width: 100%;
+  min-height: 100dvh;
   color: var(--text);
   line-height: 1.5;
   letter-spacing: 0.02em;
+  overflow-x: clip;
+  overscroll-behavior: none;
+  touch-action: pan-y;
   background-image:
     linear-gradient(to bottom, rgba(255, 255, 255, 0.045) 1px, transparent 1px),
     linear-gradient(to right, rgba(68, 214, 255, 0.06) 1px, transparent 1px),
@@ -48,7 +49,11 @@ body {
     4px 100%,
     100% 100%,
     100% 100%;
-  overflow-x: hidden;
+}
+
+#root {
+  width: 100%;
+  min-height: 100dvh;
 }
 
 body::before {
@@ -149,6 +154,9 @@ a:hover {
   inset: 0;
   pointer-events: none;
   background: linear-gradient(180deg, transparent 0%, rgba(68, 214, 255, 0.03) 50%, transparent 100%);
+  background-position: 0 -100%;
+  background-repeat: no-repeat;
+  background-size: 100% 200%;
   animation: crt-sweep 6s linear infinite;
   z-index: 5;
 }
@@ -180,10 +188,10 @@ a:hover {
 
 @keyframes crt-sweep {
   0% {
-    transform: translateY(-105%);
+    background-position: 0 -100%;
   }
   100% {
-    transform: translateY(105%);
+    background-position: 0 100%;
   }
 }
 

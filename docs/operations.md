@@ -68,13 +68,14 @@ Tauri bundle outputs are uploaded from target release bundle folders and include
 2. wait for reconnect/system-ready gates
 3. inspect Sunshine/audio recovery logs
 
-### Manual WireGuard control
+### Managed tunnel control
 
-Noland no longer auto-repairs the local WireGuard tunnel during health-monitor drift cases. Use the WireGuard app directly for manual reconnect/activation.
+The desktop app owns the local GotaTun tunnel lifecycle and can reconnect it from the instance controls. Do not ask users to install or operate WireGuard, `wg-quick`, or a standalone GotaTun binary.
 
 ## Security notes
 
 - Credentials are persisted in JSON state for current phase requirements.
 - Sensitive values are redacted in logs where applicable.
 - SSH actions run via explicit command wrappers and timeouts.
-- Release workflows in this repo do not document code signing or notarization.
+- macOS release builds fail unless Developer ID signing and Apple notarization credentials are configured.
+- Windows Authenticode signing and Linux repository/package signing are not yet configured.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { appendFileSync, existsSync, mkdirSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -37,11 +37,7 @@ function stageLinuxTools(targetTriple) {
     fail(`Linux CI managed-tool staging for ${targetTriple} must run on a Linux host.`);
   }
 
-  const gotatunPath = buildGotatun(targetTriple);
   const envAssignments = {
-    NOLAND_GOTATUN_BIN: gotatunPath,
-    NOLAND_WG_BIN: requireExistingPath('/usr/bin/wg', 'wireguard-tools package did not provide /usr/bin/wg'),
-    NOLAND_WG_QUICK_BIN: requireExistingPath('/usr/bin/wg-quick', 'wireguard-tools package did not provide /usr/bin/wg-quick'),
     NOLAND_SSH_BIN: locateFirstExisting([
       '/usr/bin/ssh',
       which('ssh'),
@@ -56,8 +52,74 @@ function stageLinuxTools(targetTriple) {
     ], 'openssh-client did not provide ssh-keygen'),
   };
 
+  stageLinuxToolRuntime(Object.values(envAssignments), targetTriple);
   writeGitHubEnv(envAssignments);
   logAssignments(envAssignments);
+}
+
+function stageLinuxToolRuntime(seedExecutables, targetTriple) {
+  const destination = join(repoRoot, 'src-tauri', 'binaries', 'ssh-runtime', targetTriple);
+  rmSync(destination, { recursive: true, force: true });
+  mkdirSync(destination, { recursive: true });
+
+  const queue = [...seedExecutables];
+  const scanned = new Set();
+  const copied = new Set();
+  while (queue.length > 0) {
+    const current = queue.pop();
+    if (!current || scanned.has(current)) continue;
+    scanned.add(current);
+
+    const result = spawnSync('ldd', [current], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.status !== 0) {
+      fail(`Unable to inspect Linux runtime dependencies for ${current}: ${result.stderr?.trim() || `ldd exited ${result.status}`}`);
+    }
+    if (/not found/u.test(result.stdout)) {
+      fail(`Linux managed tool has unresolved dependencies: ${current}\n${result.stdout}`);
+    }
+
+    for (const dependency of parseLddDependencies(result.stdout)) {
+      if (isLinuxBaseRuntime(dependency) || copied.has(dependency)) continue;
+      copied.add(dependency);
+      const output = join(destination, basename(dependency));
+      copyFileSync(dependency, output);
+      chmodSync(output, statSync(dependency).mode);
+      queue.push(dependency);
+    }
+  }
+
+  console.log(`Staged ${copied.size} non-base OpenSSH runtime libraries in ${destination}`);
+}
+
+function parseLddDependencies(output) {
+  return output
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const mapped = line.match(/=>\s+(\/[^\s]+)\s+\(/u);
+      if (mapped) return mapped[1];
+      const direct = line.match(/^(\/[^\s]+)\s+\(/u);
+      return direct ? direct[1] : null;
+    })
+    .filter((path) => path && existsSync(path));
+}
+
+function isLinuxBaseRuntime(path) {
+  return [
+    /^ld-linux/u,
+    /^ld-musl/u,
+    /^libc\.so/u,
+    /^libm\.so/u,
+    /^libpthread\.so/u,
+    /^libdl\.so/u,
+    /^librt\.so/u,
+    /^libresolv\.so/u,
+    /^libutil\.so/u,
+  ].some((pattern) => pattern.test(basename(path)));
 }
 
 function stageWindowsTools(targetTriple) {
@@ -65,21 +127,8 @@ function stageWindowsTools(targetTriple) {
     fail(`Windows CI managed-tool staging for ${targetTriple} must run on a Windows host.`);
   }
 
-  const gotatunPath = buildGotatun(targetTriple);
-  const programFiles = process.env.ProgramFiles ?? 'C:\\Program Files';
-  const wireguardDir = join(programFiles, 'WireGuard');
   const envAssignments = {
-    NOLAND_GOTATUN_BIN: gotatunPath,
-    NOLAND_WG_BIN: locateFirstExisting([
-      process.env.NOLAND_WG_BIN,
-      join(wireguardDir, 'wg.exe'),
-      ...where('wg.exe'),
-    ], 'Unable to locate wg.exe after installing WireGuard'),
-    NOLAND_WIREGUARD_EXE_BIN: locateFirstExisting([
-      process.env.NOLAND_WIREGUARD_EXE_BIN,
-      join(wireguardDir, 'wireguard.exe'),
-      ...where('wireguard.exe'),
-    ], 'Unable to locate wireguard.exe after installing WireGuard'),
+    NOLAND_WINTUN_DLL: stageWintun(targetTriple),
     NOLAND_SSH_BIN: locateFirstExisting([
       process.env.NOLAND_SSH_BIN,
       ...where('ssh.exe'),
@@ -106,23 +155,7 @@ function stageMacosTools(targetTriple) {
     fail(`macOS CI managed-tool staging for ${targetTriple} must run on a macOS host.`);
   }
 
-  const gotatunPath = buildGotatun(targetTriple);
   const envAssignments = {
-    NOLAND_GOTATUN_BIN: gotatunPath,
-    NOLAND_WG_BIN: locateFirstExisting([
-      process.env.NOLAND_WG_BIN,
-      '/opt/homebrew/bin/wg',
-      '/usr/local/bin/wg',
-      '/usr/bin/wg',
-      which('wg'),
-    ], 'Unable to locate wg on the macOS runner. Install wireguard-tools or set NOLAND_WG_BIN.'),
-    NOLAND_WG_QUICK_BIN: locateFirstExisting([
-      process.env.NOLAND_WG_QUICK_BIN,
-      '/opt/homebrew/bin/wg-quick',
-      '/usr/local/bin/wg-quick',
-      '/usr/bin/wg-quick',
-      which('wg-quick'),
-    ], 'Unable to locate wg-quick on the macOS runner. Install wireguard-tools or set NOLAND_WG_QUICK_BIN.'),
     NOLAND_SSH_BIN: locateFirstExisting([
       process.env.NOLAND_SSH_BIN,
       '/usr/bin/ssh',
@@ -144,45 +177,34 @@ function stageMacosTools(targetTriple) {
   logAssignments(envAssignments);
 }
 
-function buildGotatun(targetTriple) {
-  const explicit = process.env.NOLAND_GOTATUN_BIN?.trim();
+function stageWintun(targetTriple) {
+  const explicit = process.env.NOLAND_WINTUN_DLL?.trim();
   if (explicit && existsSync(explicit)) {
-    console.log(`Using preconfigured gotatun from ${explicit}`);
     return explicit;
   }
 
-  const cacheRoot = join(repoRoot, 'src-tauri', '.native-deps', 'cache', 'gotatun');
-  const sourceDir = join(cacheRoot, 'src');
-  const cargoTargetDir = join(cacheRoot, 'target');
-  const ext = targetTriple.includes('windows') ? '.exe' : '';
-  const builtBinary = join(cargoTargetDir, targetTriple, 'release', `gotatun${ext}`);
-
-  mkdirSync(cacheRoot, { recursive: true });
-
-  if (!existsSync(sourceDir)) {
-    run('git', ['clone', '--depth', '1', 'https://github.com/mullvad/gotatun.git', sourceDir]);
-  } else {
-    rmSync(sourceDir, { recursive: true, force: true });
-    run('git', ['clone', '--depth', '1', 'https://github.com/mullvad/gotatun.git', sourceDir]);
+  const version = '0.14.1';
+  const archDir = targetTriple.includes('aarch64') ? 'arm64' : 'amd64';
+  const cacheRoot = join(repoRoot, 'src-tauri', '.native-deps', 'cache', `wintun-${version}`);
+  const zipPath = join(cacheRoot, `wintun-${version}.zip`);
+  const extractedRoot = join(cacheRoot, 'extracted');
+  const dllPath = join(extractedRoot, 'wintun', 'bin', archDir, 'wintun.dll');
+  if (existsSync(dllPath)) {
+    return dllPath;
   }
 
-  run('cargo', [
-    'build',
-    '--locked',
-    '--release',
-    '--target', targetTriple,
-    '--bin', 'gotatun',
-    '--manifest-path', join(sourceDir, 'Cargo.toml'),
-  ], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      CARGO_TARGET_DIR: cargoTargetDir,
-    },
-  });
-
-  return requireExistingPath(builtBinary, `gotatun build completed but ${builtBinary} was not produced`);
+  mkdirSync(cacheRoot, { recursive: true });
+  const escapePs = (value) => String(value).replaceAll("'", "''");
+  const script = [
+    "$ProgressPreference = 'SilentlyContinue'",
+    `Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-${version}.zip' -OutFile '${escapePs(zipPath)}'`,
+    `if (Test-Path '${escapePs(extractedRoot)}') { Remove-Item -Recurse -Force '${escapePs(extractedRoot)}' }`,
+    `Expand-Archive -Path '${escapePs(zipPath)}' -DestinationPath '${escapePs(extractedRoot)}' -Force`,
+  ].join('; ');
+  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+  return requireExistingPath(dllPath, `Wintun archive did not contain ${dllPath}`);
 }
+
 
 function writeGitHubEnv(assignments) {
   const githubEnv = process.env.GITHUB_ENV?.trim();

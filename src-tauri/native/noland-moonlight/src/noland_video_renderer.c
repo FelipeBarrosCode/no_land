@@ -40,7 +40,7 @@ static int nl_video_renderer_platform_submit_frame_noop(nl_video_renderer_t* ren
   return DR_OK;
 }
 
-#if !defined(__APPLE__)
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
 void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
   nl_video_renderer_platform_attach_surface_noop(renderer, surface);
 }

@@ -101,20 +101,16 @@ The provisioning flow consists of these main stages:
 
 ## Stage 5: SSH Connectivity Check
 
-**Purpose:** Verify SSH connection works and load private key into ssh-agent.
+**Purpose:** Verify the bundled SSH client can connect using the app-managed private key directly.
 
 **Steps:**
-1. Load private key into ssh-agent:
-   ```bash
-   SSH_AUTH_SOCK=<socket> ssh-add <private_key_path>
-   ```
-2. Test SSH connection:
+1. Test SSH connection:
    ```bash
    ssh -o BatchMode=yes -o PreferredAuthentications=publickey \
        -i <key_path> -p <port> <user>@<host> "echo connected"
    ```
-3. Retry up to 10 times with 15-second intervals if connection fails
-4. Mark `SshConnected` step as completed
+2. Retry up to 10 times with 15-second intervals if connection fails
+3. Mark `SshConnected` step as completed
 
 ---
 
@@ -341,7 +337,9 @@ Copy `src-tauri/scripts/setup_low_latency_audio.sh` to remote and execute.
 
 **Purpose:** Create encrypted tunnel from client to GPU server.
 
-### Step 9.1: Install WireGuard
+### Step 9.1: Install WireGuard on the remote GPU VM
+
+The client never installs or invokes these tools locally. They configure the server-side kernel tunnel endpoint only.
 
 ```bash
 sudo apt-get update
@@ -436,16 +434,16 @@ Before activating the local client tunnel, refresh endpoint from Vast API:
 
 ### Step 9.10: Local Client Activation (macOS/Linux/Windows)
 
-**macOS implementation details:**
-1. Normalize `AllowedIPs` to `10.77.0.1/32` only
-2. Bring down `nolandwg0` and legacy tunnel names
-3. Copy config to system WireGuard paths (for `wg-quick` compatibility)
-4. Bring up tunnel with `wg-quick`
-5. Validate active tunnel snapshot:
-   - Reject full-tunnel (`0.0.0.0/0`)
-   - Require `AllowedIPs = 10.77.0.1/32`
-   - Require handshake not `never`
-6. Ping `10.77.0.1` as final health gate
+**Cross-platform implementation details:**
+1. Normalize `AllowedIPs` to `10.77.0.1/32` only.
+2. Launch the bundled privileged `noland-net-helper`; do not invoke `wg`, `wg-quick`, WireGuard.exe, or a separately installed GotaTun binary.
+3. The helper embeds GotaTun and creates/configures the TUN adapter directly. Windows uses the packaged architecture-specific Wintun DLL.
+4. Read the helper-owned runtime status and validate:
+   - reject full-tunnel (`0.0.0.0/0`)
+   - require the expected peer and `AllowedIPs = 10.77.0.1/32`
+   - require a fresh helper heartbeat and active process
+   - require a recent handshake or successful reachability probe
+5. Ping `10.77.0.1` as the final health gate and automatically repair stale or failed local tunnel state.
 
 ### Step 9.11: Server-side Routing/NAT apply (separate from PostUp)
 

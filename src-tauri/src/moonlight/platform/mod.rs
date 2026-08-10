@@ -1,7 +1,7 @@
-pub mod macos_input;
+pub mod desktop_input;
 pub mod window;
 
-pub use macos_input::{
+pub use desktop_input::{
     activate_native_stream_input, deactivate_native_stream_input, install_native_stream_input,
     set_native_stream_input_debug_overlay_enabled, uninstall_native_stream_input,
 };

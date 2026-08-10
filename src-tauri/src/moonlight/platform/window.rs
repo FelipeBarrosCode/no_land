@@ -12,7 +12,7 @@ unsafe extern "C" {
 use tauri::{AppHandle, Manager, Runtime, Window};
 
 use crate::moonlight::{
-    domain::MoonlightError, native, platform::macos_input::uninstall_native_stream_input,
+    domain::MoonlightError, native, platform::desktop_input::uninstall_native_stream_input,
 };
 
 pub const STREAM_WINDOW_LABEL: &str = "moonlight-stream";

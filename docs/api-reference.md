@@ -24,15 +24,13 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `skip_pairing_and_continue`
 - `get_provisioning_logs`
 
-## WireGuard setup and guided handoff
+## Embedded tunnel setup and guided pairing
 
 - `setup_wireguard_client`
 - `reconnect_local_wireguard_client_quick`
 
-- `setup_wireguard_app_handoff_command`
+- `setup_wireguard_app_handoff_command` (legacy command name; starts the embedded tunnel handoff stage)
 - `verify_wireguard`
-- `open_wireguard_app_command`
-- `download_wireguard_config_command`
 - `get_setup_status_command`
 - `verify_sunshine`
 - `detect_moonlight`
@@ -46,16 +44,21 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `start_local_sleep_prevention`
 - `stop_local_sleep_prevention`
 
-## Moonlight client
+## Embedded streaming client
 
-- `get_moonlight_download_url`
-- `launch_moonlight_client`
-- `configure_moonlight_client`
-- `restore_moonlight_backup`
+- `moonlight_get_configuration`
+- `moonlight_register_host`
+- `moonlight_refresh_host`
+- `moonlight_begin_pairing`
+- `moonlight_complete_pairing`
+- `moonlight_list_apps`
+- `moonlight_start_stream`
+- `moonlight_disconnect_stream`
+- `moonlight_start_input_capture`
+- `moonlight_stop_input_capture`
+- `moonlight_quit_remote_app`
 
-## WireGuard download URL
-
-- `get_wireguard_download_url`
+`detect_moonlight` remains a compatibility/setup-state command; it reports readiness of the embedded client and does not inspect or require an external Moonlight installation.
 
 ## Settings updates
 

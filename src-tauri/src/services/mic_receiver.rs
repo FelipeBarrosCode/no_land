@@ -1,11 +1,13 @@
 use std::{
     collections::{HashSet, VecDeque},
     env, fs,
+    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine};
+use flate2::{write::GzEncoder, Compression};
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
@@ -299,48 +301,36 @@ async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
         })?;
     }
 
-    let source_parent = source_dir.parent().ok_or_else(|| {
-        AppError::State(format!(
-            "Failed resolving parent directory for mic receiver source bundle at {}",
-            source_dir.display()
-        ))
-    })?;
     let source_name = source_dir
         .file_name()
-        .and_then(|name| name.to_str())
         .ok_or_else(|| {
             AppError::State(format!(
                 "Failed resolving directory name for mic receiver source bundle at {}",
                 source_dir.display()
             ))
         })?
-        .to_string();
-    let archive_string = archive_path.display().to_string();
-    let source_parent_string = source_parent.display().to_string();
-    let output = tokio::task::spawn_blocking(move || {
-        let mut args = vec!["-czf", archive_string.as_str()];
-        if cfg!(target_os = "macos") {
-            args.extend(["--no-mac-metadata", "--no-xattrs"]);
-        }
-        args.extend([
-            "-C",
-            source_parent_string.as_str(),
-            "--exclude=vm-cloud-mic-agent/Cargo.lock",
-            "--exclude=vm-cloud-mic-agent/target",
-            source_name.as_str(),
-        ]);
-        RemoteExec::run_local("tar", &args, Duration::from_secs(120))
+        .to_owned();
+    let archive_for_task = archive_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let output = File::create(&archive_for_task).map_err(|error| {
+            AppError::Command(format!(
+                "Failed creating mic source bundle {}: {error}",
+                archive_for_task.display()
+            ))
+        })?;
+        let encoder = GzEncoder::new(output, Compression::default());
+        let mut archive = tar::Builder::new(encoder);
+        append_source_tree(&mut archive, &source_dir, Path::new(&source_name), true)?;
+        let encoder = archive.into_inner().map_err(|error| {
+            AppError::Command(format!("Failed finalizing mic source tar archive: {error}"))
+        })?;
+        encoder.finish().map_err(|error| {
+            AppError::Command(format!("Failed finalizing mic source gzip stream: {error}"))
+        })?;
+        Ok::<(), AppError>(())
     })
     .await
     .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
-
-    if output.status_code != 0 {
-        return Err(AppError::Provisioning(format!(
-            "Failed packaging mic receiver source bundle: {} {}",
-            output.stderr.trim(),
-            output.stdout.trim()
-        )));
-    }
 
     if !archive_path.is_file() {
         return Err(AppError::NotFound(format!(
@@ -350,6 +340,44 @@ async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
     }
 
     Ok(archive_path)
+}
+
+fn append_source_tree<W: std::io::Write>(
+    archive: &mut tar::Builder<W>,
+    source: &Path,
+    archive_path: &Path,
+    source_root: bool,
+) -> AppResult<()> {
+    archive.append_dir(archive_path, source).map_err(|error| {
+        AppError::Command(format!(
+            "Failed adding directory {} to mic source bundle: {error}",
+            source.display()
+        ))
+    })?;
+
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if source_root && (name == "Cargo.lock" || name == "target") {
+            continue;
+        }
+        let path = entry.path();
+        let bundled_path = archive_path.join(&name);
+        if path.is_dir() {
+            append_source_tree(archive, &path, &bundled_path, false)?;
+        } else {
+            archive
+                .append_path_with_name(&path, &bundled_path)
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "Failed adding {} to mic source bundle: {error}",
+                        path.display()
+                    ))
+                })?;
+        }
+    }
+
+    Ok(())
 }
 
 fn sanitize_username(value: &str) -> AppResult<&str> {
