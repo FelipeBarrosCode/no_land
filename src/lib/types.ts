@@ -15,10 +15,6 @@ export type OrchestrationState =
   | "ConfiguringWireGuard"
   | "ConfiguringSunshine"
   | "ConfiguringNvidiaHeadless"
-  | "SelectingConnectionProvider"
-  | "ConfiguringTailscale"
-  | "TailscaleConfigGenerated"
-  | "TailscaleConnected"
   | "WireGuardConfigGenerated"
   | "WireGuardAppHandoffStarted"
   | "WireGuardWaitingForImport"
@@ -58,10 +54,7 @@ export type SetupStage =
   | "setup_complete"
   | "failed";
 
-export type WireGuardSetupMode =
-  | "wireguard_app_windows"
-  | "wireguard_app_linux"
-  | "wireguard_app_macos_manual";
+export type WireGuardSetupMode = "embedded_gotatun";
 
 export type WireGuardSetupStatus =
   | "not_started"
@@ -98,13 +91,12 @@ export interface PostWireGuardSetupState {
   lastError: SetupErrorState | null;
 }
 
-export type ConnectionProvider = "wireguard" | "tailscale";
+export type ConnectionProvider = "wireguard";
 
 export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
-  tailscaleApiKey: string;
 }
 
 export interface SshState {
@@ -239,7 +231,6 @@ export interface ProvisionedServerState {
   wireguardConfigPath: string;
   moonlightHostAddress: string;
   connectionProvider: ConnectionProvider;
-  tailscaleClientIp: string;
   embeddedMoonlightPipelineEnabled: boolean;
   embeddedMoonlightHostId: string;
   embeddedMoonlightPaired: boolean;
@@ -321,36 +312,6 @@ export type VastBrowserBillingAction =
   | "open-add-credit"
   | "open-auto-topup";
 
-export interface VastBrowserAutomationStatus {
-  available: boolean;
-  nodeFound: boolean;
-  scriptRoot: string;
-  storageStatePath: string;
-  artifactDir: string;
-  sessionConnected: boolean;
-  sessionMetadataPath: string | null;
-  apiKeyResultPath: string | null;
-  billingResultPath: string | null;
-  savedAt: string | null;
-  lastError: string | null;
-}
-
-export interface VastBrowserAuthSessionResult extends VastBrowserAutomationStatus {
-  pageUrl: string | null;
-}
-
-export interface VastBrowserGeneratedApiKeyResult extends VastBrowserAutomationStatus {
-  apiKey: string | null;
-  apiKeyName: string;
-  discoveredSecretMasked: string | null;
-  resultPath: string;
-}
-
-export interface VastBrowserBillingSessionResult extends VastBrowserAutomationStatus {
-  action: VastBrowserBillingAction;
-  pageUrl: string | null;
-  resultPath: string;
-}
 
 export interface VastWalletSummary {
   available: boolean;
@@ -396,7 +357,6 @@ export interface OnboardingPayload {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
-  tailscaleApiKey: string;
 }
 
 export interface ManualLocationInput {

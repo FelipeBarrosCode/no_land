@@ -27,21 +27,6 @@ function RootRoute() {
 
   const blockingAction = useAppStore((state) => state.blockingAction);
   const runOnboarding = useAppStore((state) => state.runOnboarding);
-  const vastBrowserAutomationStatus = useAppStore(
-    (state) => state.vastBrowserAutomationStatus,
-  );
-  const connectVastBrowserSession = useAppStore(
-    (state) => state.connectVastBrowserSession,
-  );
-  const refreshVastBrowserAutomationStatus = useAppStore(
-    (state) => state.refreshVastBrowserAutomationStatus,
-  );
-  const generateVastApiKeyViaBrowserSession = useAppStore(
-    (state) => state.generateVastApiKeyViaBrowserSession,
-  );
-  const openVastBillingBrowserSession = useAppStore(
-    (state) => state.openVastBillingBrowserSession,
-  );
   const vastWalletSummary = useAppStore((state) => state.vastWalletSummary);
   const refreshVastWalletSummary = useAppStore(
     (state) => state.refreshVastWalletSummary,
@@ -106,15 +91,7 @@ function RootRoute() {
 
   if (!appState.onboardingCompleted) {
     return (
-      <OnboardingScreen
-        busy={busy}
-        onSubmit={runOnboarding}
-        vastAutomationStatus={vastBrowserAutomationStatus}
-        onConnectVastBrowser={connectVastBrowserSession}
-        onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
-        onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
-        onOpenVastBillingBrowser={openVastBillingBrowserSession}
-      />
+      <OnboardingScreen busy={busy} onSubmit={runOnboarding} />
     );
   }
 
@@ -137,7 +114,6 @@ function RootRoute() {
       onManualLocationSave={saveManualLocation}
       onLoadRentedInstances={loadRentedInstances}
       onRefreshVastWalletSummary={refreshVastWalletSummary}
-      onOpenVastBillingBrowser={openVastBillingBrowserSession}
       onStartPlayExisting={startPlayExisting}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
@@ -165,14 +141,7 @@ function ProvisioningRoute() {
   const setupWireguardAppHandoff = useAppStore(
     (state) => state.setupWireguardAppHandoff,
   );
-  const openWireguardApp = useAppStore((state) => state.openWireguardApp);
-  const downloadWireguardConfig = useAppStore(
-    (state) => state.downloadWireguardConfig,
-  );
-  const verifyWireguardConnection = useAppStore(
-    (state) => state.verifyWireguardConnection,
-  );
-  const detectMoonlight = useAppStore((state) => state.detectMoonlight);
+
   const setupMoonlightSunshine = useAppStore(
     (state) => state.setupMoonlightSunshine,
   );
@@ -208,10 +177,6 @@ function ProvisioningRoute() {
       busy={busy}
       blockingAction={blockingAction}
       onSetupWireguardAppHandoff={setupWireguardAppHandoff}
-      onOpenWireguardApp={openWireguardApp}
-      onDownloadWireguardConfig={downloadWireguardConfig}
-      onVerifyWireguard={verifyWireguardConnection}
-      onDetectMoonlight={detectMoonlight}
       onSetupMoonlightSunshine={setupMoonlightSunshine}
       activeMoonlightPairing={activeMoonlightPairing}
       onPrepareMoonlightPairingHandoff={() => {
@@ -239,7 +204,7 @@ function ProvisioningRoute() {
 
 function BootScreen() {
   return (
-    <main className="crt-surface flex min-h-screen items-center justify-center bg-hero-glow px-4">
+    <main className="crt-surface flex min-h-dvh items-center justify-center bg-hero-glow px-4">
       <Card className="pixel-frame animate-fade-in p-6 text-center">
         <img
           src={appLogo}
@@ -270,24 +235,7 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
-  const vastBrowserAutomationStatus = useAppStore(
-    (state) => state.vastBrowserAutomationStatus,
-  );
-  const refreshVastBrowserAutomationStatus = useAppStore(
-    (state) => state.refreshVastBrowserAutomationStatus,
-  );
-  const connectVastBrowserSession = useAppStore(
-    (state) => state.connectVastBrowserSession,
-  );
-  const generateVastApiKeyViaBrowserSession = useAppStore(
-    (state) => state.generateVastApiKeyViaBrowserSession,
-  );
-  const openVastBillingBrowserSession = useAppStore(
-    (state) => state.openVastBillingBrowserSession,
-  );
-  const saveConnectionProvider = useAppStore(
-    (state) => state.saveConnectionProvider,
-  );
+
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
   );
@@ -412,7 +360,6 @@ export function App() {
                 <SettingsScreen
                   appState={appState}
                   busy={busy}
-                  vastAutomationStatus={vastBrowserAutomationStatus}
                   storageProviders={storageProviders}
                   sharedStorageProfiles={sharedStorageProfiles}
                   sharedStorageTestResult={sharedStorageTestResult}
@@ -426,16 +373,11 @@ export function App() {
                   onBeginOauthFlow={beginOauthFlow}
                   onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
-                  onRefreshVastAutomationStatus={refreshVastBrowserAutomationStatus}
-                  onConnectVastBrowser={connectVastBrowserSession}
-                  onGenerateVastApiKey={generateVastApiKeyViaBrowserSession}
-                  onOpenVastBillingBrowser={openVastBillingBrowserSession}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
                   onRegenerateEdid={regenerateEdid}
-                  onSaveConnectionProvider={saveConnectionProvider}
                 />
               ) : null
             }

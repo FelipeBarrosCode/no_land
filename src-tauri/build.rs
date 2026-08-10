@@ -125,21 +125,34 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         native_root
+            .join("noland-moonlight/src/noland_video_renderer_linux.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_video_renderer_windows.cpp")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_desktop_input_sdl.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_audio_renderer_sdl.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
             .join("noland-moonlight/src/noland_audio_renderer_macos.m")
             .display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        native_root
-            .join("noland-moonlight/src/noland_audio_renderer_linux.c")
-            .display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
-        native_root
-            .join("noland-moonlight/src/noland_audio_renderer_windows.c")
-            .display()
-    );
+
     println!(
         "cargo:rerun-if-changed={}",
         PathBuf::from("src/moonlight/platform/macos_stream_input.m").display()
@@ -154,7 +167,7 @@ fn main() {
         .define("BUILD_NOLAND_MOONLIGHT_HARNESS", "OFF")
         .define("BUILD_NOLAND_MOONLIGHT_TESTS", "OFF");
 
-    if is_macos || is_windows {
+    if is_macos || is_windows || is_linux {
         if is_macos {
             let arch = if target.starts_with("x86_64-") {
                 "x86_64"
@@ -284,8 +297,13 @@ fn main() {
         }
 
         println!("cargo:rustc-link-lib=static=opus");
-        println!("cargo:rustc-link-lib=bcrypt");
-        println!("cargo:rustc-link-lib=winmm");
+        println!("cargo:rustc-link-lib=static=SDL2-static");
+        for library in [
+            "advapi32", "bcrypt", "dinput8", "dxguid", "gdi32", "imm32", "mf", "mfplat", "mfuuid",
+            "ole32", "oleaut32", "setupapi", "shell32", "user32", "uuid", "version", "winmm",
+        ] {
+            println!("cargo:rustc-link-lib={library}");
+        }
     }
     if is_linux {
         for prefix in native_dep_prefixes(&target, &manifest_dir) {
@@ -300,9 +318,27 @@ fn main() {
         }
 
         println!("cargo:rustc-link-lib=dylib=crypto");
-        println!("cargo:rustc-link-lib=dylib=opus");
-        println!("cargo:rustc-link-lib=dylib=pulse-simple");
-        println!("cargo:rustc-link-lib=dylib=pulse");
+        println!("cargo:rustc-link-lib=static=opus");
+        println!("cargo:rustc-link-lib=static=SDL2");
+        for library in [
+            "dl",
+            "m",
+            "pthread",
+            "rt",
+            "gstreamer-1.0",
+            "gstapp-1.0",
+            "gstvideo-1.0",
+            "gobject-2.0",
+            "glib-2.0",
+        ] {
+            println!("cargo:rustc-link-lib={library}");
+        }
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/noland-connect/resources/binaries/gstreamer/{target}/lib"
+        );
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/noland-connect/resources/binaries/gstreamer/{target}/lib64"
+        );
     }
 
     let bindings = bindgen::Builder::default()
@@ -347,40 +383,35 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
     )?;
     ensure_staged_bundle_binary(
         &binaries_dir,
-        "gotatun",
+        "noland-net-helper",
         &target_triple,
         target_is_windows,
         is_release,
         true,
-        "run the Tauri build through the npm wrapper so the managed tunnel sidecar is staged first",
+        "run the Tauri build through the npm wrapper so the embedded GotaTun helper is staged first",
     )?;
-    ensure_staged_bundle_binary(
-        &binaries_dir,
-        "wg",
-        &target_triple,
-        target_is_windows,
-        is_release,
-        true,
-        "run the Tauri build through the npm wrapper so the bundled WireGuard helpers are staged first",
-    )?;
-    ensure_staged_bundle_binary(
-        &binaries_dir,
-        "wg-quick",
-        &target_triple,
-        target_is_windows,
-        is_release,
-        !target_is_windows,
-        "run the Tauri build through the npm wrapper so the bundled WireGuard helpers are staged first",
-    )?;
-    ensure_staged_bundle_binary(
-        &binaries_dir,
-        "wireguard",
-        &target_triple,
-        true,
-        is_release,
-        target_is_windows,
-        "run the Tauri build through the npm wrapper so the Windows WireGuard service helper is staged first",
-    )?;
+    if target_is_windows && is_release {
+        let wintun = binaries_dir.join(format!("wintun-{target_triple}.dll"));
+        if !wintun.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "missing packaged Wintun adapter library '{}'; run the managed-tool staging step first",
+                    wintun.display()
+                ),
+            ));
+        }
+        let wintun_license = binaries_dir.join("wintun-LICENSE.txt");
+        if !wintun_license.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "missing packaged Wintun license '{}'; run the managed-tool staging step first",
+                    wintun_license.display()
+                ),
+            ));
+        }
+    }
     ensure_staged_bundle_binary(
         &binaries_dir,
         "ssh",

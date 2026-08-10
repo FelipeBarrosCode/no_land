@@ -36,10 +36,11 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 ## Core backend service boundaries
 
 - `orchestration.rs`: main create/reuse provisioning flow and checkpointing
-- `post_wireguard_setup.rs`: guided post-WireGuard setup (manual tunnel app handoff, Sunshine/Moonlight pairing)
-- `wireguard.rs`: remote tunnel provisioning and local tunnel monitoring/normalization
+- `post_wireguard_setup.rs`: guided post-tunnel setup and embedded-client/Sunshine pairing
+- `wireguard.rs`: remote tunnel provisioning plus embedded GotaTun lifecycle and monitoring
 - `sunshine.rs`: Sunshine install/config/health and credentials bootstrap
-- `moonlight.rs`: Moonlight client detection, launch, config patching
+- `moonlight/*`: embedded GameStream discovery, pairing, launch, stream runtime, and input pipeline
+- `native/noland-moonlight`: platform render/audio/input backends (AVFoundation/AppKit on macOS, GStreamer/SDL on Linux, Media Foundation/SDL on Windows)
 - `sleep_inhibit.rs`: local system sleep prevention during active sessions
 - `instance_lifecycle.rs`: actions on existing instances (pause, reboot, destroy, settings)
 - `reboot_helper.rs`: reboot/reconnect/service re-init pipeline
@@ -74,7 +75,7 @@ Persistent state is stored in `state.json` and loaded into `PersistedAppState`.
 ## Design constraints and assumptions
 
 - Remote VM automation targets Linux hosts.
-- Local client support includes macOS, Windows, and Linux branches for tool detection and WireGuard/Moonlight handoff.
+- The installed client owns its tunnel and streaming engines; users are not expected to install WireGuard, GotaTun, or Moonlight.
+- Release targets cover x86_64 and ARM64 on macOS, Linux, and Windows.
 - Provisioning uses checkpoint markers so repeated runs can skip already-completed steps safely.
-- Post-WireGuard setup is intentionally split from earlier automatic local tunnel control.
 - Frontend state is a cache over backend state; authoritative writes happen in Rust through `AppContext::update_state(...)`.

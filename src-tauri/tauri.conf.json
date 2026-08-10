@@ -29,21 +29,21 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/gotatun",
+      "binaries/noland-net-helper",
       "binaries/noland-mic-sender"
     ],
     "resources": [
-      "binaries/wg-*",
-      "binaries/wg-quick-*",
-      "binaries/wireguard-*",
+
       "binaries/ssh-*",
       "binaries/scp-*",
       "binaries/ssh-keygen-*",
+      "binaries/ssh-runtime/**/*",
       "binaries/gstreamer/**/*",
       "../vm-cloud-mic-agent/Cargo.toml",
       "../vm-cloud-mic-agent/src/**/*"
     ],
     "macOS": {
+      "minimumSystemVersion": "12.0",
       "frameworks": [
         "bundled/macos/GStreamer.framework"
       ]

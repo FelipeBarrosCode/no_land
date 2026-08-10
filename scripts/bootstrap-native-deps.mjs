@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import {
+  chmodSync,
   copyFileSync,
   cpSync,
   existsSync,
@@ -9,6 +10,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -82,6 +84,7 @@ function bootstrapLinuxTarget(targetTriple) {
   mkdirSync(prefix, { recursive: true });
 
   ensureOpus(prefix, targetTriple);
+  ensureSdl2(prefix, targetTriple);
   const gstreamerRoot = ensureLinuxGstreamerRoot(prefix, targetTriple);
 
   if (gstreamerRoot) {
@@ -103,6 +106,7 @@ function bootstrapWindowsTarget(targetTriple) {
   mkdirSync(prefix, { recursive: true });
 
   ensureOpus(prefix, targetTriple);
+  ensureSdl2(prefix, targetTriple);
   const gstreamerRoot = windowsTargetNeedsGstreamer(targetTriple)
     ? ensureWindowsGstreamerRoot(prefix, targetTriple)
     : null;
@@ -421,10 +425,18 @@ function ensureOpenSsl(prefix, targetTriple) {
 }
 
 function ensureOpus(prefix, targetTriple) {
-  const libName = isWindowsTarget(targetTriple) ? 'opus.lib' : isMacTarget(targetTriple) ? 'libopus.dylib' : 'libopus.so';
+  const libName = isWindowsTarget(targetTriple)
+    ? 'opus.lib'
+    : isMacTarget(targetTriple)
+      ? 'libopus.dylib'
+      : 'libopus.a';
   const libPath = join(prefix, 'lib', libName);
   const pkgConfig = join(prefix, 'lib', 'pkgconfig', 'opus.pc');
-  if (existsSync(libPath) && (existsSync(pkgConfig) || isWindowsTarget(targetTriple))) {
+  const staticStamp = join(prefix, 'lib', '.noland-opus-static');
+  const expectedVariantExists = isMacTarget(targetTriple)
+    ? existsSync(libPath)
+    : existsSync(libPath) && existsSync(staticStamp);
+  if (expectedVariantExists && (existsSync(pkgConfig) || isWindowsTarget(targetTriple))) {
     console.log(`Using staged Opus for ${targetTriple}`);
     return;
   }
@@ -444,7 +456,8 @@ function ensureOpus(prefix, targetTriple) {
     '-B', buildDir,
     '-DCMAKE_BUILD_TYPE=Release',
     `-DCMAKE_INSTALL_PREFIX=${prefix}`,
-    '-DBUILD_SHARED_LIBS=ON',
+    `-DBUILD_SHARED_LIBS=${isMacTarget(targetTriple) ? 'ON' : 'OFF'}`,
+    `-DOPUS_BUILD_SHARED_LIBRARY=${isMacTarget(targetTriple) ? 'ON' : 'OFF'}`,
     '-DOPUS_BUILD_PROGRAMS=OFF',
     '-DOPUS_BUILD_TESTING=OFF',
     '-DOPUS_STACK_PROTECTOR=OFF',
@@ -457,12 +470,19 @@ function ensureOpus(prefix, targetTriple) {
     env: nativeBuildEnv(targetTriple),
   });
   run('cmake', ['--install', buildDir, '--config', 'Release'], { env: nativeBuildEnv(targetTriple) });
+  if (!isMacTarget(targetTriple)) {
+    writeFileSync(staticStamp, `${targetTriple}\n`, 'utf8');
+  }
 }
 
 function ensureSdl2(prefix, targetTriple) {
-  const libPath = join(prefix, 'lib', 'libSDL2.dylib');
+  const libPath = isWindowsTarget(targetTriple)
+    ? join(prefix, 'lib', 'SDL2-static.lib')
+    : isMacTarget(targetTriple)
+      ? join(prefix, 'lib', 'libSDL2.dylib')
+      : join(prefix, 'lib', 'libSDL2.a');
   const pkgConfig = join(prefix, 'lib', 'pkgconfig', 'sdl2.pc');
-  if (existsSync(libPath) && existsSync(pkgConfig)) {
+  if (existsSync(libPath) && (existsSync(pkgConfig) || isWindowsTarget(targetTriple))) {
     console.log(`Using staged SDL2 for ${targetTriple}`);
     return;
   }
@@ -479,15 +499,24 @@ function ensureSdl2(prefix, targetTriple) {
   rmSync(buildDir, { recursive: true, force: true });
   mkdirSync(buildDir, { recursive: true });
 
+  const shared = isMacTarget(targetTriple) ? 'ON' : 'OFF';
+  const staticLibrary = isMacTarget(targetTriple) ? 'OFF' : 'ON';
   run('cmake', [
     '-S', sourceDir,
     '-B', buildDir,
     '-DCMAKE_BUILD_TYPE=Release',
     `-DCMAKE_INSTALL_PREFIX=${prefix}`,
-    '-DSDL_SHARED=ON',
-    '-DSDL_STATIC=OFF',
+    `-DSDL_SHARED=${shared}`,
+    `-DSDL_STATIC=${staticLibrary}`,
+    '-DSDL_STATIC_PIC=ON',
     '-DSDL_TEST=OFF',
     '-DSDL2_DISABLE_INSTALL_DOCS=ON',
+    '-DSDL_X11_SHARED=ON',
+    '-DSDL_WAYLAND_SHARED=ON',
+    '-DSDL_ALSA_SHARED=ON',
+    '-DSDL_PULSEAUDIO_SHARED=ON',
+    '-DSDL_PIPEWIRE_SHARED=ON',
+    '-DSDL_HIDAPI_LIBUSB_SHARED=ON',
     ...cmakeTargetArgs(targetTriple),
   ], { env: nativeBuildEnv(targetTriple) });
   console.log(`[bootstrap-native-deps] SDL2 configure complete for ${targetTriple}`);
@@ -636,6 +665,15 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
 
   const requiredPluginNames = new Set([
     'libgstcoreelements.so',
+    'libgstautodetect.so',
+    'libgstplayback.so',
+    'libgstvideoconvertscale.so',
+    'libgstvideoconvert.so',
+    'libgstvideoscale.so',
+    'libgstvideoparsersbad.so',
+    'libgstlibav.so',
+    'libgstximagesink.so',
+    'libgstwaylandsink.so',
     'libgstaudioconvert.so',
     'libgstaudioresample.so',
     'libgstaudiorate.so',

@@ -211,7 +211,7 @@ export function StreamWindowScreen() {
   };
 
   return (
-    <main className="relative h-screen w-screen overflow-hidden bg-transparent text-white">
+    <main className="relative h-dvh w-full overflow-hidden bg-transparent text-white">
       <div className="pointer-events-none absolute inset-0 select-none">
         {showHud ? (
           <div className="absolute inset-x-0 top-0 flex justify-center p-4">

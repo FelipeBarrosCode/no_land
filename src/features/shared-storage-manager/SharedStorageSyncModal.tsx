@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
+import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type { SharedStorageObjectEntry } from "../../lib/types";
 
 interface Props {
@@ -155,9 +156,8 @@ export function SharedStorageSyncModal({
   const roots = childrenMap.get("/") ?? [];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#02040bdd] p-4">
-      <div className="glass-panel pixel-frame max-h-[90vh] w-full max-w-3xl overflow-hidden">
-        <div className="flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
+        <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
             <h2 className="font-display text-base text-white">Sync From Shared Storage</h2>
             <p className="text-[1.2rem] text-[#b4c8de]">Choose folders or files to sync to the remote machine.</p>
@@ -167,7 +167,7 @@ export function SharedStorageSyncModal({
           </Button>
         </div>
 
-        <div className="max-h-[65vh] overflow-y-auto px-5 py-4">
+        <ModalBody className="px-5 py-4">
           {loading ? (
             pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
           ) : loadError ? (
@@ -180,9 +180,9 @@ export function SharedStorageSyncModal({
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
-        </div>
+        </ModalBody>
 
-        <div className="flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
+        <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
           <p className="text-[1.1rem] text-[#9ec0e4]">Selected: {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
@@ -209,7 +209,6 @@ export function SharedStorageSyncModal({
             </Button>
           </div>
         </div>
-      </div>
-    </div>
+    </ModalFrame>
   );
 }

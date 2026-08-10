@@ -2,7 +2,6 @@ use std::{
     env,
     net::{SocketAddr, TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
-    process::Command,
     time::Duration,
 };
 
@@ -10,8 +9,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            ConnectionProvider, OrchestrationState, PostWireGuardSetupState, SetupErrorState,
-            SetupStage, WireGuardSetupMode, WireGuardSetupStatus,
+            OrchestrationState, PostWireGuardSetupState, SetupErrorState, SetupStage,
+            WireGuardSetupMode, WireGuardSetupStatus,
         },
         events::ProvisioningEvent,
     },
@@ -22,20 +21,14 @@ use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
 use super::{
-    app_context::AppContext,
-    moonlight::{MoonlightConfigureOptions, MoonlightService},
-    orchestration,
-    os_detection::OsDetection,
-    remote_exec::RemoteExec,
-    ssh_keys::SshKeyService,
-    tailscale::TailscaleService,
+    app_context::AppContext, orchestration, remote_exec::RemoteExec, ssh_keys::SshKeyService,
     wireguard::setup_local_wireguard_client,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
 const SUNSHINE_API_PORT: u16 = 47990;
 const REACHABILITY_PORTS: [u16; 3] = [47990, 47989, 47984];
-const IMPORT_FILENAME: &str = "wireguard-app-import.conf";
+
 const SUNSHINE_API_READY_RETRIES: usize = 15;
 const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
@@ -145,14 +138,12 @@ pub async fn initialize_post_wireguard_flow(
             .post_wireguard_setup
             .current_instance_id
     };
-    let config_text = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading generated WireGuard config {}: {error}",
+    if !config_path.is_file() {
+        return Err(AppError::NotFound(format!(
+            "Generated WireGuard config not found at {}",
             config_path.display()
-        ))
-    })?;
-    let export_path = ensure_wireguard_import_copy(context, config_path, instance_id)?;
-    let export_path_text = export_path.display().to_string();
+        )));
+    }
     let mode = platform_wireguard_mode();
 
     context
@@ -162,8 +153,8 @@ pub async fn initialize_post_wireguard_flow(
                 wireguard_setup_mode: mode,
                 wireguard_setup_status: WireGuardSetupStatus::ConfigGenerated,
                 current_instance_id: Some(instance_id),
-                wireguard_export_path: export_path_text.clone(),
-                wireguard_config: config_text.clone(),
+                wireguard_export_path: String::new(),
+                wireguard_config: String::new(),
                 wireguard_verified_host: TUNNEL_HOST.to_string(),
                 wireguard_reachable_ports: Vec::new(),
                 sunshine_username: state.credentials.app_username.clone(),
@@ -184,8 +175,8 @@ pub async fn initialize_post_wireguard_flow(
         OrchestrationState::WireGuardConfigGenerated,
         "WireGuard config generated",
         Some(format!(
-            "Do not change provisioning logic before this point. New post-WireGuard setup flow starts here. Config saved at {}",
-            export_path.display()
+            "Embedded GotaTun setup is ready to activate from the managed config at {}",
+            config_path.display()
         )),
         false,
     )
@@ -214,8 +205,6 @@ pub async fn setup_wireguard_app_handoff(
     context: &AppContext,
 ) -> AppResult<PostWireGuardSetupState> {
     let config_path = active_wireguard_config_path(context).await?;
-    let instance_id = active_instance_id(context).await?;
-    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
 
     context
         .update_state(|state| {
@@ -391,61 +380,6 @@ pub async fn verify_wireguard_connection(
     Ok(result)
 }
 
-pub async fn download_wireguard_config(context: &AppContext) -> AppResult<String> {
-    let config_path = active_wireguard_config_path(context).await?;
-    let instance_id = active_instance_id(context).await?;
-    sync_wireguard_config_snapshot(context, instance_id, &config_path).await?;
-    let export_path = ensure_wireguard_import_copy(context, &config_path, instance_id)?;
-    let export_text = export_path.display().to_string();
-    sync_wireguard_config_snapshot(context, instance_id, &export_path).await?;
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.wireguard_export_path = export_text.clone();
-        })
-        .await?;
-    Ok(export_text)
-}
-
-pub fn open_wireguard_app() -> AppResult<()> {
-    let os = OsDetection::new();
-    let status = if os.is_macos() {
-        Command::new("open").args(["-a", "WireGuard"]).status()
-    } else if os.is_windows() {
-        Command::new("cmd")
-            .args(["/C", "start", "", "wireguard.exe"])
-            .status()
-    } else {
-        let attempts = [
-            ("wireguard", vec![]),
-            ("wireguard-ui", vec![]),
-            ("flatpak", vec!["run", "com.wireguard.WireGuard"]),
-            ("xdg-open", vec!["wireguard://"]),
-        ];
-        let mut launched = None;
-        for (program, args) in attempts {
-            let status = Command::new(program).args(args).status();
-            if status
-                .as_ref()
-                .map(|value| value.success())
-                .unwrap_or(false)
-            {
-                launched = Some(Ok(std::process::ExitStatus::default()));
-                break;
-            }
-        }
-        launched.unwrap_or_else(|| Err(std::io::Error::other("WireGuard app launch failed")))
-    }
-    .map_err(|error| AppError::Command(format!("Failed to open WireGuard app: {error}")))?;
-
-    if !status.success() {
-        return Err(AppError::Command(
-            "WireGuard app did not launch successfully".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
 pub async fn verify_sunshine_api(
     app: &AppHandle,
     context: &AppContext,
@@ -587,49 +521,34 @@ pub async fn verify_sunshine_api(
 }
 
 pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<MoonlightDetectionResult> {
-    let moonlight = MoonlightService;
-    let executable_path = moonlight
-        .detected_executable_path()
-        .map(|path| path.display().to_string());
-    let installed = executable_path.is_some();
-    let os = OsDetection::new();
-    let launch_kind = if !installed {
-        "unknown"
-    } else if os.is_linux() {
-        match executable_path.as_deref() {
-            Some(path) if path.ends_with("flatpak") => "flatpak",
-            Some(path) if path.ends_with("snap") => "snap",
-            _ => "path_lookup",
-        }
-    } else {
-        "native_path"
-    };
-    let result = MoonlightDetectionResult {
-        installed,
-        launch_kind: launch_kind.to_string(),
-        executable_path,
-        error: if installed {
-            None
-        } else {
-            Some(if os.is_windows() {
-                "Moonlight is not installed on this Windows machine. Install the desktop app from the official website and ensure Moonlight.exe is in PATH or registered in App Paths.".to_string()
-            } else if os.is_linux() {
-                "Moonlight is not installed on this Linux machine. Install Moonlight from the official website, Flatpak, or Snap and try again.".to_string()
-            } else if os.is_macos() {
-                "Moonlight is not installed on this Mac. Install the desktop app from the official website and try again.".to_string()
-            } else {
-                "Moonlight is not installed on this machine. Install the desktop app from the official website and try again.".to_string()
-            })
-        },
-    };
-
     context
         .update_state(|state| {
-            state.post_wireguard_setup.moonlight_installed = installed;
+            state.post_wireguard_setup.moonlight_installed = true;
+            if let Some(instance_id) = state
+                .post_wireguard_setup
+                .current_instance_id
+                .or(state.instance.instance_id)
+            {
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|record| record.instance_id == instance_id)
+                {
+                    server.embedded_moonlight_pipeline_enabled = true;
+                    if server.embedded_moonlight_host_id.trim().is_empty() {
+                        server.embedded_moonlight_host_id = format!("instance-{instance_id}");
+                    }
+                }
+            }
         })
         .await?;
 
-    Ok(result)
+    Ok(MoonlightDetectionResult {
+        installed: true,
+        launch_kind: "embedded".to_string(),
+        executable_path: None,
+        error: None,
+    })
 }
 
 pub async fn setup_moonlight_sunshine(
@@ -682,62 +601,14 @@ pub async fn setup_moonlight_sunshine(
     )
     .await;
 
-    let (username, password, connection_provider, moonlight_host) = {
+    let (username, password, moonlight_host) = {
         let state = context.state.read().await;
         (
             state.credentials.app_username.clone(),
             state.credentials.app_password.clone(),
-            state.connection_provider,
             state.post_wireguard_setup.moonlight_host.clone(),
         )
     };
-
-    if connection_provider == ConnectionProvider::Tailscale {
-        emit_post_wireguard_event(
-            app,
-            context,
-            OrchestrationState::SunshineVerifying,
-            "Checking local Tailscale connectivity",
-            Some(format!(
-                "Verifying this computer can reach Sunshine on https://{}:{}/api/config before pairing.",
-                moonlight_host, SUNSHINE_API_PORT
-            )),
-            false,
-        )
-        .await;
-
-        let local_tailscale_ip = match ensure_local_tailscale_connectivity(&moonlight_host).await {
-            Ok(local_ip) => local_ip,
-            Err(error) => {
-                let message =
-                    "Local Tailscale is not ready. Sign in to the same tailnet on this computer, keep Tailscale running, then retry.";
-                set_setup_failure(
-                    context,
-                    SetupStage::SunshineVerifying,
-                    OrchestrationState::TailscaleConnected,
-                    "tailscale_local_unreachable",
-                    message,
-                    Some(error.to_string()),
-                    true,
-                )
-                .await?;
-                return Err(AppError::Provisioning(message.to_string()));
-            }
-        };
-
-        emit_post_wireguard_event(
-            app,
-            context,
-            OrchestrationState::SunshineVerifying,
-            "Local Tailscale connectivity verified",
-            Some(format!(
-                "Local tailnet IP: {}. Reachability to {} confirmed.",
-                local_tailscale_ip, moonlight_host
-            )),
-            false,
-        )
-        .await;
-    }
 
     emit_post_wireguard_event(
         app,
@@ -804,15 +675,9 @@ pub async fn setup_moonlight_sunshine(
     {
         Ok(result) => result?,
         Err(_) => {
-            let recovery_hint = if connection_provider == ConnectionProvider::Tailscale {
-                "Reconnect Tailscale locally, confirm you are on the same tailnet, and try again."
-            } else {
-                "Re-import the current WireGuard config and try again."
-            };
             let error = format!(
-                "Sunshine verification took longer than {} seconds. {}",
-                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs(),
-                recovery_hint
+                "Sunshine verification took longer than {} seconds. Reconnect Noland's managed tunnel and try again.",
+                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs()
             );
             let timeout_details = format!(
                 "The secure tunnel or Sunshine API did not become ready in time before Moonlight PIN setup. {}",
@@ -846,124 +711,66 @@ pub async fn setup_moonlight_sunshine(
         ));
     }
 
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.stage = SetupStage::MoonlightDetecting;
-            state.orchestration_state = OrchestrationState::MoonlightDetecting;
-        })
-        .await?;
-
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::MoonlightDetecting,
-        "Finding Moonlight",
-        Some("Looking for a local Moonlight client installation.".to_string()),
-        false,
-    )
-    .await;
-
-    let detection = detect_moonlight_client(context).await?;
-    if !detection.installed {
-        set_setup_failure(
-            context,
-            SetupStage::MoonlightDetecting,
-            OrchestrationState::MoonlightDetecting,
-            "moonlight_not_found",
-            "Moonlight is not installed on this machine.",
-            detection.error.clone(),
-            true,
-        )
-        .await?;
-        return Err(AppError::NotFound(
-            "Moonlight is not installed on this machine.".to_string(),
-        ));
-    }
-
-    let moonlight = MoonlightService;
-    let preferences = { context.state.read().await.moonlight_preferences.clone() };
-    let moonlight_host = {
-        context
-            .state
-            .read()
-            .await
-            .post_wireguard_setup
-            .moonlight_host
-            .clone()
-    };
-    moonlight
-        .patch_local_config(&moonlight_host, SUNSHINE_API_PORT, &preferences)
-        .await?;
-    let config_result = moonlight
-        .configure_client(MoonlightConfigureOptions {
-            apply: true,
-            ..Default::default()
-        })
-        .await;
-    if !config_result.success {
-        warn!(
-            "moonlight auto-config apply returned non-success before pairing: {:?}",
-            config_result.error
-        );
-    }
-
-    let os = OsDetection::new();
-    if os.is_windows() {
-        if let Err(error) = moonlight.launch_native_client() {
-            warn!(
-                "windows moonlight auto-launch failed before pairing attempt: {}",
-                error
-            );
-        }
-
-        if let Err(error) = moonlight.pair_host(&moonlight_host) {
-            warn!(
-                "windows moonlight auto-pair command failed for {}: {}",
-                moonlight_host, error
-            );
-        }
-    }
-
     let moonlight_host_for_state = moonlight_host.clone();
-    let state = context
-        .update_state(move |state| {
-            state.post_wireguard_setup.stage = SetupStage::MoonlightPairingStarted;
-            state.orchestration_state = OrchestrationState::MoonlightPairingStarted;
-            state.moonlight.host_address = moonlight_host_for_state.clone();
-            state.moonlight.configured = true;
-            state.post_wireguard_setup.moonlight_host = moonlight_host_for_state.clone();
-        })
-        .await?;
 
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::MoonlightPairingStarted,
-        "Starting Moonlight pairing",
-        Some(
-            "Moonlight pairing was started for 10.77.0.1. Enter the PIN shown there below."
-                .to_string(),
-        ),
-        false,
-    )
-    .await;
+    {
+        let state = context
+            .update_state(move |state| {
+                state.post_wireguard_setup.stage = SetupStage::MoonlightPairingStarted;
+                state.orchestration_state = OrchestrationState::MoonlightPairingStarted;
+                state.moonlight.host_address = moonlight_host_for_state.clone();
+                state.moonlight.configured = true;
+                state.post_wireguard_setup.moonlight_host = moonlight_host_for_state.clone();
 
-    // Launch Steam in the background while the user pairs so first-run setup can complete.
-    let ctx_clone = context.clone();
-    tauri::async_runtime::spawn(async move {
-        if let Ok((remote, sunshine_user)) = sunshine_ssh_remote(&ctx_clone).await {
-            let command = format!(
-                "sudo -u {} env DISPLAY=:0 steam >/dev/null 2>&1 & disown",
-                sunshine_user
-            );
-            let _ = tokio::task::spawn_blocking(move || {
-                remote.ssh(&command, std::time::Duration::from_secs(120))
+                if let Some(instance_id) = state
+                    .post_wireguard_setup
+                    .current_instance_id
+                    .or(state.instance.instance_id)
+                {
+                    if let Some(server) = state
+                        .provisioned_servers
+                        .iter_mut()
+                        .find(|server| server.instance_id == instance_id)
+                    {
+                        server.embedded_moonlight_pipeline_enabled = true;
+                        if server.embedded_moonlight_host_id.trim().is_empty() {
+                            server.embedded_moonlight_host_id = format!("instance-{}", instance_id);
+                        }
+                    }
+                }
             })
-            .await;
-        }
-    });
+            .await?;
 
-    Ok(state.post_wireguard_setup)
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::MoonlightPairingStarted,
+            "Embedded Moonlight pairing ready",
+            Some(
+                "Built-in Moonlight is enabled for this instance, so Noland will generate the Sunshine pairing PIN itself. Use Generate Pairing PIN below."
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+
+        // Launch Steam in the background while the user pairs so first-run setup can complete.
+        let ctx_clone = context.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok((remote, sunshine_user)) = sunshine_ssh_remote(&ctx_clone).await {
+                let command = format!(
+                    "sudo -u {} env DISPLAY=:0 steam >/dev/null 2>&1 & disown",
+                    sunshine_user
+                );
+                let _ = tokio::task::spawn_blocking(move || {
+                    remote.ssh(&command, std::time::Duration::from_secs(120))
+                })
+                .await;
+            }
+        });
+
+        return Ok(state.post_wireguard_setup);
+    }
 }
 
 pub async fn submit_moonlight_pin_to_sunshine(
@@ -1172,45 +979,7 @@ pub async fn retry_setup_stage(
 }
 
 fn platform_wireguard_mode() -> WireGuardSetupMode {
-    let os = OsDetection::new();
-    if os.is_macos() {
-        WireGuardSetupMode::WireguardAppMacosManual
-    } else if os.is_windows() {
-        WireGuardSetupMode::WireguardAppWindows
-    } else {
-        WireGuardSetupMode::WireguardAppLinux
-    }
-}
-
-async fn active_instance_id(context: &AppContext) -> AppResult<u64> {
-    let state = context.state.read().await;
-    state
-        .instance
-        .instance_id
-        .or(state.post_wireguard_setup.current_instance_id)
-        .ok_or_else(|| AppError::State("Missing active instance id for WireGuard flow".to_string()))
-}
-
-async fn sync_wireguard_config_snapshot(
-    context: &AppContext,
-    instance_id: u64,
-    config_path: &Path,
-) -> AppResult<()> {
-    let config_text = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading generated WireGuard config {}: {error}",
-            config_path.display()
-        ))
-    })?;
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.current_instance_id = Some(instance_id);
-            state.post_wireguard_setup.wireguard_config = config_text.clone();
-        })
-        .await?;
-
-    Ok(())
+    WireGuardSetupMode::EmbeddedGotatun
 }
 
 async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf> {
@@ -1261,59 +1030,6 @@ async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf
     Ok(candidate)
 }
 
-fn ensure_wireguard_import_copy(
-    _context: &AppContext,
-    config_path: &Path,
-    instance_id: u64,
-) -> AppResult<PathBuf> {
-    #[cfg(target_os = "macos")]
-    let wireguard_dir_name = "wireguard-local";
-    #[cfg(not(target_os = "macos"))]
-    let wireguard_dir_name = "wireguard";
-
-    let app_data_dir = dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("com.noland.connect")
-        .join(wireguard_dir_name)
-        .join(instance_id.to_string());
-    std::fs::create_dir_all(&app_data_dir).map_err(|error| {
-        AppError::Io(format!(
-            "Failed creating WireGuard export directory {}: {error}",
-            app_data_dir.display()
-        ))
-    })?;
-    let export_path = app_data_dir.join(IMPORT_FILENAME);
-    std::fs::copy(config_path, &export_path).map_err(|error| {
-        AppError::Io(format!(
-            "Failed exporting WireGuard config to {}: {error}",
-            export_path.display()
-        ))
-    })?;
-    Ok(export_path)
-}
-
-fn open_path_with_system(path: &Path) -> AppResult<()> {
-    let os = OsDetection::new();
-    let status = if os.is_macos() {
-        Command::new("open").arg(path).status()
-    } else if os.is_windows() {
-        Command::new("cmd")
-            .args(["/C", "start", "", path.to_string_lossy().as_ref()])
-            .status()
-    } else {
-        Command::new("xdg-open").arg(path).status()
-    }
-    .map_err(|error| AppError::Command(format!("Failed opening {}: {error}", path.display())))?;
-
-    if !status.success() {
-        return Err(AppError::Command(format!(
-            "System opener failed for {}",
-            path.display()
-        )));
-    }
-    Ok(())
-}
-
 fn tcp_reachability(host: &str, ports: &[u16], timeout: Duration) -> ReachabilityResult {
     let mut reachable_ports = Vec::new();
     let mut last_error = None;
@@ -1346,32 +1062,6 @@ fn tcp_reachability(host: &str, ports: &[u16], timeout: Duration) -> Reachabilit
 
 fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
     (host, port).to_socket_addrs().ok()?.next()
-}
-
-async fn ensure_local_tailscale_connectivity(remote_host: &str) -> AppResult<String> {
-    let local_ip = TailscaleService::get_local_ip().await.map_err(|error| {
-        AppError::Provisioning(format!(
-            "Could not determine a local Tailscale IP. Make sure Tailscale is installed, signed in on this computer, and connected before continuing: {}",
-            error
-        ))
-    })?;
-
-    let reachability = tcp_reachability(remote_host, &REACHABILITY_PORTS, Duration::from_secs(2));
-    if reachability.reachable {
-        return Ok(local_ip);
-    }
-
-    let details = reachability.error.unwrap_or_else(|| {
-        format!(
-            "No Sunshine ports on {} responded over Tailscale. Expected one of {:?}.",
-            remote_host, REACHABILITY_PORTS
-        )
-    });
-
-    Err(AppError::Provisioning(format!(
-        "Local Tailscale IP {} is up, but this computer could not reach {} over Tailscale. {}",
-        local_ip, remote_host, details
-    )))
 }
 
 async fn sunshine_config_response(
@@ -1783,10 +1473,7 @@ fn shell_single_quote_escape(content: &str) -> String {
 
 fn recovery_stage_for_mode(mode: WireGuardSetupMode) -> SetupStage {
     match mode {
-        WireGuardSetupMode::WireguardAppMacosManual => SetupStage::WireguardWaitingForImport,
-        WireGuardSetupMode::WireguardAppWindows | WireGuardSetupMode::WireguardAppLinux => {
-            SetupStage::WireguardWaitingForActivation
-        }
+        WireGuardSetupMode::EmbeddedGotatun => SetupStage::WireguardWaitingForActivation,
     }
 }
 

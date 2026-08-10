@@ -16,9 +16,7 @@ const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
 const windowsTargetConfig = resolveWindowsTargetConfig(target, tauriArgsWithTarget);
 const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsTargetConfig];
-const tauriCliArgs = mode === 'build'
-  ? ensureCargoFeature(tauriArgsPrepared, 'moonlight-config-bin')
-  : tauriArgsPrepared;
+const tauriCliArgs = tauriArgsPrepared;
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsPrepared];
 let nativeEnv = buildNativeEnv(target);
 const prepEnv = {
@@ -50,25 +48,20 @@ if (process.platform === 'darwin' && mode === 'build') {
   console.log('[tauri-with-mic-sidecar] Deferring macOS notarization until after bundle fix/signing completes');
 }
 
-const managedWg = findManagedTool(process.platform === 'win32' ? 'wg' : 'wg', target, 'NOLAND_WG_BIN');
-const managedWgQuick = process.platform === 'win32'
-  ? undefined
-  : findManagedTool('wg-quick', target, 'NOLAND_WG_QUICK_BIN');
-const managedWireguardExe = process.platform === 'win32'
-  ? findManagedTool('wireguard', target, 'NOLAND_WIREGUARD_EXE_BIN')
-  : undefined;
-const managedGotatun = findManagedTool('gotatun', target, 'NOLAND_GOTATUN_BIN');
-if (managedWg) {
-  tauriEnv.NOLAND_WG_BIN = managedWg;
+const managedNetHelper = findManagedTool(
+  'noland-net-helper',
+  target,
+  'NOLAND_NET_HELPER_BIN',
+);
+if (managedNetHelper) {
+  tauriEnv.NOLAND_NET_HELPER_BIN = managedNetHelper;
 }
-if (managedWgQuick) {
-  tauriEnv.NOLAND_WG_QUICK_BIN = managedWgQuick;
-}
-if (managedWireguardExe) {
-  tauriEnv.NOLAND_WIREGUARD_EXE_BIN = managedWireguardExe;
-}
-if (managedGotatun) {
-  tauriEnv.NOLAND_GOTATUN_BIN = managedGotatun;
+if (target?.includes('windows')) {
+  const stagedWintun = join(repoRoot, 'src-tauri', 'binaries', `wintun-${target}.dll`);
+  const wintun = process.env.NOLAND_WINTUN_DLL?.trim() || (existsSync(stagedWintun) ? stagedWintun : undefined);
+  if (wintun) {
+    tauriEnv.NOLAND_WINTUN_DLL = wintun;
+  }
 }
 
 if (mode === 'dev') {
@@ -136,7 +129,15 @@ if (process.platform === 'darwin' && mode === 'build') {
     process.exit(1);
   }
 
-  if (process.env.APPLE_ID && process.env.APPLE_PASSWORD && process.env.APPLE_TEAM_ID) {
+  const notarizationConfigured = Boolean(
+    process.env.APPLE_ID && process.env.APPLE_PASSWORD && process.env.APPLE_TEAM_ID,
+  );
+  if (process.env.NOLAND_REQUIRE_SIGNED_RELEASE === '1' && !notarizationConfigured) {
+    console.error('Refusing to produce a macOS release artifact without APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID notarization credentials.');
+    process.exit(1);
+  }
+
+  if (notarizationConfigured) {
     console.log(`[tauri-with-mic-sidecar] Starting custom macOS notarization for ${targetTriple}`);
     const notarize = spawnSync(process.execPath, [resolve(repoRoot, 'scripts', 'notarize-macos-bundle.mjs'), targetTriple], {
       cwd: repoRoot,
@@ -154,29 +155,6 @@ if (process.platform === 'darwin' && mode === 'build') {
 
 process.exit(0);
 
-function ensureCargoFeature(args, feature) {
-  const cloned = [...args];
-
-  for (let i = 0; i < cloned.length; i += 1) {
-    if (cloned[i] === '--features' && cloned[i + 1]) {
-      const features = new Set(cloned[i + 1].split(',').map((value) => value.trim()).filter(Boolean));
-      features.add(feature);
-      cloned[i + 1] = [...features].join(',');
-      return cloned;
-    }
-
-    if (cloned[i].startsWith('--features=')) {
-      const existing = cloned[i].slice('--features='.length);
-      const features = new Set(existing.split(',').map((value) => value.trim()).filter(Boolean));
-      features.add(feature);
-      cloned[i] = `--features=${[...features].join(',')}`;
-      return cloned;
-    }
-  }
-
-  cloned.push('--features', feature);
-  return cloned;
-}
 
 function readTarget(args) {
   for (let i = 0; i < args.length; i += 1) {
@@ -240,6 +218,7 @@ function buildNativeEnv(targetTriple) {
   env.OPENSSL_DIR = env.NOLAND_NATIVE_DEPS_PREFIX;
 
   if (targetTriple.endsWith('apple-darwin')) {
+    env.MACOSX_DEPLOYMENT_TARGET = env.MACOSX_DEPLOYMENT_TARGET?.trim() || '12.0';
     env.NOLAND_GSTREAMER_FRAMEWORK = join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework');
     env.PKG_CONFIG_PATH = [
       ...resolveMacPkgConfigRoots(),

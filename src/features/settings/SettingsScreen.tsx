@@ -17,9 +17,6 @@ import type {
   ServerPreferencesUpdate,
   SharedStorageTestResult,
   SshCredentialsUpdate,
-  VastBrowserAutomationStatus,
-  VastBrowserBillingAction,
-  VastBrowserGeneratedApiKeyResult,
 } from "../../lib/types";
 import {
   VAST_API_KEY_URL,
@@ -59,7 +56,6 @@ type ClientForm = {
 interface Props {
   appState: PersistedAppState;
   busy: boolean;
-  vastAutomationStatus: VastBrowserAutomationStatus | null;
   storageProviders: ProviderDefinition[];
   sharedStorageProfiles: ProfileReference[];
   sharedStorageTestResult: SharedStorageTestResult | null;
@@ -85,14 +81,6 @@ interface Props {
   ) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
-  onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
-  onConnectVastBrowser: () => Promise<unknown>;
-  onGenerateVastApiKey: (
-    apiKeyName?: string,
-  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
-  onOpenVastBillingBrowser: (
-    action?: VastBrowserBillingAction,
-  ) => Promise<unknown>;
   onSavePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
@@ -104,9 +92,6 @@ interface Props {
   onRegenerateEdid: (payload: {
     mode: "auto_detect" | "manual";
     refreshRateHz: number;
-  }) => Promise<void>;
-  onSaveConnectionProvider: (payload: {
-    connectionProvider: "wireguard";
   }) => Promise<void>;
 }
 
@@ -207,7 +192,6 @@ function SelectField({
 export function SettingsScreen({
   appState,
   busy,
-  vastAutomationStatus,
   storageProviders,
   sharedStorageProfiles,
   sharedStorageTestResult,
@@ -221,23 +205,14 @@ export function SettingsScreen({
   onBeginOauthFlow,
   onCompleteOauthFlow,
   onSaveApiKey,
-  onRefreshVastAutomationStatus,
-  onConnectVastBrowser,
-  onGenerateVastApiKey,
-  onOpenVastBillingBrowser,
   onSavePlatformCredentials,
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
   onRegenerateEdid,
-  onSaveConnectionProvider,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
-  const [vastAutomationMessage] = useState<string | null>(null);
-  const [connectionProvider, setConnectionProvider] = useState<"wireguard">(
-    "wireguard",
-  );
   const [platformUsername, setPlatformUsername] = useState(
     appState.credentials.appUsername,
   );
@@ -290,7 +265,6 @@ export function SettingsScreen({
 
   useEffect(() => {
     setApiKey(appState.credentials.vastApiKey);
-    setConnectionProvider("wireguard");
     setPlatformUsername(appState.credentials.appUsername);
     setPlatformPassword(appState.credentials.appPassword);
     setSshUsername(
@@ -332,13 +306,6 @@ export function SettingsScreen({
     });
   }, [appState]);
 
-
-
-  void vastAutomationStatus;
-  void onRefreshVastAutomationStatus;
-  void onConnectVastBrowser;
-  void onGenerateVastApiKey;
-  void onOpenVastBillingBrowser;
 
   async function openExternalUrl(url: string) {
     try {
@@ -452,7 +419,7 @@ export function SettingsScreen({
         </div>
         <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
           <p>Use the normal browser pages above, then save the API key here.</p>
-          {vastAutomationMessage ? <p className="text-neon-cyan">{vastAutomationMessage}</p> : null}
+
         </div>
       </div>
 
@@ -1113,18 +1080,6 @@ export function SettingsScreen({
         </p>
       </div>
 
-      <div className="mt-4">
-        <Button
-          disabled={busy}
-          onClick={() =>
-            onSaveConnectionProvider({
-              connectionProvider,
-            })
-          }
-        >
-          Save Managed Tunnel Preference
-        </Button>
-      </div>
     </Card>
   );
 
@@ -1140,7 +1095,7 @@ export function SettingsScreen({
             : clientPanel;
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-4 pb-6 pt-6 md:px-8">
+    <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-6 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <div className="flex shrink-0 items-center justify-between gap-4">
           <div className="flex items-center gap-3">

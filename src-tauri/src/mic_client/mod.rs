@@ -12,6 +12,7 @@ use std::time::Duration;
 use tracing::info;
 
 pub use permissions::ensure_microphone_access;
+pub use runtime::configure_embedded_stream_runtime;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::app_state::MicQualityProfile;

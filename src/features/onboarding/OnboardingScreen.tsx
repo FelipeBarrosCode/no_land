@@ -8,27 +8,13 @@ import {
   VAST_BILLING_URL,
   VAST_LOGIN_URL,
 } from "../../lib/constants";
-import type {
-  OnboardingPayload,
-  VastBrowserAutomationStatus,
-  VastBrowserGeneratedApiKeyResult,
-  VastBrowserBillingAction,
-} from "../../lib/types";
+import type { OnboardingPayload } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
 
 interface Props {
   busy: boolean;
   onSubmit: (payload: OnboardingPayload) => Promise<void>;
-  vastAutomationStatus: VastBrowserAutomationStatus | null;
-  onConnectVastBrowser: () => Promise<unknown>;
-  onRefreshVastAutomationStatus: () => Promise<VastBrowserAutomationStatus | null>;
-  onGenerateVastApiKey: (
-    apiKeyName?: string,
-  ) => Promise<VastBrowserGeneratedApiKeyResult | null>;
-  onOpenVastBillingBrowser: (
-    action?: VastBrowserBillingAction,
-  ) => Promise<unknown>;
 }
 
 interface FormState {
@@ -37,15 +23,7 @@ interface FormState {
   vastApiKey: string;
 }
 
-export function OnboardingScreen({
-  busy,
-  onSubmit,
-  vastAutomationStatus,
-  onConnectVastBrowser,
-  onRefreshVastAutomationStatus,
-  onGenerateVastApiKey,
-  onOpenVastBillingBrowser,
-}: Props) {
+export function OnboardingScreen({ busy, onSubmit }: Props) {
   const [tutorialOpen, setTutorialOpen] = useState(true);
   const [tutorialCompleted, setTutorialCompleted] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -59,13 +37,7 @@ export function OnboardingScreen({
     appPassword: false,
     vastApiKey: false,
   });
-  const [automationNote] = useState<string | null>(null);
 
-  void vastAutomationStatus;
-  void onConnectVastBrowser;
-  void onRefreshVastAutomationStatus;
-  void onGenerateVastApiKey;
-  void onOpenVastBillingBrowser;
 
   const errors = useMemo(() => {
     return {
@@ -94,7 +66,6 @@ export function OnboardingScreen({
       appUsername: form.appUsername.trim(),
       appPassword: form.appPassword,
       vastApiKey: form.vastApiKey.trim(),
-      tailscaleApiKey: "",
     });
   }
 
@@ -138,8 +109,8 @@ export function OnboardingScreen({
   }
 
   return (
-    <main className="crt-surface min-h-screen bg-hero-glow px-6 py-8">
-      <div className="mx-auto flex min-h-[calc(100vh-4rem)] w-full max-w-6xl items-center justify-center">
+    <main className="crt-surface min-h-dvh bg-hero-glow px-6 py-8">
+      <div className="mx-auto flex min-h-[calc(100dvh-4rem)] w-full max-w-6xl items-center justify-center">
         <Card className="pixel-frame w-full max-w-xl animate-fade-in p-8">
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-2">
@@ -192,7 +163,7 @@ export function OnboardingScreen({
             </div>
             <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
               <p>Sign in in your normal browser, then come back here and paste the API key.</p>
-              {automationNote ? <p className="text-neon-cyan">{automationNote}</p> : null}
+
             </div>
           </div>
 

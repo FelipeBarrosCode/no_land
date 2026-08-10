@@ -144,6 +144,11 @@ nl_result_t nl_runtime_attach_surface(nl_runtime_t* runtime, const nl_surface_de
 nl_result_t nl_runtime_detach_surface(nl_runtime_t* runtime);
 nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output);
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output);
+
+int nl_desktop_input_install(const nl_surface_descriptor_t* surface);
+void nl_desktop_input_uninstall(void);
+int nl_desktop_input_set_capture_active(bool active, int mode);
+
 nl_result_t nl_send_relative_mouse(nl_runtime_t* runtime, int16_t delta_x, int16_t delta_y);
 nl_result_t nl_send_absolute_mouse(nl_runtime_t* runtime, int16_t x, int16_t y, int16_t reference_width, int16_t reference_height);
 nl_result_t nl_send_mouse_button(nl_runtime_t* runtime, uint8_t button, bool pressed);

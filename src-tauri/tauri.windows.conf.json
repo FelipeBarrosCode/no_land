@@ -2,8 +2,8 @@
   "bundle": {
     "targets": ["nsis"],
     "resources": [
-      "binaries/wg-*-pc-windows-msvc.exe",
-      "binaries/wireguard-*-pc-windows-msvc.exe",
+      "binaries/wintun-*-pc-windows-msvc.dll",
+      "binaries/wintun-LICENSE.txt",
       "binaries/ssh-*-pc-windows-msvc.exe",
       "binaries/scp-*-pc-windows-msvc.exe",
       "binaries/ssh-keygen-*-pc-windows-msvc.exe",
@@ -11,6 +11,9 @@
       "../vm-cloud-mic-agent/src/**/*"
     ],
     "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      },
       "nsis": {
         "compression": "zlib"
       }

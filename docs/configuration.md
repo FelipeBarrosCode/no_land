@@ -90,23 +90,21 @@ Backend config is defined in `src-tauri/src/services/app_config.rs` and reads en
 
 ## Download URL defaults
 
-- Moonlight (all OSes): `https://github.com/moonlight-stream/moonlight-qt/releases`
-- WireGuard (all OSes): `https://www.wireguard.com/install/`
+- The primary streaming client and GotaTun tunnel engine are embedded in Noland Connect.
+- Users are not expected to install Moonlight, WireGuard, GotaTun, `wg`, or `wg-quick`.
 
-## Local tool prerequisites (client side)
+## Local managed components (client side)
 
 Checked by `local_environment_preflight`:
 
-- `ssh`
-- `ssh-keygen`
-- `ssh-add`
-- Windows additionally: `wireguard.exe`
-- Linux additionally: `xdg-open`
+- bundled `noland-net-helper` containing the pinned GotaTun engine
+- bundled `ssh` and `ssh-keygen` support where the OS does not provide them
+- Windows additionally: bundled `wintun.dll`
 
-Other local capabilities are used elsewhere, but the preflight command currently validates only the tools listed above.
+Tunnel activation uses the operating system's privilege broker. Missing managed components indicate an incomplete Noland package, not a user prerequisite.
 
 ## State schema versioning
 
 - Config exposes `state_schema_version`.
-- Current default: `1`.
+- Current default: `2`.
 - Use serde defaults and additive fields to preserve backward compatibility.

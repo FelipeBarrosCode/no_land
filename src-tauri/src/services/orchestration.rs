@@ -25,7 +25,7 @@ use super::{
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
     mic_receiver::MicReceiverProvisioner,
-    moonlight::{detect_client_display_for_provisioning, MoonlightService},
+    moonlight::detect_client_display_for_provisioning,
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
     post_wireguard_setup::initialize_post_wireguard_flow,
@@ -808,12 +808,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
                     let _ = hydrate_state_from_server_record(&context, existing.id, false).await?;
 
-                    if try_launch_existing_moonlight_session(&app, &context, Some(existing.id))
-                        .await?
-                    {
-                        return Ok(());
-                    }
-
                     return run_existing_instance_orchestration(app, context, existing.id).await;
                 }
 
@@ -1314,30 +1308,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
-    // Reload persisted state.json before choosing the connection provider.
-    // The provider selection and associated credentials are persisted config,
-    // so orchestration should branch from the disk-backed snapshot rather than
-    // relying only on the current in-memory lock state.
-    let persisted_state = context.reload_state_from_disk().await?;
-    if persisted_state.connection_provider == ConnectionProvider::Tailscale {
-        warn!(
-            instance_id = instance.id,
-            "Tailscale selection is deprecated; continuing with the managed GotaTun/WireGuard provisioning path"
-        );
-        context
-            .update_state(|state| {
-                state.connection_provider = ConnectionProvider::Wireguard;
-                if let Some(record) = state
-                    .provisioned_servers
-                    .iter_mut()
-                    .find(|record| record.instance_id == instance.id)
-                {
-                    record.connection_provider = ConnectionProvider::Wireguard;
-                }
-            })
-            .await?;
-    }
-
     match vast.get_instance(instance.id).await {
         Ok(refreshed_instance) => {
             instance.public_ip = refreshed_instance.public_ip;
@@ -1716,10 +1686,6 @@ async fn run_existing_instance_orchestration(
     }
 
     let initial_state = context.state.read().await.clone();
-
-    if try_launch_existing_moonlight_session(&app, &context, Some(instance_id)).await? {
-        return Ok(());
-    }
 
     let api_key = initial_state.credentials.vast_api_key.clone();
     if api_key.trim().is_empty() {
@@ -2226,30 +2192,6 @@ async fn run_existing_instance_orchestration(
         .await;
     }
     ensure_not_cancelled(&context)?;
-
-    let existing_connection_provider = {
-        let snapshot = context.state.read().await;
-        snapshot.connection_provider
-    };
-
-    if existing_connection_provider == ConnectionProvider::Tailscale {
-        warn!(
-            instance_id = instance.id,
-            "Existing instance was marked as Tailscale-backed; continuing with the managed GotaTun/WireGuard path"
-        );
-        context
-            .update_state(|state| {
-                state.connection_provider = ConnectionProvider::Wireguard;
-                if let Some(record) = state
-                    .provisioned_servers
-                    .iter_mut()
-                    .find(|record| record.instance_id == instance.id)
-                {
-                    record.connection_provider = ConnectionProvider::Wireguard;
-                }
-            })
-            .await?;
-    }
 
     match vast.get_instance(instance.id).await {
         Ok(refreshed_instance) => {
@@ -3259,9 +3201,6 @@ async fn try_launch_existing_moonlight_session(
         }
     }
 
-    let moonlight = MoonlightService;
-    moonlight.launch_native_client()?;
-
     context
         .update_state(|state| {
             if let Some(id) = instance_id {
@@ -3351,7 +3290,7 @@ async fn try_launch_existing_moonlight_session(
         app,
         context,
         OrchestrationState::Ready,
-        "Server already configured. Opening native Moonlight client.",
+        "Server already configured for Noland's embedded stream.",
         Some(format!(
             "Host {} via WireGuard {}",
             snapshot.moonlight.host_address, snapshot.wireguard.server_ip
@@ -3583,16 +3522,10 @@ async fn hydrate_state_from_server_record(
     let wireguard_server_public_key = record.wireguard_server_public_key.clone();
     let wireguard_client_public_key = record.wireguard_client_public_key.clone();
     let wireguard_config_path = record.wireguard_config_path.clone();
-    let connection_provider = record.connection_provider;
-    let tailscale_client_ip = record.tailscale_client_ip.clone();
     let sunshine_configured = record.steps.sunshine_configured;
     let moonlight_configured = record.steps.moonlight_configured || record.steps.pairing_completed;
     let moonlight_host_address = if !record.moonlight_host_address.trim().is_empty() {
         record.moonlight_host_address.clone()
-    } else if connection_provider == ConnectionProvider::Tailscale
-        && !tailscale_client_ip.trim().is_empty()
-    {
-        tailscale_client_ip.clone()
     } else {
         wireguard_server_ip.clone()
     };
@@ -3621,7 +3554,7 @@ async fn hydrate_state_from_server_record(
             state.wireguard.server_public_key = wireguard_server_public_key.clone();
             state.wireguard.client_public_key = wireguard_client_public_key.clone();
             state.wireguard.config_path = wireguard_config_path.clone();
-            state.connection_provider = connection_provider;
+            state.connection_provider = ConnectionProvider::Wireguard;
             state.sunshine.configured = sunshine_configured;
             state.moonlight.configured = moonlight_configured;
             state.moonlight.host_address = moonlight_host_address.clone();
@@ -4001,54 +3934,4 @@ async fn emit_transition(
     };
 
     context.emit_progress(app, event).await;
-}
-
-async fn initialize_post_tailscale_flow(
-    app: &AppHandle,
-    context: &AppContext,
-    instance_id: u64,
-    tailscale_ip: &str,
-) -> AppResult<()> {
-    use crate::models::app_state::{
-        PostWireGuardSetupState, SetupStage, WireGuardSetupMode, WireGuardSetupStatus,
-    };
-
-    let app_username = { context.state.read().await.credentials.app_username.clone() };
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup = PostWireGuardSetupState {
-                stage: SetupStage::WireguardConnected,
-                wireguard_setup_mode: WireGuardSetupMode::WireguardAppLinux,
-                wireguard_setup_status: WireGuardSetupStatus::Connected,
-                current_instance_id: Some(instance_id),
-                wireguard_export_path: String::new(),
-                wireguard_config: String::new(),
-                wireguard_verified_host: tailscale_ip.to_string(),
-                wireguard_reachable_ports: vec![47984, 47989, 47990, 48010],
-                sunshine_username: app_username.clone(),
-                moonlight_host: tailscale_ip.to_string(),
-                moonlight_installed: false,
-                paired: false,
-                setup_complete: false,
-                last_error: None,
-            };
-            state.orchestration_state = OrchestrationState::TailscaleConnected;
-            state.moonlight.host_address = tailscale_ip.to_string();
-            state.moonlight.configured = true;
-            state.last_error = None;
-        })
-        .await?;
-
-    emit_transition(
-        app,
-        context,
-        OrchestrationState::TailscaleConnected,
-        "Tailscale connected. Click Continue to proceed to Moonlight/Sunshine setup.",
-        Some(format!("Remote IP: {}", tailscale_ip)),
-        false,
-    )
-    .await;
-
-    Ok(())
 }

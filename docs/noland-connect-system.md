@@ -241,8 +241,9 @@ These flags are used to skip already-complete steps safely.
 
 #### `setup_wireguard_app_handoff_command()`
 
-- **Purpose**: export config + open WireGuard app
+- **Purpose**: start Noland's bundled GotaTun helper, create the managed adapter, and apply the generated tunnel configuration
 - **Output**: `PostWireGuardSetupState`
+- **Local dependencies**: none; the packaged app supplies the helper and Windows Wintun library
 
 #### `verify_wireguard()`
 
@@ -251,7 +252,7 @@ These flags are used to skip already-complete steps safely.
 
 #### `setup_moonlight_sunshine_command()`
 
-- **Purpose**: verify Sunshine, detect Moonlight, launch pairing prep
+- **Purpose**: verify Sunshine and prepare pairing for Noland's embedded Moonlight-compatible client
 - **Output**: `PostWireGuardSetupState`
 
 #### `submit_moonlight_pin_to_sunshine_command(pin)`
@@ -536,4 +537,4 @@ Mitigations:
 2. What are the target SLOs for "time to Ready" and reboot recovery?
 3. Is encrypted local credential storage required in the next phase?
 4. Should local WireGuard health monitor remain observational-only on all platforms permanently?
-5. Is there a required production signing/notarization policy for release artifacts?
+5. Which Windows Authenticode certificate and Linux package/repository signing infrastructure will be used for production releases?

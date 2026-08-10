@@ -1,4 +1,0 @@
-#!/bin/sh
-SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-export WG="$SELF_DIR/wg-aarch64-apple-darwin"
-exec "$SELF_DIR/wg-bash-aarch64-apple-darwin" "$SELF_DIR/wg-quick-real-aarch64-apple-darwin" "$@"

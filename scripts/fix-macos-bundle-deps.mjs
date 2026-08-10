@@ -103,7 +103,6 @@ const frameworkRootLibs = existsSync(frameworksDir)
   : [];
 
 ensureBundledSdl3(frameworksDir, frameworkRootLibs);
-ensureBundledWireguardSidecars(target, resourcesBinariesDir);
 pruneIrrelevantMacResourceSidecars(resourcesBinariesDir, target);
 ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
 sanitizeBundleSymlinks(appPath);
@@ -308,45 +307,11 @@ function setInstallId(file, id) {
   run('install_name_tool', ['-id', id, file], { allowFailure: true });
 }
 
-function ensureBundledWireguardSidecars(targetTriple, destinationDir) {
-  const stagedDir = join(repoRoot, 'src-tauri', 'binaries');
-  const requiredNames = [
-    `wg-${targetTriple}`,
-    `wg-quick-${targetTriple}`,
-  ];
-  const optionalNames = targetTriple.endsWith('apple-darwin')
-    ? [`wg-bash-${targetTriple}`, `wg-quick-real-${targetTriple}`]
-    : [];
-  const stagedSidecars = [...requiredNames, ...optionalNames].map((name) => ({
-    name,
-    source: join(stagedDir, name),
-    dest: join(destinationDir, name),
-    required: requiredNames.includes(name),
-  }));
-
-  mkdirSync(destinationDir, { recursive: true });
-  for (const { source, dest, required } of stagedSidecars) {
-    if (!existsSync(source)) {
-      if (required) {
-        throw new Error(`Required staged WireGuard sidecar is missing: ${source}`);
-      }
-      continue;
-    }
-    copyFileSync(source, dest);
-    try {
-      chmodSync(dest, statSync(source).mode);
-    } catch {}
-  }
-}
 
 function pruneIrrelevantMacResourceSidecars(destinationDir, targetTriple) {
   if (!existsSync(destinationDir)) return;
 
   const managedMacSidecarPrefixes = [
-    'wg-',
-    'wg-quick-',
-    'wg-bash-',
-    'wg-quick-real-',
     'ssh-',
     'scp-',
     'ssh-keygen-',
@@ -355,7 +320,7 @@ function pruneIrrelevantMacResourceSidecars(destinationDir, targetTriple) {
   for (const entry of readdirSync(destinationDir, { withFileTypes: true })) {
     if (!entry.isFile()) continue;
 
-    if (/^wireguard-.*\.exe$/u.test(entry.name)) {
+    if (/^(?:wireguard|wg|wg-quick|wg-bash|wg-quick-real)-/u.test(entry.name)) {
       rmSync(join(destinationDir, entry.name), { force: true });
       continue;
     }
@@ -425,14 +390,10 @@ function shouldEnableHardenedRuntime(file) {
 
 function collectExplicitMacSidecarFiles(appMacosDir, appResourcesBinariesDir, targetTriple) {
   const candidates = [
-    join(appMacosDir, 'gotatun'),
-    join(appMacosDir, `gotatun-${targetTriple}`),
+    join(appMacosDir, 'noland-net-helper'),
+    join(appMacosDir, `noland-net-helper-${targetTriple}`),
     join(appMacosDir, 'noland-mic-sender'),
     join(appMacosDir, `noland-mic-sender-${targetTriple}`),
-    join(appResourcesBinariesDir, `wg-${targetTriple}`),
-    join(appResourcesBinariesDir, `wg-quick-${targetTriple}`),
-    join(appResourcesBinariesDir, `wg-bash-${targetTriple}`),
-    join(appResourcesBinariesDir, `wg-quick-real-${targetTriple}`),
     join(appResourcesBinariesDir, `ssh-${targetTriple}`),
     join(appResourcesBinariesDir, `scp-${targetTriple}`),
     join(appResourcesBinariesDir, `ssh-keygen-${targetTriple}`),

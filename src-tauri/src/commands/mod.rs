@@ -8,7 +8,6 @@ pub use self::shared_storage::{
 
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,7 +16,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, State};
 
 use crate::{
-    errors::{AppError, AppResult, FrontendError},
+    errors::{AppError, FrontendError},
     input::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
@@ -62,20 +61,15 @@ use crate::{
         instance_lifecycle::InstanceLifecycleService,
         location::LocationService,
         mic_passthrough::MicPassthroughService,
-        moonlight::{
-            detect_client_display_for_provisioning, MoonlightCodecPreference,
-            MoonlightConfigureOptions, MoonlightConfigureResult, MoonlightNetworkPreference,
-            MoonlightService,
-        },
+        moonlight::detect_client_display_for_provisioning,
         offer_selector::OfferSelector,
         orchestration::OrchestrationService,
         os_detection::OsDetection,
         post_wireguard_setup::{
-            authorize_sunshine_pin, detect_moonlight_client, download_wireguard_config,
-            get_setup_status, open_wireguard_app, retry_setup_stage, setup_moonlight_sunshine,
-            setup_wireguard_app_handoff, submit_moonlight_pin_to_sunshine, verify_sunshine_api,
-            verify_wireguard_connection, MoonlightDetectionResult, ReachabilityResult,
-            SunshineVerificationResult,
+            authorize_sunshine_pin, detect_moonlight_client, get_setup_status, retry_setup_stage,
+            setup_moonlight_sunshine, setup_wireguard_app_handoff,
+            submit_moonlight_pin_to_sunshine, verify_sunshine_api, verify_wireguard_connection,
+            MoonlightDetectionResult, ReachabilityResult, SunshineVerificationResult,
         },
         reboot_helper::RebootHelperService,
         remote_exec::RemoteExec,
@@ -87,8 +81,7 @@ use crate::{
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
         wireguard::{
-            locate_gotatun_binary, locate_wg_binary, locate_wg_quick_binary,
-            locate_wireguard_exe_binary, read_local_wireguard_show_output,
+            locate_noland_net_helper_binary, locate_wintun_library,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
             teardown_local_wireguard_client, WireGuardProvisionMode, WireGuardService,
         },
@@ -125,61 +118,6 @@ struct RemoteInstanceServiceHealth {
     pub wireguard_addresses: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-struct VastBrowserAutomationPaths {
-    repo_root: PathBuf,
-    storage_state_path: PathBuf,
-    artifact_dir: PathBuf,
-    session_metadata_path: PathBuf,
-    api_key_result_path: PathBuf,
-    billing_result_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastBrowserAutomationStatus {
-    pub available: bool,
-    pub node_found: bool,
-    pub script_root: String,
-    pub storage_state_path: String,
-    pub artifact_dir: String,
-    pub session_connected: bool,
-    pub session_metadata_path: Option<String>,
-    pub api_key_result_path: Option<String>,
-    pub billing_result_path: Option<String>,
-    pub saved_at: Option<String>,
-    pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastBrowserAuthSessionResult {
-    #[serde(flatten)]
-    pub status: VastBrowserAutomationStatus,
-    pub page_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastBrowserGeneratedApiKeyResult {
-    #[serde(flatten)]
-    pub status: VastBrowserAutomationStatus,
-    pub api_key: Option<String>,
-    pub api_key_name: String,
-    pub discovered_secret_masked: Option<String>,
-    pub result_path: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastBrowserBillingSessionResult {
-    #[serde(flatten)]
-    pub status: VastBrowserAutomationStatus,
-    pub action: String,
-    pub page_url: Option<String>,
-    pub result_path: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VastWalletSummary {
@@ -188,133 +126,6 @@ pub struct VastWalletSummary {
     pub display_amount: String,
     pub source: String,
     pub last_updated_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastGenerateApiKeyPayload {
-    pub api_key_name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct VastBillingBrowserPayload {
-    pub action: Option<String>,
-}
-
-fn browser_automation_repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")))
-        .to_path_buf()
-}
-
-fn detect_node_found() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
-fn resolve_vast_browser_automation_paths(
-    context: &AppContext,
-) -> AppResult<VastBrowserAutomationPaths> {
-    let app_data_root = context
-        .state_store
-        .path()
-        .parent()
-        .ok_or_else(|| AppError::State("Unable to resolve app data directory".to_string()))?
-        .to_path_buf();
-    let automation_root = app_data_root.join("vast-browser-automation");
-    let artifact_dir = automation_root.join("artifacts");
-    let storage_state_path = automation_root.join("playwright/.auth/vast-ai.json");
-
-    Ok(VastBrowserAutomationPaths {
-        repo_root: browser_automation_repo_root(),
-        storage_state_path,
-        artifact_dir: artifact_dir.clone(),
-        session_metadata_path: artifact_dir.join("vast-ai-authenticated-session.json"),
-        api_key_result_path: artifact_dir.join("vast-ai-api-key-result.json"),
-        billing_result_path: artifact_dir.join("vast-ai-billing-result.json"),
-    })
-}
-
-fn extract_string_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(|entry| entry.trim().to_string())
-        .filter(|entry| !entry.is_empty())
-}
-
-fn read_json_file(path: &Path) -> Option<Value> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&raw).ok()
-}
-
-fn build_vast_browser_automation_status(
-    context: &AppContext,
-    last_error: Option<String>,
-) -> VastBrowserAutomationStatus {
-    let paths = resolve_vast_browser_automation_paths(context).ok();
-    let repo_root = browser_automation_repo_root();
-    let script_root = repo_root.join("scripts");
-    let node_found = detect_node_found();
-    let playwright_package_present = repo_root.join("node_modules/playwright").exists()
-        || repo_root.join("node_modules/@playwright/test").exists();
-
-    let session_json = paths
-        .as_ref()
-        .and_then(|resolved| read_json_file(&resolved.session_metadata_path));
-
-    VastBrowserAutomationStatus {
-        available: node_found
-            && playwright_package_present
-            && script_root.join("vast-ai-bootstrap-session.mjs").exists()
-            && script_root.join("vast-ai-create-api-key.mjs").exists()
-            && script_root
-                .join("vast-ai-open-billing-session.mjs")
-                .exists(),
-        node_found,
-        script_root: script_root.display().to_string(),
-        storage_state_path: paths
-            .as_ref()
-            .map(|resolved| resolved.storage_state_path.display().to_string())
-            .unwrap_or_default(),
-        artifact_dir: paths
-            .as_ref()
-            .map(|resolved| resolved.artifact_dir.display().to_string())
-            .unwrap_or_default(),
-        session_connected: paths
-            .as_ref()
-            .map(|resolved| {
-                resolved.storage_state_path.exists() && resolved.session_metadata_path.exists()
-            })
-            .unwrap_or(false),
-        session_metadata_path: paths.as_ref().and_then(|resolved| {
-            resolved
-                .session_metadata_path
-                .exists()
-                .then(|| resolved.session_metadata_path.display().to_string())
-        }),
-        api_key_result_path: paths.as_ref().and_then(|resolved| {
-            resolved
-                .api_key_result_path
-                .exists()
-                .then(|| resolved.api_key_result_path.display().to_string())
-        }),
-        billing_result_path: paths.as_ref().and_then(|resolved| {
-            resolved
-                .billing_result_path
-                .exists()
-                .then(|| resolved.billing_result_path.display().to_string())
-        }),
-        saved_at: session_json
-            .as_ref()
-            .and_then(|json| extract_string_field(json, "savedAt")),
-        last_error,
-    }
 }
 
 fn unavailable_vast_wallet_summary() -> VastWalletSummary {
@@ -347,75 +158,6 @@ fn build_vast_wallet_summary(balance_usd: Option<f64>) -> VastWalletSummary {
                 .unwrap_or_default(),
         ),
     }
-}
-
-fn default_generated_api_key_name() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format!("noland-{now}")
-}
-
-fn validate_billing_action(raw: Option<String>) -> AppResult<String> {
-    let action = raw.unwrap_or_else(|| "snapshot".to_string());
-    match action.as_str() {
-        "snapshot" | "open-add-credit" | "open-auto-topup" => Ok(action),
-        _ => Err(AppError::InvalidInput(format!(
-            "Unsupported Vast billing action: {action}"
-        ))),
-    }
-}
-
-fn run_vast_browser_script(
-    context: &AppContext,
-    script_name: &str,
-    extra_env: &[(&str, String)],
-) -> AppResult<VastBrowserAutomationPaths> {
-    let paths = resolve_vast_browser_automation_paths(context)?;
-    let script_path = paths.repo_root.join("scripts").join(script_name);
-    if !script_path.exists() {
-        return Err(AppError::State(format!(
-            "Vast browser automation script not found: {}",
-            script_path.display()
-        )));
-    }
-    if !detect_node_found() {
-        return Err(AppError::Command(
-            "Node.js is required for Vast.ai browser automation but was not found on PATH."
-                .to_string(),
-        ));
-    }
-
-    if let Some(parent) = paths.storage_state_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::create_dir_all(&paths.artifact_dir)?;
-
-    let mut command = Command::new("node");
-    command
-        .arg(&script_path)
-        .current_dir(&paths.repo_root)
-        .env("VAST_AI_STORAGE_STATE_PATH", &paths.storage_state_path)
-        .env("VAST_AI_ARTIFACT_DIR", &paths.artifact_dir)
-        .env("VAST_AI_HEADLESS", "false");
-
-    for (key, value) in extra_env {
-        command.env(key, value);
-    }
-
-    let output = command.output()?;
-    if !output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AppError::Command(format!(
-            "Vast browser automation failed running {script_name}. stdout: {} stderr: {}",
-            stdout.trim(),
-            stderr.trim()
-        )));
-    }
-
-    Ok(paths)
 }
 
 #[derive(Debug, Deserialize)]
@@ -605,106 +347,44 @@ pub struct MoonlightControllerStateInput {
     pub right_stick_y: i16,
 }
 
-fn local_environment_check(attempt_install: bool) -> LocalEnvironmentCheck {
+fn local_environment_check(_attempt_install: bool) -> LocalEnvironmentCheck {
     let os = OsDetection::new();
-    let build_check = |tool: &str, required_for: &str| {
-        let mut install_attempted = false;
-        let mut install_error = None;
-        if attempt_install && !os.command_exists(tool) {
-            install_attempted = true;
-            if let Err(error) = os.try_install_tool(tool) {
-                install_error = Some(error);
-            }
-        }
-
+    let bundled_check = |tool: &str, required_for: &str, resolved_path: Option<PathBuf>| {
         ToolCheck {
-            tool: tool.to_string(),
-            found: os.command_exists(tool),
-            path: os.resolve_command_path(tool),
-            required_for: required_for.to_string(),
-            install_hint: os.install_hint_for_tool(tool),
-            install_attempted,
-            install_error,
-        }
-    };
-    let bundled_check =
-        |tool: &str, required_for: &str, resolved_path: Option<PathBuf>| ToolCheck {
             tool: tool.to_string(),
             found: resolved_path.is_some(),
             path: resolved_path.map(|path| path.display().to_string()),
             required_for: required_for.to_string(),
-            install_hint: os.install_hint_for_tool(tool),
+            install_hint: "This component is bundled with Noland Connect. Reinstall the app or report the package as incomplete; do not install it manually.".to_string(),
             install_attempted: false,
             install_error: None,
-        };
+        }
+    };
 
-    let macos_ssh = if os.is_macos() {
-        Some(PathBuf::from("/usr/bin/ssh"))
-    } else {
-        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"))
-    };
-    let macos_ssh_keygen = if os.is_macos() {
-        Some(PathBuf::from("/usr/bin/ssh-keygen"))
-    } else {
-        os.locate_app_managed_binary(
-            "ssh-keygen",
-            "NOLAND_SSH_KEYGEN_BIN",
-            cfg!(target_os = "windows"),
-        )
-    };
+    let managed_ssh =
+        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"));
+    let managed_ssh_keygen = os.locate_app_managed_binary(
+        "ssh-keygen",
+        "NOLAND_SSH_KEYGEN_BIN",
+        cfg!(target_os = "windows"),
+    );
 
     let mut checks = vec![
-        bundled_check("ssh", "remote commands and provisioning", macos_ssh),
-        bundled_check("ssh-keygen", "SSH key generation", macos_ssh_keygen),
+        bundled_check("ssh", "remote commands and provisioning", managed_ssh),
+        bundled_check("ssh-keygen", "SSH key generation", managed_ssh_keygen),
     ];
 
+    checks.push(bundled_check(
+        "noland-net-helper",
+        "embedded GotaTun tunnel engine and network configuration",
+        locate_noland_net_helper_binary(),
+    ));
     if os.is_windows() {
         checks.push(bundled_check(
-            "wg",
-            "WireGuard control-plane configuration on Windows",
-            locate_wg_binary(),
+            "wintun.dll",
+            "Windows virtual network adapter for the embedded GotaTun engine",
+            locate_wintun_library(),
         ));
-        checks.push(bundled_check(
-            "wireguard.exe",
-            "managed WireGuard tunnel service runtime on Windows",
-            locate_wireguard_exe_binary(),
-        ));
-    } else {
-        checks.push(bundled_check(
-            "gotatun",
-            "managed userspace WireGuard tunnel runtime",
-            locate_gotatun_binary(),
-        ));
-        checks.push(bundled_check(
-            "wg",
-            "WireGuard control-plane configuration",
-            locate_wg_binary(),
-        ));
-        checks.push(bundled_check(
-            "wg-quick",
-            "managed userspace tunnel activation",
-            locate_wg_quick_binary(),
-        ));
-    }
-
-    if os.is_linux() {
-        let mut install_attempted = false;
-        let mut install_error = None;
-        if attempt_install && !os.command_exists("xdg-open") {
-            install_attempted = true;
-            if let Err(error) = os.try_install_tool("xdg-open") {
-                install_error = Some(error);
-            }
-        }
-        checks.push(ToolCheck {
-            tool: "xdg-open".to_string(),
-            found: os.command_exists("xdg-open"),
-            path: os.resolve_command_path("xdg-open"),
-            required_for: "Moonlight protocol launch fallback".to_string(),
-            install_hint: os.install_hint_for_tool("xdg-open"),
-            install_attempted,
-            install_error,
-        });
     }
 
     let arch = match os.arch() {
@@ -869,7 +549,6 @@ fn resolve_embedded_moonlight_host_address(
     [
         Some(server.wireguard_server_ip.as_str()),
         Some(server.moonlight_host_address.as_str()),
-        Some(server.tailscale_client_ip.as_str()),
         Some(state.post_wireguard_setup.moonlight_host.as_str()),
         Some(state.moonlight.host_address.as_str()),
     ]
@@ -1704,9 +1383,6 @@ pub async fn complete_onboarding(
             state.credentials.app_username = payload.app_username.clone();
             state.credentials.app_password = payload.app_password.clone();
             state.credentials.vast_api_key = payload.vast_api_key.clone();
-            if !payload.tailscale_api_key.is_empty() {
-                state.credentials.tailscale_api_key = payload.tailscale_api_key.clone();
-            }
             state.ssh.key_name = "nolandConnectSSH".to_string();
             state.ssh.private_key_path = key_paths.private_key_path.display().to_string();
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
@@ -1984,17 +1660,22 @@ pub async fn start_play_existing_instance(
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<String, FrontendError> {
     stop_active_stream_if_needed(&app, moonlight.inner()).await?;
-    let embedded_enabled = {
-        let state = context.state.read().await;
-        state
-            .provisioned_servers
-            .iter()
-            .find(|record| record.instance_id == instance_id)
-            .map(|record| record.embedded_moonlight_pipeline_enabled)
-            .unwrap_or(false)
-    };
+    context
+        .update_state(|state| {
+            if let Some(server) = state
+                .provisioned_servers
+                .iter_mut()
+                .find(|record| record.instance_id == instance_id)
+            {
+                server.embedded_moonlight_pipeline_enabled = true;
+                if server.embedded_moonlight_host_id.trim().is_empty() {
+                    server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
+                }
+            }
+        })
+        .await?;
 
-    if embedded_enabled {
+    {
         ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
             .await
             .map_err(moonlight_frontend_error)?;
@@ -2086,36 +1767,6 @@ pub async fn start_play_existing_instance(
             .await?;
         return Ok("embedded".to_string());
     }
-
-    let preflight = local_environment_check(true);
-    if !preflight.ok {
-        let missing = preflight
-            .checks
-            .iter()
-            .filter(|check| !check.found)
-            .map(|check| {
-                let install_context = check
-                    .install_error
-                    .as_ref()
-                    .map(|error| format!(" | install error: {error}"))
-                    .unwrap_or_default();
-                format!("{} ({}){}", check.tool, check.install_hint, install_context)
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        return Err(AppError::Command(format!(
-            "Local environment check failed before provisioning. Missing tools: {missing}"
-        ))
-        .into());
-    }
-
-    OrchestrationService::start_play_for_existing_instance(
-        app,
-        context.inner().clone(),
-        instance_id,
-    )
-    .await?;
-    Ok("provisioning".to_string())
 }
 
 #[tauri::command]
@@ -2379,20 +2030,6 @@ pub async fn verify_wireguard(
 }
 
 #[tauri::command]
-pub async fn open_wireguard_app_command() -> Result<(), FrontendError> {
-    open_wireguard_app().map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn download_wireguard_config_command(
-    context: State<'_, AppContext>,
-) -> Result<String, FrontendError> {
-    download_wireguard_config(context.inner())
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn get_setup_status_command(
     context: State<'_, AppContext>,
 ) -> Result<PostWireGuardSetupState, FrontendError> {
@@ -2450,369 +2087,11 @@ pub async fn retry_setup_stage_command(
         .map_err(Into::into)
 }
 
-async fn validate_local_wireguard_tunnel(
-    context: &AppContext,
-    tunnel_server_ip: &str,
-    allow_handshake_retry: bool,
-) -> Result<(), FrontendError> {
-    let os = OsDetection::new();
-    let attempts = if allow_handshake_retry { 15 } else { 3 };
-    let retry_delay = if allow_handshake_retry { 3 } else { 2 };
-
-    for attempt in 1..=attempts {
-        let local_stdout = read_local_wireguard_show_output()?;
-        if let Some(local_snapshot) = parse_wg_show(&local_stdout) {
-            let expected_allowed_ip = format!("{tunnel_server_ip}/32");
-            if !local_snapshot.allowed_ips.contains(&expected_allowed_ip) {
-                return Err(AppError::Provisioning(format!(
-                    "Local WireGuard tunnel is not scoped to {expected_allowed_ip} (found: {})",
-                    local_snapshot.allowed_ips
-                ))
-                .into());
-            }
-
-            sync_local_wireguard_keys(context, &local_snapshot).await;
-
-            let handshake_missing = local_snapshot.latest_handshake.is_empty()
-                || local_snapshot
-                    .latest_handshake
-                    .to_ascii_lowercase()
-                    .contains("never");
-
-            if !handshake_missing {
-                break;
-            }
-
-            if attempt == attempts {
-                if os.is_macos() {
-                    warn!(
-                            "WireGuard handshake is still missing on macOS after reconnect retries, but the local tunnel config is applied; continuing without hard failure"
-                        );
-                    return Ok(());
-                }
-                return Err(AppError::Provisioning(
-                        "WireGuard tunnel exists, but peer handshake is still not visible. Tunnel state was refreshed, but the server is not responding on the WireGuard session yet. Retry reconnect once more; if it still fails, verify the server-side WireGuard service and Sunshine reachability."
-                            .to_string(),
-                    )
-                    .into());
-            }
-
-            std::thread::sleep(Duration::from_secs(retry_delay));
-            continue;
-        }
-
-        if attempt == attempts {
-            if allow_handshake_retry || os.is_macos() {
-                warn!(
-                    "WireGuard local wg state is unavailable after retries; continuing without hard failure"
-                );
-                return Ok(());
-            }
-            let platform_hint = if os.is_macos() {
-                " macOS may have detached the interface; retry reconnect once more."
-            } else if os.is_windows() {
-                " Windows may not have finished applying the managed tunnel yet; retry reconnect once more."
-            } else if os.is_linux() {
-                " Linux may not have finished applying the managed tunnel yet; retry reconnect once more."
-            } else {
-                " Retry reconnect once more."
-            };
-            return Err(AppError::Provisioning(format!(
-                "WireGuard reconnect completed, but no local tunnel state is visible yet.{}",
-                platform_hint
-            ))
-            .into());
-        }
-
-        std::thread::sleep(Duration::from_secs(retry_delay));
-    }
-
-    if !tunnel_server_ip.trim().is_empty() {
-        if let Err(error) = validate_wireguard_ping(tunnel_server_ip) {
-            if os.is_macos() {
-                warn!(
-                    "WireGuard ping validation failed on macOS after reconnect/setup; continuing non-fatally: {}",
-                    error
-                );
-            } else {
-                return Err(error.into());
-            }
-        }
-    }
-
-    if let Err(error) = sync_server_wireguard_keys(context).await {
-        warn!("best-effort server WireGuard key sync failed: {}", error);
-    }
-
-    Ok(())
-}
-
-async fn sync_local_wireguard_keys(context: &AppContext, local_snapshot: &WgSnapshot) {
-    let _ = context
-        .update_state(|state| {
-            if !local_snapshot.interface_public_key.is_empty() {
-                state.wireguard.client_public_key = local_snapshot.interface_public_key.clone();
-            }
-            if !local_snapshot.peer_public_key.is_empty() {
-                state.wireguard.server_public_key = local_snapshot.peer_public_key.clone();
-            }
-        })
-        .await;
-}
-
-#[derive(Debug, Clone)]
-struct WgSnapshot {
-    interface_public_key: String,
-    peer_public_key: String,
-    allowed_ips: String,
-    latest_handshake: String,
-}
-
-fn parse_wg_show(raw: &str) -> Option<WgSnapshot> {
-    let mut interface_public_key = String::new();
-    let mut peer_public_key = String::new();
-    let mut allowed_ips = String::new();
-    let mut latest_handshake = String::new();
-    let mut in_peer = false;
-
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("interface:") {
-            in_peer = false;
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("public key:") {
-            if in_peer {
-                if peer_public_key.is_empty() {
-                    peer_public_key = value.trim().to_string();
-                }
-            } else if interface_public_key.is_empty() {
-                interface_public_key = value.trim().to_string();
-            }
-            continue;
-        }
-        if trimmed.starts_with("peer:") {
-            in_peer = true;
-            if peer_public_key.is_empty() {
-                peer_public_key = trimmed.trim_start_matches("peer:").trim().to_string();
-            }
-            continue;
-        }
-        if let Some(value) = trimmed.strip_prefix("allowed ips:") {
-            if in_peer && allowed_ips.is_empty() {
-                allowed_ips = value.trim().to_string();
-            }
-        }
-        if let Some(value) = trimmed.strip_prefix("latest handshake:") {
-            if in_peer && latest_handshake.is_empty() {
-                latest_handshake = value.trim().to_string();
-            }
-        }
-    }
-
-    if interface_public_key.is_empty() && peer_public_key.is_empty() {
-        None
-    } else {
-        Some(WgSnapshot {
-            interface_public_key,
-            peer_public_key,
-            allowed_ips,
-            latest_handshake,
-        })
-    }
-}
-
-fn validate_wireguard_ping(server_ip: &str) -> Result<(), AppError> {
-    let args = OsDetection::new().ping_args(server_ip);
-
-    let ping = Command::new("ping").args(&args).output().map_err(|error| {
-        AppError::Command(format!(
-            "Failed to run ping for WireGuard validation: {error}"
-        ))
-    })?;
-
-    if !ping.status.success() {
-        return Err(AppError::Provisioning(format!(
-            "WireGuard tunnel validation ping to {} failed: {}",
-            server_ip,
-            String::from_utf8_lossy(&ping.stderr).trim()
-        )));
-    }
-
-    Ok(())
-}
-
-async fn sync_server_wireguard_keys(context: &AppContext) -> Result<(), AppError> {
-    let (private_key_path, app_password, ssh_username, fallback_host, fallback_port) = {
-        let state = context.state.read().await;
-        (
-            state.ssh.private_key_path.clone(),
-            state.credentials.app_password.clone(),
-            state.ssh.ssh_username.clone(),
-            state.instance.ssh_host.clone(),
-            state.instance.ssh_port,
-        )
-    };
-
-    if private_key_path.trim().is_empty() || app_password.trim().is_empty() {
-        return Ok(());
-    }
-
-    let (ssh_host, ssh_port, ssh_user) = {
-        let pairing = context.pairing_context.read().await;
-        if let Some(pairing_context) = pairing.as_ref() {
-            (
-                pairing_context.host.clone(),
-                pairing_context.port,
-                pairing_context.user.clone(),
-            )
-        } else {
-            let user = if ssh_username.trim().is_empty() {
-                context.config.audio_target_user.clone()
-            } else {
-                ssh_username
-            };
-            (fallback_host, fallback_port, user)
-        }
-    };
-
-    if ssh_host.trim().is_empty() || ssh_port == 0 {
-        return Ok(());
-    }
-
-    let ssh_service = SshKeyService::new("nolandConnectSSH");
-    ssh_service
-        .load_key_into_agent(Path::new(&private_key_path), &app_password)
-        .await?;
-
-    let remote = RemoteExec {
-        ssh_user,
-        ssh_host,
-        ssh_port,
-        private_key_path,
-    };
-
-    let remote_show = tokio::task::spawn_blocking(move || {
-        remote.ssh("sudo wg show wg0", Duration::from_secs(20))
-    })
-    .await
-    .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
-
-    if remote_show.status_code != 0 {
-        return Ok(());
-    }
-
-    if let Some(server_snapshot) = parse_wg_show(&remote_show.stdout) {
-        let _ = context
-            .update_state(|state| {
-                if !server_snapshot.interface_public_key.is_empty() {
-                    state.wireguard.server_public_key =
-                        server_snapshot.interface_public_key.clone();
-                }
-                if !server_snapshot.peer_public_key.is_empty() {
-                    state.wireguard.client_public_key = server_snapshot.peer_public_key.clone();
-                }
-            })
-            .await;
-    }
-
-    Ok(())
-}
-
 #[tauri::command]
 pub async fn get_provisioning_logs(
     context: State<'_, AppContext>,
 ) -> Result<Vec<ProvisioningEvent>, FrontendError> {
     Ok(context.provisioning_logs.read().await.clone())
-}
-
-#[tauri::command]
-pub async fn get_moonlight_download_url(
-    context: State<'_, AppContext>,
-) -> Result<String, FrontendError> {
-    let os = OsDetection::new();
-    if os.is_windows() {
-        Ok(context.config.moonlight_download_url_windows.clone())
-    } else if os.is_macos() {
-        Ok(context.config.moonlight_download_url_macos.clone())
-    } else {
-        Ok(context.config.moonlight_download_url_linux.clone())
-    }
-}
-
-#[tauri::command]
-pub async fn get_wireguard_download_url(
-    context: State<'_, AppContext>,
-) -> Result<String, FrontendError> {
-    let os = OsDetection::new();
-    if os.is_windows() {
-        Ok(context.config.wireguard_download_url_windows.clone())
-    } else if os.is_macos() {
-        Ok(context.config.wireguard_download_url_macos.clone())
-    } else {
-        Ok(context.config.wireguard_download_url_linux.clone())
-    }
-}
-
-#[tauri::command]
-pub async fn launch_moonlight_client() -> Result<(), FrontendError> {
-    let moonlight = MoonlightService;
-    moonlight.launch_native_client()?;
-    Ok(())
-}
-
-#[tauri::command]
-pub async fn configure_moonlight_client(
-    apply: bool,
-    force_close: bool,
-    native: bool,
-    network: Option<String>,
-    prefer_codec: Option<String>,
-    max_bitrate: Option<u32>,
-    fps: Option<u32>,
-    resolution: Option<String>,
-) -> Result<MoonlightConfigureResult, FrontendError> {
-    let moonlight = MoonlightService;
-    let resolution_override = resolution
-        .as_deref()
-        .and_then(|value| value.split_once('x'))
-        .and_then(|(width, height)| {
-            Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
-        });
-
-    let network = match network.as_deref() {
-        Some("lan") => MoonlightNetworkPreference::Lan,
-        Some("wifi") => MoonlightNetworkPreference::Wifi,
-        Some("remote") => MoonlightNetworkPreference::Remote,
-        _ => MoonlightNetworkPreference::Auto,
-    };
-
-    let prefer_codec = match prefer_codec.as_deref() {
-        Some("h264") => MoonlightCodecPreference::H264,
-        Some("hevc") => MoonlightCodecPreference::Hevc,
-        Some("av1") => MoonlightCodecPreference::Av1,
-        _ => MoonlightCodecPreference::Auto,
-    };
-
-    Ok(moonlight
-        .configure_client(MoonlightConfigureOptions {
-            apply,
-            force_close,
-            native,
-            network,
-            prefer_codec,
-            max_bitrate,
-            fps_override: fps,
-            resolution_override,
-            set_overrides: Default::default(),
-        })
-        .await)
-}
-
-#[tauri::command]
-pub async fn restore_moonlight_backup(backup_file: String) -> Result<String, FrontendError> {
-    let moonlight = MoonlightService;
-    Ok(moonlight.restore_backup(&backup_file).await?)
 }
 
 #[tauri::command]
@@ -2898,13 +2177,6 @@ pub async fn get_rented_instances(
 }
 
 #[tauri::command]
-pub async fn get_vast_browser_automation_status(
-    context: State<'_, AppContext>,
-) -> Result<VastBrowserAutomationStatus, FrontendError> {
-    Ok(build_vast_browser_automation_status(context.inner(), None))
-}
-
-#[tauri::command]
 pub async fn get_vast_wallet_summary(
     context: State<'_, AppContext>,
 ) -> Result<VastWalletSummary, FrontendError> {
@@ -2929,103 +2201,6 @@ pub async fn get_vast_wallet_summary(
 }
 
 #[tauri::command]
-pub async fn start_vast_browser_auth_session(
-    context: State<'_, AppContext>,
-) -> Result<VastBrowserAuthSessionResult, FrontendError> {
-    let app_context = context.inner().clone();
-    let paths = tauri::async_runtime::spawn_blocking(move || {
-        run_vast_browser_script(&app_context, "vast-ai-bootstrap-session.mjs", &[])
-    })
-    .await
-    .map_err(|error| AppError::Command(format!("Vast browser auth task failed: {error}")))??;
-
-    let status = build_vast_browser_automation_status(context.inner(), None);
-    let metadata = read_json_file(&paths.session_metadata_path);
-    Ok(VastBrowserAuthSessionResult {
-        status,
-        page_url: metadata
-            .as_ref()
-            .and_then(|json| extract_string_field(json, "pageUrl")),
-    })
-}
-
-#[tauri::command]
-pub async fn generate_vast_api_key_from_browser_session(
-    payload: Option<VastGenerateApiKeyPayload>,
-    context: State<'_, AppContext>,
-) -> Result<VastBrowserGeneratedApiKeyResult, FrontendError> {
-    let requested_name = payload
-        .and_then(|value| value.api_key_name)
-        .unwrap_or_else(default_generated_api_key_name);
-    let app_context = context.inner().clone();
-    let requested_name_for_task = requested_name.clone();
-    let paths = tauri::async_runtime::spawn_blocking(move || {
-        run_vast_browser_script(
-            &app_context,
-            "vast-ai-create-api-key.mjs",
-            &[
-                ("VAST_AI_HEADLESS", "true".to_string()),
-                ("VAST_AI_API_KEY_NAME", requested_name_for_task),
-            ],
-        )
-    })
-    .await
-    .map_err(|error| AppError::Command(format!("Vast API key task failed: {error}")))??;
-
-    let result_json = read_json_file(&paths.api_key_result_path).unwrap_or(Value::Null);
-    let api_key = extract_string_field(&result_json, "apiKey");
-    if let Some(secret) = api_key.clone() {
-        context
-            .update_state(|state| {
-                state.credentials.vast_api_key = secret;
-                state.last_error = None;
-            })
-            .await?;
-    }
-
-    let status = build_vast_browser_automation_status(context.inner(), None);
-    Ok(VastBrowserGeneratedApiKeyResult {
-        status,
-        api_key,
-        api_key_name: extract_string_field(&result_json, "apiKeyName").unwrap_or(requested_name),
-        discovered_secret_masked: extract_string_field(&result_json, "discoveredSecretMasked"),
-        result_path: paths.api_key_result_path.display().to_string(),
-    })
-}
-
-#[tauri::command]
-pub async fn open_vast_billing_browser_session(
-    payload: Option<VastBillingBrowserPayload>,
-    context: State<'_, AppContext>,
-) -> Result<VastBrowserBillingSessionResult, FrontendError> {
-    let action = validate_billing_action(payload.and_then(|value| value.action))?;
-    let action_for_task = action.clone();
-    let app_context = context.inner().clone();
-    let paths = tauri::async_runtime::spawn_blocking(move || {
-        run_vast_browser_script(
-            &app_context,
-            "vast-ai-open-billing-session.mjs",
-            &[
-                ("VAST_AI_HEADLESS", "false".to_string()),
-                ("VAST_AI_KEEP_OPEN", "true".to_string()),
-                ("VAST_AI_BILLING_ACTION", action_for_task),
-            ],
-        )
-    })
-    .await
-    .map_err(|error| AppError::Command(format!("Vast billing browser task failed: {error}")))??;
-
-    let result_json = read_json_file(&paths.billing_result_path).unwrap_or(Value::Null);
-    let status = build_vast_browser_automation_status(context.inner(), None);
-    Ok(VastBrowserBillingSessionResult {
-        status,
-        action,
-        page_url: extract_string_field(&result_json, "pageUrl"),
-        result_path: paths.billing_result_path.display().to_string(),
-    })
-}
-
-#[tauri::command]
 pub async fn update_vast_api_key(
     api_key: String,
     context: State<'_, AppContext>,
@@ -3042,59 +2217,6 @@ pub async fn update_vast_api_key(
         })
         .await?;
 
-    Ok(next_state)
-}
-
-#[tauri::command]
-pub async fn update_tailscale_api_key(
-    api_key: String,
-    context: State<'_, AppContext>,
-) -> Result<PersistedAppState, FrontendError> {
-    let trimmed = api_key.trim().to_string();
-    validate_tailscale_auth_key(&trimmed)?;
-    let next_state = context
-        .update_state(|state| {
-            state.credentials.tailscale_api_key = trimmed;
-            state.last_error = None;
-        })
-        .await?;
-    Ok(next_state)
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConnectionProviderUpdate {
-    pub connection_provider: String,
-}
-
-#[tauri::command]
-pub async fn update_connection_provider(
-    payload: ConnectionProviderUpdate,
-    context: State<'_, AppContext>,
-) -> Result<PersistedAppState, FrontendError> {
-    let provider = match payload.connection_provider.as_str() {
-        "wireguard" | "gotatun" => ConnectionProvider::Wireguard,
-        "tailscale" => {
-            return Err(AppError::InvalidInput(
-                "Tailscale provisioning has been retired in this build. Noland now uses the managed GotaTun/WireGuard tunnel path."
-                    .to_string(),
-            )
-            .into());
-        }
-        _ => {
-            return Err(AppError::InvalidInput(format!(
-                "Unknown connection provider: {}",
-                payload.connection_provider
-            ))
-            .into());
-        }
-    };
-    let next_state = context
-        .update_state(|state| {
-            state.connection_provider = provider;
-            state.last_error = None;
-        })
-        .await?;
     Ok(next_state)
 }
 
@@ -3648,22 +2770,6 @@ fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), Fronte
     Ok(())
 }
 
-fn validate_tailscale_auth_key(value: &str) -> Result<(), FrontendError> {
-    if value.is_empty() {
-        return Ok(());
-    }
-
-    if !value.starts_with("tskey-auth-") {
-        return Err(AppError::InvalidInput(
-            "Tailscale requires an auth key (expected prefix: tskey-auth-), not a Tailscale API key."
-                .to_string(),
-        )
-        .into());
-    }
-
-    Ok(())
-}
-
 fn resolve_effective_edid_profile(
     mode: EdidMode,
     width: u32,
@@ -3877,12 +2983,6 @@ async fn refresh_instance_connection_state(
     result: &crate::services::wireguard::WireGuardProvisionResult,
 ) -> Result<(), AppError> {
     let config_path = result.client_config_path.display().to_string();
-    let config_text = std::fs::read_to_string(&result.client_config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading refreshed WireGuard config {}: {error}",
-            result.client_config_path.display()
-        ))
-    })?;
     let moonlight_host = if !result.server_ip.trim().is_empty() {
         result.server_ip.clone()
     } else {
@@ -3929,7 +3029,7 @@ async fn refresh_instance_connection_state(
             state.connection_provider = ConnectionProvider::Wireguard;
             state.moonlight.host_address = moonlight_host.clone();
             state.post_wireguard_setup.current_instance_id = Some(instance.id);
-            state.post_wireguard_setup.wireguard_config = config_text.clone();
+            state.post_wireguard_setup.wireguard_config.clear();
             state.post_wireguard_setup.wireguard_export_path.clear();
             state.post_wireguard_setup.wireguard_verified_host = result.server_ip.clone();
             state.post_wireguard_setup.moonlight_host = moonlight_host.clone();
@@ -4425,12 +3525,6 @@ async fn teardown_local_instance_session(
         warn!(
             instance_id = instance_id,
             "Failed to close Moonlight stream window: {}", error
-        );
-    }
-    if let Err(error) = MoonlightService::terminate_running_client() {
-        warn!(
-            instance_id = instance_id,
-            "Failed to terminate local Moonlight client process: {}", error
         );
     }
 }
@@ -5133,7 +4227,7 @@ pub async fn moonlight_get_active_input_mode(
 pub async fn moonlight_get_input_debug_state(
     _moonlight: State<'_, MoonlightManager>,
 ) -> Result<MoonlightInputDebugStateResponse, FrontendError> {
-    let native = crate::moonlight::platform::macos_input::macos_input_debug_snapshot();
+    let native = crate::moonlight::platform::desktop_input::desktop_input_debug_snapshot();
     let worker = crate::input::worker::input_worker_debug_snapshot();
 
     Ok(MoonlightInputDebugStateResponse {

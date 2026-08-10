@@ -1,0 +1,20 @@
+[package]
+name = "noland-net-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MPL-2.0"
+description = "Privileged Noland-managed GotaTun tunnel runtime"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22.1"
+gotatun = { version = "=0.7.1", default-features = false, features = ["device", "tun", "ring"] }
+ipnetwork = "0.21.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["full"] }
+tun = { version = "=0.8.6", features = ["async"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

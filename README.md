@@ -125,7 +125,7 @@ git push origin v0.1.1
 - Windows: `.msi` / `.exe`
 - Linux: `.AppImage` and distro packages when supported by runner tooling
 
-Note: this beta flow does not enforce code signing/notarization. End users may see OS security warnings.
+macOS release artifacts are required to use a Developer ID Application certificate and Apple notarization; the release build fails when those credentials are absent. Windows Authenticode signing and Linux repository/package signing are still pending.
 
 ## State persistence
 

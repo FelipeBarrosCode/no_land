@@ -1,12 +1,12 @@
 import moonlightCard from '../../prompts/moonlight-card.md?raw';
 import wireguardCard from '../../prompts/wireguard-card.md?raw';
-import tailscaleCard from '../../prompts/tailscale-card.md?raw';
+
 import setServerCard from '../../prompts/set-server-card.md?raw';
 import rentedServersSection from '../../prompts/rented-servers-section.md?raw';
 import selectedServerSection from '../../prompts/selected-server-section.md?raw';
 import playButtonSection from '../../prompts/play-button-section.md?raw';
 import wireguardModalInfo from '../../prompts/wireguard-modal-info.md?raw';
-import tailscaleModalInfo from '../../prompts/tailscale-modal-info.md?raw';
+
 import serverPickerModalHeader from '../../prompts/server-picker-modal-header.md?raw';
 import serverSearchPreferences from '../../prompts/server-search-preferences.md?raw';
 import serverInstanceCard from '../../prompts/server-instance-card.md?raw';
@@ -27,13 +27,13 @@ import settingsPage from '../../prompts/settings-page.md?raw';
 export const APP_PROMPTS = {
   moonlightCard,
   wireguardCard,
-  tailscaleCard,
+
   setServerCard,
   rentedServersSection,
   selectedServerSection,
   playButtonSection,
   wireguardModalInfo,
-  tailscaleModalInfo,
+
   serverPickerModalHeader,
   serverSearchPreferences,
   serverInstanceCard,

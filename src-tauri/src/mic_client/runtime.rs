@@ -134,6 +134,25 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
                     .join("gstreamer")
                     .join(target_triple),
             );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("lib")
+                    .join("noland-connect")
+                    .join("resources")
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("lib")
+                    .join("noland-connect")
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
         }
     }
 
@@ -406,6 +425,45 @@ fn configure_linux_gstreamer_command(command: &mut Command, current_exe: &Path) 
         if typelib_dir.is_dir() {
             command.env("GI_TYPELIB_PATH", typelib_dir.as_os_str());
         }
+    }
+}
+
+pub fn configure_embedded_stream_runtime() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+
+    let Ok(current_exe) = std::env::current_exe() else {
+        return;
+    };
+    let Some(root) = resolve_gstreamer_root(&current_exe) else {
+        return;
+    };
+    let lib_dir = if root.join("lib").is_dir() {
+        root.join("lib")
+    } else {
+        root.join("lib64")
+    };
+    let plugin_dir = lib_dir.join("gstreamer-1.0");
+    let scanner = root
+        .join("libexec")
+        .join("gstreamer-1.0")
+        .join("gst-plugin-scanner");
+
+    // Bundled plugins guarantee the baseline decoder/sinks. Keep GStreamer's
+    // default system path available so hardware decoder plugins can be used
+    // opportunistically when the OS already provides them.
+    std::env::set_var("GST_PLUGIN_PATH_1_0", &plugin_dir);
+    if scanner.is_file() {
+        std::env::set_var("GST_PLUGIN_SCANNER_1_0", scanner);
+    }
+    if let Some(cache_dir) = dirs::cache_dir() {
+        let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
+        let _ = std::fs::create_dir_all(&registry_dir);
+        std::env::set_var(
+            "GST_REGISTRY_1_0",
+            registry_dir.join("registry-video-linux.bin"),
+        );
     }
 }
 

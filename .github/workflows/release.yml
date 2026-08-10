@@ -8,6 +8,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   GSTREAMER_VERSION: 1.24.13
   NOLAND_GSTREAMER_VERSION: 1.24.13
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 on:
   workflow_dispatch:
@@ -37,7 +38,7 @@ jobs:
             platform: linux
             arch: x64
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             platform: linux
             arch: arm64
             target: aarch64-unknown-linux-gnu
@@ -75,12 +76,21 @@ jobs:
             ca-certificates \
             curl \
             openssh-client \
-            wireguard-tools \
             xdg-utils \
+            xvfb \
+            dbus-x11 \
+            cpio \
+            file \
             libwebkit2gtk-4.1-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libasound2-dev \
+            libudev-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            wayland-protocols \
+            libdecor-0-dev \
             pkg-config \
             libunwind-dev \
             libgstreamer1.0-dev \
@@ -89,6 +99,9 @@ jobs:
             gstreamer1.0-plugins-base \
             gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav \
+            gstreamer1.0-x \
+            gstreamer1.0-wayland \
             gstreamer1.0-pipewire \
             rpm2cpio \
             libssl-dev \
@@ -96,48 +109,6 @@ jobs:
             libpulse-dev \
             patchelf
 
-      - name: Install Windows managed tool dependencies
-        if: matrix.platform == 'windows'
-        shell: pwsh
-        run: |
-          $wireGuardDir = Join-Path ($env:ProgramFiles ?? 'C:\Program Files') 'WireGuard'
-          $wgExe = Join-Path $wireGuardDir 'wg.exe'
-          $wireguardExe = Join-Path $wireGuardDir 'wireguard.exe'
-
-          if ((Test-Path $wgExe) -and (Test-Path $wireguardExe)) {
-            Write-Host "WireGuard already present at $wireGuardDir"
-            exit 0
-          }
-
-          if ('${{ matrix.arch }}' -eq 'arm64') {
-            $msiPath = Join-Path $env:TEMP 'wireguard-arm64-1.1.msi'
-            $logPath = Join-Path $env:TEMP 'wireguard-arm64-install.log'
-            Invoke-WebRequest -Uri 'https://download.wireguard.com/windows-client/wireguard-arm64-1.1.msi' -OutFile $msiPath
-            $process = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/i', $msiPath, '/qn', '/norestart', '/l*v', $logPath, 'DO_NOT_LAUNCH=1')
-            if ($process.ExitCode -ne 0) {
-              Write-Host "WireGuard ARM64 install failed with exit code $($process.ExitCode). MSI log: $logPath"
-              if (Test-Path $logPath) {
-                Get-Content $logPath -Tail 200
-              }
-              throw "WireGuard ARM64 MSI install failed"
-            }
-          } else {
-            choco install wireguard -y --no-progress
-          }
-
-          if (-not ((Test-Path $wgExe) -and (Test-Path $wireguardExe))) {
-            throw "WireGuard installation completed but expected executables were not found in $wireGuardDir"
-          }
-
-      - name: Install macOS managed tool dependencies
-        if: matrix.platform == 'macos'
-        shell: bash
-        run: |
-          if command -v wg >/dev/null 2>&1 && command -v wg-quick >/dev/null 2>&1; then
-            echo "WireGuard tools already present"
-            exit 0
-          fi
-          brew install wireguard-tools
 
       - name: Check Apple signing secret presence
         if: matrix.platform == 'macos'
@@ -146,19 +117,24 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          check_secret() {
-            local name="$1"
-            local value="${!name:-}"
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!name:-}"
             if [[ -n "$value" ]]; then
               echo "$name: present"
             else
-              echo "$name: missing"
+              echo "$name: missing" >&2
+              missing=1
             fi
-          }
-          check_secret APPLE_CERTIFICATE
-          check_secret APPLE_CERTIFICATE_PASSWORD
-          check_secret KEYCHAIN_PASSWORD
+          done
+          if [[ "$missing" -ne 0 ]]; then
+            echo "macOS release artifacts must be Developer ID signed and notarized; refusing to publish an ad-hoc build." >&2
+            exit 1
+          fi
 
       - name: Import Apple Developer certificate
         if: matrix.platform == 'macos'
@@ -194,10 +170,10 @@ jobs:
           IDENTITIES=$(security find-identity -v -p codesigning build.keychain || true)
           echo "Available code-signing identities in build.keychain:"
           echo "$IDENTITIES"
-          CERT_LINE=$(printf '%s\n' "$IDENTITIES" | grep -E 'Developer ID Application|Apple Distribution' | head -n 1 || true)
+          CERT_LINE=$(printf '%s\n' "$IDENTITIES" | grep -E 'Developer ID Application' | head -n 1 || true)
           CERT_ID=$(echo "$CERT_LINE" | awk -F'"' '{print $2}')
           if [[ -z "$CERT_ID" ]]; then
-            echo "Unable to find a Developer ID Application or Apple Distribution identity in build.keychain." >&2
+            echo "Unable to find a Developer ID Application identity in build.keychain." >&2
             echo "This usually means the imported .p12 is the wrong certificate type, is missing the private key, or has a different subject name than expected." >&2
             exit 1
           fi
@@ -218,14 +194,12 @@ jobs:
             where.exe ssh || true
             where.exe scp || true
             where.exe ssh-keygen || true
-            where.exe wg || true
-            where.exe wireguard || true
+
           else
             command -v ssh || true
             command -v scp || true
             command -v ssh-keygen || true
-            command -v wg || true
-            command -v wg-quick || true
+
             command -v xdg-open || true
           fi
           env | grep '^NOLAND_' || true
@@ -242,6 +216,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          NOLAND_REQUIRE_SIGNED_RELEASE: "1"
         run: |
           npm run tauri:build -- --target "${{ matrix.target }}"
 
@@ -256,7 +231,6 @@ jobs:
           ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
       - name: Verify bundled sidecars and runtime
-        if: matrix.platform == 'windows'
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
       - name: Upload build artifacts
@@ -286,17 +260,6 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Install Windows managed tool dependencies
-        shell: pwsh
-        run: |
-          $wireGuardDir = Join-Path ($env:ProgramFiles ?? 'C:\Program Files') 'WireGuard'
-          $wgExe = Join-Path $wireGuardDir 'wg.exe'
-          $wireguardExe = Join-Path $wireGuardDir 'wireguard.exe'
-          if ((Test-Path $wgExe) -and (Test-Path $wireguardExe)) {
-            Write-Host "WireGuard already present at $wireGuardDir"
-            exit 0
-          }
-          choco install wireguard -y --no-progress
 
       - name: Stage CI managed tools
         run: node scripts/stage-ci-managed-tools.mjs --target x86_64-pc-windows-msvc

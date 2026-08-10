@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -50,7 +50,9 @@ function verifyMacBundles(targetTriple, bundleRoot) {
   }
 
   withMountedDmg(dmg, productName, (mountedApp) => {
-    verifyMacBundleTree(mountedApp, targetTriple, `DMG payload ${basename(dmg)}`);
+    const label = `DMG payload ${basename(dmg)}`;
+    verifyMacBundleTree(mountedApp, targetTriple, label);
+    verifyMacExecutableSmokeTests(mountedApp, targetTriple, label);
   });
 
   console.log(`Verified bundled macOS sidecars/runtime/resources for ${targetTriple}`);
@@ -62,12 +64,25 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
     fail(`Could not locate AppDir under ${bundleRoot}`);
   }
   verifyBundleTree(appDir, targetTriple, 'linux AppDir');
+  verifyLinuxExecutableSmokeTests(appDir, targetTriple, 'linux AppDir');
+
+  const appImage = findFirstPath(bundleRoot, (path) => path.endsWith('.AppImage'));
+  if (appImage) {
+    withExtractedTemp('linux-appimage-', (extractRoot) => {
+      run(appImage, ['--appimage-extract'], { cwd: extractRoot });
+      const extractedAppDir = join(extractRoot, 'squashfs-root');
+      verifyBundleTree(extractedAppDir, targetTriple, `AppImage ${basename(appImage)}`);
+      verifyLinuxExecutableSmokeTests(extractedAppDir, targetTriple, `AppImage ${basename(appImage)}`);
+    });
+  }
 
   const deb = findFirstPath(bundleRoot, (path) => path.endsWith('.deb'));
   if (deb) {
     withExtractedTemp('linux-deb-', (extractRoot) => {
       run('dpkg-deb', ['-x', deb, extractRoot]);
-      verifyBundleTree(extractRoot, targetTriple, `deb package ${basename(deb)}`);
+      const label = `deb package ${basename(deb)}`;
+      verifyBundleTree(extractRoot, targetTriple, label);
+      verifyLinuxLinkage(extractRoot, targetTriple, label);
     });
   }
 
@@ -75,7 +90,9 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
   if (rpm) {
     withExtractedTemp('linux-rpm-', (extractRoot) => {
       runShell(`rpm2cpio '${escapeForSingleQuotes(rpm)}' | cpio -idm --quiet`, extractRoot);
-      verifyBundleTree(extractRoot, targetTriple, `rpm package ${basename(rpm)}`);
+      const label = `rpm package ${basename(rpm)}`;
+      verifyBundleTree(extractRoot, targetTriple, label);
+      verifyLinuxLinkage(extractRoot, targetTriple, label);
     });
   }
 
@@ -83,20 +100,27 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
 }
 
 function verifyWindowsBundles(targetTriple, bundleRoot) {
+  let verifiedInstaller = false;
   const msi = findFirstPath(bundleRoot, (path) => path.endsWith('.msi'));
   if (msi) {
     withExtractedTemp('windows-msi-', (extractRoot) => {
       run('msiexec', ['/a', msi, '/qn', `TARGETDIR=${extractRoot}`]);
-      verifyBundleTree(extractRoot, targetTriple, `MSI package ${basename(msi)}`);
+      const label = `MSI package ${basename(msi)}`;
+      verifyBundleTree(extractRoot, targetTriple, label);
+      verifyWindowsExecutableSmokeTests(extractRoot, targetTriple, label);
     });
-    console.log(`Verified bundled Windows sidecars/runtime for ${targetTriple}`);
-    return;
+    console.log(`Verified bundled Windows MSI sidecars/runtime for ${targetTriple}`);
+    verifiedInstaller = true;
   }
 
   const nsis = findFirstPath(bundleRoot, (path) => path.endsWith('-setup.exe'));
   if (nsis) {
-    verifyWindowsNsisStaging(targetTriple, nsis);
-    console.log(`Verified staged Windows NSIS sidecars/runtime/resources for ${targetTriple}`);
+    verifyWindowsNsisInstallation(targetTriple, nsis);
+    console.log(`Verified installed Windows NSIS sidecars/runtime/resources for ${targetTriple}`);
+    verifiedInstaller = true;
+  }
+
+  if (verifiedInstaller) {
     return;
   }
 
@@ -119,6 +143,202 @@ function verifyBundleTree(root, targetTriple, label) {
   verifyRequiredSidecars(root, targetTriple, label);
   verifyRequiredRuntimeFiles(root, targetTriple, label);
   verifyBundledMicReceiverSource(root, label);
+}
+
+function verifyMacExecutableSmokeTests(appBundle, targetTriple, label) {
+  run('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appBundle]);
+
+  const executable = findMacAppExecutable(appBundle);
+  if (!executable) {
+    fail(`Could not locate the primary macOS executable in ${label}`);
+  }
+
+  const ssh = findRequiredSidecar(appBundle, targetTriple, 'ssh');
+  run(ssh, ['-V']);
+
+  const linkageSeeds = [
+    executable,
+    ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
+      .map((stem) => findRequiredSidecar(appBundle, targetTriple, stem)),
+    findFirstPath(appBundle, (path) => basename(path) === 'libgstreamer-1.0.dylib'),
+  ].filter(Boolean);
+  for (const path of linkageSeeds) {
+    verifyMacLinkage(path, label);
+  }
+
+  launchAndRequireAlive(executable, [], {}, `${label} GUI`, 8_000);
+}
+
+function findMacAppExecutable(appBundle) {
+  const macosDir = join(appBundle, 'Contents', 'MacOS');
+  const expectedNames = new Set(['noland-connect', productName, productName.toLowerCase()]);
+  return findFirstPath(
+    macosDir,
+    (path) => expectedNames.has(basename(path)) && isExecutableFile(path),
+  );
+}
+
+function verifyMacLinkage(path, label) {
+  const result = runCapture('otool', ['-L', path]);
+  const invalid = result.stdout
+    .split(/\r?\n/u)
+    .slice(1)
+    .map((line) => line.trim().split(/\s+/u)[0])
+    .filter(Boolean)
+    .filter((dependency) => dependency.startsWith('/'))
+    .filter((dependency) => !dependency.startsWith('/System/Library/') && !dependency.startsWith('/usr/lib/'));
+  if (invalid.length > 0) {
+    fail(`Unbundled absolute macOS dependencies in ${label}: ${path}\n${invalid.join('\n')}`);
+  }
+}
+
+function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
+  const runtimeDir = findFirstPath(
+    root,
+    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'ssh-runtime',
+  );
+  if (!runtimeDir || !readdirSync(runtimeDir).some((name) => name.includes('.so'))) {
+    fail(`Missing bundled OpenSSH shared-library closure in ${label}`);
+  }
+
+  verifyLinuxLinkage(root, targetTriple, label);
+  const env = linuxRuntimeEnv(root, targetTriple);
+  const ssh = findRequiredSidecar(root, targetTriple, 'ssh');
+  run(ssh, ['-V'], { env });
+
+  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
+  withExtractedTemp('noland-helper-check-', (tempRoot) => {
+    const configPath = join(tempRoot, 'wg.conf');
+    writeFileSync(configPath, [
+      '[Interface]',
+      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'Address = 10.66.66.2/32',
+      'MTU = 1280',
+      '',
+      '[Peer]',
+      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+      'AllowedIPs = 10.66.66.1/32',
+      'Endpoint = 127.0.0.1:51820',
+      'PersistentKeepalive = 25',
+      '',
+    ].join('\n'));
+    run(helper, ['check', '--config', configPath], { env });
+  });
+
+  const appRun = join(root, 'AppRun');
+  const executable = isExecutableFile(appRun) ? appRun : findLinuxAppExecutable(root);
+  if (!executable) {
+    fail(`Could not locate the Linux application executable in ${label}`);
+  }
+  launchAndRequireAlive(
+    'dbus-run-session',
+    ['--', 'xvfb-run', '-a', executable],
+    env,
+    `${label} GUI`,
+    8_000,
+  );
+}
+
+function verifyLinuxLinkage(root, targetTriple, label) {
+  const env = linuxRuntimeEnv(root, targetTriple);
+  const seeds = [
+    findLinuxAppExecutable(root),
+    ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
+      .map((stem) => findRequiredSidecar(root, targetTriple, stem)),
+    findFirstPath(root, (path) => basename(path) === 'gst-plugin-scanner'),
+    findFirstPath(root, (path) => basename(path) === 'libgstreamer-1.0.so.0'),
+  ].filter(Boolean);
+
+  for (const path of seeds) {
+    const kind = runCapture('file', ['-b', path]);
+    if (!kind.stdout.includes('ELF')) continue;
+    const linkage = runCapture('ldd', [path], { env, allowFailure: true });
+    if (linkage.status !== 0 || /not found/u.test(linkage.stdout) || /not found/u.test(linkage.stderr)) {
+      fail(`Unresolved Linux runtime dependencies in ${label}: ${path}\n${linkage.stdout}\n${linkage.stderr}`);
+    }
+  }
+}
+
+function linuxRuntimeEnv(root, targetTriple) {
+  const runtimeDir = findFirstPath(
+    root,
+    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'ssh-runtime',
+  );
+  const gstreamerRoot = findFirstPath(
+    root,
+    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'gstreamer',
+  );
+  const libraryPaths = [
+    runtimeDir,
+    gstreamerRoot ? join(gstreamerRoot, 'lib') : null,
+    gstreamerRoot ? join(gstreamerRoot, 'lib64') : null,
+    process.env.LD_LIBRARY_PATH,
+  ].filter((path) => path && existsSync(path));
+  const env = {
+    ...process.env,
+    LD_LIBRARY_PATH: libraryPaths.join(':'),
+  };
+  if (gstreamerRoot) {
+    const plugins = join(gstreamerRoot, 'lib', 'gstreamer-1.0');
+    const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
+    if (existsSync(plugins)) env.GST_PLUGIN_PATH_1_0 = plugins;
+    if (existsSync(scanner)) env.GST_PLUGIN_SCANNER_1_0 = scanner;
+  }
+  return env;
+}
+
+function findLinuxAppExecutable(root) {
+  return findFirstPath(root, (path) => {
+    const name = basename(path).toLowerCase();
+    return (name === 'noland-connect' || name === productName.toLowerCase()) && isExecutableFile(path);
+  });
+}
+
+function findRequiredSidecar(root, targetTriple, stem) {
+  const windows = targetTriple.includes('windows');
+  const suffix = windows ? '.exe' : '';
+  const names = [`${stem}-${targetTriple}${suffix}`, `${stem}${suffix}`];
+  const found = findFirstPath(root, (path) => names.includes(basename(path)) && isExecutableFile(path));
+  if (!found) {
+    fail(`Could not locate ${stem} for executable smoke testing under ${root}`);
+  }
+  return found;
+}
+
+function isExecutableFile(path) {
+  if (!path || !existsSync(path)) return false;
+  try {
+    if (!statSync(path).isFile()) return false;
+    accessSync(path, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function launchAndRequireAlive(command, args, env, label, durationMs) {
+  const child = spawn(command, args, {
+    cwd: repoRoot,
+    env: { ...process.env, ...env },
+    stdio: 'ignore',
+  });
+  if (!child.pid) {
+    fail(`Failed to launch ${label}: ${command}`);
+  }
+
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
+  let alive = true;
+  try {
+    process.kill(child.pid, 0);
+  } catch {
+    alive = false;
+  }
+  if (alive) {
+    child.kill('SIGTERM');
+  }
+  if (!alive) {
+    fail(`${label} exited before the ${durationMs / 1000}-second package smoke test completed`);
+  }
 }
 
 function verifyRequiredRuntimeFiles(root, targetTriple, label) {
@@ -148,20 +368,47 @@ function verifyMicReceiverSourceDirectory(receiverDir, label) {
   }
 }
 
-function verifyWindowsNsisStaging(targetTriple, nsisInstallerPath) {
-  const binariesRoot = join(repoRoot, 'src-tauri', 'binaries');
-  if (!existsSync(binariesRoot)) {
-    fail(`Expected staged Windows bundle inputs under ${binariesRoot}`);
+function verifyWindowsNsisInstallation(targetTriple, nsisInstallerPath) {
+  if (process.platform !== 'win32') {
+    fail('Windows NSIS installation verification must run on a Windows host.');
   }
 
-  verifyRequiredSidecars(binariesRoot, targetTriple, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
-  verifyRequiredRuntimeFiles(binariesRoot, targetTriple, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
+  withExtractedTemp('windows-nsis-install-', (installRoot) => {
+    run(nsisInstallerPath, ['/S', `/D=${installRoot}`]);
+    const label = `installed NSIS package ${basename(nsisInstallerPath)}`;
+    verifyBundleTree(installRoot, targetTriple, label);
+    verifyWindowsExecutableSmokeTests(installRoot, targetTriple, label);
+  });
+}
 
-  const receiverDir = join(repoRoot, 'vm-cloud-mic-agent');
-  if (!existsSync(join(receiverDir, 'Cargo.toml'))) {
-    fail(`Missing vm-cloud-mic-agent source directory for Windows NSIS staging: ${receiverDir}`);
+function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
+  const sshNames = [
+    `ssh-${targetTriple}.exe`,
+    'ssh.exe',
+  ];
+  const ssh = findFirstPath(root, (path) => sshNames.includes(basename(path)));
+  if (!ssh) {
+    fail(`Could not locate bundled ssh.exe for smoke testing in ${label}`);
   }
-  verifyMicReceiverSourceDirectory(receiverDir, `Windows NSIS staging inputs for ${basename(nsisInstallerPath)}`);
+  run(ssh, ['-V']);
+
+  const appExecutable = findFirstPath(
+    root,
+    (path) => basename(path).toLocaleLowerCase() === `${productName}.exe`.toLocaleLowerCase(),
+  );
+  if (!appExecutable) {
+    fail(`Could not locate the installed Noland executable for smoke testing in ${label}`);
+  }
+
+  const quotePowerShell = (value) => `'${String(value).replaceAll("'", "''")}'`;
+  const script = [
+    `$process = Start-Process -FilePath ${quotePowerShell(appExecutable)} -PassThru`,
+    'Start-Sleep -Seconds 8',
+    '$process.Refresh()',
+    'if ($process.HasExited) { Write-Error "Noland exited during the Windows installer smoke test with code $($process.ExitCode)"; exit 1 }',
+    'Stop-Process -Id $process.Id -Force',
+  ].join('; ');
+  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
 }
 
 function verifyRequiredSidecars(root, targetTriple, label) {
@@ -169,6 +416,13 @@ function verifyRequiredSidecars(root, targetTriple, label) {
     const found = findFirstPath(root, (path) => candidates.includes(basename(path)));
     if (!found) {
       fail(`Missing required bundled sidecar (${candidates.join(' or ')}) in ${label}`);
+    }
+    if (!targetTriple.includes('windows')) {
+      try {
+        accessSync(found, constants.X_OK);
+      } catch {
+        fail(`Bundled sidecar is not executable in ${label}: ${found}`);
+      }
     }
   }
 }
@@ -181,18 +435,11 @@ function requiredSidecarCandidates(targetTriple) {
 
   const groups = [
     [withTarget('noland-mic-sender'), plain('noland-mic-sender')],
-    [withTarget('gotatun'), plain('gotatun')],
-    [withTarget('wg'), plain('wg')],
+    [withTarget('noland-net-helper'), plain('noland-net-helper')],
     [withTarget('ssh'), plain('ssh')],
     [withTarget('scp'), plain('scp')],
     [withTarget('ssh-keygen'), plain('ssh-keygen')],
   ];
-
-  if (windows) {
-    groups.push([withTarget('wireguard'), plain('wireguard')]);
-  } else {
-    groups.push([withTarget('wg-quick'), plain('wg-quick')]);
-  }
 
   return groups;
 }
@@ -200,10 +447,15 @@ function requiredSidecarCandidates(targetTriple) {
 function requiredRuntimeFileCandidates(targetTriple) {
   if (targetTriple.includes('windows')) {
     if (targetTriple.includes('aarch64')) {
-      return [];
+      return [
+        ['wintun.dll', `wintun-${targetTriple}.dll`],
+        ['wintun-LICENSE.txt'],
+      ];
     }
 
     return [
+      ['wintun.dll', `wintun-${targetTriple}.dll`],
+      ['wintun-LICENSE.txt'],
       ['gstreamer-1.0-0.dll'],
       ['gst-plugin-scanner.exe'],
       ['gstwasapi.dll', 'libgstwasapi.dll', 'gstwasapi2.dll', 'libgstwasapi2.dll'],
@@ -218,6 +470,15 @@ function requiredRuntimeFileCandidates(targetTriple) {
   return [
     ['gst-plugin-scanner'],
     ['libgstreamer-1.0.so.0', 'libgstreamer-1.0.so'],
+    ['libgstapp-1.0.so.0', 'libgstapp-1.0.so'],
+    ['libgstvideo-1.0.so.0', 'libgstvideo-1.0.so'],
+    ['libgstautodetect.so'],
+    ['libgstplayback.so'],
+    ['libgstvideoconvertscale.so', 'libgstvideoconvert.so'],
+    ['libgstvideoparsersbad.so'],
+    ['libgstlibav.so'],
+    ['libgstximagesink.so'],
+    ['libgstwaylandsink.so'],
     ['libgstpipewire.so'],
     ['libgstaudioconvert.so'],
     ['libgstaudioresample.so'],
@@ -279,14 +540,32 @@ function findFirstPath(root, predicate) {
   return null;
 }
 
-function run(command, args) {
+function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
-    cwd: repoRoot,
+    cwd: options.cwd ?? repoRoot,
+    env: options.env ?? process.env,
     stdio: 'inherit',
   });
   if (result.status !== 0) {
     fail(`Command failed: ${command} ${args.join(' ')}`);
   }
+}
+
+function runCapture(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: options.cwd ?? repoRoot,
+    env: options.env ?? process.env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (!options.allowFailure && result.status !== 0) {
+    fail(`Command failed: ${command} ${args.join(' ')}\n${result.stdout ?? ''}\n${result.stderr ?? ''}`);
+  }
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
+  };
 }
 
 function runAllowFailure(command, args) {

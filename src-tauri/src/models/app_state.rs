@@ -36,7 +36,7 @@ pub struct PersistedAppState {
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
             onboarding_completed: false,
             has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
@@ -67,8 +67,6 @@ pub struct CredentialsState {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
-    #[serde(default)]
-    pub tailscale_api_key: String,
 }
 
 impl Default for CredentialsState {
@@ -77,7 +75,6 @@ impl Default for CredentialsState {
             app_username: String::new(),
             app_password: String::new(),
             vast_api_key: String::new(),
-            tailscale_api_key: String::new(),
         }
     }
 }
@@ -304,8 +301,8 @@ pub struct WireGuardState {
 #[serde(rename_all = "snake_case")]
 pub enum ConnectionProvider {
     #[default]
+    #[serde(alias = "gotatun", alias = "tailscale")]
     Wireguard,
-    Tailscale,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -335,9 +332,12 @@ pub enum SetupStage {
 #[serde(rename_all = "snake_case")]
 pub enum WireGuardSetupMode {
     #[default]
-    WireguardAppWindows,
-    WireguardAppLinux,
-    WireguardAppMacosManual,
+    #[serde(
+        alias = "wireguard_app_windows",
+        alias = "wireguard_app_linux",
+        alias = "wireguard_app_macos_manual"
+    )]
+    EmbeddedGotatun,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -387,13 +387,7 @@ impl Default for PostWireGuardSetupState {
     fn default() -> Self {
         Self {
             stage: SetupStage::PreWireguardExistingFlow,
-            wireguard_setup_mode: if cfg!(target_os = "macos") {
-                WireGuardSetupMode::WireguardAppMacosManual
-            } else if cfg!(target_os = "windows") {
-                WireGuardSetupMode::WireguardAppWindows
-            } else {
-                WireGuardSetupMode::WireguardAppLinux
-            },
+            wireguard_setup_mode: WireGuardSetupMode::EmbeddedGotatun,
             wireguard_setup_status: WireGuardSetupStatus::NotStarted,
             current_instance_id: None,
             wireguard_export_path: String::new(),
@@ -599,8 +593,6 @@ pub struct ProvisionedServerState {
     #[serde(default)]
     pub connection_provider: ConnectionProvider,
     #[serde(default)]
-    pub tailscale_client_ip: String,
-    #[serde(default)]
     pub embedded_moonlight_pipeline_enabled: bool,
     #[serde(default)]
     pub embedded_moonlight_host_id: String,
@@ -656,9 +648,8 @@ impl ProvisionedServerState {
             wireguard_config_path: String::new(),
             moonlight_host_address: String::new(),
             connection_provider: ConnectionProvider::default(),
-            tailscale_client_ip: String::new(),
-            embedded_moonlight_pipeline_enabled: false,
-            embedded_moonlight_host_id: String::new(),
+            embedded_moonlight_pipeline_enabled: true,
+            embedded_moonlight_host_id: format!("instance-{}", instance_id),
             embedded_moonlight_paired: false,
             mic_device_id: default_mic_device_id(),
             mic_device_name: default_mic_device_name(),
@@ -686,15 +677,17 @@ pub enum OrchestrationState {
     ConfiguringWireGuard,
     ConfiguringSunshine,
     ConfiguringNvidiaHeadless,
-    SelectingConnectionProvider,
-    ConfiguringTailscale,
-    TailscaleConfigGenerated,
-    TailscaleConnected,
+    #[serde(
+        alias = "SelectingConnectionProvider",
+        alias = "ConfiguringTailscale",
+        alias = "TailscaleConfigGenerated"
+    )]
     WireGuardConfigGenerated,
     WireGuardAppHandoffStarted,
     WireGuardWaitingForImport,
     WireGuardWaitingForActivation,
     WireGuardVerifying,
+    #[serde(alias = "TailscaleConnected")]
     WireGuardConnected,
     MoonlightSunshineReadyToSetup,
     SunshineCredentialsConfiguring,
@@ -717,8 +710,6 @@ pub struct OnboardingPayload {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
-    #[serde(default)]
-    pub tailscale_api_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

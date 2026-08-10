@@ -19,9 +19,7 @@ pub struct AppConfig {
     pub moonlight_download_url_windows: String,
     pub moonlight_download_url_macos: String,
     pub moonlight_download_url_linux: String,
-    pub wireguard_download_url_windows: String,
-    pub wireguard_download_url_macos: String,
-    pub wireguard_download_url_linux: String,
+
     pub sunshine: SunshineDefaults,
     pub wireguard: WireGuardDefaults,
     pub scoring: OfferScoring,
@@ -75,7 +73,7 @@ impl Default for AppConfig {
         // API key setup flow:
         // https://cloud.vast.ai/cli/
         Self {
-            state_schema_version: 1,
+            state_schema_version: 2,
             default_template_hash: env::var("NOLAND_TEMPLATE_HASH")
                 .unwrap_or_else(|_| "566868bff8b15eef891ee706acbbb5e5".to_string()),
             min_host_reliability: env::var("NOLAND_MIN_RELIABILITY")
@@ -114,9 +112,7 @@ impl Default for AppConfig {
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
             moonlight_download_url_linux:
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
-            wireguard_download_url_windows: "https://github.com/mullvad/gotatun".to_string(),
-            wireguard_download_url_macos: "https://github.com/mullvad/gotatun".to_string(),
-            wireguard_download_url_linux: "https://github.com/mullvad/gotatun".to_string(),
+
             sunshine: SunshineDefaults {
                 av1_mode: 1,
                 bind_address: env::var("NOLAND_SUNSHINE_BIND_ADDRESS").unwrap_or_default(),
