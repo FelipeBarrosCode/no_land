@@ -101,7 +101,6 @@ jobs:
             gstreamer1.0-plugins-bad \
             gstreamer1.0-libav \
             gstreamer1.0-x \
-            gstreamer1.0-wayland \
             gstreamer1.0-pipewire \
             rpm2cpio \
             libssl-dev \

@@ -294,12 +294,16 @@ function listDependencies(file) {
   const output = run('otool', ['-L', file], { allowFailure: true });
   if (output.status !== 0) return [];
   return output.stdout
-    .split('\n')
+    .split(/\r?\n/u)
     .slice(1)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => line.split(' ')[0])
+    .map(parseOtoolDependencyLine)
     .filter(Boolean);
+}
+
+function parseOtoolDependencyLine(line) {
+  const trimmed = line.trim();
+  const metadataIndex = trimmed.lastIndexOf(' (compatibility version ');
+  return metadataIndex >= 0 ? trimmed.slice(0, metadataIndex) : trimmed;
 }
 
 function setInstallId(file, id) {

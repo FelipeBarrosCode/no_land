@@ -183,13 +183,19 @@ function verifyMacLinkage(path, label) {
   const invalid = result.stdout
     .split(/\r?\n/u)
     .slice(1)
-    .map((line) => line.trim().split(/\s+/u)[0])
+    .map(parseOtoolDependencyLine)
     .filter(Boolean)
     .filter((dependency) => dependency.startsWith('/'))
     .filter((dependency) => !dependency.startsWith('/System/Library/') && !dependency.startsWith('/usr/lib/'));
   if (invalid.length > 0) {
     fail(`Unbundled absolute macOS dependencies in ${label}: ${path}\n${invalid.join('\n')}`);
   }
+}
+
+function parseOtoolDependencyLine(line) {
+  const trimmed = line.trim();
+  const metadataIndex = trimmed.lastIndexOf(' (compatibility version ');
+  return metadataIndex >= 0 ? trimmed.slice(0, metadataIndex) : trimmed;
 }
 
 function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
@@ -392,9 +398,13 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   }
   run(ssh, ['-V']);
 
+  const expectedAppExecutableNames = new Set([
+    'noland-connect.exe',
+    `${productName}.exe`,
+  ].map((name) => name.toLocaleLowerCase()));
   const appExecutable = findFirstPath(
     root,
-    (path) => basename(path).toLocaleLowerCase() === `${productName}.exe`.toLocaleLowerCase(),
+    (path) => expectedAppExecutableNames.has(basename(path).toLocaleLowerCase()),
   );
   if (!appExecutable) {
     fail(`Could not locate the installed Noland executable for smoke testing in ${label}`);
