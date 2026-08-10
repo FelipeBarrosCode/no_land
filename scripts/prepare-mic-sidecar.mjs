@@ -244,7 +244,14 @@ function stageWindowsGstreamerRuntime(targetTriple, binariesDir) {
 function stageLinuxGstreamerRuntime(targetTriple, binariesDir) {
   const root = resolveLinuxGstreamerRoot(targetTriple);
   if (!root) {
-    return;
+    console.error(`Project-managed Linux GStreamer root was not found for ${targetTriple}. Run bootstrap-native-deps first.`);
+    process.exit(1);
+  }
+
+  const scanner = join(root, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
+  if (!existsSync(scanner)) {
+    console.error(`Project-managed Linux GStreamer runtime is missing gst-plugin-scanner: ${scanner}`);
+    process.exit(1);
   }
 
   const destinationRoot = join(binariesDir, 'gstreamer', targetTriple);

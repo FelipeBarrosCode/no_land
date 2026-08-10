@@ -303,7 +303,7 @@ function listDependencies(file) {
 function parseOtoolDependencyLine(line) {
   const trimmed = line.trim();
   const metadataIndex = trimmed.lastIndexOf(' (compatibility version ');
-  return metadataIndex >= 0 ? trimmed.slice(0, metadataIndex) : trimmed;
+  return metadataIndex >= 0 ? trimmed.slice(0, metadataIndex) : null;
 }
 
 function setInstallId(file, id) {

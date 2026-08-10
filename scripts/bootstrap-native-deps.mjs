@@ -620,11 +620,18 @@ function discoverLinuxSystemGstreamer() {
     pkgConfigVariable('gstreamer-1.0', 'pluginsdir'),
     join(libDir, 'gstreamer-1.0'),
   ]);
+  const pluginScannerDir = pkgConfigVariable('gstreamer-1.0', 'pluginscannerdir');
+  const pluginScanner = pkgConfigVariable('gstreamer-1.0', 'pluginscanner');
+  const libexecDir = pkgConfigVariable('gstreamer-1.0', 'libexecdir');
   const scannerPath = locateExistingPath([
-    join(pkgConfigVariable('gstreamer-1.0', 'libexecdir') || '', 'gstreamer-1.0', 'gst-plugin-scanner'),
+    pluginScanner,
+    pluginScannerDir ? join(pluginScannerDir, 'gst-plugin-scanner') : null,
+    libexecDir ? join(libexecDir, 'gstreamer-1.0', 'gst-plugin-scanner') : null,
+    join(libDir, 'gstreamer1.0', 'gstreamer-1.0', 'gst-plugin-scanner'),
     join(libDir, 'gstreamer-1.0', 'gst-plugin-scanner'),
     '/usr/libexec/gstreamer-1.0/gst-plugin-scanner',
     '/usr/lib/gstreamer-1.0/gst-plugin-scanner',
+    ...findFilesNamed(libDir, 'gst-plugin-scanner'),
   ]);
   const pkgConfigPath = locateExistingPath([
     join(libDir, 'pkgconfig', 'gstreamer-1.0.pc'),
@@ -632,7 +639,7 @@ function discoverLinuxSystemGstreamer() {
     '/usr/share/pkgconfig/gstreamer-1.0.pc',
   ]);
 
-  if (!pluginsDir || !pkgConfigPath) {
+  if (!pluginsDir || !pkgConfigPath || !scannerPath) {
     return null;
   }
 
@@ -690,11 +697,12 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
   stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.libDir, libDest, /^libgst.+\.so(?:\..+)?$/u));
   stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.pluginsDir, pluginDest, (name) => requiredPluginNames.has(name)));
 
-  if (systemRoot.scannerPath && existsSync(systemRoot.scannerPath)) {
-    const scannerDest = join(libexecDest, 'gst-plugin-scanner');
-    copyFileWithMode(systemRoot.scannerPath, scannerDest);
-    stagedFiles.push(scannerDest);
+  if (!systemRoot.scannerPath || !existsSync(systemRoot.scannerPath)) {
+    throw new Error('The system GStreamer installation does not provide gst-plugin-scanner');
   }
+  const scannerDest = join(libexecDest, 'gst-plugin-scanner');
+  copyFileWithMode(systemRoot.scannerPath, scannerDest);
+  stagedFiles.push(scannerDest);
 
   if (systemRoot.pkgConfigPath && existsSync(systemRoot.pkgConfigPath)) {
     copyFileWithMode(systemRoot.pkgConfigPath, join(pkgConfigDest, 'gstreamer-1.0.pc'));
@@ -915,7 +923,7 @@ function hasLinuxGstreamerRoot(path) {
   ) && (
     existsSync(join(path, 'lib', 'pkgconfig', 'gstreamer-1.0.pc'))
     || existsSync(join(path, 'lib64', 'pkgconfig', 'gstreamer-1.0.pc'))
-  );
+  ) && existsSync(join(path, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner'));
 }
 
 function hasWindowsGstreamerRoot(path) {
