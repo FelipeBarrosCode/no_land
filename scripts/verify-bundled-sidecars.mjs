@@ -297,8 +297,10 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
 
   const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
   const scannerDynamic = runCapture('readelf', ['-d', scanner]);
-  if (!scannerDynamic.stdout.includes('(RPATH)') || !scannerDynamic.stdout.includes('$ORIGIN/../../lib')) {
-    fail(`Bundled gst-plugin-scanner is not relocatable in ${label}\n${scannerDynamic.stdout}`);
+  const scannerHasSearchPath = scannerDynamic.stdout.includes('(RPATH)')
+    || scannerDynamic.stdout.includes('(RUNPATH)');
+  if (!scannerHasSearchPath || !scannerDynamic.stdout.includes('$ORIGIN/../../lib')) {
+    fail(`Bundled gst-plugin-scanner does not contain the required relative library search path in ${label}\n${scannerDynamic.stdout}`);
   }
 
   const plugin = findFirstPath(join(gstreamerRoot, 'lib', 'gstreamer-1.0'), (path) => basename(path) === 'libgstlibav.so');
@@ -306,8 +308,10 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
     fail(`Could not locate bundled libgstlibav.so in ${label}`);
   }
   const pluginDynamic = runCapture('readelf', ['-d', plugin]);
-  if (!pluginDynamic.stdout.includes('(RPATH)') || !pluginDynamic.stdout.includes('$ORIGIN/..')) {
-    fail(`Bundled GStreamer plugin is not relocatable in ${label}: ${plugin}\n${pluginDynamic.stdout}`);
+  const pluginHasSearchPath = pluginDynamic.stdout.includes('(RPATH)')
+    || pluginDynamic.stdout.includes('(RUNPATH)');
+  if (!pluginHasSearchPath || !pluginDynamic.stdout.includes('$ORIGIN/..')) {
+    fail(`Bundled GStreamer plugin does not contain the required relative library search path in ${label}: ${plugin}\n${pluginDynamic.stdout}`);
   }
 
   const linkage = runCapture('ldd', [appExecutable], { env: cleanEnv, allowFailure: true });
