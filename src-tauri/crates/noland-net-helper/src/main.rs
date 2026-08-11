@@ -96,6 +96,19 @@ impl RuntimeStatus {
 }
 
 #[cfg(target_os = "windows")]
+struct WindowsAddressGuard {
+    interface_name: String,
+    address: Ipv4Addr,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsAddressGuard {
+    fn drop(&mut self) {
+        remove_windows_adapter_address(&self.interface_name, self.address);
+    }
+}
+
+#[cfg(target_os = "windows")]
 struct WindowsRouteGuard {
     interface_name: String,
     routes: Vec<String>,
@@ -116,6 +129,61 @@ fn configure_hidden_windows_command(command: &mut Command) {
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_adapter_address(interface_name: &str, address: Ipv4Addr) {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    let _ = command
+        .args(["interface", "ipv4", "delete", "address"])
+        .arg(format!("name={interface_name}"))
+        .arg(format!("address={address}"))
+        .arg("gateway=all")
+        .arg("store=active")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "windows")]
+fn configure_windows_adapter_address(
+    interface_name: &str,
+    address: Ipv4Addr,
+    prefix: u8,
+) -> Result<WindowsAddressGuard> {
+    // tun 0.8.6 applies the address twice on Windows. Creating the adapter
+    // without address fields and configuring it here avoids ERROR_OBJECT_EXISTS,
+    // while this cleanup also recovers adapters left behind by interrupted runs.
+    remove_windows_adapter_address(interface_name, address);
+
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    let output = command
+        .args(["interface", "ipv4", "set", "address"])
+        .arg(format!("name={interface_name}"))
+        .arg("source=static")
+        .arg(format!("address={address}"))
+        .arg(format!("mask={}", prefix_to_netmask(prefix)))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed launching netsh to configure the Windows tunnel address")?;
+
+    if !output.status.success() {
+        bail!(
+            "failed configuring Windows tunnel address {address}/{prefix} on {interface_name}: {} {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(WindowsAddressGuard {
+        interface_name: interface_name.to_string(),
+        address,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -248,14 +316,13 @@ async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     tun_config.tun_name(INTERFACE_NAME);
 
+    tun_config.mtu(tunnel_config.mtu).up();
+
+    #[cfg(not(target_os = "windows"))]
     tun_config
         .address(tunnel_config.client_address)
         .netmask(prefix_to_netmask(tunnel_config.client_prefix))
-        .mtu(tunnel_config.mtu)
-        .up();
-
-    #[cfg(not(target_os = "windows"))]
-    tun_config.destination(tunnel_config.server_address);
+        .destination(tunnel_config.server_address);
 
     #[cfg(target_os = "linux")]
     tun_config.platform_config(|platform| {
@@ -282,6 +349,13 @@ async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
     let interface_name = async_tun
         .tun_name()
         .context("failed resolving managed TUN adapter name")?;
+
+    #[cfg(target_os = "windows")]
+    let _windows_address = configure_windows_adapter_address(
+        &interface_name,
+        tunnel_config.client_address,
+        tunnel_config.client_prefix,
+    )?;
 
     #[cfg(target_os = "windows")]
     let _windows_routes =
