@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
-    utils::managed_binaries::configure_bundled_linux_runtime,
+    utils::{managed_binaries::configure_bundled_linux_runtime, process::configure_no_window},
 };
 
 use super::os_detection::OsDetection;
@@ -72,7 +72,7 @@ impl RemoteExec {
         let port_str = self.ssh_port.to_string();
 
         info!(
-            "SSH command: ssh -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
+            "SSH command: ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
             port_str, connection_string, remote_command
         );
 
@@ -85,6 +85,7 @@ impl RemoteExec {
             os.managed_binary_target_triple(),
         );
         command
+            .arg("-T")
             .arg("-p")
             .arg(&port_str)
             .arg("-i")
@@ -120,7 +121,7 @@ impl RemoteExec {
         let port_str = self.ssh_port.to_string();
 
         info!(
-            "SSH command (no timeout): ssh -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
+            "SSH command (no timeout): ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
             port_str, connection_string, remote_command
         );
 
@@ -133,6 +134,7 @@ impl RemoteExec {
             os.managed_binary_target_triple(),
         );
         command
+            .arg("-T")
             .arg("-p")
             .arg(&port_str)
             .arg("-i")
@@ -216,6 +218,7 @@ fn ensure_command_available(command: &str) -> AppResult<()> {
 }
 
 fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {
+    configure_no_window(&mut command);
     let rendered = render_command(&command);
     let started = Instant::now();
     match timeout {
@@ -224,6 +227,7 @@ fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResul
     }
 
     let mut child = command
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
