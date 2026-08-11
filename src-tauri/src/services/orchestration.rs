@@ -24,7 +24,6 @@ use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
     instance_manager::InstanceManager,
-    mic_receiver::MicReceiverProvisioner,
     moonlight::detect_client_display_for_provisioning,
     nvidia_headless::NvidiaHeadlessService,
     post_provision::PostProvisionService,
@@ -38,8 +37,37 @@ use super::{
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+use super::mic_receiver::MicReceiverProvisioner;
+
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
+
+fn microphone_receiver_provisioning_enabled() -> bool {
+    !cfg!(any(target_os = "linux", target_os = "windows"))
+}
+
+async fn provision_microphone_receiver(
+    remote: &RemoteExec,
+    target_user: &str,
+) -> AppResult<String> {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        // Microphone passthrough is not part of Linux/Windows provisioning until its
+        // client runtime is production-ready. Treat the step as skipped, not failed.
+        let _ = remote;
+        info!(
+            client_os = std::env::consts::OS,
+            target_user, "Skipping remote microphone receiver provisioning"
+        );
+        Ok("Microphone receiver provisioning is disabled on Linux and Windows clients; continuing without microphone passthrough.".to_string())
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        MicReceiverProvisioner::install(remote, target_user).await
+    }
+}
 
 fn build_display_profile(
     preferences: &MoonlightPreferences,
@@ -1569,11 +1597,16 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         .await?;
     ensure_not_cancelled(&context)?;
 
+    let microphone_provisioning_enabled = microphone_receiver_provisioning_enabled();
     emit_transition(
         &app,
         &context,
         OrchestrationState::ConfiguringWireGuard,
-        "Ensuring remote microphone receiver is installed",
+        if microphone_provisioning_enabled {
+            "Ensuring remote microphone receiver is installed"
+        } else {
+            "Skipping remote microphone receiver on this client"
+        },
         Some(format!(
             "target_user={} remote_bind_ip={}",
             target_user, wireguard_result.server_ip
@@ -1582,7 +1615,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     )
     .await;
 
-    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    let install_output = provision_microphone_receiver(&remote, &target_user).await?;
     mark_server_step_completed(
         &context,
         instance.id,
@@ -1599,7 +1632,11 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         &app,
         &context,
         OrchestrationState::ConfiguringWireGuard,
-        "Remote microphone receiver ready",
+        if microphone_provisioning_enabled {
+            "Remote microphone receiver ready"
+        } else {
+            "Remote microphone receiver skipped"
+        },
         Some(install_output),
         false,
     )
@@ -2454,11 +2491,16 @@ async fn run_existing_instance_orchestration(
         .await?;
     ensure_not_cancelled(&context)?;
 
+    let microphone_provisioning_enabled = microphone_receiver_provisioning_enabled();
     emit_transition(
         &app,
         &context,
         OrchestrationState::ConfiguringWireGuard,
-        "Ensuring remote microphone receiver is installed",
+        if microphone_provisioning_enabled {
+            "Ensuring remote microphone receiver is installed"
+        } else {
+            "Skipping remote microphone receiver on this client"
+        },
         Some(format!(
             "target_user={} remote_bind_ip={}",
             target_user, wireguard_result.server_ip
@@ -2467,7 +2509,7 @@ async fn run_existing_instance_orchestration(
     )
     .await;
 
-    let install_output = MicReceiverProvisioner::install(&remote, &target_user).await?;
+    let install_output = provision_microphone_receiver(&remote, &target_user).await?;
     mark_server_step_completed(
         &context,
         instance.id,
@@ -2484,7 +2526,11 @@ async fn run_existing_instance_orchestration(
         &app,
         &context,
         OrchestrationState::ConfiguringWireGuard,
-        "Remote microphone receiver ready",
+        if microphone_provisioning_enabled {
+            "Remote microphone receiver ready"
+        } else {
+            "Remote microphone receiver skipped"
+        },
         Some(install_output),
         false,
     )

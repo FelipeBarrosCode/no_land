@@ -1,14 +1,14 @@
 use std::{
     io::ErrorKind,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
 };
 
 use tokio::fs;
 
 use crate::{
     errors::{AppError, AppResult},
-    utils::managed_binaries::configure_bundled_linux_runtime,
+    utils::{managed_binaries::configure_bundled_linux_runtime, process::configure_no_window},
 };
 
 use super::{os_detection::OsDetection, vast_api::VastApiClient};
@@ -80,7 +80,9 @@ impl SshKeyService {
                 "ssh-runtime",
                 OsDetection::new().managed_binary_target_triple(),
             );
+            configure_no_window(&mut command);
             let output = command
+                .stdin(Stdio::null())
                 .arg("-t")
                 .arg("ed25519")
                 .arg("-f")
