@@ -23,6 +23,9 @@ use crate::{
 
 use super::{app_config::WireGuardDefaults, app_context::AppContext, remote_exec::RemoteExec};
 
+#[cfg(target_os = "windows")]
+use crate::utils::process::configure_no_window;
+
 #[cfg(target_os = "linux")]
 use super::os_detection::OsDetection;
 
@@ -319,6 +322,53 @@ fn resolve_wintun_library() -> AppResult<PathBuf> {
     })
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn windows_command_line_quote(value: &str) -> String {
+    if !value.is_empty() && !value.chars().any(|ch| ch.is_whitespace() || ch == '"') {
+        return value.to_string();
+    }
+
+    let mut quoted = String::from("\"");
+    let mut backslashes = 0usize;
+    for ch in value.chars() {
+        match ch {
+            '\\' => backslashes += 1,
+            '"' => {
+                quoted.push_str(&"\\".repeat(backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                quoted.push_str(&"\\".repeat(backslashes));
+                backslashes = 0;
+                quoted.push(ch);
+            }
+        }
+    }
+    quoted.push_str(&"\\".repeat(backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn powershell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn build_windows_tunnel_launch_script(helper: &str, arguments: &[String]) -> String {
+    let argument_line = arguments
+        .iter()
+        .map(|value| windows_command_line_quote(value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "Start-Process -FilePath {} -Verb RunAs -WindowStyle Hidden -ArgumentList {}",
+        powershell_single_quote(helper),
+        powershell_single_quote(&argument_line)
+    )
+}
+
 fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
     let helper = resolve_noland_net_helper_binary()?;
     let runtime_dir = gotatun_runtime_dir(config_path);
@@ -329,6 +379,7 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
         ))
     })?;
     let _ = std::fs::remove_file(gotatun_stop_request_path(config_path));
+    let _ = std::fs::remove_file(gotatun_status_path(config_path));
 
     #[cfg(target_os = "linux")]
     {
@@ -394,11 +445,8 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
 
     #[cfg(target_os = "windows")]
     {
-        fn powershell_quote(value: &str) -> String {
-            format!("'{}'", value.replace('\'', "''"))
-        }
         let wintun = resolve_wintun_library()?;
-        let argument_list = [
+        let arguments = vec![
             "run".to_string(),
             "--config".to_string(),
             config_path.display().to_string(),
@@ -406,16 +454,11 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
             runtime_dir.display().to_string(),
             "--wintun".to_string(),
             wintun.display().to_string(),
-        ]
-        .into_iter()
-        .map(|value| powershell_quote(&value))
-        .collect::<Vec<_>>()
-        .join(",");
-        let script = format!(
-            "Start-Process -FilePath {} -Verb RunAs -ArgumentList @({argument_list})",
-            powershell_quote(&helper)
-        );
-        Command::new("powershell.exe")
+        ];
+        let script = build_windows_tunnel_launch_script(&helper, &arguments);
+        let mut command = Command::new("powershell.exe");
+        configure_no_window(&mut command);
+        command
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -2507,4 +2550,40 @@ fn strip_cidr(ip: &str) -> String {
 
 fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\"'\"'")
+}
+
+#[cfg(test)]
+mod windows_launch_tests {
+    use super::{build_windows_tunnel_launch_script, windows_command_line_quote};
+
+    #[test]
+    fn quotes_windows_arguments_with_spaces() {
+        assert_eq!(
+            windows_command_line_quote(r"C:\Program Files\Noland Connect\wintun.dll"),
+            r#""C:\Program Files\Noland Connect\wintun.dll""#
+        );
+        assert_eq!(windows_command_line_quote("run"), "run");
+    }
+
+    #[test]
+    fn elevated_launch_preserves_all_helper_path_boundaries() {
+        let arguments = vec![
+            "run".to_string(),
+            "--config".to_string(),
+            r"C:\Users\Test User\Noland\nolandwg0.conf".to_string(),
+            "--state-dir".to_string(),
+            r"C:\Users\Test User\Noland\gotatun runtime".to_string(),
+            "--wintun".to_string(),
+            r"C:\Program Files\Noland Connect\wintun.dll".to_string(),
+        ];
+        let script = build_windows_tunnel_launch_script(
+            r"C:\Program Files\Noland Connect\noland-net-helper.exe",
+            &arguments,
+        );
+
+        assert!(script.contains("-WindowStyle Hidden"));
+        assert!(script.contains(r#"--config "C:\Users\Test User\Noland\nolandwg0.conf""#));
+        assert!(script.contains(r#"--state-dir "C:\Users\Test User\Noland\gotatun runtime""#));
+        assert!(script.contains(r#"--wintun "C:\Program Files\Noland Connect\wintun.dll""#));
+    }
 }

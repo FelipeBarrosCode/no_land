@@ -6,6 +6,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "windows")]
+use std::process::{Command, Stdio};
+
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use gotatun::{
@@ -45,6 +48,7 @@ struct TunnelConfig {
     peer_public_key: [u8; 32],
     client_address: Ipv4Addr,
     client_prefix: u8,
+    #[cfg_attr(target_os = "windows", allow(dead_code))]
     server_address: Ipv4Addr,
     allowed_ips: Vec<IpNetwork>,
     endpoint: SocketAddr,
@@ -89,6 +93,94 @@ impl RuntimeStatus {
             error: None,
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsRouteGuard {
+    interface_name: String,
+    routes: Vec<String>,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsRouteGuard {
+    fn drop(&mut self) {
+        for route in self.routes.iter().rev() {
+            remove_windows_route(&self.interface_name, route);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn configure_hidden_windows_command(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_route(interface_name: &str, route: &str) {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    let _ = command
+        .args(["interface", "ipv4", "delete", "route"])
+        .arg(format!("prefix={route}"))
+        .arg(format!("interface={interface_name}"))
+        .arg("store=active")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_allowed_ip_routes(
+    interface_name: &str,
+    allowed_ips: &[IpNetwork],
+) -> Result<WindowsRouteGuard> {
+    let mut installed: Vec<String> = Vec::new();
+    for network in allowed_ips {
+        let IpNetwork::V4(network) = network else {
+            continue;
+        };
+        let route = network.to_string();
+        remove_windows_route(interface_name, &route);
+
+        let mut command = Command::new("netsh.exe");
+        configure_hidden_windows_command(&mut command);
+        let output = command
+            .args(["interface", "ipv4", "add", "route"])
+            .arg(format!("prefix={route}"))
+            .arg(format!("interface={interface_name}"))
+            .arg("nexthop=0.0.0.0")
+            .arg("store=active")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| format!("failed launching netsh for route {route}"))?;
+
+        if !output.status.success() {
+            for installed_route in installed.iter().rev() {
+                remove_windows_route(interface_name, installed_route);
+            }
+            bail!(
+                "failed adding Windows route {route} through {interface_name}: {} {}",
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        installed.push(route);
+    }
+
+    if installed.is_empty() {
+        bail!("WireGuard config has no IPv4 AllowedIPs routes for the Windows adapter");
+    }
+
+    Ok(WindowsRouteGuard {
+        interface_name: interface_name.to_string(),
+        routes: installed,
+    })
 }
 
 #[tokio::main]
@@ -158,10 +250,12 @@ async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
 
     tun_config
         .address(tunnel_config.client_address)
-        .destination(tunnel_config.server_address)
         .netmask(prefix_to_netmask(tunnel_config.client_prefix))
         .mtu(tunnel_config.mtu)
         .up();
+
+    #[cfg(not(target_os = "windows"))]
+    tun_config.destination(tunnel_config.server_address);
 
     #[cfg(target_os = "linux")]
     tun_config.platform_config(|platform| {
@@ -188,6 +282,11 @@ async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
     let interface_name = async_tun
         .tun_name()
         .context("failed resolving managed TUN adapter name")?;
+
+    #[cfg(target_os = "windows")]
+    let _windows_routes =
+        install_windows_allowed_ip_routes(&interface_name, &tunnel_config.allowed_ips)?;
+
     let gotatun_tun =
         TunDevice::from_tun_device(async_tun).context("failed attaching GotaTun to TUN adapter")?;
 
