@@ -138,6 +138,15 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
                 exe_dir
                     .join("..")
                     .join("lib")
+                    .join("Noland Connect")
+                    .join("binaries")
+                    .join("gstreamer")
+                    .join(target_triple),
+            );
+            candidates.push(
+                exe_dir
+                    .join("..")
+                    .join("lib")
                     .join("noland-connect")
                     .join("resources")
                     .join("binaries")

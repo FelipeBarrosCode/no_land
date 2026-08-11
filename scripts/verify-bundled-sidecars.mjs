@@ -208,9 +208,10 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
   }
 
   verifyLinuxLinkage(root, targetTriple, label);
-  const env = linuxRuntimeEnv(root, targetTriple);
+  const sshEnv = linuxSshRuntimeEnv(root, targetTriple);
+  const cleanEnv = cleanLinuxRuntimeEnv();
   const ssh = findRequiredSidecar(root, targetTriple, 'ssh');
-  run(ssh, ['-V'], { env });
+  run(ssh, ['-V'], { env: sshEnv });
 
   const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
   withExtractedTemp('noland-helper-check-', (tempRoot) => {
@@ -228,7 +229,7 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
       'PersistentKeepalive = 25',
       '',
     ].join('\n'));
-    run(helper, ['check', '--config', configPath], { env });
+    run(helper, ['check', '--config', configPath], { env: cleanEnv });
   });
 
   const appRun = join(root, 'AppRun');
@@ -239,16 +240,18 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
   launchAndRequireAlive(
     'dbus-run-session',
     ['--', 'xvfb-run', '-a', executable],
-    env,
+    cleanEnv,
     `${label} GUI`,
     8_000,
   );
 }
 
 function verifyLinuxLinkage(root, targetTriple, label) {
-  const env = linuxRuntimeEnv(root, targetTriple);
+  const cleanEnv = cleanLinuxRuntimeEnv();
+  const sshEnv = linuxSshRuntimeEnv(root, targetTriple);
+  const appExecutable = findLinuxAppExecutable(root);
   const seeds = [
-    findLinuxAppExecutable(root),
+    appExecutable,
     ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
       .map((stem) => findRequiredSidecar(root, targetTriple, stem)),
     findFirstPath(root, (path) => basename(path) === 'gst-plugin-scanner'),
@@ -258,37 +261,73 @@ function verifyLinuxLinkage(root, targetTriple, label) {
   for (const path of seeds) {
     const kind = runCapture('file', ['-b', path]);
     if (!kind.stdout.includes('ELF')) continue;
-    const linkage = runCapture('ldd', [path], { env, allowFailure: true });
+    const name = basename(path);
+    const usesSshRuntime = /^(?:ssh|scp|ssh-keygen)(?:-|$)/u.test(name);
+    const linkage = runCapture('ldd', [path], { env: usesSshRuntime ? sshEnv : cleanEnv, allowFailure: true });
     if (linkage.status !== 0 || /not found/u.test(linkage.stdout) || /not found/u.test(linkage.stderr)) {
       fail(`Unresolved Linux runtime dependencies in ${label}: ${path}\n${linkage.stdout}\n${linkage.stderr}`);
     }
   }
+
+  verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv);
 }
 
-function linuxRuntimeEnv(root, targetTriple) {
+function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv) {
+  const gstreamerRoot = join(root, 'usr', 'lib', productName, 'binaries', 'gstreamer', targetTriple);
+  if (!existsSync(gstreamerRoot)) {
+    fail(`Linux GStreamer runtime is not installed at the Tauri resource path in ${label}: ${gstreamerRoot}`);
+  }
+  if (!appExecutable) {
+    fail(`Could not locate the Linux application executable while verifying GStreamer RPATH in ${label}`);
+  }
+
+  const appDynamic = runCapture('readelf', ['-d', appExecutable]);
+  const expectedAppRpath = `$ORIGIN/../lib/${productName}/binaries/gstreamer/${targetTriple}/lib`;
+  if (!appDynamic.stdout.includes('(RPATH)') || !appDynamic.stdout.includes(expectedAppRpath)) {
+    fail(`Linux application does not contain the required inherited GStreamer RPATH in ${label}: ${expectedAppRpath}\n${appDynamic.stdout}`);
+  }
+
+  const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
+  const scannerDynamic = runCapture('readelf', ['-d', scanner]);
+  if (!scannerDynamic.stdout.includes('(RPATH)') || !scannerDynamic.stdout.includes('$ORIGIN/../../lib')) {
+    fail(`Bundled gst-plugin-scanner is not relocatable in ${label}\n${scannerDynamic.stdout}`);
+  }
+
+  const plugin = findFirstPath(join(gstreamerRoot, 'lib', 'gstreamer-1.0'), (path) => basename(path) === 'libgstlibav.so');
+  if (!plugin) {
+    fail(`Could not locate bundled libgstlibav.so in ${label}`);
+  }
+  const pluginDynamic = runCapture('readelf', ['-d', plugin]);
+  if (!pluginDynamic.stdout.includes('(RPATH)') || !pluginDynamic.stdout.includes('$ORIGIN/..')) {
+    fail(`Bundled GStreamer plugin is not relocatable in ${label}: ${plugin}\n${pluginDynamic.stdout}`);
+  }
+
+  const linkage = runCapture('ldd', [appExecutable], { env: cleanEnv, allowFailure: true });
+  const normalizedRoot = gstreamerRoot.split('\\').join('/');
+  for (const library of ['libgstreamer-1.0.so', 'libgstapp-1.0.so', 'libgstvideo-1.0.so', 'libcrypto.so']) {
+    const line = linkage.stdout.split(/\r?\n/u).find((candidate) => candidate.includes(library));
+    if (!line || !line.split('\\').join('/').includes(normalizedRoot)) {
+      fail(`Linux application resolved ${library} outside the bundled runtime in ${label}\n${linkage.stdout}`);
+    }
+  }
+}
+
+function cleanLinuxRuntimeEnv() {
+  const env = { ...process.env };
+  for (const name of ['LD_LIBRARY_PATH', 'NOLAND_GSTREAMER_ROOT', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SYSTEM_PATH_1_0', 'GST_PLUGIN_SCANNER_1_0']) {
+    delete env[name];
+  }
+  return env;
+}
+
+function linuxSshRuntimeEnv(root, targetTriple) {
   const runtimeDir = findFirstPath(
     root,
     (path) => basename(path) === targetTriple && basename(dirname(path)) === 'ssh-runtime',
   );
-  const gstreamerRoot = findFirstPath(
-    root,
-    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'gstreamer',
-  );
-  const libraryPaths = [
-    runtimeDir,
-    gstreamerRoot ? join(gstreamerRoot, 'lib') : null,
-    gstreamerRoot ? join(gstreamerRoot, 'lib64') : null,
-    process.env.LD_LIBRARY_PATH,
-  ].filter((path) => path && existsSync(path));
-  const env = {
-    ...process.env,
-    LD_LIBRARY_PATH: libraryPaths.join(':'),
-  };
-  if (gstreamerRoot) {
-    const plugins = join(gstreamerRoot, 'lib', 'gstreamer-1.0');
-    const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
-    if (existsSync(plugins)) env.GST_PLUGIN_PATH_1_0 = plugins;
-    if (existsSync(scanner)) env.GST_PLUGIN_SCANNER_1_0 = scanner;
+  const env = cleanLinuxRuntimeEnv();
+  if (runtimeDir) {
+    env.LD_LIBRARY_PATH = runtimeDir;
   }
   return env;
 }
@@ -398,6 +437,25 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   }
   run(ssh, ['-V']);
 
+  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
+  withExtractedTemp('noland windows helper ', (tempRoot) => {
+    const configPath = join(tempRoot, 'tunnel config.conf');
+    writeFileSync(configPath, [
+      '[Interface]',
+      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'Address = 10.66.66.2/32',
+      'MTU = 1280',
+      '',
+      '[Peer]',
+      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+      'AllowedIPs = 10.66.66.1/32',
+      'Endpoint = 127.0.0.1:51820',
+      'PersistentKeepalive = 25',
+      '',
+    ].join('\n'));
+    run(helper, ['check', '--config', configPath]);
+  });
+
   const expectedAppExecutableNames = new Set([
     'noland-connect.exe',
     `${productName}.exe`,
@@ -482,6 +540,7 @@ function requiredRuntimeFileCandidates(targetTriple) {
     ['libgstreamer-1.0.so.0', 'libgstreamer-1.0.so'],
     ['libgstapp-1.0.so.0', 'libgstapp-1.0.so'],
     ['libgstvideo-1.0.so.0', 'libgstvideo-1.0.so'],
+    ['libcrypto.so.3', 'libcrypto.so'],
     ['libgstautodetect.so'],
     ['libgstplayback.so'],
     ['libgstvideoconvertscale.so', 'libgstvideoconvert.so'],

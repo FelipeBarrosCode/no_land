@@ -695,6 +695,7 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
 
   const stagedFiles = [];
   stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.libDir, libDest, /^libgst.+\.so(?:\..+)?$/u));
+  stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.libDir, libDest, /^libcrypto\.so(?:\..+)?$/u));
   stagedFiles.push(...copyDirectoryEntriesMatching(systemRoot.pluginsDir, pluginDest, (name) => requiredPluginNames.has(name)));
 
   if (!systemRoot.scannerPath || !existsSync(systemRoot.scannerPath)) {
@@ -713,6 +714,47 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
   }
 
   stageLinuxDependencyClosure(stagedFiles, libDest);
+  patchLinuxRuntimeRpaths(destination);
+}
+
+function patchLinuxRuntimeRpaths(root) {
+  const probe = run('patchelf', ['--version'], { allowFailure: true, captureOutput: true });
+  if (probe.status !== 0) {
+    throw new Error('patchelf is required to make the bundled Linux GStreamer runtime relocatable');
+  }
+
+  const libDir = join(root, 'lib');
+  const pluginDir = join(libDir, 'gstreamer-1.0');
+  const scanner = join(root, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
+  const targets = [
+    ...linuxElfFilesInDirectory(libDir, { recursive: false }).map((path) => [path, '$ORIGIN']),
+    ...linuxElfFilesInDirectory(pluginDir, { recursive: true }).map((path) => [path, '$ORIGIN/..']),
+    ...(existsSync(scanner) ? [[scanner, '$ORIGIN/../../lib']] : []),
+  ];
+
+  for (const [path, rpath] of targets) {
+    run('patchelf', ['--force-rpath', '--set-rpath', rpath, path]);
+  }
+}
+
+function linuxElfFilesInDirectory(root, { recursive }) {
+  if (!existsSync(root)) return [];
+  const files = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) {
+        if (recursive) stack.push(path);
+        continue;
+      }
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
+      const kind = run('file', ['-b', path], { allowFailure: true, captureOutput: true });
+      if (kind.status === 0 && kind.stdout.includes('ELF')) files.push(path);
+    }
+  }
+  return files;
 }
 
 function stageLinuxDependencyClosure(seedFiles, libDest) {
