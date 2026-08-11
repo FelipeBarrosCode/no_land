@@ -84,18 +84,29 @@ const tauriCommand = process.platform === 'win32' && existsSync(tauriCliScript)
 const tauriCommandArgs = process.platform === 'win32' && existsSync(tauriCliScript)
   ? [tauriCliScript, mode, ...tauriCliArgs]
   : ['tauri', mode, ...tauriCliArgs];
-console.log(`[tauri-with-mic-sidecar] Running Tauri ${mode} for target ${target}`);
-const tauri = spawnSync(tauriCommand, tauriCommandArgs, {
-  cwd: repoRoot,
-  stdio: 'inherit',
-  env: tauriEnv,
-});
-if (tauri.error) {
-  console.error(`Failed to launch Tauri CLI via ${tauriCommand}: ${tauri.error.message}`);
-  process.exit(1);
+const maxTauriAttempts = process.platform === 'win32' && mode === 'build' ? 3 : 1;
+let tauri;
+for (let attempt = 1; attempt <= maxTauriAttempts; attempt += 1) {
+  console.log(`[tauri-with-mic-sidecar] Running Tauri ${mode} for target ${target} (attempt ${attempt}/${maxTauriAttempts})`);
+  tauri = spawnSync(tauriCommand, tauriCommandArgs, {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: tauriEnv,
+  });
+  if (!tauri.error && tauri.status === 0) {
+    break;
+  }
+  if (tauri.error) {
+    console.error(`Failed to launch Tauri CLI via ${tauriCommand}: ${tauri.error.message}`);
+  }
+  if (attempt < maxTauriAttempts) {
+    const delayMs = attempt * 15_000;
+    console.warn(`[tauri-with-mic-sidecar] Windows bundling failed; retrying in ${delayMs / 1_000}s. Cargo output is cached, so the application will not be rebuilt from scratch.`);
+    sleepSync(delayMs);
+  }
 }
-if (tauri.status !== 0) {
-  process.exit(tauri.status ?? 1);
+if (!tauri || tauri.error || tauri.status !== 0) {
+  process.exit(tauri?.status ?? 1);
 }
 
 if (process.platform === 'darwin' && mode === 'build') {
@@ -155,6 +166,10 @@ if (process.platform === 'darwin' && mode === 'build') {
 
 process.exit(0);
 
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
 
 function readTarget(args) {
   for (let i = 0; i < args.length; i += 1) {
