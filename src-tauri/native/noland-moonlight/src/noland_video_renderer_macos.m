@@ -150,20 +150,18 @@ static bool nl_strip_annexb_start_code(const uint8_t* data, size_t length, const
 static bool nl_find_next_annexb_nal(const uint8_t* data, size_t length, size_t* cursor, const uint8_t** nal, size_t* nal_len) {
   size_t i;
   size_t start = SIZE_MAX;
-  size_t prefix = 0;
+  size_t end;
   if (data == NULL || cursor == NULL || nal == NULL || nal_len == NULL) {
     return false;
   }
 
-  for (i = *cursor; i + 3 < length; ++i) {
+  for (i = *cursor; i + 2 < length; ++i) {
     if (i + 4 <= length && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 && data[i + 3] == 0x01) {
       start = i + 4;
-      prefix = 4;
       break;
     }
     if (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01) {
       start = i + 3;
-      prefix = 3;
       break;
     }
   }
@@ -172,19 +170,18 @@ static bool nl_find_next_annexb_nal(const uint8_t* data, size_t length, size_t* 
     return false;
   }
 
-  for (i = start; i + 3 < length; ++i) {
-    if (i + 4 <= length && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 && data[i + 3] == 0x01) {
-      break;
-    }
-    if (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01) {
+  end = length;
+  for (i = start; i + 2 < length; ++i) {
+    if ((i + 4 <= length && data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x00 && data[i + 3] == 0x01) ||
+        (data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01)) {
+      end = i;
       break;
     }
   }
 
   *nal = data + start;
-  *nal_len = i - start;
-  *cursor = i;
-  (void)prefix;
+  *nal_len = end - start;
+  *cursor = end;
   return *nal_len > 0;
 }
 

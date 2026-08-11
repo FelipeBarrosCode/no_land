@@ -4,11 +4,29 @@ use serde::{Deserialize, Serialize};
 
 use super::{host::PersistedHost, identity::PersistedIdentity, MoonlightError};
 
-pub const HOST_SUPPORT_H264: u32 = 1 << 0;
-pub const HOST_SUPPORT_HEVC: u32 = 1 << 1;
-pub const HOST_SUPPORT_AV1: u32 = 1 << 2;
-pub const HOST_SUPPORT_10BIT: u32 = 1 << 3;
-pub const HOST_SUPPORT_YUV444: u32 = 1 << 4;
+// ServerCodecModeSupport values from moonlight-common-c/Limelight.h.
+pub const SCM_H264: u32 = 0x0000_0001;
+pub const SCM_HEVC: u32 = 0x0000_0100;
+pub const SCM_HEVC_MAIN10: u32 = 0x0000_0200;
+pub const SCM_AV1_MAIN8: u32 = 0x0001_0000;
+pub const SCM_AV1_MAIN10: u32 = 0x0002_0000;
+pub const SCM_H264_HIGH8_444: u32 = 0x0004_0000;
+pub const SCM_HEVC_REXT8_444: u32 = 0x0008_0000;
+pub const SCM_HEVC_REXT10_444: u32 = 0x0010_0000;
+pub const SCM_AV1_HIGH8_444: u32 = 0x0020_0000;
+pub const SCM_AV1_HIGH10_444: u32 = 0x0040_0000;
+
+// StreamConfiguration.supportedVideoFormats values from moonlight-common-c/Limelight.h.
+pub const VIDEO_FORMAT_H264: u32 = 0x0001;
+pub const VIDEO_FORMAT_H264_HIGH8_444: u32 = 0x0004;
+pub const VIDEO_FORMAT_H265: u32 = 0x0100;
+pub const VIDEO_FORMAT_H265_MAIN10: u32 = 0x0200;
+pub const VIDEO_FORMAT_H265_REXT8_444: u32 = 0x0400;
+pub const VIDEO_FORMAT_H265_REXT10_444: u32 = 0x0800;
+pub const VIDEO_FORMAT_AV1_MAIN8: u32 = 0x1000;
+pub const VIDEO_FORMAT_AV1_MAIN10: u32 = 0x2000;
+pub const VIDEO_FORMAT_AV1_HIGH8_444: u32 = 0x4000;
+pub const VIDEO_FORMAT_AV1_HIGH10_444: u32 = 0x8000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -559,13 +577,8 @@ pub fn validate_preferences(
                 "HDR requires a 10-bit-capable decoder and display".to_string(),
             ));
         }
-        // 4:4:4 is negotiated opportunistically. Unsupported clients fall back to 4:2:0
-        // instead of rejecting the entire request.
-        if video.codec_preference.contains(&Codec::Av1) && !capabilities.supports_av1 {
-            return Err(MoonlightError::Validation(
-                "AV1 cannot be selected without local AV1 support".to_string(),
-            ));
-        }
+        // Codec and 4:4:4 preferences are negotiated opportunistically. Unsupported
+        // entries fall through to the next codec/profile instead of rejecting the request.
     }
 
     Ok(())
@@ -578,61 +591,111 @@ pub fn negotiate_video_format(
 ) -> Result<NegotiatedVideoFormat, MoonlightError> {
     validate_preferences(preferences, Some(capabilities))?;
 
-    let mut codecs = preferences.video.codec_preference.clone();
-    codecs.retain(|codec| match codec {
-        Codec::H264 => capabilities.supports_h264 && (host_support_mask & HOST_SUPPORT_H264 != 0),
-        Codec::Hevc => capabilities.supports_hevc && (host_support_mask & HOST_SUPPORT_HEVC != 0),
-        Codec::Av1 => capabilities.supports_av1 && (host_support_mask & HOST_SUPPORT_AV1 != 0),
-    });
-
-    if codecs.is_empty() {
-        return Err(MoonlightError::Validation(
-            "no compatible codec remains after negotiation".to_string(),
-        ));
-    }
-
     let hdr = preferences.video.hdr;
-    let wants_10bit = hdr;
-    if wants_10bit && host_support_mask & HOST_SUPPORT_10BIT == 0 {
-        return Err(MoonlightError::Validation(
-            "HDR was requested but the host does not advertise 10-bit support".to_string(),
-        ));
-    }
+    let wants_yuv444 = preferences.video.yuv444 && capabilities.supports_yuv444;
 
-    let chroma = if preferences.video.yuv444 {
-        if capabilities.supports_yuv444 && host_support_mask & HOST_SUPPORT_YUV444 != 0 {
-            ChromaFormat::Yuv444
-        } else {
-            ChromaFormat::Yuv420
-        }
-    } else {
-        ChromaFormat::Yuv420
-    };
-
-    let bit_depth = if wants_10bit {
-        BitDepth::Depth10
-    } else {
-        BitDepth::Depth8
-    };
-    let codec = codecs[0];
-    let moonlight_format_mask = match codec {
-        Codec::H264 => HOST_SUPPORT_H264,
-        Codec::Hevc => HOST_SUPPORT_HEVC,
-        Codec::Av1 => HOST_SUPPORT_AV1,
-    } | if wants_10bit { HOST_SUPPORT_10BIT } else { 0 }
-        | if matches!(chroma, ChromaFormat::Yuv444) {
-            HOST_SUPPORT_YUV444
-        } else {
-            0
+    for codec in &preferences.video.codec_preference {
+        let selected = match codec {
+            Codec::H264 if capabilities.supports_h264 && !hdr => {
+                if wants_yuv444 && host_support_mask & SCM_H264_HIGH8_444 != 0 {
+                    Some((
+                        VIDEO_FORMAT_H264_HIGH8_444,
+                        BitDepth::Depth8,
+                        ChromaFormat::Yuv444,
+                    ))
+                } else if host_support_mask & SCM_H264 != 0 {
+                    Some((VIDEO_FORMAT_H264, BitDepth::Depth8, ChromaFormat::Yuv420))
+                } else {
+                    None
+                }
+            }
+            Codec::Hevc if capabilities.supports_hevc => {
+                if hdr && capabilities.supports_10bit {
+                    if wants_yuv444 && host_support_mask & SCM_HEVC_REXT10_444 != 0 {
+                        Some((
+                            VIDEO_FORMAT_H265_REXT10_444,
+                            BitDepth::Depth10,
+                            ChromaFormat::Yuv444,
+                        ))
+                    } else if host_support_mask & SCM_HEVC_MAIN10 != 0 {
+                        Some((
+                            VIDEO_FORMAT_H265_MAIN10,
+                            BitDepth::Depth10,
+                            ChromaFormat::Yuv420,
+                        ))
+                    } else {
+                        None
+                    }
+                } else if !hdr {
+                    if wants_yuv444 && host_support_mask & SCM_HEVC_REXT8_444 != 0 {
+                        Some((
+                            VIDEO_FORMAT_H265_REXT8_444,
+                            BitDepth::Depth8,
+                            ChromaFormat::Yuv444,
+                        ))
+                    } else if host_support_mask & SCM_HEVC != 0 {
+                        Some((VIDEO_FORMAT_H265, BitDepth::Depth8, ChromaFormat::Yuv420))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Codec::Av1 if capabilities.supports_av1 => {
+                if hdr && capabilities.supports_10bit {
+                    if wants_yuv444 && host_support_mask & SCM_AV1_HIGH10_444 != 0 {
+                        Some((
+                            VIDEO_FORMAT_AV1_HIGH10_444,
+                            BitDepth::Depth10,
+                            ChromaFormat::Yuv444,
+                        ))
+                    } else if host_support_mask & SCM_AV1_MAIN10 != 0 {
+                        Some((
+                            VIDEO_FORMAT_AV1_MAIN10,
+                            BitDepth::Depth10,
+                            ChromaFormat::Yuv420,
+                        ))
+                    } else {
+                        None
+                    }
+                } else if !hdr {
+                    if wants_yuv444 && host_support_mask & SCM_AV1_HIGH8_444 != 0 {
+                        Some((
+                            VIDEO_FORMAT_AV1_HIGH8_444,
+                            BitDepth::Depth8,
+                            ChromaFormat::Yuv444,
+                        ))
+                    } else if host_support_mask & SCM_AV1_MAIN8 != 0 {
+                        Some((
+                            VIDEO_FORMAT_AV1_MAIN8,
+                            BitDepth::Depth8,
+                            ChromaFormat::Yuv420,
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
         };
 
-    Ok(NegotiatedVideoFormat {
-        codec,
-        bit_depth,
-        chroma,
-        hdr,
-        moonlight_format_mask,
-    })
+        if let Some((moonlight_format_mask, bit_depth, chroma)) = selected {
+            return Ok(NegotiatedVideoFormat {
+                codec: *codec,
+                bit_depth,
+                chroma,
+                hdr,
+                moonlight_format_mask,
+            });
+        }
+    }
+
+    Err(MoonlightError::Validation(
+        "no compatible codec profile remains after negotiation".to_string(),
+    ))
 }
 
 #[cfg(test)]
@@ -689,10 +752,12 @@ mod tests {
     }
 
     #[test]
-    fn rejects_av1_when_unavailable_locally() {
+    fn unavailable_av1_preference_falls_back_to_h264() {
         let mut prefs = StreamPreferences::default();
-        prefs.video.codec_preference = vec![Codec::Av1];
-        assert!(validate_preferences(&prefs, Some(&local_caps())).is_err());
+        prefs.video.codec_preference = vec![Codec::Av1, Codec::H264];
+        let negotiated = negotiate_video_format(&prefs, SCM_H264, &local_caps()).unwrap();
+        assert_eq!(negotiated.codec, Codec::H264);
+        assert_eq!(negotiated.moonlight_format_mask, VIDEO_FORMAT_H264);
     }
 
     #[test]
@@ -707,7 +772,7 @@ mod tests {
         let prefs = StreamPreferences::default();
         let negotiated = negotiate_video_format(
             &prefs,
-            HOST_SUPPORT_H264,
+            SCM_H264,
             &ClientVideoCapabilities {
                 supports_h264: true,
                 supports_hevc: true,
@@ -728,7 +793,7 @@ mod tests {
         prefs.video.codec_preference = vec![Codec::Hevc, Codec::H264];
         let negotiated = negotiate_video_format(
             &prefs,
-            HOST_SUPPORT_HEVC | HOST_SUPPORT_H264,
+            SCM_HEVC | SCM_H264,
             &ClientVideoCapabilities {
                 supports_h264: true,
                 supports_hevc: true,
@@ -740,5 +805,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(negotiated.chroma, ChromaFormat::Yuv420);
+        assert_eq!(negotiated.moonlight_format_mask, VIDEO_FORMAT_H265);
+    }
+
+    #[test]
+    fn sunshine_codec_mask_maps_to_exact_hevc_format() {
+        let prefs = StreamPreferences::default();
+        let negotiated = negotiate_video_format(&prefs, 0x0003_0501, &local_caps()).unwrap();
+        assert_eq!(negotiated.codec, Codec::Hevc);
+        assert_eq!(negotiated.bit_depth, BitDepth::Depth8);
+        assert_eq!(negotiated.chroma, ChromaFormat::Yuv420);
+        assert_eq!(negotiated.moonlight_format_mask, VIDEO_FORMAT_H265);
+    }
+
+    #[test]
+    fn h264_is_not_selected_for_hdr() {
+        let mut prefs = StreamPreferences::default();
+        prefs.video.hdr = true;
+        prefs.video.codec_preference = vec![Codec::H264];
+        let caps = ClientVideoCapabilities {
+            supports_h264: true,
+            supports_hevc: false,
+            supports_av1: false,
+            supports_hdr10: true,
+            supports_yuv444: false,
+            supports_10bit: true,
+        };
+        assert!(negotiate_video_format(&prefs, SCM_H264, &caps).is_err());
     }
 }

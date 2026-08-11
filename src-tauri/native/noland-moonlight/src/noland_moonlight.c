@@ -490,10 +490,11 @@ static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit
     runtime->last_video_rtp_timestamp = frame->rtp_timestamp;
     runtime->last_video_hdr_active = frame->hdr_active;
     runtime->last_video_colorspace = frame->colorspace;
+    nl_runtime_unlock(runtime);
+
     renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, raw_decode_unit, frame);
     snprintf(message, sizeof(message), "video frame #%d len=%d", frame->frame_number, frame->full_length);
-    nl_runtime_push_event_locked(runtime, NL_EVENT_VIDEO_FRAME, frame->frame_number, message);
-    nl_runtime_unlock(runtime);
+    nl_runtime_push_event(runtime, NL_EVENT_VIDEO_FRAME, frame->frame_number, message);
     return renderer_result;
   }
   return DR_OK;

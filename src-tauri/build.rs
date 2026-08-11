@@ -299,8 +299,9 @@ fn main() {
         println!("cargo:rustc-link-lib=static=opus");
         println!("cargo:rustc-link-lib=static=SDL2-static");
         for library in [
-            "advapi32", "bcrypt", "dinput8", "dxguid", "gdi32", "imm32", "mf", "mfplat", "mfuuid",
-            "ole32", "oleaut32", "setupapi", "shell32", "user32", "uuid", "version", "winmm",
+            "advapi32", "bcrypt", "d3d11", "dinput8", "dxgi", "dxguid", "gdi32", "imm32", "mf",
+            "mfplat", "mfuuid", "ole32", "oleaut32", "setupapi", "shell32", "user32", "uuid",
+            "version", "winmm",
         ] {
             println!("cargo:rustc-link-lib={library}");
         }

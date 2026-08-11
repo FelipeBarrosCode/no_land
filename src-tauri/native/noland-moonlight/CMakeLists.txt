@@ -38,7 +38,7 @@ elseif(WIN32)
     src/noland_video_renderer_windows.cpp
   )
   target_compile_features(noland_moonlight PRIVATE cxx_std_17)
-  target_link_libraries(noland_moonlight PRIVATE mf mfplat mfuuid ole32 user32 gdi32)
+  target_link_libraries(noland_moonlight PRIVATE d3d11 dxgi mf mfplat mfuuid ole32 user32 gdi32)
 endif()
 
 find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS})
