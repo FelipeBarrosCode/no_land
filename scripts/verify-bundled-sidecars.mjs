@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
@@ -318,12 +318,18 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
   const packagedLibraryRoots = [
     gstreamerRoot,
     join(root, 'usr', 'lib'),
-  ].map((path) => path.split('\\').join('/'));
+  ].map((path) => normalize(path).split('\\').join('/'));
   for (const library of ['libgstreamer-1.0.so', 'libgstapp-1.0.so', 'libgstvideo-1.0.so', 'libcrypto.so']) {
     const line = linkage.stdout.split(/\r?\n/u).find((candidate) => candidate.includes(library));
-    const normalizedLine = line?.split('\\').join('/') ?? '';
-    if (!line || !packagedLibraryRoots.some((path) => normalizedLine.includes(path))) {
-      fail(`Linux application resolved ${library} outside the extracted package in ${label}\nExpected one of: ${packagedLibraryRoots.join(', ')}\n${linkage.stdout}`);
+    const resolvedPath = line?.match(/=>\s+(.+)\s+\(0x[0-9a-f]+\)$/iu)?.[1]?.trim();
+    const normalizedResolvedPath = resolvedPath
+      ? normalize(resolvedPath).split('\\').join('/')
+      : '';
+    const resolvesInsidePackage = packagedLibraryRoots.some((path) => (
+      normalizedResolvedPath === path || normalizedResolvedPath.startsWith(`${path}/`)
+    ));
+    if (!line || !resolvesInsidePackage) {
+      fail(`Linux application resolved ${library} outside the extracted package in ${label}\nResolved path: ${resolvedPath ?? 'unknown'}\nExpected one of: ${packagedLibraryRoots.join(', ')}\n${linkage.stdout}`);
     }
   }
 }
