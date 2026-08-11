@@ -106,15 +106,18 @@ void nl_video_renderer_detach_surface(nl_video_renderer_t* renderer) {
 }
 
 int nl_video_renderer_setup(nl_video_renderer_t* renderer, int video_format, int width, int height, int redraw_rate) {
+  int result;
   if (renderer == NULL) {
     return -1;
   }
-  renderer->configured = true;
+  renderer->configured = false;
   renderer->video_format = video_format;
   renderer->width = width;
   renderer->height = height;
   renderer->redraw_rate = redraw_rate;
-  return nl_video_renderer_platform_setup(renderer, video_format, width, height, redraw_rate);
+  result = nl_video_renderer_platform_setup(renderer, video_format, width, height, redraw_rate);
+  renderer->configured = result == 0;
+  return result;
 }
 
 void nl_video_renderer_start(nl_video_renderer_t* renderer) {
