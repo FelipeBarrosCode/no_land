@@ -1358,7 +1358,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_host.trim().is_empty() || endpoint_port == 0 {
@@ -2252,7 +2252,7 @@ async fn run_existing_instance_orchestration(
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let endpoint_host = instance.wireguard_endpoint_host();
     let endpoint_port = instance.wireguard_port;
     if endpoint_host.trim().is_empty() || endpoint_port == 0 {
