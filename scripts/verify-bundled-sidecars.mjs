@@ -282,9 +282,17 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
   }
 
   const appDynamic = runCapture('readelf', ['-d', appExecutable]);
-  const expectedAppRpath = `$ORIGIN/../lib/${productName}/binaries/gstreamer/${targetTriple}/lib`;
-  if (!appDynamic.stdout.includes('(RPATH)') || !appDynamic.stdout.includes(expectedAppRpath)) {
-    fail(`Linux application does not contain the required inherited GStreamer RPATH in ${label}: ${expectedAppRpath}\n${appDynamic.stdout}`);
+  // linuxdeploy copies direct dependencies into usr/lib and replaces the linked
+  // RPATH with $ORIGIN/../lib. Debian/RPM bundles may retain our resource RPATH.
+  // The clean-environment ldd checks below prove either layout stays in-package.
+  const expectedResourceRpath = `$ORIGIN/../lib/${productName}/binaries/gstreamer/${targetTriple}/lib`;
+  const expectedBundlerRpath = '$ORIGIN/../lib';
+  const hasResourceRpath = appDynamic.stdout.includes('(RPATH)')
+    && appDynamic.stdout.includes(expectedResourceRpath);
+  const hasBundlerRpath = (appDynamic.stdout.includes('(RPATH)') || appDynamic.stdout.includes('(RUNPATH)'))
+    && appDynamic.stdout.includes(expectedBundlerRpath);
+  if (!hasResourceRpath && !hasBundlerRpath) {
+    fail(`Linux application has neither the Noland resource RPATH nor Tauri's packaged-library RUNPATH in ${label}: ${expectedResourceRpath} or ${expectedBundlerRpath}\n${appDynamic.stdout}`);
   }
 
   const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
@@ -303,11 +311,15 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
   }
 
   const linkage = runCapture('ldd', [appExecutable], { env: cleanEnv, allowFailure: true });
-  const normalizedRoot = gstreamerRoot.split('\\').join('/');
+  const packagedLibraryRoots = [
+    gstreamerRoot,
+    join(root, 'usr', 'lib'),
+  ].map((path) => path.split('\\').join('/'));
   for (const library of ['libgstreamer-1.0.so', 'libgstapp-1.0.so', 'libgstvideo-1.0.so', 'libcrypto.so']) {
     const line = linkage.stdout.split(/\r?\n/u).find((candidate) => candidate.includes(library));
-    if (!line || !line.split('\\').join('/').includes(normalizedRoot)) {
-      fail(`Linux application resolved ${library} outside the bundled runtime in ${label}\n${linkage.stdout}`);
+    const normalizedLine = line?.split('\\').join('/') ?? '';
+    if (!line || !packagedLibraryRoots.some((path) => normalizedLine.includes(path))) {
+      fail(`Linux application resolved ${library} outside the extracted package in ${label}\nExpected one of: ${packagedLibraryRoots.join(', ')}\n${linkage.stdout}`);
     }
   }
 }
