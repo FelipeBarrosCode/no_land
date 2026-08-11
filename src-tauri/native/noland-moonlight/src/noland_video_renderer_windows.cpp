@@ -6,7 +6,7 @@
 #include <windows.h>
 #include <codecapi.h>
 #include <icodecapi.h>
-#include <d3d10.h>
+#include <d3d10_1.h>
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 #include <mfapi.h>
