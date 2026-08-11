@@ -329,7 +329,6 @@ interface AsyncActionOptions {
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
   "WireGuardConfigGenerated",
-  "WireGuardAppHandoffStarted",
   "WireGuardWaitingForImport",
   "WireGuardWaitingForActivation",
   "WireGuardConnected",
@@ -456,7 +455,9 @@ async function applyProvisioningEventState(
           }
         : state.appState;
     const nextState = nextBaseState
-      ? applyPostWireguardEventState(nextBaseState, event.state)
+      ? latestPostWireguardSetup
+        ? nextBaseState
+        : applyPostWireguardEventState(nextBaseState, event.state)
       : nextBaseState;
 
     const updates: Partial<AppStore> = {
@@ -560,6 +561,8 @@ function shouldClearBlockingAction(
 }
 
 export const useAppStore = create<AppStore>((set, get) => {
+  let provisioningEventQueue: Promise<void> = Promise.resolve();
+
   const runBusyTask = async <T>(
     options: AsyncActionOptions,
     task: () => Promise<T>,
@@ -743,7 +746,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
 
       await subscribeProvisioningEvents((event) => {
-        void applyProvisioningEventState(event, set);
+        provisioningEventQueue = provisioningEventQueue
+          .then(() => applyProvisioningEventState(event, set))
+          .catch(() => undefined);
       });
 
       set({ _eventsBound: true });

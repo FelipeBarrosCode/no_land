@@ -1793,6 +1793,7 @@ pub async fn setup_wireguard_client(
     app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let preflight = local_environment_check(true);
     if !preflight.ok {
         let missing = preflight
@@ -1886,6 +1887,7 @@ pub async fn reconnect_local_wireguard_client_quick(
     app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let preflight = local_environment_check(true);
     if !preflight.ok {
         let missing = preflight
@@ -1978,6 +1980,7 @@ pub async fn reconnect_local_wireguard_client_quick(
 pub async fn disconnect_local_wireguard_client_command(
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let config_path = {
         let state = context.state.read().await;
         if let Some(instance_id) = state.instance.instance_id {
@@ -2014,6 +2017,7 @@ pub async fn setup_wireguard_app_handoff_command(
     app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<PostWireGuardSetupState, FrontendError> {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     setup_wireguard_app_handoff(&app, context.inner())
         .await
         .map_err(Into::into)
@@ -2082,6 +2086,7 @@ pub async fn retry_setup_stage_command(
     context: State<'_, AppContext>,
     stage: SetupStage,
 ) -> Result<PostWireGuardSetupState, FrontendError> {
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     retry_setup_stage(&app, context.inner(), stage)
         .await
         .map_err(Into::into)
@@ -3128,7 +3133,7 @@ async fn sync_instance_connection_internal(
     let wireguard = WireGuardService {
         defaults: context.config.wireguard.clone(),
     };
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation();
+    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let wireguard_result = wireguard
         .configure(
             &remote,

@@ -6,7 +6,7 @@ use tokio::sync::{Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::{
-    errors::AppResult,
+    errors::{AppError, AppResult},
     models::{
         app_state::{OfferCandidate, PairingContext, PersistedAppState},
         events::ProvisioningEvent,
@@ -69,12 +69,22 @@ impl AppContext {
         }
     }
 
-    pub fn begin_wireguard_mutation(&self) -> WireGuardMutationGuard {
+    pub fn try_begin_wireguard_mutation(&self) -> Option<WireGuardMutationGuard> {
         self.wireguard_mutation_in_progress
-            .store(true, Ordering::SeqCst);
-        WireGuardMutationGuard {
-            flag: self.wireguard_mutation_in_progress.clone(),
-        }
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .ok()
+            .map(|_| WireGuardMutationGuard {
+                flag: self.wireguard_mutation_in_progress.clone(),
+            })
+    }
+
+    pub fn begin_wireguard_mutation(&self) -> AppResult<WireGuardMutationGuard> {
+        self.try_begin_wireguard_mutation().ok_or_else(|| {
+            AppError::Command(
+                "A managed tunnel operation is already running. Wait for it to finish before retrying."
+                    .to_string(),
+            )
+        })
     }
 
     pub fn wireguard_mutation_in_progress(&self) -> bool {

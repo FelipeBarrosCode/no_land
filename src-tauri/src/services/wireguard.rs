@@ -533,14 +533,14 @@ fn setup_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
     let expected = load_expected_local_tunnel(config_path)?;
     if let Some(status) = load_gotatun_runtime_status(&gotatun_status_path(config_path)) {
-        if status.active
-            && status.peer_public_key == expected.peer_public_key
+        let status_fresh =
+            gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix) <= 5;
+        let identity_matches = status.peer_public_key == expected.peer_public_key
             && normalize_allowed_ips(&status.allowed_ips.join(","))
-                == normalize_allowed_ips(&expected.allowed_ips)
-            && can_ping_tunnel_host(&expected.server_ip)
-        {
+                == normalize_allowed_ips(&expected.allowed_ips);
+        if status.active && status_fresh && identity_matches {
             return Ok(
-                "Embedded GotaTun tunnel is already active with the saved Noland identity"
+                "Embedded GotaTun tunnel is active with the saved Noland identity; remote services may still be starting"
                     .to_string(),
             );
         }
@@ -2001,9 +2001,9 @@ pub fn normalize_wireguard_state_from_disk(
 }
 
 pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<()> {
-    if context.wireguard_mutation_in_progress() {
+    let Some(_mutation) = context.try_begin_wireguard_mutation() else {
         return Ok(());
-    }
+    };
 
     let snapshot = context.load_state().await;
     if snapshot.instance.instance_id.is_none() || snapshot.wireguard.server_ip.trim().is_empty() {
@@ -2057,6 +2057,20 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         return Ok(());
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        warn!(
+            "Embedded GotaTun is unhealthy on Windows; automatic elevated repair is disabled to prevent repeated UAC prompts (status_fresh={}, process_active={}, identity_match={}, handshake_recent={}, ping_ok={})",
+            status_fresh,
+            process_active,
+            runtime_matches,
+            handshake_ok,
+            ping_ok
+        );
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
     warn!(
         "Embedded GotaTun health monitor is repairing the Noland-owned tunnel (status_fresh={}, process_active={}, identity_match={}, handshake_recent={}, ping_ok={})",
         status_fresh,
@@ -2065,17 +2079,20 @@ pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<
         handshake_ok,
         ping_ok
     );
-    let _mutation = context.begin_wireguard_mutation();
-    reconnect_managed_gotatun_tunnel(&config_path)?;
-    let repaired_runtime = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
-    let _ = note_monitor_repair_health(true);
-    context
-        .update_state(|state| {
-            state.wireguard.config_path = config_path.display().to_string();
-            apply_expected_tunnel_to_state(state, &expected);
-            state.wireguard.last_runtime_interface = repaired_runtime.interface_name.clone();
-        })
-        .await?;
+    #[cfg(not(target_os = "windows"))]
+    {
+        reconnect_managed_gotatun_tunnel(&config_path)?;
+        let repaired_runtime =
+            collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
+        let _ = note_monitor_repair_health(true);
+        context
+            .update_state(|state| {
+                state.wireguard.config_path = config_path.display().to_string();
+                apply_expected_tunnel_to_state(state, &expected);
+                state.wireguard.last_runtime_interface = repaired_runtime.interface_name.clone();
+            })
+            .await?;
+    }
 
     Ok(())
 }
