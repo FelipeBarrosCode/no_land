@@ -1038,6 +1038,14 @@ fn process_native_event(
                 .map(|existing| existing.kind.as_str()),
             Some("stageFailed" | "error" | "terminated")
         )
+    } else if event.kind == native::nl_event_kind_NL_EVENT_ERROR {
+        matches!(
+            latest_event_tx
+                .borrow()
+                .as_ref()
+                .map(|existing| existing.kind.as_str()),
+            Some("stageFailed" | "terminated")
+        )
     } else {
         false
     };
@@ -1365,7 +1373,11 @@ mod tests {
         platform::NativeSurfaceDescriptor,
     };
 
-    use super::{audio_configuration_native, NativeRuntime};
+    use super::{
+        audio_configuration_native, process_native_event, NativeEvent, NativeRuntime,
+        RuntimeEventMessage,
+    };
+    use tokio::sync::{broadcast, watch};
 
     #[test]
     fn stereo_audio_configuration_matches_moonlight_layout() {
@@ -1373,6 +1385,52 @@ mod tests {
             audio_configuration_native(AudioConfiguration::Stereo),
             0x000302CA
         );
+    }
+
+    #[test]
+    fn generic_start_error_does_not_replace_failed_stage() {
+        let (state_tx, _) = watch::channel(crate::moonlight::domain::SessionState::Connecting);
+        let (latest_event_tx, _) = watch::channel::<Option<RuntimeEventMessage>>(None);
+        let (event_tx, _) = broadcast::channel(4);
+        let mut state = crate::moonlight::domain::SessionState::Connecting;
+
+        process_native_event(
+            &mut state,
+            &state_tx,
+            &latest_event_tx,
+            &event_tx,
+            NativeEvent {
+                kind: native::nl_event_kind_NL_EVENT_STAGE_FAILED,
+                code: -1,
+                message: "RTSP handshake failed (-1)".to_string(),
+            },
+        );
+        process_native_event(
+            &mut state,
+            &state_tx,
+            &latest_event_tx,
+            &event_tx,
+            NativeEvent {
+                kind: native::nl_event_kind_NL_EVENT_ERROR,
+                code: -1,
+                message: "LiStartConnection returned -1".to_string(),
+            },
+        );
+        process_native_event(
+            &mut state,
+            &state_tx,
+            &latest_event_tx,
+            &event_tx,
+            NativeEvent {
+                kind: native::nl_event_kind_NL_EVENT_STOPPED,
+                code: -1,
+                message: "stopped (-1)".to_string(),
+            },
+        );
+
+        let latest = latest_event_tx.borrow().clone().unwrap();
+        assert_eq!(latest.kind, "stageFailed");
+        assert_eq!(latest.message, "RTSP handshake failed (-1)");
     }
 
     #[test]
