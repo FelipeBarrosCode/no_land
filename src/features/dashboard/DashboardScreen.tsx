@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useNavigate } from "react-router-dom";
@@ -142,6 +142,30 @@ export function DashboardScreen({
   const blockingDetail = blockingAction?.detail ?? null;
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
 
+  const hasProvisioningToResume = useMemo(() => {
+    const hasActiveProvisioningInstance =
+      appState.postWireguardSetup.currentInstanceId !== null ||
+      appState.instance.instanceId !== null;
+    if (!hasActiveProvisioningInstance) {
+      return false;
+    }
+
+    if (appState.postWireguardSetup.setupComplete) {
+      return false;
+    }
+
+    if (
+      appState.postWireguardSetup.stage !== "pre_wireguard_existing_flow" &&
+      appState.postWireguardSetup.stage !== "setup_complete"
+    ) {
+      return true;
+    }
+
+    return (
+      appState.orchestrationState !== "Idle" &&
+      appState.orchestrationState !== "Ready"
+    );
+  }, [appState]);
 
   const walletAmountLabel = vastWalletSummary?.displayAmount || "--";
 
@@ -154,6 +178,11 @@ export function DashboardScreen({
   }
 
   async function handlePlay() {
+    if (hasProvisioningToResume) {
+      navigate("/provisioning");
+      return;
+    }
+
     await onStartPlay();
     navigate("/provisioning");
   }
@@ -624,8 +653,9 @@ export function DashboardScreen({
               </div>
               <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
               <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
-                Creates the instance, waits for readiness, runs provisioning,
-                and opens pairing guidance.
+                {hasProvisioningToResume
+                  ? "Returns to your current provisioning session exactly where it stopped."
+                  : "Creates the instance, waits for readiness, runs provisioning, and opens pairing guidance."}
               </p>
             </div>
             <Button
@@ -636,7 +666,7 @@ export function DashboardScreen({
               onClick={handlePlay}
             >
               <SpriteIcon icon="play" />
-              <span className="ml-1">Play</span>
+              <span className="ml-1">{hasProvisioningToResume ? "Resume Provisioning" : "Play"}</span>
             </Button>
           </Card>
         </section>

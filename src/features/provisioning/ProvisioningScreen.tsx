@@ -17,6 +17,9 @@ interface Props {
   appState: PersistedAppState;
   logs: ProvisioningEvent[];
   busy: boolean;
+  provisioningModalDismissed: boolean;
+  onDismissProvisioningModal: () => void;
+  onReopenProvisioningModal: () => void;
   blockingAction: BlockingActionState | null;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
   onSetupMoonlightSunshine: () => Promise<unknown>;
@@ -42,6 +45,9 @@ export function ProvisioningScreen({
   appState,
   logs,
   busy,
+  provisioningModalDismissed,
+  onDismissProvisioningModal,
+  onReopenProvisioningModal,
   blockingAction,
   onSetupWireguardAppHandoff,
   onSetupMoonlightSunshine,
@@ -63,6 +69,24 @@ export function ProvisioningScreen({
     username: "user",
     password: "password",
   };
+  const provisioningModalRequested =
+    appState.orchestrationState === "WireGuardConfigGenerated" ||
+    appState.orchestrationState === "WireGuardAppHandoffStarted" ||
+    appState.orchestrationState === "WireGuardWaitingForImport" ||
+    appState.orchestrationState === "WireGuardWaitingForActivation" ||
+    appState.orchestrationState === "WireGuardVerifying" ||
+    appState.orchestrationState === "WireGuardConnected" ||
+    appState.orchestrationState === "MoonlightSunshineReadyToSetup" ||
+    appState.orchestrationState === "SunshineCredentialsConfiguring" ||
+    appState.orchestrationState === "SunshineVerifying" ||
+    appState.orchestrationState === "MoonlightDetecting" ||
+    appState.orchestrationState === "MoonlightPairingStarted" ||
+    appState.orchestrationState === "MoonlightPinReceived" ||
+    appState.orchestrationState === "SunshinePinSubmitting" ||
+    appState.orchestrationState === "MoonlightSunshinePaired" ||
+    appState.orchestrationState === "Ready";
+  const provisioningModalOpen =
+    provisioningModalRequested && !provisioningModalDismissed;
 
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
@@ -82,6 +106,11 @@ export function ProvisioningScreen({
 
           <div className="flex items-center gap-2">
             <ArcadeSoundToggle />
+            {provisioningModalRequested && provisioningModalDismissed ? (
+              <Button variant="ghost" onClick={onReopenProvisioningModal}>
+                Reopen Setup Modal
+              </Button>
+            ) : null}
             <Link to="/">
               <Button variant="ghost">Close</Button>
             </Link>
@@ -242,23 +271,8 @@ export function ProvisioningScreen({
 
 
       <PostWireguardModal
-        open={
-          appState.orchestrationState === "WireGuardConfigGenerated" ||
-          appState.orchestrationState === "WireGuardAppHandoffStarted" ||
-          appState.orchestrationState === "WireGuardWaitingForImport" ||
-          appState.orchestrationState === "WireGuardWaitingForActivation" ||
-          appState.orchestrationState === "WireGuardVerifying" ||
-          appState.orchestrationState === "WireGuardConnected" ||
-          appState.orchestrationState === "MoonlightSunshineReadyToSetup" ||
-          appState.orchestrationState === "SunshineCredentialsConfiguring" ||
-          appState.orchestrationState === "SunshineVerifying" ||
-          appState.orchestrationState === "MoonlightDetecting" ||
-          appState.orchestrationState === "MoonlightPairingStarted" ||
-          appState.orchestrationState === "MoonlightPinReceived" ||
-          appState.orchestrationState === "SunshinePinSubmitting" ||
-          appState.orchestrationState === "MoonlightSunshinePaired" ||
-          appState.orchestrationState === "Ready"
-        }
+        open={provisioningModalOpen}
+        onClose={onDismissProvisioningModal}
         appState={appState}
         busy={busy}
         onSetupWireguardAppHandoff={onSetupWireguardAppHandoff}

@@ -129,12 +129,15 @@ interface AppStore {
   blockingAction: BlockingActionState | null;
   isBlocking: boolean;
   serverPickerOpen: boolean;
+  provisioningModalDismissed: boolean;
   error: string | null;
   _eventsBound: boolean;
   vastWalletSummary: VastWalletSummary | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
   setServerPickerOpen: (open: boolean) => void;
+  dismissProvisioningModal: () => void;
+  reopenProvisioningModal: () => void;
   runOnboarding: (payload: OnboardingPayload) => Promise<void>;
   saveManualLocation: (payload: ManualLocationInput) => Promise<void>;
   discoverOffers: (page?: number) => Promise<void>;
@@ -342,6 +345,24 @@ const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
   "Error",
 ]);
 
+const PROVISIONING_MODAL_STATES = new Set<OrchestrationState>([
+  "WireGuardConfigGenerated",
+  "WireGuardAppHandoffStarted",
+  "WireGuardWaitingForImport",
+  "WireGuardWaitingForActivation",
+  "WireGuardVerifying",
+  "WireGuardConnected",
+  "MoonlightSunshineReadyToSetup",
+  "SunshineCredentialsConfiguring",
+  "SunshineVerifying",
+  "MoonlightDetecting",
+  "MoonlightPairingStarted",
+  "MoonlightPinReceived",
+  "SunshinePinSubmitting",
+  "MoonlightSunshinePaired",
+  "Ready",
+]);
+
 const POST_WIREGUARD_EVENT_STAGE_MAP: Partial<
   Record<OrchestrationState, SetupStage>
 > = {
@@ -460,10 +481,17 @@ async function applyProvisioningEventState(
         : applyPostWireguardEventState(nextBaseState, event.state)
       : nextBaseState;
 
+    const shouldReopenProvisioningModal =
+      PROVISIONING_MODAL_STATES.has(event.state) &&
+      state.appState?.orchestrationState !== event.state;
+
     const updates: Partial<AppStore> = {
       logs: nextLogs,
       appState: nextState,
       error: event.isError ? event.message : state.error,
+      ...(shouldReopenProvisioningModal
+        ? { provisioningModalDismissed: false }
+        : {}),
     };
 
     if (event.isError || PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
@@ -682,6 +710,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     blockingAction: null,
     isBlocking: false,
     serverPickerOpen: false,
+    provisioningModalDismissed: false,
     error: null,
     _eventsBound: false,
     vastWalletSummary: null,
@@ -733,6 +762,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           logs,
           rentedInstances,
           vastWalletSummary,
+          provisioningModalDismissed: false,
           loading: false,
         });
       } catch (error) {
@@ -755,6 +785,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     setServerPickerOpen: (serverPickerOpen) => set({ serverPickerOpen }),
+
+    dismissProvisioningModal: () => set({ provisioningModalDismissed: true }),
+
+    reopenProvisioningModal: () => set({ provisioningModalDismissed: false }),
 
     runOnboarding: async (payload) => {
       await runBusyTask(
@@ -842,6 +876,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     startPlay: async () => {
+      set({ provisioningModalDismissed: false });
       beginProvisioningBlock(
         "Reserving hardware and starting your cloud gaming session.",
       );
@@ -859,6 +894,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     startPlayExisting: async (instanceId) => {
+      set({ provisioningModalDismissed: false });
       beginProvisioningBlock("Reconnecting to your existing gaming instance.");
       try {
         let mode: string;
@@ -1104,6 +1140,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           blocking: true,
         },
         async () => {
+          set({ provisioningModalDismissed: false });
           const setup = await setupWireguardAppHandoff();
           const appState = await getAppState();
           set({ appState });
@@ -1174,6 +1211,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           try {
+            set({ provisioningModalDismissed: false });
             const setup = await setupMoonlightSunshine();
             await refreshProvisioningState(set);
             return setup;
@@ -1200,6 +1238,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           try {
+            set({ provisioningModalDismissed: false });
             const setup = await retrySetupStage(stage);
             await refreshProvisioningState(set);
             return setup;

@@ -14,6 +14,7 @@ import type {
 
 interface Props {
   open: boolean;
+  onClose: () => void;
   appState: PersistedAppState;
   busy: boolean;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
@@ -51,6 +52,7 @@ const pinStages = new Set<SetupStage>([
 
 export function PostWireguardModal({
   open,
+  onClose,
   appState,
   busy,
   onSetupWireguardAppHandoff,
@@ -129,19 +131,30 @@ export function PostWireguardModal({
               ? "Managed Tunnel Setup"
               : "Moonlight & Sunshine Setup"}
           </h3>
-          <AIPromptHelper
-            topic={
-              isWireguardPhase
-                ? "Managed Tunnel Setup"
-                : "Moonlight & Sunshine Pair Setup"
-            }
-            promptText={
-              isWireguardPhase
-                ? APP_PROMPTS.wireguardModalInfo
-                : APP_PROMPTS.playButtonSection
-            }
-            variant="both"
-          />
+          <div className="flex items-center gap-2">
+            <AIPromptHelper
+              topic={
+                isWireguardPhase
+                  ? "Managed Tunnel Setup"
+                  : "Moonlight & Sunshine Pair Setup"
+              }
+              promptText={
+                isWireguardPhase
+                  ? APP_PROMPTS.wireguardModalInfo
+                  : APP_PROMPTS.playButtonSection
+              }
+              variant="both"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              className="px-3 py-1 text-[16px]"
+              onClick={onClose}
+              aria-label="Close setup modal"
+            >
+              ×
+            </Button>
+          </div>
         </div>
 
         <ModalBody className="px-6 pb-6 pt-2">
