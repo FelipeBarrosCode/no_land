@@ -1285,12 +1285,6 @@ async fn start_embedded_stream_for_host(
         details: Some(error.to_string()),
         retryable: false,
     })?;
-    stream_window.set_focus().map_err(|error| FrontendError {
-        code: "moonlight_error".to_string(),
-        message: "Moonlight operation failed".to_string(),
-        details: Some(error.to_string()),
-        retryable: false,
-    })?;
     stream_window
         .set_fullscreen(true)
         .map_err(|error| FrontendError {
@@ -1299,6 +1293,12 @@ async fn start_embedded_stream_for_host(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
     let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
         crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
@@ -3134,7 +3134,7 @@ async fn refresh_instance_connection_state(
     Ok(())
 }
 
-async fn sync_instance_connection_internal(
+pub(crate) async fn sync_instance_connection_internal(
     app: &AppHandle,
     context: &AppContext,
     instance_id: u64,
@@ -4022,12 +4022,6 @@ pub async fn moonlight_start_stream(
         details: Some(error.to_string()),
         retryable: false,
     })?;
-    stream_window.set_focus().map_err(|error| FrontendError {
-        code: "moonlight_error".to_string(),
-        message: "Moonlight operation failed".to_string(),
-        details: Some(error.to_string()),
-        retryable: false,
-    })?;
     stream_window
         .set_fullscreen(true)
         .map_err(|error| FrontendError {
@@ -4036,6 +4030,12 @@ pub async fn moonlight_start_stream(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
     let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
         crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
@@ -4130,12 +4130,21 @@ pub async fn moonlight_activate_native_mouse_capture(
     app: AppHandle,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<bool, FrontendError> {
-    moonlight.input.begin_capture(CaptureMouseMode::Relative);
+    let capture_mode = moonlight
+        .active_session_preferences
+        .lock()
+        .ok()
+        .and_then(|preferences| preferences.as_ref().map(|value| value.input.mouse_mode))
+        .map(|mode| match mode {
+            crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+            crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+        })
+        .unwrap_or_else(|| moonlight.input.capture_state().mouse_mode);
+    moonlight.input.begin_capture(capture_mode);
     let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
         return Ok(false);
     };
-    activate_native_stream_input(&window, CaptureMouseMode::Relative)
-        .map_err(moonlight_frontend_error)
+    activate_native_stream_input(&window, capture_mode).map_err(moonlight_frontend_error)
 }
 
 #[tauri::command]

@@ -538,6 +538,64 @@ impl OrchestrationService {
             )
             .await;
         }
+
+        let mut reconnect_instance_ids = state
+            .provisioned_servers
+            .iter()
+            .filter(|server| {
+                !server.wireguard_config_path.trim().is_empty()
+                    && !server.ssh_host.trim().is_empty()
+                    && server.ssh_port != 0
+                    && matches!(
+                        server.last_state,
+                        OrchestrationState::Ready
+                            | OrchestrationState::WireGuardConnected
+                            | OrchestrationState::MoonlightSunshineReadyToSetup
+                    )
+            })
+            .map(|server| server.instance_id)
+            .collect::<Vec<_>>();
+
+        if reconnect_instance_ids.is_empty() {
+            let should_attempt_active_reconnect = state.instance.instance_id.is_some()
+                && (matches!(
+                    state.post_wireguard_setup.wireguard_setup_status,
+                    crate::models::app_state::WireGuardSetupStatus::Connected
+                        | crate::models::app_state::WireGuardSetupStatus::Verifying
+                ) || state.post_wireguard_setup.setup_complete);
+            if should_attempt_active_reconnect {
+                if let Some(instance_id) = state.instance.instance_id {
+                    reconnect_instance_ids.push(instance_id);
+                }
+            }
+        }
+
+        reconnect_instance_ids.sort_unstable();
+        reconnect_instance_ids.dedup();
+
+        for instance_id in reconnect_instance_ids {
+            info!(
+                instance_id,
+                "Attempting to restore managed WireGuard tunnel for persisted instance on app startup"
+            );
+
+            match crate::commands::sync_instance_connection_internal(app, context, instance_id)
+                .await
+            {
+                Ok(message) => {
+                    info!(
+                        instance_id,
+                        "Restored managed WireGuard tunnel on startup: {}", message
+                    );
+                }
+                Err(error) => {
+                    warn!(
+                        instance_id,
+                        "Failed restoring managed WireGuard tunnel on startup: {}", error
+                    );
+                }
+            }
+        }
     }
 }
 

@@ -635,6 +635,14 @@ fn request_managed_gotatun_stop(config_path: &Path) -> AppResult<()> {
     request_managed_gotatun_stop_in_runtime(&gotatun_runtime_dir(config_path))
 }
 
+fn windows_dev_auto_repair_tunnel_enabled() -> bool {
+    cfg!(target_os = "windows")
+        && std::env::var("NOLAND_WINDOWS_DEV_AUTO_REPAIR_TUNNEL")
+            .ok()
+            .as_deref()
+            .is_some_and(|value| value == "1")
+}
+
 fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
     for runtime_dir in legacy_gotatun_runtime_dirs(config_path) {
         request_managed_gotatun_stop_in_runtime(&runtime_dir)?;
@@ -679,18 +687,35 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
     let expected = load_expected_local_tunnel(config_path)?;
     let expected_fingerprint = config_fingerprint(config_path)?;
-    let status = load_gotatun_runtime_status(&gotatun_status_path(config_path)).ok_or_else(|| {
-        AppError::Command(
-            "The managed GotaTun runtime has no active ownership status. Use Setup Tunnel or Reconnect."
-                .to_string(),
-        )
-    })?;
+    let auto_repair = windows_dev_auto_repair_tunnel_enabled();
+    let repair_stale_runtime = |reason: &str| -> AppResult<String> {
+        if auto_repair {
+            info!(
+                "Windows dev mode auto-repairing managed GotaTun runtime for {}: {}",
+                config_path.display(),
+                reason
+            );
+            stop_legacy_managed_gotatun_helpers(config_path)?;
+            request_managed_gotatun_stop(config_path)?;
+            return reconnect_managed_gotatun_tunnel(config_path);
+        }
+        Err(AppError::Command(reason.to_string()))
+    };
+
+    let status = match load_gotatun_runtime_status(&gotatun_status_path(config_path)) {
+        Some(status) => status,
+        None => {
+            return repair_stale_runtime(
+                "The managed GotaTun runtime has no active ownership status. Use Setup Tunnel or Reconnect.",
+            )
+        }
+    };
     let status_age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
     if !status.active || status_age > 5 {
-        return Err(AppError::Command(format!(
+        return repair_stale_runtime(&format!(
             "The managed GotaTun helper is not actively reporting (pid={}, status_age={}s). Use Reconnect to replace stale runtime state.",
             status.pid, status_age
-        )));
+        ));
     }
     if status.config_path != config_path.display().to_string()
         || status.config_fingerprint != expected_fingerprint
@@ -698,10 +723,9 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
         || normalize_allowed_ips(&status.allowed_ips.join(","))
             != normalize_allowed_ips(&expected.allowed_ips)
     {
-        return Err(AppError::Command(
-            "The managed GotaTun helper owns a different or outdated tunnel config. Use Reconnect to apply the current instance config."
-                .to_string(),
-        ));
+        return repair_stale_runtime(
+            "The managed GotaTun helper owns a different or outdated tunnel config. Use Reconnect to apply the current instance config.",
+        );
     }
 
     let handshake_recent = status

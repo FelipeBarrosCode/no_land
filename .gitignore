@@ -7,18 +7,50 @@ src-tauri/gen/
 src-tauri/bundled/
 src-tauri/.native-deps/
 src-tauri/native/build/
-src-tauri/binaries/noland-mic-sender-*
+
+# Packaging staging area recreated by prepare-mic-sidecar.mjs
+src-tauri/binaries/
 
 # Sidecar build outputs
 .tmp-sidecar-isolated/
 mic-sidecar/target/
 vm-cloud-mic-agent/target/
-.tmp-sidecar-isolated/
 
+# Local tools and temporary/generated workspace files
+.tmp/
+src-tauri/.local-tools/
+*.tmp
+*.temp
+*.bak
+*.orig
+
+# Logs and local audio dumps
 *.log
+*.log.*
+*.trace
+*.out
+*.err
+*.pcm
+*.wav
+*.mp3
+*.aac
+*.opus
+*.flac
+
+# Editor / OS cruft
 .DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.vs/
 .env
 AuthKey_SNUVSFN2NN.p8
 DeveloperID.p12
 DeveloperID-modern.p12
 src-tauri/platform/*
+
+# Local diagnostics / ad-hoc machine-specific scripts
+/tmp-*.ps1
+*.pdb
+*.ilk
+*.dmp

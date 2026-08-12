@@ -1,5 +1,7 @@
 use std::{ffi::CStr, time::Duration};
 
+use uuid::Uuid;
+
 use crate::moonlight::{
     domain::{
         LaunchOperation, LaunchRequestParameters, LaunchResult, MoonlightError, PersistedIdentity,
@@ -26,13 +28,17 @@ pub fn build_launch_or_resume_request(
     };
 
     let mut query = vec![
+        ("uniqueid".to_string(), identity.unique_id.clone()),
+        ("uuid".to_string(), Uuid::new_v4().simple().to_string()),
         ("appid".to_string(), parameters.app_id.to_string()),
         ("mode".to_string(), parameters.mode.clone()),
+        ("additionalStates".to_string(), "1".to_string()),
+        ("sops".to_string(), "1".to_string()),
         ("rikey".to_string(), parameters.ri_key_hex.clone()),
         ("rikeyid".to_string(), parameters.ri_key_id.clone()),
         (
             "localAudioPlayMode".to_string(),
-            if parameters.play_local_audio {
+            if parameters.play_audio_on_host {
                 "1"
             } else {
                 "0"
@@ -44,7 +50,15 @@ pub fn build_launch_or_resume_request(
             surround_audio_info_value(parameters.audio_configuration).to_string(),
         ),
         (
+            "remoteControllersBitmap".to_string(),
+            parameters.active_gamepad_mask.to_string(),
+        ),
+        (
             "gcmap".to_string(),
+            parameters.active_gamepad_mask.to_string(),
+        ),
+        (
+            "gcpersist".to_string(),
             if parameters.persist_gamepads_after_disconnect {
                 "1"
             } else {
@@ -191,7 +205,8 @@ mod tests {
                 ri_key_hex: "abcd".to_string(),
                 ri_key_id: "123".to_string(),
                 audio_configuration: AudioConfiguration::Stereo,
-                play_local_audio: true,
+                play_audio_on_host: true,
+                active_gamepad_mask: 0,
                 persist_gamepads_after_disconnect: false,
                 hdr: false,
             },
@@ -202,11 +217,19 @@ mod tests {
             req.scheme,
             crate::moonlight::infrastructure::gamestream::GameStreamScheme::Https
         ));
+        assert!(req.query.iter().any(|(k, v)| k == "uniqueid" && v == "abc"));
+        assert!(req.query.iter().any(|(k, v)| k == "uuid" && !v.is_empty()));
         assert!(req.query.iter().any(|(k, _)| k == "rikey"));
         assert!(req
             .query
             .iter()
             .any(|(k, v)| k == "surroundAudioInfo" && v == "196610"));
+        assert!(req
+            .query
+            .iter()
+            .any(|(k, v)| k == "localAudioPlayMode" && v == "1"));
+        assert!(req.query.iter().any(|(k, v)| k == "gcmap" && v == "0"));
+        assert!(req.query.iter().any(|(k, v)| k == "gcpersist" && v == "0"));
         assert!(req.query.iter().any(|(k, v)| k == "hdrMode" && v == "0"));
         assert!(req.query.iter().any(|(k, v)| k == "corever" && v == "1"));
         assert!(req.identity.is_some());

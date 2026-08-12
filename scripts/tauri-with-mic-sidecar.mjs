@@ -39,6 +39,8 @@ const tauriEnv = {
   ...nativeEnv,
 };
 
+
+
 if (process.platform === 'darwin' && mode === 'build') {
   delete tauriEnv.APPLE_ID;
   delete tauriEnv.APPLE_PASSWORD;
@@ -58,7 +60,12 @@ if (managedNetHelper) {
 }
 if (target?.includes('windows')) {
   const stagedWintun = join(repoRoot, 'src-tauri', 'binaries', `wintun-${target}.dll`);
-  const wintun = process.env.NOLAND_WINTUN_DLL?.trim() || (existsSync(stagedWintun) ? stagedWintun : undefined);
+  const installedWintun = process.env.ProgramFiles
+    ? join(process.env.ProgramFiles, 'WireGuard', 'wintun.dll')
+    : undefined;
+  const wintun = process.env.NOLAND_WINTUN_DLL?.trim()
+    || (existsSync(stagedWintun) ? stagedWintun : undefined)
+    || (installedWintun && existsSync(installedWintun) ? installedWintun : undefined);
   if (wintun) {
     tauriEnv.NOLAND_WINTUN_DLL = wintun;
   }
@@ -71,6 +78,10 @@ if (mode === 'dev') {
   tauriEnv.NOLAND_MIC_SENDER_BIN = target
     ? join(sidecarTargetDir, target, profileDir, executableName)
     : join(sidecarTargetDir, profileDir, executableName);
+
+  if (process.platform === 'win32') {
+    tauriEnv.NOLAND_WINDOWS_DEV_AUTO_REPAIR_TUNNEL = '1';
+  }
 
   if (process.platform === 'darwin' && target?.endsWith('apple-darwin')) {
     stageMacosDevRuntimeDeps(target);

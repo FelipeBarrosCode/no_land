@@ -12,10 +12,10 @@ extern "C" {
 #endif
 
 struct oblas_impl {
-    void (*axpy)(uint8_t *a, uint8_t *b, uint8_t u, unsigned k);
+    void (*axpy)(uint8_t *a, const uint8_t *b, uint8_t u, unsigned k);
     void (*scal)(uint8_t *a, uint8_t u, unsigned k);
-    void (*axiy)(uint8_t *a, uint8_t *b, uint8_t u, unsigned k);
-    void (*axpyb32)(uint8_t *a, uint32_t *b, uint8_t u, unsigned k);
+    void (*axiy)(uint8_t *a, const uint8_t *b, uint8_t u, unsigned k);
+    void (*axpyb32)(uint8_t *a, const uint32_t *b, uint8_t u, unsigned k);
     size_t align_size;
 };
 

@@ -1080,6 +1080,48 @@ fn map_native_result(result: native::nl_result_t, operation: &str) -> Result<(),
     }
 }
 
+fn format_runtime_event_for_error(event: &RuntimeEventMessage) -> String {
+    if event.message.trim().is_empty() {
+        format!("{} ({})", event.kind, event.code)
+    } else {
+        format!("{}: {} ({})", event.kind, event.message, event.code)
+    }
+}
+
+fn enrich_native_start_error(
+    error: MoonlightError,
+    latest_event: Option<&RuntimeEventMessage>,
+    stats: Option<&RuntimeStatistics>,
+) -> MoonlightError {
+    let mut details = Vec::new();
+
+    if let Some(event) = latest_event {
+        details.push(format!(
+            "latest_event={}",
+            format_runtime_event_for_error(event)
+        ));
+    }
+
+    if let Some(stats) = stats {
+        details.push(format!(
+            "state={} renderer_ready={} video_session_active={} video_frame_count={} submitted_frames={} dropped_frames={} audio_samples={}",
+            stats.state,
+            stats.renderer_ready,
+            stats.video_session_active,
+            stats.video_frame_count,
+            stats.renderer_submitted_frame_count,
+            stats.renderer_dropped_frame_count,
+            stats.audio_sample_count,
+        ));
+    }
+
+    if details.is_empty() {
+        error
+    } else {
+        MoonlightError::Native(format!("{error}; {}", details.join("; ")))
+    }
+}
+
 pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<RuntimeCommand>(32);
     let (state_tx, state_rx) = watch::channel(SessionState::Idle);
@@ -1213,7 +1255,36 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                 let _ = state_tx.send(state.clone());
                                 last_video_frame_count = 0;
                                 last_video_progress_at = Instant::now();
-                                native_runtime.start(&request)?;
+
+                                if let Err(error) = native_runtime.start(&request) {
+                                    if let Ok(native_events) = native_runtime.drain_events() {
+                                        for event in native_events {
+                                            process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
+                                        }
+                                    }
+
+                                    let runtime_stats = native_runtime.read_stats().ok().map(|stats| {
+                                        let runtime_stats = runtime_statistics_from_native(&state, &stats);
+                                        let _ = stats_tx.send(runtime_stats.clone());
+                                        runtime_stats
+                                    });
+                                    let latest_event = latest_event_tx.borrow().clone();
+                                    let enriched_error = enrich_native_start_error(
+                                        error,
+                                        latest_event.as_ref(),
+                                        runtime_stats.as_ref(),
+                                    );
+                                    tracing::error!(
+                                        host_id = %request.host_id,
+                                        app_id = request.app_id,
+                                        error = %enriched_error,
+                                        latest_event = ?latest_event,
+                                        runtime_stats = ?runtime_stats,
+                                        "moonlight native start failed"
+                                    );
+                                    return Err(enriched_error);
+                                }
+
                                 if let Ok(native_events) = native_runtime.drain_events() {
                                     for event in native_events {
                                         process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);

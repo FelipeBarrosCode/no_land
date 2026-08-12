@@ -38,41 +38,44 @@ static inline uint8_t gf2_8_mul(uint16_t a, uint16_t b)
     return GF2_8_EXP[GF2_8_LOG[a] + GF2_8_LOG[b]];
 }
 
-static void obl_axpy_ref(u8 *a, u8 *b, u8 u, unsigned k)
+static void obl_axpy_ref(u8 *a, const u8 *b, u8 u, unsigned k)
 {
-    register u8 *ap = a, *ae = &a[k], *bp = b;
+    register u8 *ap = a, *ae = &a[k];
+    register const u8 *bp = b;
     for (; ap != ae; ap++, bp++)
         *ap ^= gf2_8_mul(u, *bp);
 }
 
-static void obl_axiy_ref(u8 *a, u8 *b, u8 u, unsigned k)
+static void obl_axiy_ref(u8 *a, const u8 *b, u8 u, unsigned k)
 {
-    register u8 *ap = a, *ae = &a[k], *bp = b;
+    register u8 *ap = a, *ae = &a[k];
+    register const u8 *bp = b;
     for (; ap != ae; ap++, bp++)
         *ap = gf2_8_mul(u, *bp);
 }
 
 #else
-static void obl_axpy_ref(u8 *restrict a, u8 *restrict b, u8 u, unsigned k)
+static void obl_axpy_ref(u8 *a, const u8 *b, u8 u, unsigned k)
 {
     register const u8 *u_row = &GF2_8_MUL[u << 8];
-    register u8 *restrict ap = a;
+    register u8 *ap = a;
     register u8 *ae = &a[k];
-    register const u8 *restrict bp = b;
+    register const u8 *bp = b;
     for (; ap < ae; ap++, bp++)
         *ap ^= u_row[*bp];
 }
 
-static void obl_axiy_ref(u8 *a, u8 *b, u8 u, unsigned k)
+static void obl_axiy_ref(u8 *a, const u8 *b, u8 u, unsigned k)
 {
     register const u8 *u_row = &GF2_8_MUL[u << 8];
-    register u8 *ap = a, *ae = &a[k], *bp = b;
+    register u8 *ap = a, *ae = &a[k];
+    register const u8 *bp = b;
     for (; ap != ae; ap++, bp++)
         *ap = u_row[*bp];
 }
 #endif
 
-static void obl_axpyb32_ref(u8 *a, u32 *b, u8 u, unsigned k)
+static void obl_axpyb32_ref(u8 *a, const u32 *b, u8 u, unsigned k)
 {
     unsigned idx = 0, p = 0;
     unsigned k_fast = k & ~31;
@@ -216,7 +219,7 @@ GENERATE_IMPL(ssse3_gfni, __attribute__((target("ssse3,gfni"))), __m128i, _mm_lo
 GENERATE_IMPL(ssse3_std, __attribute__((target("ssse3"))), __m128i, _mm_loadu_si128, _mm_storeu_si128, VEC_INIT_ssse3_std,
               VEC_CORE_ssse3_std, _mm_xor_si128)
 
-__attribute__((target("avx512f,avx512bw,avx512dq,avx512vl"))) static void obl_axpyb32_avx512(u8 *a, u32 *b, u8 u, unsigned k)
+__attribute__((target("avx512f,avx512bw,avx512dq,avx512vl"))) static void obl_axpyb32_avx512(u8 *a, const u32 *b, u8 u, unsigned k)
 {
     __m512i *ap = (__m512i *)a;
     __m512i *ae = (__m512i *)(a + (k & ~63));
@@ -240,7 +243,7 @@ __attribute__((target("avx512f,avx512bw,avx512dq,avx512vl"))) static void obl_ax
     obl_axpyb32_ref((u8 *)ap, b + p, u, k & 63);
 }
 
-__attribute__((target("avx2"))) static void obl_axpyb32_avx2(u8 *a, u32 *b, u8 u, unsigned k)
+__attribute__((target("avx2"))) static void obl_axpyb32_avx2(u8 *a, const u32 *b, u8 u, unsigned k)
 {
     __m256i *ap = (__m256i *)a;
     __m256i *ae = (__m256i *)(a + (k & ~31));
@@ -260,7 +263,7 @@ __attribute__((target("avx2"))) static void obl_axpyb32_avx2(u8 *a, u32 *b, u8 u
     obl_axpyb32_ref((u8 *)ap, b + p, u, k & 31);
 }
 
-__attribute__((target("ssse3"))) static void obl_axpyb32_ssse3(u8 *a, u32 *b, u8 u, unsigned k)
+__attribute__((target("ssse3"))) static void obl_axpyb32_ssse3(u8 *a, const u32 *b, u8 u, unsigned k)
 {
     __m128i *ap = (__m128i *)a;
     __m128i *ae = (__m128i *)(a + (k & ~31));
@@ -315,7 +318,7 @@ static inline uint8x16_t vqtbl1q_u8(uint8x16_t tbl, uint8x16_t idx)
 #define VEC_STORE_neon(ptr, val) vst1q_u8((uint8_t *)(ptr), val)
 GENERATE_IMPL(neon, , uint8x16_t, VEC_LOAD_neon, VEC_STORE_neon, VEC_INIT_neon, VEC_CORE_neon, veorq_u8)
 
-static void obl_axpyb32_neon(u8 *a, u32 *b, u8 u, unsigned k)
+static void obl_axpyb32_neon(u8 *a, const u32 *b, u8 u, unsigned k)
 {
     uint8_t *ap = (uint8_t *)a;
     uint8_t *ae = (uint8_t *)(a + (k & ~31));

@@ -185,12 +185,12 @@ export function StreamWindowScreen() {
 
   const detail = useMemo(() => {
     if (preferredMouseMode === "absolute") {
-      return "Native macOS stream view owns input. WebView forwarding is disabled for the normal path.";
+      return "Native stream window owns desktop mouse and keyboard input. Capture restores when the window regains focus.";
     }
     if (preferredMouseMode === "relative") {
-      return "Native macOS stream view owns relative mouse and keyboard capture. WebView forwarding is disabled for the normal path.";
+      return "Native stream window owns relative mouse and keyboard input. Capture restores when the window regains focus.";
     }
-    return "Native macOS stream view owns stream input. WebView forwarding is disabled for the normal path.";
+    return "Native stream window owns stream input. Capture restores when the window regains focus.";
   }, [preferredMouseMode]);
 
   const handleDisconnectStream = async () => {

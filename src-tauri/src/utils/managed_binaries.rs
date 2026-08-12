@@ -37,10 +37,39 @@ pub fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return metadata.permissions().mode() & 0o111 != 0;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
     }
 
-    #[allow(unreachable_code)]
+    !is_debug_placeholder_stub(path) && has_valid_executable_header(path)
+}
+
+fn is_debug_placeholder_stub(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let preview_len = bytes.len().min(512);
+    let preview = String::from_utf8_lossy(&bytes[..preview_len]).to_ascii_lowercase();
+    preview.contains("debug placeholder") && preview.contains("npm run tauri:dev")
+}
+
+fn has_valid_executable_header(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let uses_exe_suffix = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false);
+        if uses_exe_suffix {
+            let Ok(bytes) = fs::read(path) else {
+                return false;
+            };
+            return bytes.len() >= 2 && bytes[0] == b'M' && bytes[1] == b'Z';
+        }
+    }
+
     true
 }
 
