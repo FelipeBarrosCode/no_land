@@ -21,8 +21,11 @@ use tokio::time::{sleep, timeout};
 use tracing::{info, warn};
 
 use super::{
-    app_context::AppContext, orchestration, remote_exec::RemoteExec, ssh_keys::SshKeyService,
-    wireguard::setup_local_wireguard_client,
+    app_context::AppContext,
+    orchestration,
+    remote_exec::RemoteExec,
+    ssh_keys::SshKeyService,
+    wireguard::{setup_local_wireguard_client, verify_managed_gotatun_tunnel},
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -319,7 +322,28 @@ pub async fn verify_wireguard_connection(
     )
     .await;
 
-    let result = tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
+    let config_path = active_wireguard_config_path(context).await?;
+    let tunnel_verification = verify_managed_gotatun_tunnel(&config_path);
+    let application_reachability =
+        tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
+    let result = match tunnel_verification {
+        Ok(detail) => ReachabilityResult {
+            reachable: true,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: application_reachability.reachable_ports,
+            error: (!application_reachability.reachable).then_some(format!(
+                "{detail}. The tunnel is healthy; Sunshine ports are not ready yet and will be checked during streaming setup."
+            )),
+        },
+        Err(error) => ReachabilityResult {
+            reachable: false,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    };
     if result.reachable {
         context
             .update_state(|state| {
@@ -337,10 +361,17 @@ pub async fn verify_wireguard_connection(
             context,
             OrchestrationState::WireGuardConnected,
             "Connection verified",
-            Some(format!(
-                "Reachable ports on {}: {:?}",
-                TUNNEL_HOST, result.reachable_ports
-            )),
+            Some(if result.reachable_ports.is_empty() {
+                format!(
+                    "Embedded GotaTun is healthy for {}. Sunshine ports are still starting and will be verified next.",
+                    TUNNEL_HOST
+                )
+            } else {
+                format!(
+                    "Embedded GotaTun is healthy; reachable Sunshine ports on {}: {:?}",
+                    TUNNEL_HOST, result.reachable_ports
+                )
+            }),
             false,
         )
         .await;
@@ -1558,6 +1589,17 @@ async fn set_setup_failure(
         .update_state(|state| {
             state.post_wireguard_setup.stage = SetupStage::Failed;
             state.post_wireguard_setup.last_error = Some(error.clone());
+            if matches!(
+                stage,
+                SetupStage::WireguardConfigGenerated
+                    | SetupStage::WireguardAppHandoffStarted
+                    | SetupStage::WireguardWaitingForImport
+                    | SetupStage::WireguardWaitingForActivation
+                    | SetupStage::WireguardVerifying
+                    | SetupStage::WireguardConnected
+            ) {
+                state.post_wireguard_setup.wireguard_reachable_ports.clear();
+            }
             state.post_wireguard_setup.wireguard_setup_status = if matches!(
                 stage,
                 SetupStage::WireguardConfigGenerated

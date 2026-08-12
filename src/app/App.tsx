@@ -138,6 +138,15 @@ function ProvisioningRoute() {
   const logs = useAppStore((state) => state.logs);
   const busy = useAppStore((state) => state.busy);
   const blockingAction = useAppStore((state) => state.blockingAction);
+  const provisioningModalDismissed = useAppStore(
+    (state) => state.provisioningModalDismissed,
+  );
+  const dismissProvisioningModal = useAppStore(
+    (state) => state.dismissProvisioningModal,
+  );
+  const reopenProvisioningModal = useAppStore(
+    (state) => state.reopenProvisioningModal,
+  );
   const setupWireguardAppHandoff = useAppStore(
     (state) => state.setupWireguardAppHandoff,
   );
@@ -175,6 +184,9 @@ function ProvisioningRoute() {
       appState={appState}
       logs={logs}
       busy={busy}
+      provisioningModalDismissed={provisioningModalDismissed}
+      onDismissProvisioningModal={dismissProvisioningModal}
+      onReopenProvisioningModal={reopenProvisioningModal}
       blockingAction={blockingAction}
       onSetupWireguardAppHandoff={setupWireguardAppHandoff}
       onSetupMoonlightSunshine={setupMoonlightSunshine}

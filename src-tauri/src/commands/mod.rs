@@ -1788,6 +1788,26 @@ pub async fn skip_pairing_and_continue(
     Ok(context.state.read().await.clone())
 }
 
+fn active_instance_wireguard_config_path(state: &PersistedAppState) -> Option<String> {
+    let instance_id = state.instance.instance_id?;
+    if let Some(path) = state
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == instance_id)
+        .map(|record| record.wireguard_config_path.clone())
+        .filter(|path| Path::new(path).exists())
+    {
+        return Some(path);
+    }
+
+    let fallback = state.wireguard.config_path.trim();
+    let instance_segment = format!("/{instance_id}/");
+    (!fallback.is_empty()
+        && Path::new(fallback).exists()
+        && fallback.replace('\\', "/").contains(&instance_segment))
+    .then(|| fallback.to_string())
+}
+
 #[tauri::command]
 pub async fn setup_wireguard_client(
     app: AppHandle,
@@ -1811,21 +1831,7 @@ pub async fn setup_wireguard_client(
 
     let config_path = {
         let state = context.state.read().await;
-        if let Some(instance_id) = state.instance.instance_id {
-            if let Some(path) = state
-                .provisioned_servers
-                .iter()
-                .find(|record| record.instance_id == instance_id)
-                .map(|record| record.wireguard_config_path.clone())
-                .filter(|path| std::path::Path::new(path).exists())
-            {
-                path
-            } else {
-                state.wireguard.config_path.clone()
-            }
-        } else {
-            state.wireguard.config_path.clone()
-        }
+        active_instance_wireguard_config_path(&state).unwrap_or_default()
     };
 
     if config_path.trim().is_empty() {
@@ -1905,21 +1911,7 @@ pub async fn reconnect_local_wireguard_client_quick(
 
     let config_path = {
         let state = context.state.read().await;
-        if let Some(instance_id) = state.instance.instance_id {
-            if let Some(path) = state
-                .provisioned_servers
-                .iter()
-                .find(|record| record.instance_id == instance_id)
-                .map(|record| record.wireguard_config_path.clone())
-                .filter(|path| std::path::Path::new(path).exists())
-            {
-                path
-            } else {
-                state.wireguard.config_path.clone()
-            }
-        } else {
-            state.wireguard.config_path.clone()
-        }
+        active_instance_wireguard_config_path(&state).unwrap_or_default()
     };
 
     if config_path.trim().is_empty() {
@@ -1983,21 +1975,7 @@ pub async fn disconnect_local_wireguard_client_command(
     let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
     let config_path = {
         let state = context.state.read().await;
-        if let Some(instance_id) = state.instance.instance_id {
-            if let Some(path) = state
-                .provisioned_servers
-                .iter()
-                .find(|record| record.instance_id == instance_id)
-                .map(|record| record.wireguard_config_path.clone())
-                .filter(|path| std::path::Path::new(path).exists())
-            {
-                path
-            } else {
-                state.wireguard.config_path.clone()
-            }
-        } else {
-            state.wireguard.config_path.clone()
-        }
+        active_instance_wireguard_config_path(&state).unwrap_or_default()
     };
 
     if config_path.trim().is_empty() {
@@ -2008,6 +1986,17 @@ pub async fn disconnect_local_wireguard_client_command(
     }
 
     let message = teardown_local_wireguard_client(Path::new(&config_path))?;
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.wireguard_setup_status =
+                crate::models::app_state::WireGuardSetupStatus::NotStarted;
+            state.post_wireguard_setup.stage = SetupStage::WireguardConfigGenerated;
+            state.post_wireguard_setup.wireguard_reachable_ports.clear();
+            state.post_wireguard_setup.last_error = None;
+            state.wireguard.last_runtime_interface.clear();
+            state.orchestration_state = OrchestrationState::WireGuardConfigGenerated;
+        })
+        .await?;
 
     Ok(message)
 }

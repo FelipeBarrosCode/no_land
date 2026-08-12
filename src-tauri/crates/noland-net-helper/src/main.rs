@@ -4,7 +4,7 @@
 )]
 
 use std::{
-    fs,
+    fs::{self, File, OpenOptions},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
     process,
@@ -16,6 +16,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use fs2::FileExt;
 use gotatun::{
     device::{DefaultDeviceTransports, Device, DeviceBuilder, Peer},
     tun::tun_async_device::TunDevice,
@@ -23,6 +24,7 @@ use gotatun::{
 };
 use ipnetwork::IpNetwork;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 use tun::AbstractDevice;
 
@@ -30,6 +32,7 @@ use tun::AbstractDevice;
 const INTERFACE_NAME: &str = "nolandwg0";
 const STATUS_FILE_NAME: &str = "status.json";
 const STOP_REQUEST_FILE_NAME: &str = "stop.request";
+const OWNER_LOCK_FILE_NAME: &str = "owner.lock";
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +76,7 @@ struct RuntimeStatus {
     peer_public_key: String,
     allowed_ips: Vec<String>,
     endpoint: String,
+    config_fingerprint: String,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -81,7 +85,7 @@ struct RuntimeStatus {
 }
 
 impl RuntimeStatus {
-    fn starting(args: &Args) -> Self {
+    fn starting(args: &Args, config_fingerprint: String) -> Self {
         Self {
             engine: "gotatun-embedded-0.7.1",
             active: false,
@@ -91,6 +95,7 @@ impl RuntimeStatus {
             peer_public_key: String::new(),
             allowed_ips: Vec::new(),
             endpoint: String::new(),
+            config_fingerprint,
             latest_handshake_age_secs: None,
             rx_bytes: 0,
             tx_bytes: 0,
@@ -153,6 +158,22 @@ fn remove_windows_adapter_address(interface_name: &str, address: Ipv4Addr) {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_adapter_has_address(interface_name: &str, address: Ipv4Addr) -> bool {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    command
+        .args(["interface", "ipv4", "show", "addresses"])
+        .arg(format!("name={interface_name}"))
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(&address.to_string())
+        })
+}
+
+#[cfg(target_os = "windows")]
 fn configure_windows_adapter_address(
     interface_name: &str,
     address: Ipv4Addr,
@@ -177,7 +198,7 @@ fn configure_windows_adapter_address(
         .output()
         .context("failed launching netsh to configure the Windows tunnel address")?;
 
-    if !output.status.success() {
+    if !output.status.success() && !windows_adapter_has_address(interface_name, address) {
         bail!(
             "failed configuring Windows tunnel address {address}/{prefix} on {interface_name}: {} {}",
             String::from_utf8_lossy(&output.stdout).trim(),
@@ -207,6 +228,21 @@ fn remove_windows_route(interface_name: &str, route: &str) {
 }
 
 #[cfg(target_os = "windows")]
+fn windows_adapter_has_route(interface_name: &str, route: &str) -> bool {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    command
+        .args(["interface", "ipv4", "show", "route"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            let output = String::from_utf8_lossy(&output.stdout);
+            output.contains(route) && output.contains(interface_name)
+        })
+}
+
+#[cfg(target_os = "windows")]
 fn install_windows_allowed_ip_routes(
     interface_name: &str,
     allowed_ips: &[IpNetwork],
@@ -233,7 +269,7 @@ fn install_windows_allowed_ip_routes(
             .output()
             .with_context(|| format!("failed launching netsh for route {route}"))?;
 
-        if !output.status.success() {
+        if !output.status.success() && !windows_adapter_has_route(interface_name, &route) {
             for installed_route in installed.iter().rev() {
                 remove_windows_route(interface_name, installed_route);
             }
@@ -291,9 +327,6 @@ async fn main() {
         process::exit(1);
     }
 
-    let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
-    let _ = fs::remove_file(&stop_request_path);
-
     if let Err(error) = run(args).await {
         eprintln!("noland-net-helper: {error:#}");
         process::exit(1);
@@ -301,20 +334,25 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<()> {
+    let owner_lock = acquire_owner_lock(&args.state_dir)?;
+    let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
+    let _ = fs::remove_file(&stop_request_path);
     let status_path = args.state_dir.join(STATUS_FILE_NAME);
-    let mut initial_status = RuntimeStatus::starting(&args);
+    let config_fingerprint = config_fingerprint(&args.config_path)?;
+    let mut initial_status = RuntimeStatus::starting(&args, config_fingerprint.clone());
     write_status(&status_path, &initial_status)?;
 
-    let result = run_tunnel(&args, &status_path).await;
+    let result = run_tunnel(&args, &status_path, &config_fingerprint).await;
     if let Err(error) = &result {
         initial_status.error = Some(format!("{error:#}"));
         initial_status.updated_at_unix = unix_timestamp();
         let _ = write_status(&status_path, &initial_status);
     }
+    drop(owner_lock);
     result
 }
 
-async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
+async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -> Result<()> {
     let tunnel_config = parse_tunnel_config(&args.config_path)?;
     let mut tun_config = tun::Configuration::default();
 
@@ -400,6 +438,7 @@ async fn run_tunnel(args: &Args, status_path: &Path) -> Result<()> {
             .map(ToString::to_string)
             .collect(),
         endpoint: tunnel_config.endpoint.to_string(),
+        config_fingerprint: config_fingerprint.to_string(),
         latest_handshake_age_secs: None,
         rx_bytes: 0,
         tx_bytes: 0,
@@ -611,6 +650,52 @@ fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
     Ipv4Addr::from(mask)
 }
 
+fn owner_lock_path(state_dir: &Path) -> PathBuf {
+    let runtime_parent = state_dir.parent().unwrap_or(state_dir);
+    let wireguard_root = if runtime_parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.chars().all(|character| character.is_ascii_digit()))
+    {
+        runtime_parent.parent().unwrap_or(runtime_parent)
+    } else {
+        runtime_parent
+    };
+    wireguard_root.join(OWNER_LOCK_FILE_NAME)
+}
+
+fn acquire_owner_lock(state_dir: &Path) -> Result<File> {
+    let lock_path = owner_lock_path(state_dir);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "failed opening tunnel ownership lock {}",
+                lock_path.display()
+            )
+        })?;
+    lock_file.try_lock_exclusive().with_context(|| {
+        format!(
+            "another Noland GotaTun helper already owns the managed tunnel ({})",
+            lock_path.display()
+        )
+    })?;
+    Ok(lock_file)
+}
+
+fn config_fingerprint(config_path: &Path) -> Result<String> {
+    let content = fs::read(config_path).with_context(|| {
+        format!(
+            "failed reading {} for fingerprinting",
+            config_path.display()
+        )
+    })?;
+    Ok(format!("{:x}", Sha256::digest(content)))
+}
+
 fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
     let parent = path
         .parent()
@@ -619,6 +704,10 @@ fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
     let temporary = parent.join(format!(".{STATUS_FILE_NAME}.tmp"));
     let serialized = serde_json::to_vec_pretty(status)?;
     fs::write(&temporary, serialized)?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
     fs::rename(&temporary, path)?;
     Ok(())
 }
@@ -632,7 +721,7 @@ fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_tunnel_config, prefix_to_netmask};
+    use super::{config_fingerprint, owner_lock_path, parse_tunnel_config, prefix_to_netmask};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use std::{fs, net::Ipv4Addr};
 
@@ -653,6 +742,7 @@ mod tests {
         .unwrap();
 
         let config = parse_tunnel_config(&path).unwrap();
+        let fingerprint = config_fingerprint(&path).unwrap();
         assert_eq!(config.client_address, Ipv4Addr::new(10, 77, 0, 2));
         assert_eq!(config.client_prefix, 32);
         assert_eq!(config.server_address, Ipv4Addr::new(10, 77, 0, 1));
@@ -660,8 +750,37 @@ mod tests {
         assert_eq!(config.listen_port, 51821);
         assert_eq!(config.mtu, 1280);
         assert_eq!(config.keepalive, Some(25));
+        assert_eq!(fingerprint.len(), 64);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_fingerprint_changes_with_endpoint_generation() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-net-helper-fingerprint-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("nolandwg0.conf");
+        fs::write(&path, "Endpoint = 192.0.2.1:51820\n").unwrap();
+        let first = config_fingerprint(&path).unwrap();
+        fs::write(&path, "Endpoint = 192.0.2.2:51820\n").unwrap();
+        let second = config_fingerprint(&path).unwrap();
+        assert_ne!(first, second);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_and_global_runtime_dirs_share_one_owner_lock() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-net-helper-owner-test-{}",
+            std::process::id()
+        ));
+        let global_runtime = root.join("gotatun-runtime");
+        let legacy_runtime = root.join("47458589").join("gotatun-runtime");
+        assert_eq!(owner_lock_path(&global_runtime), root.join("owner.lock"));
+        assert_eq!(owner_lock_path(&legacy_runtime), root.join("owner.lock"));
     }
 
     #[test]
