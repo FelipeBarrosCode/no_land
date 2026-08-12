@@ -236,40 +236,17 @@ pub async fn setup_wireguard_app_handoff(
     let activation_message = match setup_local_wireguard_client(&config_path) {
         Ok(message) => message,
         Err(error) => {
-            let verification = verify_wireguard_connection(app, context).await;
-            match verification {
-                Ok(result) if result.reachable => {
-                    if let Some(port) = result.reachable_ports.first() {
-                        format!(
-                            "Managed tunnel is connected ({}:{} reachable) after setup verification.",
-                            result.host, port
-                        )
-                    } else {
-                        format!(
-                            "Managed tunnel is connected ({} reachable) after setup verification.",
-                            result.host
-                        )
-                    }
-                }
-                Ok(result) => {
-                    return Err(AppError::Command(format!(
-                        "{} | verification after setup: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
-                        error,
-                        result.host,
-                        result.checked_ports,
-                        result.reachable_ports,
-                        result
-                            .error
-                            .unwrap_or_else(|| "tunnel host still unreachable".to_string())
-                    )));
-                }
-                Err(verification_error) => {
-                    return Err(AppError::Command(format!(
-                        "{} | verification after setup failed: {}",
-                        error, verification_error
-                    )));
-                }
-            }
+            set_setup_failure(
+                context,
+                SetupStage::WireguardAppHandoffStarted,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "managed_tunnel_start_failed",
+                "The managed GotaTun tunnel could not be started.",
+                Some(error.to_string()),
+                true,
+            )
+            .await?;
+            return Err(error);
         }
     };
 
@@ -291,7 +268,12 @@ pub async fn setup_wireguard_app_handoff(
     )
     .await;
 
-    let _ = verify_wireguard_connection(app, context).await?;
+    let verification = verify_wireguard_connection(app, context).await?;
+    if !verification.reachable {
+        return Err(AppError::Command(verification.error.unwrap_or_else(|| {
+            "Managed GotaTun tunnel verification failed".to_string()
+        })));
+    }
     Ok(context.state.read().await.post_wireguard_setup.clone())
 }
 

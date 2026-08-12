@@ -58,6 +58,7 @@ interface Props {
   }) => Promise<void>;
   onLoadRentedInstances: () => Promise<void>;
   onRefreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
+  onResumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
   onStartPlayExisting: (instanceId: number) => Promise<string | null>;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   onStartPlay: () => Promise<void>;
@@ -112,6 +113,7 @@ export function DashboardScreen({
   onManualLocationSave,
   onLoadRentedInstances,
   onRefreshVastWalletSummary,
+  onResumeProvisioningExisting,
   onStartPlayExisting,
   onSelectOffer,
   onStartPlay,
@@ -187,14 +189,15 @@ export function DashboardScreen({
     navigate("/provisioning");
   }
 
-  async function handlePlayExisting(instanceId: number) {
-    const mode = await onStartPlayExisting(instanceId);
+  async function handleResumeProvisioning(instanceId: number) {
+    const mode = await onResumeProvisioningExisting(instanceId);
     if (mode === "provisioning") {
       navigate("/provisioning");
     }
   }
 
-  async function handleOpenSettings(instanceId: number) {
+
+  async function handlePlayEmbedded(instanceId: number) {
     await onSetEmbeddedMoonlightPipelineEnabled(instanceId, true);
     await onLoadEmbeddedMoonlightStatus(instanceId);
     const mode = await onStartPlayExisting(instanceId);
@@ -498,8 +501,8 @@ export function DashboardScreen({
                       busy={busy}
                       instanceActionRunning={instanceActionRunning}
                       blockingAction={blockingAction}
-                      onPlay={handlePlayExisting}
-                      onSettings={handleOpenSettings}
+                      onProvisioning={handleResumeProvisioning}
+                      onPlay={handlePlayEmbedded}
                       onPair={handlePair}
                       onReconnect={handleReconnect}
                       onReboot={handleReboot}

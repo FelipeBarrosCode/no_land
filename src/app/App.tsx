@@ -38,6 +38,9 @@ function RootRoute() {
   const loadRentedInstances = useAppStore((state) => state.loadRentedInstances);
   const chooseOffer = useAppStore((state) => state.chooseOffer);
   const startPlay = useAppStore((state) => state.startPlay);
+  const resumeProvisioningExisting = useAppStore(
+    (state) => state.resumeProvisioningExisting,
+  );
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
@@ -114,6 +117,7 @@ function RootRoute() {
       onManualLocationSave={saveManualLocation}
       onLoadRentedInstances={loadRentedInstances}
       onRefreshVastWalletSummary={refreshVastWalletSummary}
+      onResumeProvisioningExisting={resumeProvisioningExisting}
       onStartPlayExisting={startPlayExisting}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}

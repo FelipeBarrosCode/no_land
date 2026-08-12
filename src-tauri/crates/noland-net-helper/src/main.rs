@@ -11,8 +11,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(all(unix, not(target_os = "linux")))]
+use std::process::Command;
 #[cfg(target_os = "windows")]
-use std::process::{Command, Stdio};
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -23,7 +28,7 @@ use gotatun::{
     x25519::{PublicKey, StaticSecret},
 };
 use ipnetwork::IpNetwork;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::time::sleep;
 use tun::AbstractDevice;
@@ -46,6 +51,7 @@ struct Args {
     command: HelperCommand,
     config_path: PathBuf,
     state_dir: PathBuf,
+    launch_id: String,
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     wintun_path: Option<PathBuf>,
 }
@@ -65,17 +71,20 @@ struct TunnelConfig {
     keepalive: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatus {
-    engine: &'static str,
+    engine: String,
     active: bool,
     pid: u32,
     interface_name: String,
     config_path: String,
+    #[serde(default)]
+    launch_id: String,
     peer_public_key: String,
     allowed_ips: Vec<String>,
     endpoint: String,
+    #[serde(default)]
     config_fingerprint: String,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
@@ -87,11 +96,12 @@ struct RuntimeStatus {
 impl RuntimeStatus {
     fn starting(args: &Args, config_fingerprint: String) -> Self {
         Self {
-            engine: "gotatun-embedded-0.7.1",
+            engine: "gotatun-embedded-0.7.1".to_string(),
             active: false,
             pid: process::id(),
             interface_name: String::new(),
             config_path: args.config_path.display().to_string(),
+            launch_id: args.launch_id.clone(),
             peer_public_key: String::new(),
             allowed_ips: Vec::new(),
             endpoint: String::new(),
@@ -334,7 +344,9 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<()> {
+    cleanup_stale_runtime_owners(&args.state_dir).await?;
     let owner_lock = acquire_owner_lock(&args.state_dir)?;
+    cleanup_platform_network_state(&args)?;
     let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
     let _ = fs::remove_file(&stop_request_path);
     let status_path = args.state_dir.join(STATUS_FILE_NAME);
@@ -426,11 +438,12 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         .context("failed starting embedded GotaTun device")?;
 
     let mut status = RuntimeStatus {
-        engine: "gotatun-embedded-0.7.1",
+        engine: "gotatun-embedded-0.7.1".to_string(),
         active: true,
         pid: process::id(),
         interface_name,
         config_path: args.config_path.display().to_string(),
+        launch_id: args.launch_id.clone(),
         peer_public_key: BASE64_STANDARD.encode(tunnel_config.peer_public_key),
         allowed_ips: tunnel_config
             .allowed_ips
@@ -463,7 +476,11 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                     break;
                 }
                 refresh_status_from_device(&device, &mut status).await;
-                write_status(status_path, &status)?;
+                if let Err(error) = write_status_with_retry(status_path, &status, 5) {
+                    eprintln!(
+                        "noland-net-helper: status heartbeat write failed; keeping the tunnel active: {error:#}"
+                    );
+                }
             }
         }
     }
@@ -471,7 +488,9 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
     device.stop().await;
     status.active = false;
     status.updated_at_unix = unix_timestamp();
-    write_status(status_path, &status)?;
+    if let Err(error) = write_status_with_retry(status_path, &status, 5) {
+        eprintln!("noland-net-helper: failed writing final tunnel status: {error:#}");
+    }
     let _ = fs::remove_file(stop_request_path);
     Ok(())
 }
@@ -501,11 +520,13 @@ fn parse_args() -> Result<Args> {
 
     let mut config_path = None;
     let mut state_dir = None;
+    let mut launch_id = None;
     let mut wintun_path = None;
     while let Some(arg) = values.next() {
         match arg.as_str() {
             "--config" => config_path = values.next().map(PathBuf::from),
             "--state-dir" => state_dir = values.next().map(PathBuf::from),
+            "--launch-id" => launch_id = values.next(),
             "--wintun" => wintun_path = values.next().map(PathBuf::from),
             other => bail!("unknown argument `{other}`"),
         }
@@ -520,6 +541,10 @@ fn parse_args() -> Result<Args> {
         command,
         config_path: config_path.ok_or_else(|| anyhow!("missing --config path"))?,
         state_dir,
+        launch_id: match command {
+            HelperCommand::Run => launch_id.ok_or_else(|| anyhow!("missing --launch-id value"))?,
+            HelperCommand::Check => launch_id.unwrap_or_else(|| "check".to_string()),
+        },
         wintun_path,
     })
 }
@@ -650,18 +675,240 @@ fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
     Ipv4Addr::from(mask)
 }
 
-fn owner_lock_path(state_dir: &Path) -> PathBuf {
+fn runtime_root(state_dir: &Path) -> PathBuf {
     let runtime_parent = state_dir.parent().unwrap_or(state_dir);
-    let wireguard_root = if runtime_parent
+    if runtime_parent
         .file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.chars().all(|character| character.is_ascii_digit()))
     {
-        runtime_parent.parent().unwrap_or(runtime_parent)
-    } else {
         runtime_parent
+            .parent()
+            .unwrap_or(runtime_parent)
+            .to_path_buf()
+    } else {
+        runtime_parent.to_path_buf()
+    }
+}
+
+fn owner_lock_path(state_dir: &Path) -> PathBuf {
+    runtime_root(state_dir).join(OWNER_LOCK_FILE_NAME)
+}
+
+fn runtime_directories(state_dir: &Path) -> Vec<PathBuf> {
+    let root = runtime_root(state_dir);
+    let mut runtimes = vec![root.join("gotatun-runtime")];
+    if let Ok(entries) = fs::read_dir(&root) {
+        for entry in entries.flatten() {
+            let candidate = entry.path().join("gotatun-runtime");
+            if candidate.is_dir() && !runtimes.contains(&candidate) {
+                runtimes.push(candidate);
+            }
+        }
+    }
+    runtimes
+}
+
+fn load_runtime_status(path: &Path) -> Option<RuntimeStatus> {
+    let content = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+#[cfg(target_os = "linux")]
+fn process_exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    let executable_matches = fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_owned()))
+        .and_then(|name| name.to_str().map(str::to_string))
+        .is_some_and(|name| name.starts_with("noland-net-helper"));
+    if !executable_matches {
+        return false;
+    }
+    let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_exists(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains("noland-net-helper")
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn process_exists(pid: u32) -> bool {
+    let mut command = Command::new("tasklist.exe");
+    configure_hidden_windows_command(&mut command);
+    command
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .is_some_and(|output| {
+            let output = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+            output.contains("noland-net-helper") && output.contains(&format!("\"{pid}\""))
+        })
+}
+
+#[cfg(unix)]
+fn terminate_stale_helper(pid: u32) {
+    if pid == 0 || pid == process::id() {
+        return;
+    }
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn discover_helper_pids() -> Vec<u32> {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
     };
-    wireguard_root.join(OWNER_LOCK_FILE_NAME)
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| *pid != process::id() && process_exists(*pid))
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn discover_helper_pids() -> Vec<u32> {
+    Command::new("pgrep")
+        .args(["-x", "noland-net-helper"])
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .filter(|pid| *pid != process::id())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn discover_helper_pids() -> Vec<u32> {
+    let mut command = Command::new("tasklist.exe");
+    configure_hidden_windows_command(&mut command);
+    command
+        .args([
+            "/FI",
+            "IMAGENAME eq noland-net-helper.exe",
+            "/FO",
+            "CSV",
+            "/NH",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let fields = line.split(',').collect::<Vec<_>>();
+                    fields
+                        .get(1)
+                        .map(|value| value.trim().trim_matches('"'))
+                        .and_then(|value| value.parse::<u32>().ok())
+                })
+                .filter(|pid| *pid != process::id())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn terminate_stale_helper(pid: u32) {
+    if pid == 0 || pid == process::id() {
+        return;
+    }
+    let mut command = Command::new("taskkill.exe");
+    configure_hidden_windows_command(&mut command);
+    let _ = command
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
+    let runtimes = runtime_directories(state_dir);
+    let mut owner_pids = discover_helper_pids();
+    for runtime in &runtimes {
+        if let Some(status) = load_runtime_status(&runtime.join(STATUS_FILE_NAME)) {
+            if status.pid != process::id() && !owner_pids.contains(&status.pid) {
+                owner_pids.push(status.pid);
+            }
+        }
+        if runtime.exists() {
+            fs::write(runtime.join(STOP_REQUEST_FILE_NAME), b"stop\n").with_context(|| {
+                format!(
+                    "failed requesting stale helper shutdown in {}",
+                    runtime.display()
+                )
+            })?;
+        }
+    }
+
+    for _ in 0..20 {
+        if owner_pids.iter().all(|pid| !process_exists(*pid)) {
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    for pid in owner_pids
+        .iter()
+        .copied()
+        .filter(|pid| process_exists(*pid))
+    {
+        terminate_stale_helper(pid);
+    }
+    for _ in 0..20 {
+        if owner_pids.iter().all(|pid| !process_exists(*pid)) {
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    if let Some(pid) = owner_pids.into_iter().find(|pid| process_exists(*pid)) {
+        bail!(
+            "stale Noland GotaTun helper PID {pid} could not be terminated during elevated cleanup"
+        );
+    }
+
+    for runtime in runtimes {
+        let _ = fs::remove_file(runtime.join(STOP_REQUEST_FILE_NAME));
+        let _ = fs::remove_file(runtime.join(STATUS_FILE_NAME));
+    }
+    Ok(())
+}
+
+fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(config) = parse_tunnel_config(&_args.config_path) {
+            for network in &config.allowed_ips {
+                if let IpNetwork::V4(network) = network {
+                    remove_windows_route(INTERFACE_NAME, &network.to_string());
+                }
+            }
+            remove_windows_adapter_address(INTERFACE_NAME, config.client_address);
+        }
+    }
+    Ok(())
 }
 
 fn acquire_owner_lock(state_dir: &Path) -> Result<File> {
@@ -696,20 +943,46 @@ fn config_fingerprint(config_path: &Path) -> Result<String> {
     Ok(format!("{:x}", Sha256::digest(content)))
 }
 
+fn write_status_with_retry(path: &Path, status: &RuntimeStatus, attempts: usize) -> Result<()> {
+    let mut last_error = None;
+    for attempt in 0..attempts.max(1) {
+        match write_status(path, status) {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    Err(last_error.unwrap_or_else(|| anyhow!("status write failed")))
+}
+
 fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("status path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".{STATUS_FILE_NAME}.tmp"));
     let serialized = serde_json::to_vec_pretty(status)?;
-    fs::write(&temporary, serialized)?;
+
     #[cfg(target_os = "windows")]
-    if path.exists() {
-        fs::remove_file(path)?;
+    {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(&serialized)?;
+        file.sync_data()?;
+        return Ok(());
     }
-    fs::rename(&temporary, path)?;
-    Ok(())
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let temporary = parent.join(format!(".{STATUS_FILE_NAME}.tmp"));
+        fs::write(&temporary, serialized)?;
+        fs::rename(&temporary, path)?;
+        Ok(())
+    }
 }
 
 fn unix_timestamp() -> u64 {

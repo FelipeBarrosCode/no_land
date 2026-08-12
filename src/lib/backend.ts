@@ -85,6 +85,14 @@ export async function startPlayFlow(): Promise<void> {
   await invokeSafe<void>("start_play_flow");
 }
 
+export async function resumeProvisioningExistingInstance(
+  instanceId: number,
+): Promise<string> {
+  return invokeSafe<string>("resume_provisioning_existing_instance", {
+    instanceId,
+  });
+}
+
 export async function startPlayExistingInstance(
   instanceId: number,
 ): Promise<string> {

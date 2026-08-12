@@ -1652,6 +1652,177 @@ pub async fn start_play_flow(
     Ok(())
 }
 
+fn setup_stage_for_orchestration_state(state: OrchestrationState) -> Option<SetupStage> {
+    match state {
+        OrchestrationState::WireGuardConfigGenerated => Some(SetupStage::WireguardConfigGenerated),
+        OrchestrationState::WireGuardAppHandoffStarted => {
+            Some(SetupStage::WireguardAppHandoffStarted)
+        }
+        OrchestrationState::WireGuardWaitingForImport => {
+            Some(SetupStage::WireguardWaitingForImport)
+        }
+        OrchestrationState::WireGuardWaitingForActivation => {
+            Some(SetupStage::WireguardWaitingForActivation)
+        }
+        OrchestrationState::WireGuardVerifying => Some(SetupStage::WireguardVerifying),
+        OrchestrationState::WireGuardConnected => Some(SetupStage::WireguardConnected),
+        OrchestrationState::MoonlightSunshineReadyToSetup => {
+            Some(SetupStage::MoonlightSunshineReadyToSetup)
+        }
+        OrchestrationState::SunshineCredentialsConfiguring => {
+            Some(SetupStage::SunshineCredentialsConfiguring)
+        }
+        OrchestrationState::SunshineVerifying => Some(SetupStage::SunshineVerifying),
+        OrchestrationState::MoonlightDetecting => Some(SetupStage::MoonlightDetecting),
+        OrchestrationState::MoonlightPairingStarted
+        | OrchestrationState::ConfiguringMoonlight
+        | OrchestrationState::AwaitingPairPin
+        | OrchestrationState::Pairing => Some(SetupStage::MoonlightPairingStarted),
+        OrchestrationState::MoonlightPinReceived => Some(SetupStage::MoonlightPinReceived),
+        OrchestrationState::SunshinePinSubmitting => Some(SetupStage::SunshinePinSubmitting),
+        OrchestrationState::MoonlightSunshinePaired => Some(SetupStage::MoonlightSunshinePaired),
+        OrchestrationState::Ready => Some(SetupStage::SetupComplete),
+        OrchestrationState::Error => Some(SetupStage::Failed),
+        _ => None,
+    }
+}
+
+fn orchestration_state_for_setup_stage(stage: SetupStage) -> OrchestrationState {
+    match stage {
+        SetupStage::PreWireguardExistingFlow => OrchestrationState::ConfiguringRemote,
+        SetupStage::WireguardConfigGenerated => OrchestrationState::WireGuardConfigGenerated,
+        SetupStage::WireguardAppHandoffStarted => OrchestrationState::WireGuardAppHandoffStarted,
+        SetupStage::WireguardWaitingForImport => OrchestrationState::WireGuardWaitingForImport,
+        SetupStage::WireguardWaitingForActivation => {
+            OrchestrationState::WireGuardWaitingForActivation
+        }
+        SetupStage::WireguardVerifying => OrchestrationState::WireGuardVerifying,
+        SetupStage::WireguardConnected => OrchestrationState::WireGuardConnected,
+        SetupStage::MoonlightSunshineReadyToSetup => {
+            OrchestrationState::MoonlightSunshineReadyToSetup
+        }
+        SetupStage::SunshineCredentialsConfiguring => {
+            OrchestrationState::SunshineCredentialsConfiguring
+        }
+        SetupStage::SunshineVerifying => OrchestrationState::SunshineVerifying,
+        SetupStage::MoonlightDetecting => OrchestrationState::MoonlightDetecting,
+        SetupStage::MoonlightPairingStarted => OrchestrationState::MoonlightPairingStarted,
+        SetupStage::MoonlightPinReceived => OrchestrationState::MoonlightPinReceived,
+        SetupStage::SunshinePinSubmitting => OrchestrationState::SunshinePinSubmitting,
+        SetupStage::MoonlightSunshinePaired => OrchestrationState::MoonlightSunshinePaired,
+        SetupStage::SetupComplete => OrchestrationState::Ready,
+        SetupStage::Failed => OrchestrationState::Error,
+    }
+}
+
+fn wireguard_status_for_setup_stage(
+    stage: SetupStage,
+) -> crate::models::app_state::WireGuardSetupStatus {
+    use crate::models::app_state::WireGuardSetupStatus;
+
+    match stage {
+        SetupStage::PreWireguardExistingFlow => WireGuardSetupStatus::NotStarted,
+        SetupStage::WireguardConfigGenerated => WireGuardSetupStatus::ConfigGenerated,
+        SetupStage::WireguardAppHandoffStarted => WireGuardSetupStatus::AppHandoffStarted,
+        SetupStage::WireguardWaitingForImport => WireGuardSetupStatus::WaitingForUserImport,
+        SetupStage::WireguardWaitingForActivation => WireGuardSetupStatus::WaitingForUserActivation,
+        SetupStage::WireguardVerifying => WireGuardSetupStatus::Verifying,
+        SetupStage::Failed => WireGuardSetupStatus::Failed,
+        _ => WireGuardSetupStatus::Connected,
+    }
+}
+
+#[tauri::command]
+pub async fn resume_provisioning_existing_instance(
+    app: AppHandle,
+    instance_id: u64,
+    context: State<'_, AppContext>,
+) -> Result<String, FrontendError> {
+    let snapshot = context.reload_state_from_disk().await?;
+    let server = snapshot
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == instance_id)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "No persisted provisioning state exists for instance {instance_id}"
+            ))
+        })?;
+
+    context
+        .update_state(|state| {
+            state.instance.instance_id = Some(instance_id);
+            state.instance.offer_id = server.offer_id;
+            state.instance.status = server.status.clone();
+            state.instance.ssh_host = server.ssh_host.clone();
+            state.instance.ssh_port = server.ssh_port;
+            state.instance.ssh_command = server.ssh_command.clone();
+            state.wireguard.server_ip = server.wireguard_server_ip.clone();
+            state.wireguard.client_ip = server.wireguard_client_ip.clone();
+            state.wireguard.server_public_key = server.wireguard_server_public_key.clone();
+            state.wireguard.client_public_key = server.wireguard_client_public_key.clone();
+            state.wireguard.config_path = server.wireguard_config_path.clone();
+            state.moonlight.host_address = server.moonlight_host_address.clone();
+            state.last_error = server.last_error.clone();
+
+            if server.steps.wireguard_configured {
+                let post_setup_belongs_to_instance =
+                    state.post_wireguard_setup.current_instance_id == Some(instance_id);
+                state.post_wireguard_setup.current_instance_id = Some(instance_id);
+                state.post_wireguard_setup.moonlight_host =
+                    if server.moonlight_host_address.trim().is_empty() {
+                        server.wireguard_server_ip.clone()
+                    } else {
+                        server.moonlight_host_address.clone()
+                    };
+                state.post_wireguard_setup.sunshine_username =
+                    state.credentials.app_username.clone();
+
+                let restored_stage = if post_setup_belongs_to_instance
+                    && !matches!(
+                        state.post_wireguard_setup.stage,
+                        SetupStage::PreWireguardExistingFlow
+                    ) {
+                    state.post_wireguard_setup.stage
+                } else {
+                    setup_stage_for_orchestration_state(server.last_state)
+                        .filter(|stage| !matches!(stage, SetupStage::Failed))
+                        .unwrap_or(SetupStage::WireguardConfigGenerated)
+                };
+
+                if !post_setup_belongs_to_instance {
+                    state.post_wireguard_setup.wireguard_export_path.clear();
+                    state.post_wireguard_setup.wireguard_config.clear();
+                    state.post_wireguard_setup.wireguard_verified_host.clear();
+                    state.post_wireguard_setup.wireguard_reachable_ports.clear();
+                    state.post_wireguard_setup.last_error = None;
+                    state.post_wireguard_setup.paired = server.embedded_moonlight_paired;
+                    state.post_wireguard_setup.setup_complete =
+                        matches!(restored_stage, SetupStage::SetupComplete);
+                }
+
+                state.post_wireguard_setup.stage = restored_stage;
+                state.post_wireguard_setup.wireguard_setup_status =
+                    wireguard_status_for_setup_stage(restored_stage);
+                state.orchestration_state = orchestration_state_for_setup_stage(restored_stage);
+            }
+        })
+        .await?;
+
+    if server.steps.wireguard_configured {
+        return Ok("provisioning".to_string());
+    }
+
+    OrchestrationService::start_play_for_existing_instance(
+        app,
+        context.inner().clone(),
+        instance_id,
+    )
+    .await?;
+    Ok("provisioning".to_string())
+}
+
 #[tauri::command]
 pub async fn start_play_existing_instance(
     app: AppHandle,
@@ -1810,7 +1981,7 @@ fn active_instance_wireguard_config_path(state: &PersistedAppState) -> Option<St
 
 #[tauri::command]
 pub async fn setup_wireguard_client(
-    app: AppHandle,
+    _app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
@@ -1849,48 +2020,12 @@ pub async fn setup_wireguard_client(
         .into());
     }
 
-    match setup_local_wireguard_client(Path::new(&config_path)) {
-        Ok(message) => Ok(message),
-        Err(error) => {
-            let verification = verify_wireguard_connection(&app, context.inner()).await;
-            match verification {
-                Ok(result) if result.reachable => {
-                    if let Some(port) = result.reachable_ports.first() {
-                        Ok(format!(
-                            "Managed tunnel is connected ({}:{} reachable) after setup verification.",
-                            result.host, port
-                        ))
-                    } else {
-                        Ok(format!(
-                            "Managed tunnel is connected ({} reachable) after setup verification.",
-                            result.host
-                        ))
-                    }
-                }
-                Ok(result) => Err(AppError::Command(format!(
-                    "{} | verification after setup: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
-                    error,
-                    result.host,
-                    result.checked_ports,
-                    result.reachable_ports,
-                    result
-                        .error
-                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
-                ))
-                .into()),
-                Err(verification_error) => Err(AppError::Command(format!(
-                    "{} | verification after setup failed: {}",
-                    error, verification_error
-                ))
-                .into()),
-            }
-        }
-    }
+    setup_local_wireguard_client(Path::new(&config_path)).map_err(Into::into)
 }
 
 #[tauri::command]
 pub async fn reconnect_local_wireguard_client_quick(
-    app: AppHandle,
+    _app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<String, FrontendError> {
     let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
@@ -1929,43 +2064,7 @@ pub async fn reconnect_local_wireguard_client_quick(
         .into());
     }
 
-    match reconnect_local_wireguard_client(Path::new(&config_path)) {
-        Ok(message) => Ok(message),
-        Err(error) => {
-            let verification = verify_wireguard_connection(&app, context.inner()).await;
-            match verification {
-                Ok(result) if result.reachable => {
-                    if let Some(port) = result.reachable_ports.first() {
-                        Ok(format!(
-                            "Managed tunnel is connected ({}:{} reachable) after reconnect verification.",
-                            result.host, port
-                        ))
-                    } else {
-                        Ok(format!(
-                            "Managed tunnel is connected ({} reachable) after reconnect verification.",
-                            result.host
-                        ))
-                    }
-                }
-                Ok(result) => Err(AppError::Command(format!(
-                    "{} | verification after reconnect: established=false host={} checked_ports={:?} reachable_ports={:?} detail={}",
-                    error,
-                    result.host,
-                    result.checked_ports,
-                    result.reachable_ports,
-                    result
-                        .error
-                        .unwrap_or_else(|| "tunnel host still unreachable".to_string())
-                ))
-                .into()),
-                Err(verification_error) => Err(AppError::Command(format!(
-                    "{} | verification after reconnect failed: {}",
-                    error, verification_error
-                ))
-                .into()),
-            }
-        }
-    }
+    reconnect_local_wireguard_client(Path::new(&config_path)).map_err(Into::into)
 }
 
 #[tauri::command]

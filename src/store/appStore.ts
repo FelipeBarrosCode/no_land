@@ -10,6 +10,7 @@ import {
   setupWireguardClient,
   reconnectLocalWireguardClientQuick,
   setupWireguardAppHandoff,
+  resumeProvisioningExistingInstance,
   startPlayExistingInstance,
   startPlayFlow,
   submitPairingPin,
@@ -145,6 +146,7 @@ interface AppStore {
   previousOffersPage: () => Promise<void>;
   chooseOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   startPlay: () => Promise<void>;
+  resumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
   startPlayExisting: (instanceId: number) => Promise<string | null>;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
@@ -893,17 +895,42 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
+    resumeProvisioningExisting: async (instanceId) => {
+      set({ provisioningModalDismissed: false });
+      beginProvisioningBlock("Resuming this instance from its saved provisioning checkpoint.");
+      try {
+        const mode = await resumeProvisioningExistingInstance(instanceId);
+        const [appState, postWireguardSetup] = await Promise.all([
+          getAppState(),
+          getSetupStatus(),
+        ]);
+        set({
+          appState: {
+            ...appState,
+            postWireguardSetup,
+          },
+        });
+        const restoredPostWireguardCheckpoint =
+          postWireguardSetup.stage !== "pre_wireguard_existing_flow";
+        if (
+          restoredPostWireguardCheckpoint ||
+          PROVISIONING_INTERACTIVE_STATES.has(appState.orchestrationState)
+        ) {
+          endProvisioningBlock();
+        }
+        return mode;
+      } catch (error) {
+        endProvisioningBlock();
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
     startPlayExisting: async (instanceId) => {
       set({ provisioningModalDismissed: false });
       beginProvisioningBlock("Reconnecting to your existing gaming instance.");
       try {
-        let mode: string;
-        try {
-          mode = await startPlayExistingInstance(instanceId);
-        } catch {
-          await reconnectInstanceWireguard(instanceId);
-          mode = await startPlayExistingInstance(instanceId);
-        }
+        const mode = await startPlayExistingInstance(instanceId);
 
         const appState = await getAppState();
         const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId).catch(() => null);
@@ -1102,30 +1129,10 @@ export const useAppStore = create<AppStore>((set, get) => {
           detail: "Restarting the local GotaTun-backed tunnel.",
         },
         async () => {
-          try {
-            const result = await reconnectLocalWireguardClientQuick();
-            const appState = await getAppState();
-            set({ appState });
-            return result;
-          } catch (error) {
-            try {
-              const verification = await verifyWireguard();
-              const appState = await getAppState();
-              set({ appState });
-
-              if (verification.reachable) {
-                if (verification.reachablePorts.length > 0) {
-                  return `Managed tunnel is connected (${verification.host}:${verification.reachablePorts[0]} reachable).`;
-                }
-
-                return `Managed tunnel is connected (${verification.host} reachable).`;
-              }
-            } catch {
-              // Fall through and surface the original reconnect error.
-            }
-
-            throw error;
-          }
+          const result = await reconnectLocalWireguardClientQuick();
+          const appState = await getAppState();
+          set({ appState });
+          return result;
         },
         null,
       );

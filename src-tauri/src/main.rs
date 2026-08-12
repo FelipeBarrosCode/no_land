@@ -20,7 +20,7 @@ use services::{
     ssh_keys::normalize_ssh_state_from_disk,
     state_store::{JsonStateStore, StateStore},
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
-    wireguard::{maintain_persisted_local_tunnel, normalize_wireguard_state_from_disk},
+    wireguard::normalize_wireguard_state_from_disk,
 };
 use tauri::{Manager, WindowEvent};
 use tracing::{error, info, warn};
@@ -179,17 +179,6 @@ fn main() {
                 OrchestrationService::resume_if_needed(&app_handle, &resume_context).await;
             });
 
-            let monitor_context = context.clone();
-            tauri::async_runtime::spawn(async move {
-                let interval = std::time::Duration::from_secs(30);
-                loop {
-                    tokio::time::sleep(interval).await;
-                    if let Err(error) = maintain_persisted_local_tunnel(&monitor_context).await {
-                        error!("WireGuard tunnel health monitor failed: {error}");
-                    }
-                }
-            });
-
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -236,6 +225,7 @@ fn main() {
             search_offers,
             select_offer,
             start_play_flow,
+            resume_provisioning_existing_instance,
             start_play_existing_instance,
             submit_pairing_pin,
             skip_pairing_and_continue,

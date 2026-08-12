@@ -22,7 +22,7 @@ use crate::{
     },
 };
 
-use super::{app_config::WireGuardDefaults, app_context::AppContext, remote_exec::RemoteExec};
+use super::{app_config::WireGuardDefaults, remote_exec::RemoteExec};
 
 #[cfg(target_os = "windows")]
 use crate::utils::process::configure_no_window;
@@ -99,6 +99,8 @@ struct GotatunRuntimeStatus {
     pid: u32,
     interface_name: String,
     config_path: String,
+    #[serde(default)]
+    launch_id: String,
     peer_public_key: String,
     allowed_ips: Vec<String>,
     endpoint: String,
@@ -116,13 +118,11 @@ const APT_UPDATE_TIMEOUT_SECS: u64 = 180;
 const APT_INSTALL_TIMEOUT_SECS: u64 = 300;
 const PACKAGE_MANAGER_READY_WAIT_SECS: u64 = 180;
 const LEGACY_LOCAL_CONFIG_NAME: &str = "nolandwg0.conf";
-const MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD: u32 = 5;
 const GOTATUN_RUNTIME_DIR_NAME: &str = "gotatun-runtime";
 const GOTATUN_STATUS_FILE_NAME: &str = "status.json";
 const GOTATUN_STOP_REQUEST_FILE_NAME: &str = "stop.request";
 const GOTATUN_HELPER_READY_TIMEOUT_SECS: u64 = 30;
 const GOTATUN_HELPER_STOP_TIMEOUT_SECS: u64 = 15;
-static MONITOR_REPAIR_FAILURE_STREAK: OnceLock<Mutex<u32>> = OnceLock::new();
 static ACTIVE_GOTATUN_STATUS_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 fn legacy_local_config_path(app_data_dir: &Path) -> PathBuf {
@@ -137,10 +137,6 @@ fn wireguard_local_root_dir(app_data_dir: &Path) -> PathBuf {
 #[cfg(not(target_os = "macos"))]
 fn wireguard_local_root_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("wireguard")
-}
-
-fn monitor_repair_failure_streak() -> &'static Mutex<u32> {
-    MONITOR_REPAIR_FAILURE_STREAK.get_or_init(|| Mutex::new(0))
 }
 
 fn bundled_tool_target_triple() -> &'static str {
@@ -228,20 +224,6 @@ fn resolve_noland_net_helper_binary() -> AppResult<String> {
     resolve_managed_tool_binary("noland-net-helper")
 }
 
-fn note_monitor_repair_health(healthy: bool) -> u32 {
-    let Ok(mut streak) = monitor_repair_failure_streak().lock() else {
-        return 0;
-    };
-
-    if healthy {
-        *streak = 0;
-    } else {
-        *streak = streak.saturating_add(1);
-    }
-
-    *streak
-}
-
 fn instance_local_config_path(app_data_dir: &Path, instance_id: u64) -> PathBuf {
     wireguard_local_root_dir(app_data_dir)
         .join(instance_id.to_string())
@@ -303,8 +285,17 @@ fn remember_active_gotatun_config(config_path: &Path) {
 }
 
 fn load_gotatun_runtime_status(path: &Path) -> Option<GotatunRuntimeStatus> {
-    let content = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&content).ok()
+    for attempt in 0..5 {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Ok(status) = serde_json::from_str(&content) {
+                return Some(status);
+            }
+        }
+        if attempt < 4 {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+    None
 }
 
 fn load_active_gotatun_runtime_status() -> Option<GotatunRuntimeStatus> {
@@ -460,7 +451,7 @@ fn build_windows_tunnel_launch_script(helper: &str, arguments: &[String]) -> Str
     )
 }
 
-fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
+fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResult<()> {
     let helper = resolve_noland_net_helper_binary()?;
     let runtime_dir = gotatun_runtime_dir(config_path);
     std::fs::create_dir_all(&runtime_dir).map_err(|error| {
@@ -473,11 +464,9 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
     {
         let broker = if OsDetection::new().command_exists("pkexec") {
             "pkexec"
-        } else if OsDetection::new().command_exists("sudo") {
-            "sudo"
         } else {
             return Err(AppError::Command(
-                "Noland needs the desktop privilege broker (`pkexec`) to create its managed tunnel, but no supported privilege broker is available."
+                "Noland needs the desktop privilege broker (`pkexec`) to create and clean its managed tunnel, but it is not available on this Linux desktop."
                     .to_string(),
             ));
         };
@@ -487,6 +476,8 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
             .arg(config_path)
             .arg("--state-dir")
             .arg(&runtime_dir)
+            .arg("--launch-id")
+            .arg(launch_id)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -511,6 +502,8 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
             shell_quote(&config_path.display().to_string()),
             "--state-dir".to_string(),
             shell_quote(&runtime_dir.display().to_string()),
+            "--launch-id".to_string(),
+            shell_quote(launch_id),
         ]
         .join(" ");
         let applescript = format!(
@@ -540,6 +533,8 @@ fn launch_managed_gotatun_helper(config_path: &Path) -> AppResult<()> {
             config_path.display().to_string(),
             "--state-dir".to_string(),
             runtime_dir.display().to_string(),
+            "--launch-id".to_string(),
+            launch_id.to_string(),
             "--wintun".to_string(),
             wintun.display().to_string(),
         ];
@@ -565,6 +560,7 @@ fn wait_for_managed_gotatun_start(
     config_path: &Path,
     launched_at: u64,
     expected_fingerprint: &str,
+    expected_launch_id: &str,
 ) -> AppResult<()> {
     let status_path = gotatun_status_path(config_path);
     let started = Instant::now();
@@ -573,8 +569,9 @@ fn wait_for_managed_gotatun_start(
             if status.updated_at_unix >= launched_at
                 && status.config_path == config_path.display().to_string()
                 && status.config_fingerprint == expected_fingerprint
+                && status.launch_id == expected_launch_id
             {
-                if status.active && process_is_alive(status.pid) {
+                if status.active {
                     return Ok(());
                 }
                 if let Some(error) = status.error.filter(|value| !value.trim().is_empty()) {
@@ -645,47 +642,30 @@ fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn setup_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
+fn replace_managed_gotatun_tunnel(config_path: &Path, success_message: &str) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
-    stop_legacy_managed_gotatun_helpers(config_path)?;
     let expected = load_expected_local_tunnel(config_path)?;
     let expected_fingerprint = config_fingerprint(config_path)?;
-    if let Some(status) = load_gotatun_runtime_status(&gotatun_status_path(config_path)) {
-        let status_fresh =
-            gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix) <= 5;
-        let process_active = status.active && process_is_alive(status.pid);
-        let identity_matches = status.peer_public_key == expected.peer_public_key
-            && normalize_allowed_ips(&status.allowed_ips.join(","))
-                == normalize_allowed_ips(&expected.allowed_ips)
-            && status.config_fingerprint == expected_fingerprint
-            && status.config_path == config_path.display().to_string();
-        if process_active && status_fresh && identity_matches {
-            return Ok(
-                "Embedded GotaTun tunnel is active with the exact saved Noland config; remote services may still be starting"
-                    .to_string(),
-            );
-        }
-        request_managed_gotatun_stop(config_path)?;
-    }
-
+    let launch_id = uuid::Uuid::new_v4().to_string();
     let launched_at = gotatun_runtime_unix_timestamp();
-    launch_managed_gotatun_helper(config_path)?;
-    wait_for_managed_gotatun_start(config_path, launched_at, &expected_fingerprint)?;
+    launch_managed_gotatun_helper(config_path, &launch_id)?;
+    wait_for_managed_gotatun_start(config_path, launched_at, &expected_fingerprint, &launch_id)?;
     wait_for_local_tunnel_health(&expected, Duration::from_secs(25), Duration::from_secs(1))?;
-    Ok("Embedded GotaTun tunnel configured and activated by Noland".to_string())
+    Ok(success_message.to_string())
+}
+
+fn setup_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
+    replace_managed_gotatun_tunnel(
+        config_path,
+        "Embedded GotaTun tunnel cleaned, configured, and activated by Noland",
+    )
 }
 
 fn reconnect_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
-    remember_active_gotatun_config(config_path);
-    stop_legacy_managed_gotatun_helpers(config_path)?;
-    request_managed_gotatun_stop(config_path)?;
-    let expected_fingerprint = config_fingerprint(config_path)?;
-    let launched_at = gotatun_runtime_unix_timestamp();
-    launch_managed_gotatun_helper(config_path)?;
-    wait_for_managed_gotatun_start(config_path, launched_at, &expected_fingerprint)?;
-    let expected = load_expected_local_tunnel(config_path)?;
-    wait_for_local_tunnel_health(&expected, Duration::from_secs(25), Duration::from_secs(1))?;
-    Ok("Embedded GotaTun tunnel reconnected by Noland".to_string())
+    replace_managed_gotatun_tunnel(
+        config_path,
+        "Embedded GotaTun tunnel cleaned and reconnected by Noland",
+    )
 }
 
 fn teardown_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
@@ -706,7 +686,7 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
         )
     })?;
     let status_age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
-    if !status.active || status_age > 5 || !process_is_alive(status.pid) {
+    if !status.active || status_age > 5 {
         return Err(AppError::Command(format!(
             "The managed GotaTun helper is not actively reporting (pid={}, status_age={}s). Use Reconnect to replace stale runtime state.",
             status.pid, status_age
@@ -727,9 +707,10 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     let handshake_recent = status
         .latest_handshake_age_secs
         .is_some_and(|age| age <= 180);
-    if !handshake_recent && !can_ping_tunnel_host(&expected.server_ip) {
+    if !handshake_recent {
+        let _ = can_ping_tunnel_host(&expected.server_ip);
         return Err(AppError::Command(format!(
-            "The managed GotaTun helper is active with the correct config, but no recent handshake or tunnel response was observed for {}.",
+            "The managed GotaTun helper is active with the correct config, but the peer has not completed a recent WireGuard handshake for {}.",
             expected.server_ip
         )));
     }
@@ -757,110 +738,6 @@ fn wireguard_root_from_config_path(config_path: &Path) -> Option<PathBuf> {
         return parent.parent().map(Path::to_path_buf);
     }
     Some(parent.to_path_buf())
-}
-
-fn resolve_active_wireguard_config_path(
-    state: &crate::models::app_state::PersistedAppState,
-) -> Option<PathBuf> {
-    if let Some(instance_id) = state.instance.instance_id {
-        if let Some(path) = state
-            .provisioned_servers
-            .iter()
-            .find(|record| record.instance_id == instance_id)
-            .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
-            .filter(|path| path.exists())
-        {
-            return Some(path);
-        }
-
-        let current = PathBuf::from(state.wireguard.config_path.clone());
-        let instance_segment = format!("/{instance_id}/");
-        if current.exists()
-            && current
-                .to_string_lossy()
-                .replace('\\', "/")
-                .contains(&instance_segment)
-        {
-            return Some(current);
-        }
-
-        return None;
-    }
-
-    state
-        .provisioned_servers
-        .iter()
-        .filter_map(|record| {
-            let path = PathBuf::from(record.wireguard_config_path.clone());
-            if !path.exists() {
-                return None;
-            }
-            let modified = std::fs::metadata(&path)
-                .and_then(|meta| meta.modified())
-                .ok();
-            Some((path, modified))
-        })
-        .max_by_key(|(_, modified)| *modified)
-        .map(|(path, _)| path)
-        .or_else(|| {
-            let current = PathBuf::from(state.wireguard.config_path.clone());
-            if current.exists() {
-                Some(current)
-            } else {
-                None
-            }
-        })
-}
-
-fn cleanup_stale_wireguard_artifacts(active_config_path: &Path) {
-    let Some(root) = wireguard_root_from_config_path(active_config_path) else {
-        return;
-    };
-
-    let active_instance_dir = active_config_path.parent().map(Path::to_path_buf);
-    let global_runtime_dir = gotatun_runtime_dir(active_config_path);
-    let Ok(entries) = std::fs::read_dir(&root) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-
-        if file_type.is_file() {
-            let extension = path.extension().and_then(|value| value.to_str());
-            if matches!(extension, Some("request") | Some("status")) {
-                let _ = std::fs::remove_file(&path);
-            }
-            continue;
-        }
-
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        if path == global_runtime_dir
-            || active_instance_dir
-                .as_ref()
-                .map(|active| active == &path)
-                .unwrap_or(false)
-        {
-            continue;
-        }
-
-        let conf_path = path.join(LEGACY_LOCAL_CONFIG_NAME);
-        if !conf_path.exists() {
-            let _ = std::fs::remove_dir_all(&path);
-            continue;
-        }
-
-        let request_path = path.join("nolandwg0.repair.request");
-        let status_path = path.join("nolandwg0.repair.status");
-        let _ = std::fs::remove_file(request_path);
-        let _ = std::fs::remove_file(status_path);
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -2183,94 +2060,6 @@ pub fn normalize_wireguard_state_from_disk(
     Ok(changed)
 }
 
-pub async fn maintain_persisted_local_tunnel(context: &AppContext) -> AppResult<()> {
-    let Some(_mutation) = context.try_begin_wireguard_mutation() else {
-        return Ok(());
-    };
-
-    let snapshot = context.load_state().await;
-    if snapshot.instance.instance_id.is_none() || snapshot.wireguard.server_ip.trim().is_empty() {
-        return Ok(());
-    }
-    if !matches!(
-        snapshot.post_wireguard_setup.wireguard_setup_status,
-        crate::models::app_state::WireGuardSetupStatus::AppHandoffStarted
-            | crate::models::app_state::WireGuardSetupStatus::Verifying
-            | crate::models::app_state::WireGuardSetupStatus::Connected
-    ) {
-        return Ok(());
-    }
-
-    let Some(config_path) = resolve_active_wireguard_config_path(&snapshot) else {
-        return Ok(());
-    };
-    remember_active_gotatun_config(&config_path);
-    cleanup_stale_wireguard_artifacts(&config_path);
-
-    let expected = load_expected_local_tunnel(&config_path)?;
-    let expected_fingerprint = config_fingerprint(&config_path)?;
-    let status = load_gotatun_runtime_status(&gotatun_status_path(&config_path));
-    let status_fresh = status.as_ref().is_some_and(|runtime| {
-        gotatun_runtime_unix_timestamp().saturating_sub(runtime.updated_at_unix) <= 5
-    });
-    let runtime = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key))?;
-    let runtime_matches = local_tunnel_runtime_matches_expected(&runtime, &expected);
-    let handshake_ok = status
-        .as_ref()
-        .and_then(|runtime| runtime.latest_handshake_age_secs)
-        .is_some_and(|age| age <= 180);
-    let ping_ok = can_ping_tunnel_host(&expected.server_ip);
-    let process_active = status
-        .as_ref()
-        .is_some_and(|runtime| runtime.active && process_is_alive(runtime.pid));
-    let config_matches = status.as_ref().is_some_and(|runtime| {
-        runtime.config_path == config_path.display().to_string()
-            && runtime.config_fingerprint == expected_fingerprint
-    });
-    let tunnel_healthy = status_fresh
-        && process_active
-        && config_matches
-        && runtime_matches
-        && (handshake_ok || ping_ok);
-
-    if tunnel_healthy {
-        let _ = note_monitor_repair_health(true);
-        let _ = context
-            .update_state(|state| {
-                state.wireguard.config_path = config_path.display().to_string();
-                apply_expected_tunnel_to_state(state, &expected);
-                state.wireguard.last_runtime_interface = runtime.interface_name.clone();
-            })
-            .await;
-        return Ok(());
-    }
-
-    let hard_failure = !status_fresh || !process_active || !config_matches || !runtime_matches;
-    let failure_streak = note_monitor_repair_health(false);
-    if !hard_failure && failure_streak < MONITOR_REPAIR_FAILURE_STREAK_THRESHOLD {
-        if failure_streak == 1 {
-            warn!(
-                "Embedded GotaTun health check is temporarily unhealthy; waiting before repair (handshake_recent={}, ping_ok={})",
-                handshake_ok,
-                ping_ok
-            );
-        }
-        return Ok(());
-    }
-
-    warn!(
-        "Embedded GotaTun is unhealthy; background elevated repair is disabled. Use the explicit Setup Tunnel or Reconnect action (status_fresh={}, process_active={}, config_match={}, identity_match={}, handshake_recent={}, ping_ok={})",
-        status_fresh,
-        process_active,
-        config_matches,
-        runtime_matches,
-        handshake_ok,
-        ping_ok
-    );
-
-    Ok(())
-}
-
 fn ensure_local_wireguard_tools() -> AppResult<()> {
     let _ = resolve_noland_net_helper_binary()?;
     #[cfg(target_os = "windows")]
@@ -2559,7 +2348,8 @@ fn local_tunnel_runtime_is_healthy(expected: &ExpectedLocalTunnel) -> bool {
         return true;
     }
 
-    can_ping_tunnel_host(&expected.server_ip)
+    let _ = can_ping_tunnel_host(&expected.server_ip);
+    false
 }
 
 fn wait_for_local_tunnel_health(

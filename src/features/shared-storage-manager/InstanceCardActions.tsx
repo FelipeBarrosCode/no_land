@@ -9,8 +9,8 @@ interface Props {
   busy: boolean;
   instanceActionRunning: boolean;
   blockingAction: BlockingActionState | null;
+  onProvisioning: (instanceId: number) => void;
   onPlay: (instanceId: number) => void;
-  onSettings: (instanceId: number) => void;
   onPair: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
@@ -25,8 +25,8 @@ export function InstanceCardActions({
   busy,
   instanceActionRunning,
   blockingAction,
+  onProvisioning,
   onPlay,
-  onSettings,
   onPair,
   onReconnect,
   onReboot,
@@ -57,7 +57,7 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           loading={loadingKey === "provisioning.flow"}
           loadingText="Launching..."
-          onClick={() => onPlay(instance.instanceId)}
+          onClick={() => onProvisioning(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
           <span className="ml-1">Provisioning</span>
@@ -78,7 +78,7 @@ export function InstanceCardActions({
           variant="secondary"
           className="w-full"
           disabled={actionDisabled}
-          onClick={() => onSettings(instance.instanceId)}
+          onClick={() => onPlay(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
           <span className="ml-1">Play</span>
