@@ -15,9 +15,9 @@ typedef struct _reed_solomon {
     int ds;
     int ps;
     int ts;
-    void (*axpy)(uint8_t *a, uint8_t *b, uint8_t u, unsigned k);
+    void (*axpy)(uint8_t *a, const uint8_t *b, uint8_t u, unsigned k);
     void (*scal)(uint8_t *a, uint8_t u, unsigned k);
-    void (*axiy)(uint8_t *a, uint8_t *b, uint8_t u, unsigned k);
+    void (*axiy)(uint8_t *a, const uint8_t *b, uint8_t u, unsigned k);
     size_t align_size;
     uint8_t p[];
 } reed_solomon;
