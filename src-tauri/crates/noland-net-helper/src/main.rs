@@ -1051,19 +1051,21 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        if let Ok(config) = parse_tunnel_config(&_args.config_path) {
-            for network in &config.allowed_ips {
-                if let IpNetwork::V4(network) = network {
-                    remove_windows_route(INTERFACE_NAME, &network.to_string());
-                }
+    if let Ok(config) = parse_tunnel_config(&_args.config_path) {
+        for network in &config.allowed_ips {
+            if let IpNetwork::V4(network) = network {
+                remove_windows_route(INTERFACE_NAME, &network.to_string());
             }
-            remove_windows_address_conflicts(INTERFACE_NAME, config.client_address);
-            reset_windows_adapter_address(INTERFACE_NAME);
-            remove_windows_adapter_address(INTERFACE_NAME, config.client_address);
         }
+        remove_windows_address_conflicts(INTERFACE_NAME, config.client_address);
+        reset_windows_adapter_address(INTERFACE_NAME);
+        remove_windows_adapter_address(INTERFACE_NAME, config.client_address);
     }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
     Ok(())
 }
 
