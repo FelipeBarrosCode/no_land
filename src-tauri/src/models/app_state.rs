@@ -566,6 +566,28 @@ pub struct RentedInstanceSummary {
     pub public_ip: String,
     #[serde(default)]
     pub embedded_moonlight_pipeline_enabled: bool,
+    #[serde(default)]
+    pub embedded_moonlight_session_state: Option<String>,
+    #[serde(default)]
+    pub embedded_moonlight_last_error: Option<String>,
+    #[serde(default)]
+    pub embedded_moonlight_last_runtime_event: Option<String>,
+    #[serde(default)]
+    pub embedded_moonlight_runtime_connected: Option<bool>,
+    #[serde(default)]
+    pub embedded_moonlight_renderer_ready: Option<bool>,
+    #[serde(default)]
+    pub embedded_moonlight_video_session_active: Option<bool>,
+    #[serde(default)]
+    pub embedded_moonlight_video_frame_count: Option<u64>,
+    #[serde(default)]
+    pub embedded_moonlight_renderer_submitted_frame_count: Option<u64>,
+    #[serde(default)]
+    pub embedded_moonlight_renderer_dropped_frame_count: Option<u64>,
+    #[serde(default)]
+    pub embedded_moonlight_audio_sample_count: Option<u64>,
+    #[serde(default)]
+    pub embedded_moonlight_paired: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
