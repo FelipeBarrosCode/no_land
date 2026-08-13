@@ -274,6 +274,17 @@ export interface RentedInstanceSummary {
   sshPort: number;
   publicIp: string;
   embeddedMoonlightPipelineEnabled: boolean;
+  embeddedMoonlightSessionState?: string | null;
+  embeddedMoonlightLastError?: string | null;
+  embeddedMoonlightLastRuntimeEvent?: string | null;
+  embeddedMoonlightRuntimeConnected?: boolean | null;
+  embeddedMoonlightRendererReady?: boolean | null;
+  embeddedMoonlightVideoSessionActive?: boolean | null;
+  embeddedMoonlightVideoFrameCount?: number | null;
+  embeddedMoonlightRendererSubmittedFrameCount?: number | null;
+  embeddedMoonlightRendererDroppedFrameCount?: number | null;
+  embeddedMoonlightAudioSampleCount?: number | null;
+  embeddedMoonlightPaired?: boolean | null;
 }
 
 export interface ServerPreferencesUpdate {

@@ -2242,12 +2242,14 @@ pub async fn get_rented_instances(
             !status.contains("destroy") && !status.contains("stopped") && !status.contains("exited")
         })
         .map(|instance| {
-            let embedded_enabled = state
+            let server = state
                 .provisioned_servers
                 .iter()
-                .find(|record| record.instance_id == instance.id)
+                .find(|record| record.instance_id == instance.id);
+            let embedded_enabled = server
                 .map(|record| record.embedded_moonlight_pipeline_enabled)
                 .unwrap_or(false);
+            let paired = server.map(|record| record.embedded_moonlight_paired);
             RentedInstanceSummary {
                 instance_id: instance.id,
                 label: if instance.label.is_empty() {
@@ -2261,6 +2263,17 @@ pub async fn get_rented_instances(
                 ssh_port: instance.ssh_port,
                 public_ip: instance.public_ip,
                 embedded_moonlight_pipeline_enabled: embedded_enabled,
+                embedded_moonlight_session_state: None,
+                embedded_moonlight_last_error: None,
+                embedded_moonlight_last_runtime_event: None,
+                embedded_moonlight_runtime_connected: None,
+                embedded_moonlight_renderer_ready: None,
+                embedded_moonlight_video_session_active: None,
+                embedded_moonlight_video_frame_count: None,
+                embedded_moonlight_renderer_submitted_frame_count: None,
+                embedded_moonlight_renderer_dropped_frame_count: None,
+                embedded_moonlight_audio_sample_count: None,
+                embedded_moonlight_paired: paired,
             }
         })
         .collect::<Vec<_>>();

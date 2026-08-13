@@ -305,6 +305,65 @@ interface AppStore {
   clearError: () => void;
 }
 
+function applyEmbeddedMoonlightStatusToInstances(
+  rentedInstances: RentedInstanceSummary[],
+  embeddedMoonlightStatus: EmbeddedMoonlightInstanceStatus | null,
+): RentedInstanceSummary[] {
+  if (!embeddedMoonlightStatus) {
+    return rentedInstances;
+  }
+
+  return rentedInstances.map((instance) =>
+    instance.instanceId === embeddedMoonlightStatus.instanceId
+      ? {
+          ...instance,
+          embeddedMoonlightPipelineEnabled: embeddedMoonlightStatus.enabled,
+          embeddedMoonlightSessionState: embeddedMoonlightStatus.sessionState,
+          embeddedMoonlightLastError: embeddedMoonlightStatus.lastError,
+          embeddedMoonlightLastRuntimeEvent:
+            embeddedMoonlightStatus.lastRuntimeEvent,
+          embeddedMoonlightRuntimeConnected:
+            embeddedMoonlightStatus.runtimeConnected,
+          embeddedMoonlightRendererReady:
+            embeddedMoonlightStatus.rendererReady,
+          embeddedMoonlightVideoSessionActive:
+            embeddedMoonlightStatus.videoSessionActive,
+          embeddedMoonlightVideoFrameCount:
+            embeddedMoonlightStatus.videoFrameCount,
+          embeddedMoonlightRendererSubmittedFrameCount:
+            embeddedMoonlightStatus.rendererSubmittedFrameCount,
+          embeddedMoonlightRendererDroppedFrameCount:
+            embeddedMoonlightStatus.rendererDroppedFrameCount,
+          embeddedMoonlightAudioSampleCount:
+            embeddedMoonlightStatus.audioSampleCount,
+          embeddedMoonlightPaired: embeddedMoonlightStatus.paired,
+        }
+      : instance,
+  );
+}
+
+async function enrichRentedInstancesWithEmbeddedStatus(
+  rentedInstances: RentedInstanceSummary[],
+): Promise<RentedInstanceSummary[]> {
+  if (rentedInstances.length === 0) {
+    return rentedInstances;
+  }
+
+  const statuses = await Promise.all(
+    rentedInstances.map(async (instance) => {
+      if (!instance.embeddedMoonlightPipelineEnabled) {
+        return null;
+      }
+      return getInstanceMoonlightPipelineStatus(instance.instanceId).catch(() => null);
+    }),
+  );
+
+  return statuses.reduce(
+    (instances, status) => applyEmbeddedMoonlightStatusToInstances(instances, status),
+    rentedInstances,
+  );
+}
+
 function mapError(error: unknown): string {
   if (typeof error === "string") {
     return error;
@@ -752,7 +811,7 @@ export const useAppStore = create<AppStore>((set, get) => {
             getRentedInstances(),
             getVastWalletSummaryCommand().catch(() => null),
           ]);
-          rentedInstances = instances;
+          rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(instances);
           vastWalletSummary = wallet;
         }
 
@@ -802,7 +861,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           const appState = await completeOnboarding(payload);
-          const rentedInstances = await getRentedInstances();
+          const rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(
+            await getRentedInstances(),
+          );
           set({ appState, rentedInstances });
         },
         undefined,
@@ -953,7 +1014,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     loadRentedInstances: async () => {
       set({ busy: true, error: null });
       try {
-        const rentedInstances = await getRentedInstances();
+        const rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(
+          await getRentedInstances(),
+        );
         set({ rentedInstances, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
@@ -968,7 +1031,12 @@ export const useAppStore = create<AppStore>((set, get) => {
           getRentedInstances(),
           getVastWalletSummaryCommand().catch(() => null),
         ]);
-        set({ appState, rentedInstances, vastWalletSummary, busy: false });
+        set({
+          appState,
+          rentedInstances: await enrichRentedInstancesWithEmbeddedStatus(rentedInstances),
+          vastWalletSummary,
+          busy: false,
+        });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
       }
@@ -1743,7 +1811,14 @@ export const useAppStore = create<AppStore>((set, get) => {
           const embeddedMoonlightStatus = enabled
             ? await getInstanceMoonlightPipelineStatus(instanceId)
             : null;
-          set({ appState, rentedInstances, embeddedMoonlightStatus });
+          set({
+            appState,
+            rentedInstances: applyEmbeddedMoonlightStatusToInstances(
+              rentedInstances,
+              embeddedMoonlightStatus,
+            ),
+            embeddedMoonlightStatus,
+          });
         },
         undefined,
       );
@@ -1758,7 +1833,13 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
-          set({ embeddedMoonlightStatus });
+          set((state) => ({
+            embeddedMoonlightStatus,
+            rentedInstances: applyEmbeddedMoonlightStatusToInstances(
+              state.rentedInstances,
+              embeddedMoonlightStatus,
+            ),
+          }));
           return embeddedMoonlightStatus;
         },
         null,
