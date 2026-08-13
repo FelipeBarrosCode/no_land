@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #if !defined(__APPLE__)
 
 #define NL_CAPTURE_NONE 0
@@ -46,9 +50,69 @@ typedef struct nl_desktop_input_context {
   int capture_mode;
   bool initialized_video;
   bool suppress_next_left_up;
+#if defined(_WIN32)
+  HWND native_window;
+  WNDPROC previous_window_proc;
+  volatile LONG cursor_hidden;
+#endif
 } nl_desktop_input_context_t;
 
 static nl_desktop_input_context_t g_input;
+
+#if defined(_WIN32)
+static LRESULT CALLBACK nl_stream_window_proc(HWND window,
+                                              UINT message,
+                                              WPARAM w_param,
+                                              LPARAM l_param) {
+  nl_desktop_input_context_t* context = &g_input;
+  if (message == WM_SETCURSOR && LOWORD(l_param) == HTCLIENT &&
+      InterlockedCompareExchange(&context->cursor_hidden, 0, 0) != 0) {
+    SetCursor(NULL);
+    return TRUE;
+  }
+
+  if (context->previous_window_proc != NULL) {
+    return CallWindowProcW(context->previous_window_proc,
+                           window,
+                           message,
+                           w_param,
+                           l_param);
+  }
+  return DefWindowProcW(window, message, w_param, l_param);
+}
+
+static bool nl_install_windows_cursor_guard(nl_desktop_input_context_t* context,
+                                            void* window_handle) {
+  LONG_PTR previous;
+  if (context == NULL || window_handle == NULL) return false;
+
+  context->native_window = (HWND)window_handle;
+  SetLastError(0);
+  previous = SetWindowLongPtrW(context->native_window,
+                               GWLP_WNDPROC,
+                               (LONG_PTR)nl_stream_window_proc);
+  if (previous == 0 && GetLastError() != 0) {
+    context->native_window = NULL;
+    return false;
+  }
+  context->previous_window_proc = (WNDPROC)previous;
+  return true;
+}
+
+static void nl_uninstall_windows_cursor_guard(nl_desktop_input_context_t* context) {
+  if (context == NULL) return;
+  InterlockedExchange(&context->cursor_hidden, 0);
+  if (context->native_window != NULL && context->previous_window_proc != NULL &&
+      IsWindow(context->native_window)) {
+    SetWindowLongPtrW(context->native_window,
+                      GWLP_WNDPROC,
+                      (LONG_PTR)context->previous_window_proc);
+  }
+  context->previous_window_proc = NULL;
+  context->native_window = NULL;
+  SetCursor(LoadCursorW(NULL, IDC_ARROW));
+}
+#endif
 
 static uint8_t nl_modifier_bits(SDL_Keymod modifiers) {
   uint8_t bits = 0;
@@ -142,10 +206,20 @@ static void nl_apply_capture_locked(nl_desktop_input_context_t* context,
 
   context->capture_active = active;
   context->capture_mode = target_mode;
+#if defined(_WIN32)
+  InterlockedExchange(&context->cursor_hidden, active ? 1 : 0);
+#endif
   SDL_SetWindowGrab(context->window, active ? SDL_TRUE : SDL_FALSE);
   SDL_CaptureMouse(active ? SDL_TRUE : SDL_FALSE);
   SDL_SetRelativeMouseMode(active && mode == NL_CAPTURE_RELATIVE ? SDL_TRUE : SDL_FALSE);
   SDL_ShowCursor(active ? SDL_DISABLE : SDL_ENABLE);
+#if defined(_WIN32)
+  if (active) {
+    SetCursor(NULL);
+  } else {
+    SetCursor(LoadCursorW(NULL, IDC_ARROW));
+  }
+#endif
   noland_desktop_input_on_capture_changed(active, target_mode);
 }
 
@@ -316,10 +390,23 @@ int nl_desktop_input_install(const nl_surface_descriptor_t* surface) {
     return -5;
   }
 
+#if defined(_WIN32)
+  if (!nl_install_windows_cursor_guard(context, surface->window_handle)) {
+    SDL_DestroyWindow(context->window);
+    if (context->initialized_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
+    SDL_DestroyMutex(context->mutex);
+    memset(context, 0, sizeof(*context));
+    return -6;
+  }
+#endif
+
   context->window_id = SDL_GetWindowID(context->window);
   context->running = true;
   context->thread = SDL_CreateThread(nl_input_thread, "noland-input", context);
   if (context->thread == NULL) {
+#if defined(_WIN32)
+    nl_uninstall_windows_cursor_guard(context);
+#endif
     SDL_DestroyWindow(context->window);
     if (context->initialized_video) SDL_QuitSubSystem(SDL_INIT_VIDEO);
     SDL_DestroyMutex(context->mutex);
@@ -349,6 +436,9 @@ void nl_desktop_input_uninstall(void) {
     SDL_WaitThread(context->thread, NULL);
     context->thread = NULL;
   }
+#if defined(_WIN32)
+  nl_uninstall_windows_cursor_guard(context);
+#endif
   if (context->window != NULL) {
     SDL_DestroyWindow(context->window);
     context->window = NULL;

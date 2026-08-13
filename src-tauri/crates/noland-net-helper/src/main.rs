@@ -152,6 +152,45 @@ fn configure_hidden_windows_command(command: &mut Command) {
 }
 
 #[cfg(target_os = "windows")]
+fn ensure_windows_gotatun_firewall_rule(listen_port: u16) -> Result<()> {
+    const RULE_NAME: &str = "Noland GotaTun UDP";
+
+    let mut delete = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut delete);
+    let _ = delete
+        .args(["advfirewall", "firewall", "delete", "rule"])
+        .arg(format!("name={RULE_NAME}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let mut add = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut add);
+    let output = add
+        .args(["advfirewall", "firewall", "add", "rule"])
+        .arg(format!("name={RULE_NAME}"))
+        .args(["dir=in", "action=allow", "protocol=UDP"])
+        .arg(format!("localport={listen_port}"))
+        .args(["profile=any", "edge=yes", "enable=yes"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .context("failed launching netsh to configure the Noland GotaTun firewall rule")?;
+
+    if !output.status.success() {
+        bail!(
+            "failed allowing inbound UDP port {listen_port} for the managed GotaTun tunnel in Windows Firewall: {} {}",
+            String::from_utf8_lossy(&output.stdout).trim(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn remove_windows_adapter_address(interface_name: &str, address: Ipv4Addr) {
     let mut command = Command::new("netsh.exe");
     configure_hidden_windows_command(&mut command);
@@ -184,42 +223,155 @@ fn windows_adapter_has_address(interface_name: &str, address: Ipv4Addr) -> bool 
 }
 
 #[cfg(target_os = "windows")]
+fn windows_interfaces_with_address(address: Ipv4Addr) -> Vec<String> {
+    let script = format!(
+        "Get-NetIPAddress -IPAddress '{}' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty InterfaceAlias",
+        address
+    );
+    let mut command = Command::new("powershell.exe");
+    configure_hidden_windows_command(&mut command);
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(target_os = "windows")]
+fn stop_and_disable_legacy_wireguard_service(interface_name: &str) {
+    let service_name = format!("WireGuardTunnel${interface_name}");
+
+    let mut stop = Command::new("sc.exe");
+    configure_hidden_windows_command(&mut stop);
+    let _ = stop
+        .args(["stop", &service_name])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    let mut disable = Command::new("sc.exe");
+    configure_hidden_windows_command(&mut disable);
+    let _ = disable
+        .args(["config", &service_name, "start=", "disabled"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "windows")]
+fn remove_windows_address_conflicts(expected_interface: &str, address: Ipv4Addr) {
+    for interface_name in windows_interfaces_with_address(address) {
+        if !interface_name.eq_ignore_ascii_case(expected_interface) {
+            eprintln!(
+                "noland-net-helper: removing reserved tunnel address {address} from conflicting Windows interface {interface_name}"
+            );
+            stop_and_disable_legacy_wireguard_service(&interface_name);
+        }
+
+        remove_windows_adapter_address(&interface_name, address);
+    }
+
+    for _ in 0..20 {
+        if windows_interfaces_with_address(address)
+            .iter()
+            .all(|interface_name| interface_name.eq_ignore_ascii_case(expected_interface))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn reset_windows_adapter_address(interface_name: &str) {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    let _ = command
+        .args(["interface", "ipv4", "set", "address"])
+        .arg(format!("name={interface_name}"))
+        .arg("source=dhcp")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "windows")]
 fn configure_windows_adapter_address(
     interface_name: &str,
     address: Ipv4Addr,
     prefix: u8,
 ) -> Result<WindowsAddressGuard> {
     // tun 0.8.6 applies the address twice on Windows. Creating the adapter
-    // without address fields and configuring it here avoids ERROR_OBJECT_EXISTS,
-    // while this cleanup also recovers adapters left behind by interrupted runs.
+    // without address fields and configuring it here avoids ERROR_OBJECT_EXISTS.
+    // A legacy WireGuard service may own the reserved address on a differently
+    // named adapter, so release that cross-interface conflict before assigning it.
+    remove_windows_address_conflicts(interface_name, address);
+    reset_windows_adapter_address(interface_name);
     remove_windows_adapter_address(interface_name, address);
 
-    let mut command = Command::new("netsh.exe");
-    configure_hidden_windows_command(&mut command);
-    let output = command
-        .args(["interface", "ipv4", "set", "address"])
-        .arg(format!("name={interface_name}"))
-        .arg("source=static")
-        .arg(format!("address={address}"))
-        .arg(format!("mask={}", prefix_to_netmask(prefix)))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("failed launching netsh to configure the Windows tunnel address")?;
+    let mut last_stdout = String::new();
+    let mut last_stderr = String::new();
+    for attempt in 0..3 {
+        let mut command = Command::new("netsh.exe");
+        configure_hidden_windows_command(&mut command);
+        let output = command
+            .args(["interface", "ipv4", "set", "address"])
+            .arg(format!("name={interface_name}"))
+            .arg("source=static")
+            .arg(format!("address={address}"))
+            .arg(format!("mask={}", prefix_to_netmask(prefix)))
+            .arg("gateway=none")
+            .arg("store=active")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .context("failed launching netsh to configure the Windows tunnel address")?;
 
-    if !output.status.success() && !windows_adapter_has_address(interface_name, address) {
-        bail!(
-            "failed configuring Windows tunnel address {address}/{prefix} on {interface_name}: {} {}",
-            String::from_utf8_lossy(&output.stdout).trim(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        last_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        last_stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+
+        if output.status.success() {
+            return Ok(WindowsAddressGuard {
+                interface_name: interface_name.to_string(),
+                address,
+            });
+        }
+
+        for _ in 0..10 {
+            if windows_adapter_has_address(interface_name, address) {
+                return Ok(WindowsAddressGuard {
+                    interface_name: interface_name.to_string(),
+                    address,
+                });
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        if attempt == 0 {
+            reset_windows_adapter_address(interface_name);
+            remove_windows_adapter_address(interface_name, address);
+        }
+        std::thread::sleep(Duration::from_millis(150));
     }
 
-    Ok(WindowsAddressGuard {
-        interface_name: interface_name.to_string(),
-        address,
-    })
+    bail!(
+        "failed configuring Windows tunnel address {address}/{prefix} on {interface_name}: {} {}",
+        last_stdout,
+        last_stderr
+    );
 }
 
 #[cfg(target_os = "windows")]
@@ -394,6 +546,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         let wintun_path = args.wintun_path.as_ref().ok_or_else(|| {
             anyhow!("the Windows GotaTun runtime requires the bundled wintun.dll path")
         })?;
+        ensure_windows_gotatun_firewall_rule(tunnel_config.listen_port)?;
         tun_config.platform_config(|platform| {
             platform.wintun_file(wintun_path.as_os_str());
         });
@@ -896,6 +1049,7 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
 fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -905,6 +1059,8 @@ fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
                     remove_windows_route(INTERFACE_NAME, &network.to_string());
                 }
             }
+            remove_windows_address_conflicts(INTERFACE_NAME, config.client_address);
+            reset_windows_adapter_address(INTERFACE_NAME);
             remove_windows_adapter_address(INTERFACE_NAME, config.client_address);
         }
     }

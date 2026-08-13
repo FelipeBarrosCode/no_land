@@ -1399,10 +1399,11 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             instance.public_ip = refreshed_instance.public_ip;
             instance.ssh_host = refreshed_instance.ssh_host;
             instance.wireguard_port = refreshed_instance.wireguard_port;
+            instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
             instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
             info!(
-                "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={}",
-                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port
+                "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
+                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
             );
         }
         Err(error) => {
@@ -1474,6 +1475,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                         instance.id,
                         &endpoint_host,
                         endpoint_port,
+                        instance.wireguard_listen_port,
                         WireGuardProvisionMode::FreshProvision,
                     )
                     .await?;
@@ -1554,6 +1556,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     instance.id,
                     &endpoint_host,
                     endpoint_port,
+                    instance.wireguard_listen_port,
                     WireGuardProvisionMode::FreshProvision,
                 )
                 .await?;
@@ -1601,6 +1604,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 instance.id,
                 &endpoint_host,
                 endpoint_port,
+                instance.wireguard_listen_port,
                 WireGuardProvisionMode::FreshProvision,
             )
             .await?;
@@ -2293,10 +2297,11 @@ async fn run_existing_instance_orchestration(
             instance.public_ip = refreshed_instance.public_ip;
             instance.ssh_host = refreshed_instance.ssh_host;
             instance.wireguard_port = refreshed_instance.wireguard_port;
+            instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
             instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
             info!(
-                "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={}",
-                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port
+                "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
+                instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
             );
         }
         Err(error) => {
@@ -2368,6 +2373,7 @@ async fn run_existing_instance_orchestration(
                         instance.id,
                         &endpoint_host,
                         endpoint_port,
+                        instance.wireguard_listen_port,
                         WireGuardProvisionMode::ReinitializeExisting,
                     )
                     .await?;
@@ -2448,6 +2454,7 @@ async fn run_existing_instance_orchestration(
                     instance.id,
                     &endpoint_host,
                     endpoint_port,
+                    instance.wireguard_listen_port,
                     WireGuardProvisionMode::FreshProvision,
                 )
                 .await?;
@@ -2495,6 +2502,7 @@ async fn run_existing_instance_orchestration(
                 instance.id,
                 &endpoint_host,
                 endpoint_port,
+                instance.wireguard_listen_port,
                 WireGuardProvisionMode::ReinitializeExisting,
             )
             .await?;

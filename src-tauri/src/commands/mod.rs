@@ -1750,6 +1750,28 @@ pub async fn resume_provisioning_existing_instance(
             ))
         })?;
 
+    let saved_post_wireguard_stage = setup_stage_for_orchestration_state(server.last_state)
+        .filter(|stage| !matches!(stage, SetupStage::Failed | SetupStage::SetupComplete));
+    let should_resume_interactive_post_wireguard = matches!(
+        saved_post_wireguard_stage,
+        Some(
+            SetupStage::WireguardConfigGenerated
+                | SetupStage::WireguardAppHandoffStarted
+                | SetupStage::WireguardWaitingForImport
+                | SetupStage::WireguardWaitingForActivation
+                | SetupStage::WireguardVerifying
+                | SetupStage::WireguardConnected
+                | SetupStage::MoonlightSunshineReadyToSetup
+                | SetupStage::SunshineCredentialsConfiguring
+                | SetupStage::SunshineVerifying
+                | SetupStage::MoonlightDetecting
+                | SetupStage::MoonlightPairingStarted
+                | SetupStage::MoonlightPinReceived
+                | SetupStage::SunshinePinSubmitting
+                | SetupStage::MoonlightSunshinePaired
+        )
+    );
+
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance_id);
@@ -1779,16 +1801,19 @@ pub async fn resume_provisioning_existing_instance(
                 state.post_wireguard_setup.sunshine_username =
                     state.credentials.app_username.clone();
 
-                let restored_stage = if post_setup_belongs_to_instance
-                    && !matches!(
-                        state.post_wireguard_setup.stage,
-                        SetupStage::PreWireguardExistingFlow
-                    ) {
-                    state.post_wireguard_setup.stage
+                let restored_stage = if should_resume_interactive_post_wireguard {
+                    if post_setup_belongs_to_instance
+                        && !matches!(
+                            state.post_wireguard_setup.stage,
+                            SetupStage::PreWireguardExistingFlow
+                        )
+                    {
+                        state.post_wireguard_setup.stage
+                    } else {
+                        saved_post_wireguard_stage.unwrap_or(SetupStage::WireguardConfigGenerated)
+                    }
                 } else {
-                    setup_stage_for_orchestration_state(server.last_state)
-                        .filter(|stage| !matches!(stage, SetupStage::Failed))
-                        .unwrap_or(SetupStage::WireguardConfigGenerated)
+                    SetupStage::PreWireguardExistingFlow
                 };
 
                 if !post_setup_belongs_to_instance {
@@ -1810,7 +1835,7 @@ pub async fn resume_provisioning_existing_instance(
         })
         .await?;
 
-    if server.steps.wireguard_configured {
+    if server.steps.wireguard_configured && should_resume_interactive_post_wireguard {
         return Ok("provisioning".to_string());
     }
 
@@ -3229,6 +3254,7 @@ pub(crate) async fn sync_instance_connection_internal(
             instance.id,
             &endpoint_host,
             endpoint_port,
+            instance.wireguard_listen_port,
             WireGuardProvisionMode::ReinitializeExisting,
         )
         .await?;
