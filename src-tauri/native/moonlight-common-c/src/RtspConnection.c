@@ -427,6 +427,7 @@ static bool transactRtspMessageTcp(PRTSP_MESSAGE request, PRTSP_MESSAGE response
 
     serializedMessage = sealRtspMessage(request, &messageLen);
     if (serializedMessage == NULL) {
+        Limelog("Failed to seal RTSP message (encrypted=%d)\n", encryptedRtspEnabled ? 1 : 0);
         closeSocket(sock);
         sock = INVALID_SOCKET;
         return ret;
@@ -955,6 +956,18 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
     encryptedRtspEnabled = serverInfo->rtspSessionUrl && strstr(serverInfo->rtspSessionUrl, "rtspenc://");
     encryptionCtx = PltCreateCryptoContext();
     decryptionCtx = PltCreateCryptoContext();
+    if (encryptionCtx == NULL || decryptionCtx == NULL) {
+        Limelog("Failed to create RTSP crypto contexts\n");
+        PltDestroyCryptoContext(encryptionCtx);
+        PltDestroyCryptoContext(decryptionCtx);
+        encryptionCtx = NULL;
+        decryptionCtx = NULL;
+        return -1;
+    }
+    Limelog("RTSP transport: %s target=%s:%u\n",
+            encryptedRtspEnabled ? "encrypted TCP" : (useEnet ? "ENet" : "TCP"),
+            RemoteAddrString,
+            RtspPortNumber);
 
     // HACK: In order to get GFE to respect our request for a lower audio bitrate, we must
     // fake our target address so it doesn't match any of the PC's local interfaces. It seems

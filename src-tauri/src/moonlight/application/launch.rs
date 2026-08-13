@@ -1,7 +1,5 @@
 use std::time::Duration;
 
-use reqwest::Url;
-
 use crate::moonlight::{
     application::bootstrap::bootstrap_client_identity,
     domain::{
@@ -117,7 +115,7 @@ pub async fn start_stream_request(
         resolution = %format!("{}x{}x{}", merged.video.width, merged.video.height, merged.video.fps),
         bitrate_kbps = merged.video.bitrate_kbps,
         audio_configuration = ?merged.audio.configuration,
-        play_local_audio = !merged.audio.play_on_host,
+        play_audio_on_host = merged.audio.play_on_host,
         packet_size = merged.network.packet_size,
         streaming_mode = ?merged.network.streaming_mode,
         hdr = merged.video.hdr,
@@ -133,13 +131,20 @@ pub async fn start_stream_request(
             &pairing,
             operation,
             &params,
-            Duration::from_secs(15),
+            match operation {
+                crate::moonlight::domain::LaunchOperation::Launch => Duration::from_secs(120),
+                crate::moonlight::domain::LaunchOperation::Resume => Duration::from_secs(30),
+            },
         ))
         .await?;
 
-    let mut launch_result = parse_launch_response(&response.body, operation)?;
-    launch_result.rtsp_session_url =
-        normalize_rtsp_session_url(launch_result.rtsp_session_url, &address);
+    let launch_result = parse_launch_response(&response.body, operation)?;
+    tracing::info!(
+        host_id,
+        operation = ?operation,
+        session_url = ?launch_result.rtsp_session_url,
+        "received Moonlight launch session URL"
+    );
     repository.update(|configuration| {
         configuration.last_selected_host_id = Some(host_id.to_string());
         if let Some(host) = configuration.hosts.get_mut(host_id) {
@@ -159,38 +164,6 @@ pub async fn start_stream_request(
         remote_input_key: crypto.key,
         remote_input_iv: crypto.iv,
     })
-}
-
-fn normalize_rtsp_session_url(session_url: Option<String>, host_address: &str) -> Option<String> {
-    let Some(session_url) = session_url else {
-        return None;
-    };
-    if host_address.trim().is_empty() {
-        return Some(session_url);
-    }
-
-    let mut parsed = match Url::parse(&session_url) {
-        Ok(parsed) => parsed,
-        Err(_) => return Some(session_url),
-    };
-    let current_host = parsed.host_str().map(str::to_string);
-    if current_host.as_deref() == Some(host_address) {
-        return Some(session_url);
-    }
-
-    match parsed.set_host(Some(host_address)) {
-        Ok(()) => {
-            let normalized = parsed.to_string();
-            tracing::info!(
-                original_session_url = %session_url,
-                normalized_session_url = %normalized,
-                host_address,
-                "normalized RTSP session URL host to selected active address"
-            );
-            Some(normalized)
-        }
-        Err(_) => Some(session_url),
-    }
 }
 
 fn default_client_video_capabilities() -> ClientVideoCapabilities {
@@ -242,25 +215,4 @@ pub async fn quit_remote_app(
         ))
         .await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_rtsp_session_url;
-
-    #[test]
-    fn normalizes_rtsp_session_url_host_to_selected_address() {
-        let normalized =
-            normalize_rtsp_session_url(Some("rtsp://ubuntu:48010".to_string()), "100.117.88.18");
-        assert_eq!(normalized.as_deref(), Some("rtsp://100.117.88.18:48010"));
-    }
-
-    #[test]
-    fn preserves_rtsp_session_url_when_host_already_matches() {
-        let normalized = normalize_rtsp_session_url(
-            Some("rtsp://100.117.88.18:48010".to_string()),
-            "100.117.88.18",
-        );
-        assert_eq!(normalized.as_deref(), Some("rtsp://100.117.88.18:48010"));
-    }
 }

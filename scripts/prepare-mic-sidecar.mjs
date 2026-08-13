@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -43,6 +43,19 @@ if (target) {
   nativeEnv = buildNativeEnv(target);
 }
 
+const binariesDir = join(srcTauriDir, 'binaries');
+mkdirSync(binariesDir, { recursive: true });
+
+if (managedTarget) {
+  for (const tool of managedToolSpecs(managedTarget)) {
+    stageBundledTool(tool, managedTarget, binariesDir);
+  }
+
+  if (isWindowsTarget(managedTarget)) {
+    stageWindowsWintun(managedTarget, binariesDir, { requireLicense: release });
+  }
+}
+
 const cargo = spawnSync('cargo', cargoArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
@@ -52,6 +65,12 @@ const cargo = spawnSync('cargo', cargoArgs, {
     CARGO_TARGET_DIR: sidecarTargetDir,
   },
 });
+
+if (cargo.error) {
+  console.error(`Failed to launch cargo for mic sidecar build: ${cargo.error.message}`);
+  console.error('Install Rust/Cargo and ensure `cargo` is on PATH before running `npm run tauri:dev`.');
+  process.exit(1);
+}
 
 if (cargo.status !== 0) {
   process.exit(cargo.status ?? 1);
@@ -71,6 +90,11 @@ const netHelperCargo = spawnSync('cargo', netHelperCargoArgs, {
     CARGO_TARGET_DIR: netHelperTargetDir,
   },
 });
+if (netHelperCargo.error) {
+  console.error(`Failed to launch cargo for embedded GotaTun helper build: ${netHelperCargo.error.message}`);
+  console.error('Install Rust/Cargo and ensure `cargo` is on PATH before running `npm run tauri:dev`.');
+  process.exit(1);
+}
 if (netHelperCargo.status !== 0) {
   process.exit(netHelperCargo.status ?? 1);
 }
@@ -104,26 +128,19 @@ if (process.platform === 'darwin') {
   }
 }
 
-const binariesDir = join(srcTauriDir, 'binaries');
-mkdirSync(binariesDir, { recursive: true });
-
 if (managedTarget) {
-  for (const tool of managedToolSpecs(managedTarget)) {
-    stageBundledTool(tool, managedTarget, binariesDir);
-  }
-
   const helperStagedName = isWindowsTarget(managedTarget)
     ? `noland-net-helper-${managedTarget}.exe`
     : `noland-net-helper-${managedTarget}`;
   const helperStagedPath = join(binariesDir, helperStagedName);
-  copyFileSync(builtNetHelper, helperStagedPath);
-  if (!isWindowsTarget(managedTarget)) {
-    chmodSync(helperStagedPath, 0o755);
-  }
-  console.log(`Staged embedded GotaTun helper for packaging: ${helperStagedPath}`);
+  stageManagedBinaryCopy(builtNetHelper, helperStagedPath, {
+    targetTriple: managedTarget,
+    release,
+    label: 'embedded GotaTun helper',
+  });
 
   if (isWindowsTarget(managedTarget)) {
-    stageWindowsWintun(managedTarget, binariesDir);
+    stageWindowsWintun(managedTarget, binariesDir, { requireLicense: release });
   }
 }
 
@@ -137,16 +154,19 @@ if (packagingTarget) {
     chmodSync(stagedBinary, 0o755);
   }
   console.log(`Staged mic sidecar for packaging: ${stagedBinary}`);
-
-  if (isWindowsTarget(packagingTarget) && windowsTargetNeedsGstreamer(packagingTarget)) {
-    stageWindowsGstreamerRuntime(packagingTarget, binariesDir);
-  } else if (packagingTarget.includes('linux')) {
-    stageLinuxGstreamerRuntime(packagingTarget, binariesDir);
-  } else if (isWindowsTarget(packagingTarget)) {
-    console.log(`Skipping bundled Windows GStreamer runtime for ${packagingTarget}; microphone passthrough falls back to an unsupported stub on this target.`);
-  }
 } else {
   console.log(`Prepared mic sidecar for local ${mode}: ${builtBinary}`);
+}
+
+const gstreamerTarget = packagingTarget ?? managedTarget;
+if (gstreamerTarget) {
+  if (isWindowsTarget(gstreamerTarget) && windowsTargetNeedsGstreamer(gstreamerTarget)) {
+    stageWindowsGstreamerRuntime(gstreamerTarget, binariesDir);
+  } else if (gstreamerTarget.includes('linux')) {
+    stageLinuxGstreamerRuntime(gstreamerTarget, binariesDir);
+  } else if (isWindowsTarget(gstreamerTarget)) {
+    console.log(`Skipping bundled Windows GStreamer runtime for ${gstreamerTarget}; microphone passthrough falls back to an unsupported stub on this target.`);
+  }
 }
 
 console.log(`Mic sidecar target dir: ${sidecarTargetDir}`);
@@ -188,34 +208,153 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
 
 
   if (resolve(sourcePath) !== resolve(stagedBinary)) {
-    copyFileSync(sourcePath, stagedBinary);
+    stageManagedBinaryCopy(sourcePath, stagedBinary, {
+      targetTriple,
+      release,
+      label: `${tool.lookupName} sidecar`,
+    });
   }
   if (!isWindowsTarget(targetTriple)) {
     chmodSync(stagedBinary, 0o755);
+  } else {
+    stageWindowsManagedToolRuntime(sourcePath, binariesDir, targetTriple);
   }
   console.log(`Staged ${tool.lookupName} sidecar for packaging: ${stagedBinary}`);
 }
 
-function stageWindowsWintun(targetTriple, binariesDir) {
+function stageManagedBinaryCopy(sourcePath, destinationPath, options = {}) {
+  const { targetTriple, release = false, label = 'managed binary' } = options;
+
+  try {
+    copyFileSync(sourcePath, destinationPath);
+  } catch (error) {
+    const windowsBusyCopy = isWindowsTarget(targetTriple)
+      && !release
+      && existsSync(destinationPath)
+      && (error?.code === 'EBUSY' || error?.code === 'EPERM');
+    if (windowsBusyCopy) {
+      console.warn(
+        `Keeping existing staged ${label} because Windows has it locked: ${destinationPath}`,
+      );
+      return;
+    }
+    throw error;
+  }
+
+  if (!isWindowsTarget(targetTriple)) {
+    chmodSync(destinationPath, 0o755);
+  }
+}
+
+function stageWindowsManagedToolRuntime(sourcePath, binariesDir, targetTriple) {
+  const root = dirname(sourcePath);
+  if (!hasWindowsManagedOpenSshRoot(root)) {
+    return;
+  }
+
+  const runtimeDir = join(binariesDir, 'ssh-runtime', targetTriple);
+  rmSync(runtimeDir, { recursive: true, force: true });
+  mkdirSync(runtimeDir, { recursive: true });
+
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isFile()) {
+      continue;
+    }
+    if (!entry.name.toLowerCase().endsWith('.dll')) {
+      continue;
+    }
+    copyFileSync(join(root, entry.name), join(runtimeDir, entry.name));
+  }
+}
+
+function stageWindowsWintun(targetTriple, binariesDir, options = {}) {
+  const { requireLicense = true } = options;
   const stagedPath = join(binariesDir, `wintun-${targetTriple}.dll`);
   const stagedLicense = join(binariesDir, 'wintun-LICENSE.txt');
-  const source = process.env.NOLAND_WINTUN_DLL?.trim();
-  if (source && existsSync(source)) {
+  const source = resolveWintunDllPath();
+  if (source) {
     const licenseSource = resolve(dirname(source), '..', '..', 'LICENSE.txt');
-    if (!existsSync(licenseSource)) {
+    copyFileSync(source, stagedPath);
+    if (existsSync(licenseSource)) {
+      copyFileSync(licenseSource, stagedLicense);
+    } else if (requireLicense) {
       console.error(`Wintun license was not found next to the staged DLL: ${licenseSource}`);
       process.exit(1);
     }
-    copyFileSync(source, stagedPath);
-    copyFileSync(licenseSource, stagedLicense);
     console.log(`Staged Wintun adapter library: ${stagedPath}`);
     return;
   }
-  if (existsSync(stagedPath) && existsSync(stagedLicense)) {
+  if (existsSync(stagedPath) && (existsSync(stagedLicense) || !requireLicense)) {
+    return;
+  }
+  if (!requireLicense) {
+    console.warn('Windows dev mode could not pre-stage wintun.dll. The app will try to use an installed WireGuard Wintun runtime at launch.');
     return;
   }
   console.error('Required bundled Wintun adapter library/license was not found. Set NOLAND_WINTUN_DLL or run the CI managed-tool staging step.');
   process.exit(1);
+}
+
+function resolveWintunDllPath() {
+  const explicit = process.env.NOLAND_WINTUN_DLL?.trim();
+  if (explicit && existsSync(explicit)) {
+    return explicit;
+  }
+
+  const candidates = [
+    join(repoRoot, 'src-tauri', 'binaries', `wintun-${target}.dll`),
+    join(repoRoot, 'src-tauri', 'binaries', 'wintun.dll'),
+  ].filter(Boolean);
+
+  const existing = candidates.find((candidate) => existsSync(candidate));
+  if (existing) {
+    return existing;
+  }
+
+  if (!isWindowsTarget(target)) {
+    return null;
+  }
+
+  return downloadBundledWintun(target);
+}
+
+function downloadBundledWintun(targetTriple) {
+  const version = '0.14.1';
+  const archDir = targetTriple.includes('aarch64') ? 'arm64' : 'amd64';
+  const cacheRoot = join(srcTauriDir, '.native-deps', 'cache', `wintun-${version}`);
+  const zipPath = join(cacheRoot, `wintun-${version}.zip`);
+  const extractedRoot = join(cacheRoot, 'extracted');
+  const dllPath = join(extractedRoot, 'wintun', 'bin', archDir, 'wintun.dll');
+  if (existsSync(dllPath)) {
+    return dllPath;
+  }
+
+  mkdirSync(cacheRoot, { recursive: true });
+  const escapePs = (value) => String(value).replaceAll("'", "''");
+  const script = [
+    "$ProgressPreference = 'SilentlyContinue'",
+    `Invoke-WebRequest -Uri 'https://www.wintun.net/builds/wintun-${version}.zip' -OutFile '${escapePs(zipPath)}'`,
+    `if (Test-Path '${escapePs(extractedRoot)}') { Remove-Item -Recurse -Force '${escapePs(extractedRoot)}' }`,
+    `Expand-Archive -Path '${escapePs(zipPath)}' -DestinationPath '${escapePs(extractedRoot)}' -Force`,
+  ].join('; ');
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: process.env,
+  });
+  if (result.error) {
+    console.error(`Failed downloading bundled Wintun runtime: ${result.error.message}`);
+    process.exit(1);
+  }
+  if (result.status !== 0) {
+    console.error(`Bundled Wintun download failed with exit code ${result.status ?? -1}`);
+    process.exit(result.status ?? 1);
+  }
+  if (!existsSync(dllPath)) {
+    console.error(`Wintun archive did not contain expected DLL: ${dllPath}`);
+    process.exit(1);
+  }
+  return dllPath;
 }
 
 function windowsTargetNeedsGstreamer(targetTriple) {
@@ -289,6 +428,20 @@ function resolveLinuxGstreamerRoot(targetTriple) {
   return existsSync(join(candidate, 'lib')) || existsSync(join(candidate, 'lib64')) ? candidate : null;
 }
 
+function resolveWindowsLibclangRoot() {
+  const explicit = process.env.LIBCLANG_PATH?.trim();
+  if (explicit && existsSync(join(explicit, 'libclang.dll'))) {
+    return explicit;
+  }
+
+  const candidates = [
+    join(srcTauriDir, '.native-deps', 'cache', 'llvm-18.1.8-windows-x64', 'extracted', 'bin'),
+    join(srcTauriDir, '.native-deps', 'cache', 'llvm-18.1.8-windows-x64', 'extracted', 'clang+llvm-18.1.8-x86_64-pc-windows-msvc', 'bin'),
+  ];
+
+  return candidates.find((candidate) => existsSync(join(candidate, 'libclang.dll'))) ?? null;
+}
+
 function resolveWindowsGstreamerRoot(targetTriple) {
   const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();
   if (explicit && existsSync(join(explicit, 'bin'))) {
@@ -307,10 +460,18 @@ function resolveWindowsGstreamerRoot(targetTriple) {
 
 function resolveToolPath(tool, targetTriple, binariesDir, stagedBinary) {
   const envOverride = process.env[tool.envVarName]?.trim();
-  if (envOverride && existsSync(envOverride)) {
+  if (envOverride && existsSync(envOverride) && !isDebugPlaceholderStub(envOverride)) {
     return envOverride;
   }
-  if (existsSync(stagedBinary)) {
+
+  if (isWindowsTarget(targetTriple)) {
+    const bundledWindowsTool = resolveWindowsManagedTool(tool.lookupName, targetTriple);
+    if (bundledWindowsTool) {
+      return bundledWindowsTool;
+    }
+  }
+
+  if (existsSync(stagedBinary) && !isDebugPlaceholderStub(stagedBinary)) {
     return stagedBinary;
   }
 
@@ -327,7 +488,47 @@ function resolveToolPath(tool, targetTriple, binariesDir, stagedBinary) {
     );
   }
 
-  return projectCandidates.find((candidate) => existsSync(candidate)) ?? null;
+  return projectCandidates.find((candidate) => existsSync(candidate) && !isDebugPlaceholderStub(candidate)) ?? null;
+}
+
+function resolveWindowsManagedTool(lookupName, targetTriple) {
+  const root = resolveWindowsManagedToolRoot(targetTriple);
+  if (!root) {
+    return null;
+  }
+
+  const candidate = join(root, lookupName);
+  return existsSync(candidate) && !isDebugPlaceholderStub(candidate) ? candidate : null;
+}
+
+function resolveWindowsManagedToolRoot(targetTriple) {
+  const explicitRoot = process.env.NOLAND_OPENSSH_ROOT?.trim();
+  if (explicitRoot && hasWindowsManagedOpenSshRoot(explicitRoot)) {
+    return explicitRoot;
+  }
+
+  const candidates = [
+    join(srcTauriDir, '.native-deps', 'cache', `openssh-${targetTriple}`, 'root'),
+    join(srcTauriDir, '.native-deps', 'cache', `openssh-${defaultHostTarget()}`, 'root'),
+  ];
+
+  return candidates.find((candidate) => hasWindowsManagedOpenSshRoot(candidate)) ?? null;
+}
+
+function hasWindowsManagedOpenSshRoot(root) {
+  return Boolean(root)
+    && existsSync(join(root, 'ssh.exe'))
+    && existsSync(join(root, 'scp.exe'))
+    && existsSync(join(root, 'ssh-keygen.exe'));
+}
+
+function isDebugPlaceholderStub(path) {
+  try {
+    const header = readFileSync(path, 'utf8');
+    return header.includes('debug placeholder') && header.includes('Run npm run tauri:dev');
+  } catch {
+    return false;
+  }
 }
 
 function readTarget(args) {
@@ -393,6 +594,7 @@ function buildNativeEnv(targetTriple) {
 
   if (isWindowsTarget(targetTriple)) {
     const gstreamerRoot = resolveWindowsGstreamerRoot(targetTriple);
+    const libclangRoot = resolveWindowsLibclangRoot();
     if (gstreamerRoot) {
       env.NOLAND_GSTREAMER_ROOT = gstreamerRoot;
       if (targetTriple.includes('aarch64')) {
@@ -407,8 +609,17 @@ function buildNativeEnv(targetTriple) {
       ].filter(Boolean).join(';');
       env.PATH = [
         join(gstreamerRoot, 'bin'),
+        libclangRoot,
         process.env.PATH,
       ].filter(Boolean).join(';');
+    } else if (libclangRoot) {
+      env.PATH = [
+        libclangRoot,
+        process.env.PATH,
+      ].filter(Boolean).join(';');
+    }
+    if (libclangRoot) {
+      env.LIBCLANG_PATH = libclangRoot;
     }
   }
 

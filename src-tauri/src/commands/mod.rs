@@ -83,7 +83,8 @@ use crate::{
         wireguard::{
             locate_noland_net_helper_binary, locate_wintun_library,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
-            teardown_local_wireguard_client, WireGuardProvisionMode, WireGuardService,
+            teardown_local_wireguard_client, verify_managed_gotatun_tunnel, WireGuardProvisionMode,
+            WireGuardService,
         },
     },
     utils::redact::redact_secret,
@@ -1285,12 +1286,6 @@ async fn start_embedded_stream_for_host(
         details: Some(error.to_string()),
         retryable: false,
     })?;
-    stream_window.set_focus().map_err(|error| FrontendError {
-        code: "moonlight_error".to_string(),
-        message: "Moonlight operation failed".to_string(),
-        details: Some(error.to_string()),
-        retryable: false,
-    })?;
     stream_window
         .set_fullscreen(true)
         .map_err(|error| FrontendError {
@@ -1299,6 +1294,12 @@ async fn start_embedded_stream_for_host(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
     let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
         crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
@@ -1750,6 +1751,28 @@ pub async fn resume_provisioning_existing_instance(
             ))
         })?;
 
+    let saved_post_wireguard_stage = setup_stage_for_orchestration_state(server.last_state)
+        .filter(|stage| !matches!(stage, SetupStage::Failed | SetupStage::SetupComplete));
+    let should_resume_interactive_post_wireguard = matches!(
+        saved_post_wireguard_stage,
+        Some(
+            SetupStage::WireguardConfigGenerated
+                | SetupStage::WireguardAppHandoffStarted
+                | SetupStage::WireguardWaitingForImport
+                | SetupStage::WireguardWaitingForActivation
+                | SetupStage::WireguardVerifying
+                | SetupStage::WireguardConnected
+                | SetupStage::MoonlightSunshineReadyToSetup
+                | SetupStage::SunshineCredentialsConfiguring
+                | SetupStage::SunshineVerifying
+                | SetupStage::MoonlightDetecting
+                | SetupStage::MoonlightPairingStarted
+                | SetupStage::MoonlightPinReceived
+                | SetupStage::SunshinePinSubmitting
+                | SetupStage::MoonlightSunshinePaired
+        )
+    );
+
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance_id);
@@ -1779,16 +1802,19 @@ pub async fn resume_provisioning_existing_instance(
                 state.post_wireguard_setup.sunshine_username =
                     state.credentials.app_username.clone();
 
-                let restored_stage = if post_setup_belongs_to_instance
-                    && !matches!(
-                        state.post_wireguard_setup.stage,
-                        SetupStage::PreWireguardExistingFlow
-                    ) {
-                    state.post_wireguard_setup.stage
+                let restored_stage = if should_resume_interactive_post_wireguard {
+                    if post_setup_belongs_to_instance
+                        && !matches!(
+                            state.post_wireguard_setup.stage,
+                            SetupStage::PreWireguardExistingFlow
+                        )
+                    {
+                        state.post_wireguard_setup.stage
+                    } else {
+                        saved_post_wireguard_stage.unwrap_or(SetupStage::WireguardConfigGenerated)
+                    }
                 } else {
-                    setup_stage_for_orchestration_state(server.last_state)
-                        .filter(|stage| !matches!(stage, SetupStage::Failed))
-                        .unwrap_or(SetupStage::WireguardConfigGenerated)
+                    SetupStage::PreWireguardExistingFlow
                 };
 
                 if !post_setup_belongs_to_instance {
@@ -1810,7 +1836,7 @@ pub async fn resume_provisioning_existing_instance(
         })
         .await?;
 
-    if server.steps.wireguard_configured {
+    if server.steps.wireguard_configured && should_resume_interactive_post_wireguard {
         return Ok("provisioning".to_string());
     }
 
@@ -3147,12 +3173,59 @@ async fn refresh_instance_connection_state(
     Ok(())
 }
 
-async fn sync_instance_connection_internal(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstanceConnectionSyncMode {
+    Interactive,
+    StartupRestore,
+}
+
+pub(crate) async fn sync_instance_connection_internal(
     app: &AppHandle,
     context: &AppContext,
     instance_id: u64,
+    mode: InstanceConnectionSyncMode,
 ) -> Result<String, AppError> {
     let snapshot = context.load_state().await;
+
+    if mode == InstanceConnectionSyncMode::StartupRestore {
+        let config_path = snapshot
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == instance_id)
+            .map(|record| PathBuf::from(record.wireguard_config_path.trim()))
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| {
+                (snapshot.instance.instance_id == Some(instance_id)
+                    && !snapshot.wireguard.config_path.trim().is_empty())
+                .then(|| PathBuf::from(snapshot.wireguard.config_path.trim()))
+            })
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "No persisted WireGuard config exists for instance {instance_id}"
+                ))
+            })?;
+
+        if !config_path.is_file() {
+            return Err(AppError::NotFound(format!(
+                "Persisted WireGuard config for instance {instance_id} was not found at {}",
+                config_path.display()
+            )));
+        }
+
+        if let Ok(status) = verify_managed_gotatun_tunnel(&config_path) {
+            return Ok(format!(
+                "Managed connection for active instance {instance_id} was already healthy. {status}"
+            ));
+        }
+
+        let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
+        let reconnect_message = reconnect_local_wireguard_client(&config_path)?;
+        let tunnel_status = verify_managed_gotatun_tunnel(&config_path)?;
+        return Ok(format!(
+            "Restored local managed connection for active instance {instance_id} without changing the remote server or provisioning state. {reconnect_message} {tunnel_status}"
+        ));
+    }
+
     if snapshot.credentials.vast_api_key.trim().is_empty() {
         return Err(AppError::InvalidInput(
             "Vast API key is missing. Add it in settings before syncing the connection."
@@ -3242,6 +3315,7 @@ async fn sync_instance_connection_internal(
             instance.id,
             &endpoint_host,
             endpoint_port,
+            instance.wireguard_listen_port,
             WireGuardProvisionMode::ReinitializeExisting,
         )
         .await?;
@@ -3249,6 +3323,7 @@ async fn sync_instance_connection_internal(
 
     let reconnect_message =
         reconnect_local_wireguard_client(wireguard_result.client_config_path.as_path())?;
+
     let reachability = verify_wireguard_connection(app, context).await?;
     let remote_health = inspect_remote_instance_services(&remote).await?;
 
@@ -3579,9 +3654,14 @@ pub async fn reconnect_instance_wireguard(
     context: State<'_, AppContext>,
     instance_id: u64,
 ) -> Result<String, FrontendError> {
-    sync_instance_connection_internal(&app, context.inner(), instance_id)
-        .await
-        .map_err(Into::into)
+    sync_instance_connection_internal(
+        &app,
+        context.inner(),
+        instance_id,
+        InstanceConnectionSyncMode::Interactive,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 async fn teardown_local_instance_session(
@@ -4035,12 +4115,6 @@ pub async fn moonlight_start_stream(
         details: Some(error.to_string()),
         retryable: false,
     })?;
-    stream_window.set_focus().map_err(|error| FrontendError {
-        code: "moonlight_error".to_string(),
-        message: "Moonlight operation failed".to_string(),
-        details: Some(error.to_string()),
-        retryable: false,
-    })?;
     stream_window
         .set_fullscreen(true)
         .map_err(|error| FrontendError {
@@ -4049,6 +4123,12 @@ pub async fn moonlight_start_stream(
             details: Some(error.to_string()),
             retryable: false,
         })?;
+    stream_window.set_focus().map_err(|error| FrontendError {
+        code: "moonlight_error".to_string(),
+        message: "Moonlight operation failed".to_string(),
+        details: Some(error.to_string()),
+        retryable: false,
+    })?;
     let preferred_capture_mode = match prepared.preferences.input.mouse_mode {
         crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
@@ -4143,12 +4223,21 @@ pub async fn moonlight_activate_native_mouse_capture(
     app: AppHandle,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<bool, FrontendError> {
-    moonlight.input.begin_capture(CaptureMouseMode::Relative);
+    let capture_mode = moonlight
+        .active_session_preferences
+        .lock()
+        .ok()
+        .and_then(|preferences| preferences.as_ref().map(|value| value.input.mouse_mode))
+        .map(|mode| match mode {
+            crate::moonlight::domain::MouseMode::Relative => CaptureMouseMode::Relative,
+            crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
+        })
+        .unwrap_or_else(|| moonlight.input.capture_state().mouse_mode);
+    moonlight.input.begin_capture(capture_mode);
     let Some(window) = app.get_window(crate::moonlight::platform::STREAM_WINDOW_LABEL) else {
         return Ok(false);
     };
-    activate_native_stream_input(&window, CaptureMouseMode::Relative)
-        .map_err(moonlight_frontend_error)
+    activate_native_stream_input(&window, capture_mode).map_err(moonlight_frontend_error)
 }
 
 #[tauri::command]

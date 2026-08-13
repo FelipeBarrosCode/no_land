@@ -196,6 +196,8 @@ pub struct VastInstance {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub wireguard_port: u16,
+    #[serde(default = "default_wireguard_listen_port")]
+    pub wireguard_listen_port: u16,
     #[serde(default)]
     pub wireguard_host_ip: String,
     pub ssh_command: String,
@@ -237,8 +239,8 @@ impl VastInstance {
             .map(|port| port as u16)
             .filter(|port| *port > 0)
             .unwrap_or_else(|| extract_ssh_port_from_ports(value));
-        let wireguard_port = extract_wireguard_port_from_ports(value);
-        let wireguard_host_ip = extract_wireguard_host_ip_from_ports(value);
+        let (wireguard_listen_port, wireguard_port, wireguard_host_ip) =
+            extract_wireguard_mapping_from_ports(value);
 
         let ssh_command = field_as_str(
             value,
@@ -280,6 +282,7 @@ impl VastInstance {
             ssh_host,
             ssh_port,
             wireguard_port,
+            wireguard_listen_port,
             wireguard_host_ip,
             ssh_command,
             public_ip,
@@ -417,12 +420,38 @@ fn extract_ssh_port_from_ports(value: &Value) -> u16 {
     extract_port_from_ports(value, "22/tcp", 22)
 }
 
-fn extract_wireguard_port_from_ports(value: &Value) -> u16 {
-    extract_port_from_ports(value, "51820/udp", 0)
+fn default_wireguard_listen_port() -> u16 {
+    51820
 }
 
-fn extract_wireguard_host_ip_from_ports(value: &Value) -> String {
-    extract_host_ip_from_ports(value, "51820/udp").unwrap_or_default()
+fn extract_wireguard_mapping_from_ports(value: &Value) -> (u16, u16, String) {
+    if let Some(ports_map) = value.get("ports").and_then(Value::as_object) {
+        for (key, entry) in ports_map {
+            let (container_port, protocol) = parse_port_key(key);
+            if container_port == 0 || protocol.as_deref() != Some("udp") {
+                continue;
+            }
+
+            let Some(host_port) = extract_host_port_from_entry(entry) else {
+                continue;
+            };
+            if host_port != container_port {
+                continue;
+            }
+
+            return (
+                container_port,
+                host_port,
+                extract_host_ip_from_entry(entry).unwrap_or_default(),
+            );
+        }
+    }
+
+    (
+        default_wireguard_listen_port(),
+        extract_port_from_ports(value, "51820/udp", 0),
+        extract_host_ip_from_ports(value, "51820/udp").unwrap_or_default(),
+    )
 }
 
 fn extract_port_from_ports(value: &Value, key: &str, default: u16) -> u16 {

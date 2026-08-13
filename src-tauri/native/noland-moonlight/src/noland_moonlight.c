@@ -295,6 +295,8 @@ static void nl_connection_stage_starting(int stage) {
   if (runtime == NULL) {
     return;
   }
+  fprintf(stderr, "[noland-moonlight] stage starting: %s (%d)\n", stage_name != NULL ? stage_name : "unknown", stage);
+  fflush(stderr);
   nl_runtime_push_event(runtime, NL_EVENT_STAGE_STARTING, stage, stage_name != NULL ? stage_name : "stage starting");
 }
 
@@ -304,6 +306,8 @@ static void nl_connection_stage_complete(int stage) {
   if (runtime == NULL) {
     return;
   }
+  fprintf(stderr, "[noland-moonlight] stage complete: %s (%d)\n", stage_name != NULL ? stage_name : "unknown", stage);
+  fflush(stderr);
   nl_runtime_push_event(runtime, NL_EVENT_STAGE_COMPLETE, stage, stage_name != NULL ? stage_name : "stage complete");
 }
 
@@ -327,6 +331,8 @@ static void nl_connection_stage_failed(int stage, int errorCode) {
       runtime->request.packet_size,
       runtime->request.session_url != NULL ? "yes" : "no");
   nl_runtime_unlock(runtime);
+  fprintf(stderr, "[noland-moonlight] stage failed: %s\n", message);
+  fflush(stderr);
   nl_runtime_push_event(runtime, NL_EVENT_STAGE_FAILED, errorCode, message);
 }
 
@@ -368,6 +374,11 @@ static void nl_connection_log_message(const char* format, ...) {
   va_start(args, format);
   vsnprintf(message, sizeof(message), format, args);
   va_end(args);
+  fprintf(stderr, "[moonlight-common-c] %s", message);
+  if (message[0] != '\0' && message[strlen(message) - 1U] != '\n') {
+    fputc('\n', stderr);
+  }
+  fflush(stderr);
   nl_runtime_push_event(runtime, NL_EVENT_STATE_CHANGED, 0, message);
 }
 
@@ -906,12 +917,14 @@ nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output) {
 }
 
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
+  bool connection_streaming;
   if (runtime == NULL || output == NULL) {
     return NL_RESULT_INVALID_ARGUMENT;
   }
   nl_runtime_lock(runtime);
   memset(output, 0, sizeof(*output));
   output->state = runtime->state;
+  connection_streaming = runtime->state == NL_STREAM_STATE_STREAMING;
   output->start_count = runtime->start_count;
   output->stop_count = runtime->stop_count;
   output->surface_attach_count = runtime->surface_attach_count;
@@ -923,15 +936,15 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
   output->has_estimated_rtt = 0U;
   nl_runtime_unlock(runtime);
 
-  {
+  if (connection_streaming) {
     uint32_t estimated_rtt = 0;
     uint32_t estimated_rtt_variance = 0;
     if (LiGetEstimatedRttInfo(&estimated_rtt, &estimated_rtt_variance)) {
-          output->estimated_rtt_ms = estimated_rtt;
-          output->estimated_rtt_variance_ms = estimated_rtt_variance;
-          output->has_estimated_rtt = 1U;
-        }
-      }
+      output->estimated_rtt_ms = estimated_rtt;
+      output->estimated_rtt_variance_ms = estimated_rtt_variance;
+      output->has_estimated_rtt = 1U;
+    }
+  }
 
       nl_runtime_lock(runtime);
       output->video_setup_count = runtime->video_setup_count;

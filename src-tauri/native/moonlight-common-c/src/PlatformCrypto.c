@@ -242,6 +242,7 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
     PUCHAR keyObject = NULL;
     DWORD keyObjectLength = 0;
     ULONG resultLength = 0;
+    NTSTATUS cryptoStatus = (NTSTATUS)-1;
     bool success = false;
 
     if (!windows_open_aes_algorithm(algorithm, &algHandle)) {
@@ -260,16 +261,17 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
         authInfo.pbTag = tag;
         authInfo.cbTag = (ULONG)tagLength;
 
-        success = BCryptEncrypt(keyHandle,
-                                inputData,
-                                (ULONG)inputDataLength,
-                                &authInfo,
-                                NULL,
-                                0,
-                                outputData,
-                                (ULONG)(*outputDataLength),
-                                &resultLength,
-                                0) == 0;
+        cryptoStatus = BCryptEncrypt(keyHandle,
+                                     inputData,
+                                     (ULONG)inputDataLength,
+                                     &authInfo,
+                                     NULL,
+                                     0,
+                                     outputData,
+                                     (ULONG)inputDataLength,
+                                     &resultLength,
+                                     0);
+        success = cryptoStatus == 0;
     }
     else if (algorithm == ALGORITHM_AES_CBC) {
         unsigned char ivCopy[16];
@@ -284,16 +286,17 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
             inputDataLength = addPkcs7PaddingInPlace(inputData, inputDataLength);
         }
 
-        success = BCryptEncrypt(keyHandle,
-                                inputData,
-                                (ULONG)inputDataLength,
-                                NULL,
-                                ivCopy,
-                                (ULONG)ivLength,
-                                outputData,
-                                (ULONG)(*outputDataLength),
-                                &resultLength,
-                                0) == 0;
+        cryptoStatus = BCryptEncrypt(keyHandle,
+                                     inputData,
+                                     (ULONG)inputDataLength,
+                                     NULL,
+                                     ivCopy,
+                                     (ULONG)ivLength,
+                                     outputData,
+                                     (ULONG)inputDataLength,
+                                     &resultLength,
+                                     0);
+        success = cryptoStatus == 0;
     }
     else {
         LC_ASSERT(false);
@@ -303,6 +306,9 @@ bool PltEncryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
 
     if (success) {
         *outputDataLength = (int)resultLength;
+    }
+    else {
+        Limelog("BCryptEncrypt failed: 0x%08X\n", (unsigned int)cryptoStatus);
     }
 
     windows_cleanup_aes(algHandle, keyHandle, keyObject);
@@ -523,7 +529,7 @@ bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                                 NULL,
                                 0,
                                 outputData,
-                                (ULONG)(*outputDataLength),
+                                (ULONG)inputDataLength,
                                 &resultLength,
                                 0) == 0;
     }
@@ -543,7 +549,7 @@ bool PltDecryptMessage(PPLT_CRYPTO_CONTEXT ctx, int algorithm, int flags,
                                 ivCopy,
                                 (ULONG)ivLength,
                                 outputData,
-                                (ULONG)(*outputDataLength),
+                                (ULONG)inputDataLength,
                                 &resultLength,
                                 0) == 0;
         if (success && (flags & CIPHER_FLAG_FINISH)) {

@@ -110,6 +110,8 @@ function bootstrapWindowsTarget(targetTriple) {
   const gstreamerRoot = windowsTargetNeedsGstreamer(targetTriple)
     ? ensureWindowsGstreamerRoot(prefix, targetTriple)
     : null;
+  const libclangRoot = ensureWindowsLibclangRoot(targetTriple);
+  const openSshRoot = ensureWindowsOpenSshRoot(targetTriple);
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
   console.log(`  prefix: ${prefix}`);
@@ -118,6 +120,8 @@ function bootstrapWindowsTarget(targetTriple) {
   } else {
     console.log('  gstreamer: skipped (Windows ARM64 microphone sidecar uses a stub fallback because upstream GStreamer MSVC ARM64 packages are not published)');
   }
+  console.log(`  libclang: ${libclangRoot}`);
+  console.log(`  openssh: ${openSshRoot}`);
 }
 
 function ensureMacGstreamerFramework() {
@@ -383,6 +387,107 @@ function ensureWindowsGstreamerRoot(prefix, targetTriple) {
 
   stageDirectory(discoveredRoot, expectedRoot);
   return expectedRoot;
+}
+
+function ensureWindowsLibclangRoot(targetTriple) {
+  const explicit = process.env.LIBCLANG_PATH?.trim();
+  if (explicit && existsSync(join(explicit, 'libclang.dll'))) {
+    return explicit;
+  }
+
+  const version = '18.1.8';
+  const cacheRoot = join(nativeDepsRoot, 'cache', `llvm-${version}-windows-x64`);
+  const archivePath = join(cacheRoot, `clang+llvm-${version}-x86_64-pc-windows-msvc.tar.xz`);
+  const extractedRoot = join(cacheRoot, 'extracted');
+  if (existsSync(join(extractedRoot, 'bin', 'libclang.dll'))) {
+    return join(extractedRoot, 'bin');
+  }
+
+  const directRoot = join(extractedRoot, `clang+llvm-${version}-x86_64-pc-windows-msvc`);
+  if (existsSync(join(directRoot, 'bin', 'libclang.dll'))) {
+    return join(directRoot, 'bin');
+  }
+
+  mkdirSync(cacheRoot, { recursive: true });
+  downloadFile(
+    `https://github.com/llvm/llvm-project/releases/download/llvmorg-${version}/clang%2Bllvm-${version}-x86_64-pc-windows-msvc.tar.xz`,
+    archivePath,
+    { expectedKind: 'tar.xz' },
+  );
+  rmSync(extractedRoot, { recursive: true, force: true });
+  mkdirSync(extractedRoot, { recursive: true });
+  extractTarXz(archivePath, extractedRoot);
+
+  const extractedEntries = readdirSync(extractedRoot, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(extractedRoot, entry.name));
+  const llvmRoot = extractedEntries.find((candidate) => existsSync(join(candidate, 'bin', 'libclang.dll')));
+  if (llvmRoot) {
+    return join(llvmRoot, 'bin');
+  }
+
+  if (existsSync(join(extractedRoot, 'bin', 'libclang.dll'))) {
+    return join(extractedRoot, 'bin');
+  }
+
+  throw new Error(`Downloaded LLVM archive did not contain libclang.dll for ${targetTriple}`);
+}
+
+function ensureWindowsOpenSshRoot(targetTriple) {
+  const explicitRoot = process.env.NOLAND_OPENSSH_ROOT?.trim();
+  if (explicitRoot && hasWindowsOpenSshRoot(explicitRoot)) {
+    return explicitRoot;
+  }
+
+  const cacheRoot = join(nativeDepsRoot, 'cache', `openssh-${targetTriple}`);
+  const stagedRoot = join(cacheRoot, 'root');
+  if (hasWindowsOpenSshRoot(stagedRoot)) {
+    return stagedRoot;
+  }
+
+  const systemRoot = process.env.SystemRoot?.trim() || 'C:\\Windows';
+  const sourceRoot = join(systemRoot, 'System32', 'OpenSSH');
+  if (!hasWindowsOpenSshRoot(sourceRoot)) {
+    throw new Error(
+      `Project-managed Windows OpenSSH sidecars are missing and no bootstrap source was found at ${sourceRoot}. Set NOLAND_OPENSSH_ROOT to a directory containing ssh.exe, scp.exe, and ssh-keygen.exe.`
+    );
+  }
+
+  rmSync(stagedRoot, { recursive: true, force: true });
+  mkdirSync(stagedRoot, { recursive: true });
+
+  const requiredFiles = [
+    'ssh.exe',
+    'scp.exe',
+    'ssh-keygen.exe',
+    'sftp.exe',
+    'ssh-agent.exe',
+    'ssh-add.exe',
+    'ssh-keyscan.exe',
+    'ssh-pkcs11-helper.exe',
+    'ssh-sk-helper.exe',
+    'LICENSE.txt',
+    'NOTICE.txt',
+  ];
+  for (const name of requiredFiles) {
+    const source = join(sourceRoot, name);
+    if (!existsSync(source)) {
+      if (['LICENSE.txt', 'NOTICE.txt', 'ssh-pkcs11-helper.exe', 'ssh-sk-helper.exe'].includes(name)) {
+        continue;
+      }
+      throw new Error(`Windows OpenSSH bootstrap source is missing required file ${source}`);
+    }
+    copyFileSync(source, join(stagedRoot, name));
+  }
+
+  return stagedRoot;
+}
+
+function hasWindowsOpenSshRoot(root) {
+  return Boolean(root)
+    && existsSync(join(root, 'ssh.exe'))
+    && existsSync(join(root, 'scp.exe'))
+    && existsSync(join(root, 'ssh-keygen.exe'));
 }
 
 function ensureOpenSsl(prefix, targetTriple) {
@@ -1136,9 +1241,27 @@ function validateDownloadedFile(path, expectedKind) {
     return header.length >= 2 && header[0] === 0x1f && header[1] === 0x8b;
   }
 
+  if (expectedKind === 'tar.xz') {
+    return header.length >= 6
+      && header[0] === 0xfd
+      && header[1] === 0x37
+      && header[2] === 0x7a
+      && header[3] === 0x58
+      && header[4] === 0x5a
+      && header[5] === 0x00;
+  }
+
   if (expectedKind === 'msi') {
     const msiMagic = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
     return msiMagic.every((byte, index) => header[index] === byte);
+  }
+
+  if (expectedKind === 'zip') {
+    return header.length >= 4
+      && header[0] === 0x50
+      && header[1] === 0x4b
+      && header[2] === 0x03
+      && header[3] === 0x04;
   }
 
   if (expectedKind === 'xar-pkg') {
@@ -1180,6 +1303,11 @@ function extractTarballSource(tarballPath, extractRoot, extractedDirName) {
 function extractTarGz(tarballPath, extractRoot) {
   mkdirSync(extractRoot, { recursive: true });
   run('cmake', ['-E', 'tar', 'xzf', tarballPath], { cwd: extractRoot });
+}
+
+function extractTarXz(tarballPath, extractRoot) {
+  mkdirSync(extractRoot, { recursive: true });
+  run('cmake', ['-E', 'tar', 'xJf', tarballPath], { cwd: extractRoot });
 }
 
 function mergeFlags(existing, nextFlag) {
