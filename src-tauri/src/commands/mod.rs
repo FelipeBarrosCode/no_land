@@ -83,7 +83,8 @@ use crate::{
         wireguard::{
             locate_noland_net_helper_binary, locate_wintun_library,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
-            teardown_local_wireguard_client, WireGuardProvisionMode, WireGuardService,
+            teardown_local_wireguard_client, verify_managed_gotatun_tunnel, WireGuardProvisionMode,
+            WireGuardService,
         },
     },
     utils::redact::redact_secret,
@@ -3159,12 +3160,59 @@ async fn refresh_instance_connection_state(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstanceConnectionSyncMode {
+    Interactive,
+    StartupRestore,
+}
+
 pub(crate) async fn sync_instance_connection_internal(
     app: &AppHandle,
     context: &AppContext,
     instance_id: u64,
+    mode: InstanceConnectionSyncMode,
 ) -> Result<String, AppError> {
     let snapshot = context.load_state().await;
+
+    if mode == InstanceConnectionSyncMode::StartupRestore {
+        let config_path = snapshot
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == instance_id)
+            .map(|record| PathBuf::from(record.wireguard_config_path.trim()))
+            .filter(|path| !path.as_os_str().is_empty())
+            .or_else(|| {
+                (snapshot.instance.instance_id == Some(instance_id)
+                    && !snapshot.wireguard.config_path.trim().is_empty())
+                .then(|| PathBuf::from(snapshot.wireguard.config_path.trim()))
+            })
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "No persisted WireGuard config exists for instance {instance_id}"
+                ))
+            })?;
+
+        if !config_path.is_file() {
+            return Err(AppError::NotFound(format!(
+                "Persisted WireGuard config for instance {instance_id} was not found at {}",
+                config_path.display()
+            )));
+        }
+
+        if let Ok(status) = verify_managed_gotatun_tunnel(&config_path) {
+            return Ok(format!(
+                "Managed connection for active instance {instance_id} was already healthy. {status}"
+            ));
+        }
+
+        let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
+        let reconnect_message = reconnect_local_wireguard_client(&config_path)?;
+        let tunnel_status = verify_managed_gotatun_tunnel(&config_path)?;
+        return Ok(format!(
+            "Restored local managed connection for active instance {instance_id} without changing the remote server or provisioning state. {reconnect_message} {tunnel_status}"
+        ));
+    }
+
     if snapshot.credentials.vast_api_key.trim().is_empty() {
         return Err(AppError::InvalidInput(
             "Vast API key is missing. Add it in settings before syncing the connection."
@@ -3262,6 +3310,7 @@ pub(crate) async fn sync_instance_connection_internal(
 
     let reconnect_message =
         reconnect_local_wireguard_client(wireguard_result.client_config_path.as_path())?;
+
     let reachability = verify_wireguard_connection(app, context).await?;
     let remote_health = inspect_remote_instance_services(&remote).await?;
 
@@ -3592,9 +3641,14 @@ pub async fn reconnect_instance_wireguard(
     context: State<'_, AppContext>,
     instance_id: u64,
 ) -> Result<String, FrontendError> {
-    sync_instance_connection_internal(&app, context.inner(), instance_id)
-        .await
-        .map_err(Into::into)
+    sync_instance_connection_internal(
+        &app,
+        context.inner(),
+        instance_id,
+        InstanceConnectionSyncMode::Interactive,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 async fn teardown_local_instance_session(

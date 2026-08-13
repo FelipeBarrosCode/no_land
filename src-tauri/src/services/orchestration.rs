@@ -523,6 +523,40 @@ impl OrchestrationService {
     }
 
     pub async fn resume_if_needed(app: &AppHandle, context: &AppContext) {
+        let initial_state = context.state.read().await.clone();
+        let active_instance_id = initial_state.instance.instance_id;
+        let completed_active_server = active_instance_id.and_then(|instance_id| {
+            initial_state
+                .provisioned_servers
+                .iter()
+                .find(|server| server.instance_id == instance_id)
+                .filter(|server| {
+                    matches!(server.last_state, OrchestrationState::Ready)
+                        && (server.steps.pairing_completed
+                            || server.embedded_moonlight_paired
+                            || initial_state.post_wireguard_setup.setup_complete)
+                })
+        });
+
+        if completed_active_server.is_some()
+            && !matches!(initial_state.orchestration_state, OrchestrationState::Ready)
+        {
+            if let Err(error) = context
+                .update_state(|state| {
+                    state.orchestration_state = OrchestrationState::Ready;
+                    state.post_wireguard_setup.stage =
+                        crate::models::app_state::SetupStage::SetupComplete;
+                    state.post_wireguard_setup.setup_complete = true;
+                    state.post_wireguard_setup.paired = true;
+                    state.post_wireguard_setup.last_error = None;
+                    state.last_error = None;
+                })
+                .await
+            {
+                warn!("Failed normalizing completed provisioning state on startup: {error}");
+            }
+        }
+
         let state = context.state.read().await.clone();
         if matches!(
             state.orchestration_state,
@@ -539,39 +573,28 @@ impl OrchestrationService {
             .await;
         }
 
-        let mut reconnect_instance_ids = state
-            .provisioned_servers
-            .iter()
-            .filter(|server| {
-                !server.wireguard_config_path.trim().is_empty()
-                    && !server.ssh_host.trim().is_empty()
-                    && server.ssh_port != 0
-                    && matches!(
-                        server.last_state,
-                        OrchestrationState::Ready
-                            | OrchestrationState::WireGuardConnected
-                            | OrchestrationState::MoonlightSunshineReadyToSetup
-                    )
+        let reconnect_instance_ids = state
+            .instance
+            .instance_id
+            .filter(|instance_id| {
+                state.provisioned_servers.iter().any(|server| {
+                    server.instance_id == *instance_id
+                        && !server.wireguard_config_path.trim().is_empty()
+                        && matches!(
+                            server.last_state,
+                            OrchestrationState::Ready
+                                | OrchestrationState::WireGuardConnected
+                                | OrchestrationState::MoonlightSunshineReadyToSetup
+                        )
+                }) || (!state.wireguard.config_path.trim().is_empty()
+                    && (matches!(
+                        state.post_wireguard_setup.wireguard_setup_status,
+                        crate::models::app_state::WireGuardSetupStatus::Connected
+                            | crate::models::app_state::WireGuardSetupStatus::Verifying
+                    ) || state.post_wireguard_setup.setup_complete))
             })
-            .map(|server| server.instance_id)
+            .into_iter()
             .collect::<Vec<_>>();
-
-        if reconnect_instance_ids.is_empty() {
-            let should_attempt_active_reconnect = state.instance.instance_id.is_some()
-                && (matches!(
-                    state.post_wireguard_setup.wireguard_setup_status,
-                    crate::models::app_state::WireGuardSetupStatus::Connected
-                        | crate::models::app_state::WireGuardSetupStatus::Verifying
-                ) || state.post_wireguard_setup.setup_complete);
-            if should_attempt_active_reconnect {
-                if let Some(instance_id) = state.instance.instance_id {
-                    reconnect_instance_ids.push(instance_id);
-                }
-            }
-        }
-
-        reconnect_instance_ids.sort_unstable();
-        reconnect_instance_ids.dedup();
 
         for instance_id in reconnect_instance_ids {
             info!(
@@ -579,8 +602,13 @@ impl OrchestrationService {
                 "Attempting to restore managed WireGuard tunnel for persisted instance on app startup"
             );
 
-            match crate::commands::sync_instance_connection_internal(app, context, instance_id)
-                .await
+            match crate::commands::sync_instance_connection_internal(
+                app,
+                context,
+                instance_id,
+                crate::commands::InstanceConnectionSyncMode::StartupRestore,
+            )
+            .await
             {
                 Ok(message) => {
                     info!(
