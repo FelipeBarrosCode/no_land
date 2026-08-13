@@ -59,7 +59,8 @@ pub struct LaunchRequestParameters {
     pub ri_key_hex: String,
     pub ri_key_id: String,
     pub audio_configuration: AudioConfiguration,
-    pub play_local_audio: bool,
+    pub play_audio_on_host: bool,
+    pub active_gamepad_mask: u32,
     pub persist_gamepads_after_disconnect: bool,
     pub hdr: bool,
 }
@@ -79,7 +80,7 @@ pub fn select_launch_operation(
 
 pub fn build_launch_parameters(
     app_id: u32,
-    operation: LaunchOperation,
+    _operation: LaunchOperation,
     preferences: &StreamPreferences,
     crypto: &RemoteInputCrypto,
 ) -> LaunchRequestParameters {
@@ -92,7 +93,8 @@ pub fn build_launch_parameters(
         ri_key_hex: crypto.key_hex(),
         ri_key_id: crypto.iv_decimal(),
         audio_configuration: preferences.audio.configuration,
-        play_local_audio: !preferences.audio.play_on_host,
+        play_audio_on_host: preferences.audio.play_on_host,
+        active_gamepad_mask: 0,
         persist_gamepads_after_disconnect: preferences.input.persist_controllers_on_disconnect,
         hdr: preferences.video.hdr,
     }

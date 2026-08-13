@@ -219,6 +219,10 @@ fn main() {
         }
     }
 
+    if is_windows {
+        cmake_config.profile("Release");
+    }
+
     let dst = cmake_config.build();
 
     let lib_dir = dst.join("lib");
@@ -346,20 +350,173 @@ fn main() {
         );
     }
 
-    let bindings = bindgen::Builder::default()
-        .header(wrapper_header.display().to_string())
-        .allowlist_function("nl_.*")
-        .allowlist_type("nl_.*")
-        .allowlist_var("NL_.*")
-        .generate()
-        .expect("failed to generate noland moonlight bindings");
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
-    bindings
-        .write_to_file(out_dir.join("noland_moonlight_bindings.rs"))
-        .expect("failed to write noland moonlight bindings");
+    fs::write(
+        out_dir.join("noland_moonlight_bindings.rs"),
+        static_noland_moonlight_bindings(),
+    )
+    .expect("failed to write noland moonlight bindings");
 
     tauri_build::build()
+}
+
+fn static_noland_moonlight_bindings() -> &'static str {
+    r#"pub type nl_result_t = ::std::os::raw::c_uint;
+pub const nl_result_NL_RESULT_OK: nl_result_t = 0;
+pub const nl_result_NL_RESULT_INVALID_ARGUMENT: nl_result_t = 1;
+pub const nl_result_NL_RESULT_OUT_OF_MEMORY: nl_result_t = 2;
+pub const nl_result_NL_RESULT_NOT_READY: nl_result_t = 3;
+pub const nl_result_NL_RESULT_INVALID_STATE: nl_result_t = 4;
+pub const nl_result_NL_RESULT_QUEUE_EMPTY: nl_result_t = 5;
+
+pub type nl_stream_state_t = ::std::os::raw::c_uint;
+pub const nl_stream_state_NL_STREAM_STATE_IDLE: nl_stream_state_t = 0;
+pub const nl_stream_state_NL_STREAM_STATE_STARTING: nl_stream_state_t = 1;
+pub const nl_stream_state_NL_STREAM_STATE_STREAMING: nl_stream_state_t = 2;
+pub const nl_stream_state_NL_STREAM_STATE_STOPPING: nl_stream_state_t = 3;
+
+pub type nl_event_kind_t = ::std::os::raw::c_uint;
+pub const nl_event_kind_NL_EVENT_NONE: nl_event_kind_t = 0;
+pub const nl_event_kind_NL_EVENT_STATE_CHANGED: nl_event_kind_t = 1;
+pub const nl_event_kind_NL_EVENT_CONNECTED: nl_event_kind_t = 2;
+pub const nl_event_kind_NL_EVENT_STOPPED: nl_event_kind_t = 3;
+pub const nl_event_kind_NL_EVENT_SURFACE_ATTACHED: nl_event_kind_t = 4;
+pub const nl_event_kind_NL_EVENT_SURFACE_DETACHED: nl_event_kind_t = 5;
+pub const nl_event_kind_NL_EVENT_ERROR: nl_event_kind_t = 6;
+pub const nl_event_kind_NL_EVENT_STAGE_STARTING: nl_event_kind_t = 7;
+pub const nl_event_kind_NL_EVENT_STAGE_COMPLETE: nl_event_kind_t = 8;
+pub const nl_event_kind_NL_EVENT_STAGE_FAILED: nl_event_kind_t = 9;
+pub const nl_event_kind_NL_EVENT_TERMINATED: nl_event_kind_t = 10;
+pub const nl_event_kind_NL_EVENT_VIDEO_FRAME: nl_event_kind_t = 11;
+
+pub type nl_surface_type_t = ::std::os::raw::c_uint;
+pub const nl_surface_type_NL_SURFACE_TYPE_UNKNOWN: nl_surface_type_t = 0;
+pub const nl_surface_type_NL_SURFACE_WINDOWS_HWND: nl_surface_type_t = 1;
+pub const nl_surface_type_NL_SURFACE_MACOS_NSVIEW: nl_surface_type_t = 2;
+pub const nl_surface_type_NL_SURFACE_X11_WINDOW: nl_surface_type_t = 3;
+pub const nl_surface_type_NL_SURFACE_WAYLAND_SURFACE: nl_surface_type_t = 4;
+
+#[repr(C)]
+pub struct nl_runtime_t {
+    _unused: [u8; 0],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nl_start_request_t {
+    pub host_id: *const ::std::os::raw::c_char,
+    pub app_id: u32,
+    pub session_url: *const ::std::os::raw::c_char,
+    pub host_address: *const ::std::os::raw::c_char,
+    pub server_app_version: *const ::std::os::raw::c_char,
+    pub server_gfe_version: *const ::std::os::raw::c_char,
+    pub server_codec_mode_support: i32,
+    pub width: i32,
+    pub height: i32,
+    pub fps: i32,
+    pub bitrate_kbps: i32,
+    pub packet_size: i32,
+    pub streaming_remotely: i32,
+    pub audio_configuration: i32,
+    pub audio_target_buffer_ms: u32,
+    pub audio_maximum_buffer_ms: u32,
+    pub supported_video_formats: i32,
+    pub client_refresh_rate_x100: i32,
+    pub color_space: i32,
+    pub color_range: i32,
+    pub encryption_flags: i32,
+    pub remote_input_aes_key: [i8; 16],
+    pub remote_input_aes_iv: [i8; 16],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nl_surface_descriptor_t {
+    pub surface_type: nl_surface_type_t,
+    pub window_handle: *mut ::std::ffi::c_void,
+    pub display_handle: *mut ::std::ffi::c_void,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nl_event_t {
+    pub kind: nl_event_kind_t,
+    pub state: nl_stream_state_t,
+    pub code: i32,
+    pub message: [::std::os::raw::c_char; 256],
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nl_stats_t {
+    pub state: nl_stream_state_t,
+    pub start_count: u64,
+    pub stop_count: u64,
+    pub surface_attach_count: u64,
+    pub surface_detach_count: u64,
+    pub dropped_event_count: u64,
+    pub last_width: u32,
+    pub last_height: u32,
+    pub has_surface: u8,
+    pub estimated_rtt_ms: u32,
+    pub estimated_rtt_variance_ms: u32,
+    pub has_estimated_rtt: u8,
+    pub video_setup_count: u64,
+    pub video_frame_count: u64,
+    pub video_frame_event_count: u64,
+    pub coalesced_video_frame_event_count: u64,
+    pub renderer_ready: u8,
+    pub video_session_active: u8,
+    pub renderer_submitted_frame_count: u64,
+    pub renderer_dropped_frame_count: u64,
+    pub audio_init_count: u64,
+    pub audio_sample_count: u64,
+    pub mouse_move_count: u64,
+    pub mouse_position_count: u64,
+    pub mouse_button_count: u64,
+    pub keyboard_event_count: u64,
+    pub controller_arrival_count: u64,
+    pub controller_state_count: u64,
+    pub last_video_frame_number: i32,
+    pub last_video_frame_type: i32,
+    pub last_video_frame_length: i32,
+    pub last_video_host_processing_latency: u16,
+    pub last_video_receive_time_us: u64,
+    pub last_video_enqueue_time_us: u64,
+    pub last_video_presentation_time_us: u64,
+    pub last_video_rtp_timestamp: u32,
+    pub last_video_hdr_active: u8,
+    pub last_video_colorspace: u8,
+}
+
+unsafe extern "C" {
+    pub fn nl_runtime_create(output: *mut *mut nl_runtime_t) -> nl_result_t;
+    pub fn nl_runtime_destroy(runtime: *mut nl_runtime_t);
+    pub fn nl_runtime_version_string() -> *const ::std::os::raw::c_char;
+    pub fn nl_get_launch_query_parameters() -> *const ::std::os::raw::c_char;
+    pub fn nl_runtime_smoke_test() -> i32;
+    pub fn nl_runtime_start(runtime: *mut nl_runtime_t, request: *const nl_start_request_t) -> nl_result_t;
+    pub fn nl_runtime_request_stop(runtime: *mut nl_runtime_t) -> nl_result_t;
+    pub fn nl_runtime_attach_surface(runtime: *mut nl_runtime_t, surface: *const nl_surface_descriptor_t) -> nl_result_t;
+    pub fn nl_runtime_detach_surface(runtime: *mut nl_runtime_t) -> nl_result_t;
+    pub fn nl_runtime_poll_event(runtime: *mut nl_runtime_t, output: *mut nl_event_t) -> nl_result_t;
+    pub fn nl_runtime_read_stats(runtime: *mut nl_runtime_t, output: *mut nl_stats_t) -> nl_result_t;
+    pub fn nl_desktop_input_install(surface: *const nl_surface_descriptor_t) -> ::std::os::raw::c_int;
+    pub fn nl_desktop_input_uninstall();
+    pub fn nl_desktop_input_set_capture_active(active: bool, mode: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
+    pub fn nl_send_relative_mouse(runtime: *mut nl_runtime_t, delta_x: i16, delta_y: i16) -> nl_result_t;
+    pub fn nl_send_absolute_mouse(runtime: *mut nl_runtime_t, x: i16, y: i16, reference_width: i16, reference_height: i16) -> nl_result_t;
+    pub fn nl_send_mouse_button(runtime: *mut nl_runtime_t, button: u8, pressed: bool) -> nl_result_t;
+    pub fn nl_send_vertical_scroll(runtime: *mut nl_runtime_t, amount: i16, high_resolution: bool) -> nl_result_t;
+    pub fn nl_send_horizontal_scroll(runtime: *mut nl_runtime_t, amount: i16, high_resolution: bool) -> nl_result_t;
+    pub fn nl_send_keyboard(runtime: *mut nl_runtime_t, virtual_key: u16, pressed: bool, modifiers: u8) -> nl_result_t;
+    pub fn nl_send_controller_arrival(runtime: *mut nl_runtime_t, controller_number: u8, active_gamepad_mask: u16, controller_type: u8, supported_button_flags: u32, capabilities: u16) -> nl_result_t;
+    pub fn nl_send_controller_state(runtime: *mut nl_runtime_t, controller_number: i16, active_gamepad_mask: i16, button_flags: i32, left_trigger: u8, right_trigger: u8, left_stick_x: i16, left_stick_y: i16, right_stick_x: i16, right_stick_y: i16) -> nl_result_t;
+}
+"#
 }
 
 fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
@@ -384,6 +541,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         is_release,
         true,
+        true,
         "run the Tauri build through the npm wrapper so the mic sidecar is staged first",
     )?;
     ensure_staged_bundle_binary(
@@ -393,6 +551,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         is_release,
         true,
+        false,
         "run the Tauri build through the npm wrapper so the embedded GotaTun helper is staged first",
     )?;
     if target_is_windows && is_release {
@@ -424,6 +583,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         is_release,
         true,
+        false,
         "run the Tauri build through the npm wrapper so the bundled OpenSSH client is staged first",
     )?;
     ensure_staged_bundle_binary(
@@ -433,6 +593,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         is_release,
         true,
+        false,
         "run the Tauri build through the npm wrapper so the bundled OpenSSH scp client is staged first",
     )?;
     ensure_staged_bundle_binary(
@@ -442,6 +603,7 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         target_is_windows,
         is_release,
         true,
+        false,
         "run the Tauri build through the npm wrapper so the bundled OpenSSH keygen client is staged first",
     )?;
 
@@ -455,6 +617,7 @@ fn ensure_staged_bundle_binary(
     uses_exe_suffix: bool,
     is_release: bool,
     required_in_release: bool,
+    allow_debug_placeholder: bool,
     release_hint: &str,
 ) -> io::Result<()> {
     let staged_name = if uses_exe_suffix {
@@ -473,6 +636,17 @@ fn ensure_staged_bundle_binary(
             io::ErrorKind::NotFound,
             format!(
                 "missing packaged managed tool sidecar '{}'; {}",
+                staged_path.display(),
+                release_hint,
+            ),
+        ));
+    }
+
+    if !allow_debug_placeholder {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "missing required managed tool sidecar '{}'; {}",
                 staged_path.display(),
                 release_hint,
             ),

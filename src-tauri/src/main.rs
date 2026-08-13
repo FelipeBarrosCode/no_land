@@ -186,6 +186,41 @@ fn main() {
                 return;
             }
 
+            if let WindowEvent::Focused(focused) = event {
+                let moonlight = window.state::<moonlight::composition::MoonlightManager>();
+                if *focused {
+                    let capture_mode = moonlight
+                        .active_session_preferences
+                        .lock()
+                        .ok()
+                        .and_then(|preferences| {
+                            preferences.as_ref().map(|value| value.input.mouse_mode)
+                        })
+                        .map(|mode| match mode {
+                            moonlight::domain::MouseMode::Relative => {
+                                crate::input::state::MouseMode::Relative
+                            }
+                            moonlight::domain::MouseMode::Absolute => {
+                                crate::input::state::MouseMode::Absolute
+                            }
+                        });
+                    if let Some(capture_mode) = capture_mode {
+                        if let Err(error) =
+                            moonlight::platform::activate_native_stream_input(window, capture_mode)
+                        {
+                            warn!("Failed to restore native stream input after focus: {error}");
+                        }
+                    }
+                } else {
+                    moonlight.input.set_focus(false);
+                    if let Err(error) = moonlight::platform::deactivate_native_stream_input(window)
+                    {
+                        warn!("Failed to release native stream input after focus loss: {error}");
+                    }
+                }
+                return;
+            }
+
             let WindowEvent::CloseRequested { api, .. } = event else {
                 return;
             };

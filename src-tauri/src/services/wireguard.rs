@@ -635,6 +635,14 @@ fn request_managed_gotatun_stop(config_path: &Path) -> AppResult<()> {
     request_managed_gotatun_stop_in_runtime(&gotatun_runtime_dir(config_path))
 }
 
+fn windows_dev_auto_repair_tunnel_enabled() -> bool {
+    cfg!(target_os = "windows")
+        && std::env::var("NOLAND_WINDOWS_DEV_AUTO_REPAIR_TUNNEL")
+            .ok()
+            .as_deref()
+            .is_some_and(|value| value == "1")
+}
+
 fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
     for runtime_dir in legacy_gotatun_runtime_dirs(config_path) {
         request_managed_gotatun_stop_in_runtime(&runtime_dir)?;
@@ -644,6 +652,8 @@ fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
 
 fn replace_managed_gotatun_tunnel(config_path: &Path, success_message: &str) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
+    stop_legacy_managed_gotatun_helpers(config_path)?;
+    request_managed_gotatun_stop(config_path)?;
     let expected = load_expected_local_tunnel(config_path)?;
     let expected_fingerprint = config_fingerprint(config_path)?;
     let launch_id = uuid::Uuid::new_v4().to_string();
@@ -679,18 +689,35 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
     let expected = load_expected_local_tunnel(config_path)?;
     let expected_fingerprint = config_fingerprint(config_path)?;
-    let status = load_gotatun_runtime_status(&gotatun_status_path(config_path)).ok_or_else(|| {
-        AppError::Command(
-            "The managed GotaTun runtime has no active ownership status. Use Setup Tunnel or Reconnect."
-                .to_string(),
-        )
-    })?;
+    let auto_repair = windows_dev_auto_repair_tunnel_enabled();
+    let repair_stale_runtime = |reason: &str| -> AppResult<String> {
+        if auto_repair {
+            info!(
+                "Windows dev mode auto-repairing managed GotaTun runtime for {}: {}",
+                config_path.display(),
+                reason
+            );
+            stop_legacy_managed_gotatun_helpers(config_path)?;
+            request_managed_gotatun_stop(config_path)?;
+            return reconnect_managed_gotatun_tunnel(config_path);
+        }
+        Err(AppError::Command(reason.to_string()))
+    };
+
+    let status = match load_gotatun_runtime_status(&gotatun_status_path(config_path)) {
+        Some(status) => status,
+        None => {
+            return repair_stale_runtime(
+                "The managed GotaTun runtime has no active ownership status. Use Setup Tunnel or Reconnect.",
+            )
+        }
+    };
     let status_age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
     if !status.active || status_age > 5 {
-        return Err(AppError::Command(format!(
+        return repair_stale_runtime(&format!(
             "The managed GotaTun helper is not actively reporting (pid={}, status_age={}s). Use Reconnect to replace stale runtime state.",
             status.pid, status_age
-        )));
+        ));
     }
     if status.config_path != config_path.display().to_string()
         || status.config_fingerprint != expected_fingerprint
@@ -698,10 +725,9 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
         || normalize_allowed_ips(&status.allowed_ips.join(","))
             != normalize_allowed_ips(&expected.allowed_ips)
     {
-        return Err(AppError::Command(
-            "The managed GotaTun helper owns a different or outdated tunnel config. Use Reconnect to apply the current instance config."
-                .to_string(),
-        ));
+        return repair_stale_runtime(
+            "The managed GotaTun helper owns a different or outdated tunnel config. Use Reconnect to apply the current instance config.",
+        );
     }
 
     let handshake_recent = status
@@ -913,6 +939,7 @@ exit 0"#
         instance_id: u64,
         endpoint_host: &str,
         endpoint_port: u16,
+        server_listen_port: u16,
         mode: WireGuardProvisionMode,
     ) -> AppResult<WireGuardProvisionResult> {
         ensure_local_wireguard_tools()?;
@@ -997,7 +1024,8 @@ exit 0"#
         self.setup_cpu_governor(remote).await?;
         self.wait_for_package_manager_ready(remote).await?;
         let primary_interface = self.detect_primary_interface(remote).await?;
-        let server_config = self.render_server_config(&server_private, &client_public);
+        let server_config =
+            self.render_server_config(&server_private, &client_public, server_listen_port);
         let server_tunnel_host = strip_cidr(&self.defaults.server_tunnel_ip);
         let client_config = self.render_client_config(
             &client_private,
@@ -1046,8 +1074,13 @@ exit 0"#
 
         // Set up firewall rules only after ufw is guaranteed to be installed
         let allowed_client_ip = strip_cidr(&self.defaults.client_tunnel_ip);
-        self.setup_firewall_rules(remote, &primary_interface, &allowed_client_ip)
-            .await?;
+        self.setup_firewall_rules(
+            remote,
+            &primary_interface,
+            &allowed_client_ip,
+            server_listen_port,
+        )
+        .await?;
 
         let bring_up = {
             let remote = remote.clone();
@@ -1331,6 +1364,7 @@ WantedBy=multi-user.target
         remote: &RemoteExec,
         primary_interface: &str,
         allowed_client_ip: &str,
+        server_listen_port: u16,
     ) -> AppResult<()> {
         let firewall_setup = format!(
             r#"#!/bin/bash
@@ -1376,10 +1410,10 @@ ufw status | grep -q "from {}/32 to any port 47998,47999,48000,48002 proto udp" 
 ufw status | grep -q "deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp" || ufw deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
 ufw status | grep -q "deny in on {} to any port 47998,47999,48000,48002 proto udp" || ufw deny in on {} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
 "#,
-            self.defaults.listen_port,
-            self.defaults.listen_port,
-            self.defaults.listen_port,
-            self.defaults.listen_port,
+            server_listen_port,
+            server_listen_port,
+            server_listen_port,
+            server_listen_port,
             self.defaults.server_interface_name,
             primary_interface,
             primary_interface,
@@ -1463,11 +1497,16 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         Ok(())
     }
 
-    fn render_server_config(&self, server_private: &str, client_public: &str) -> String {
+    fn render_server_config(
+        &self,
+        server_private: &str,
+        client_public: &str,
+        server_listen_port: u16,
+    ) -> String {
         format!(
             "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\n",
             self.defaults.server_tunnel_ip,
-            self.defaults.listen_port,
+            server_listen_port,
             server_private,
             self.defaults.tunnel_mtu,
             client_public,
@@ -1483,8 +1522,9 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         let nic = primary_interface.to_string();
         // Note: FORWARD rules are handled by ufw route allow in setup_firewall_rules.
         // Only NAT/MASQUERADE remains here because UFW cannot configure it.
+        let tunnel_subnet = wireguard_network_cidr(&self.defaults.server_tunnel_ip)?;
         let command = format!(
-            "sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null && sudo iptables -t nat -C POSTROUTING -o {nic} -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -o {nic} -j MASQUERADE"
+            "sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null; sudo iptables -t nat -D POSTROUTING -o {nic} -j MASQUERADE 2>/dev/null || true; sudo iptables -t nat -C POSTROUTING -s {tunnel_subnet} -o {nic} -j MASQUERADE 2>/dev/null || sudo iptables -t nat -A POSTROUTING -s {tunnel_subnet} -o {nic} -j MASQUERADE"
         );
 
         let output = {
@@ -1529,7 +1569,7 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
     async fn cleanup_existing_wireguard(&self, remote: &RemoteExec) -> AppResult<()> {
         let iface = self.defaults.server_interface_name.clone();
         let command = format!(
-            "sudo bash -lc 'target=\"{iface}\"; for dir in /sys/class/net/wg*; do [ -e \"$dir\" ] || continue; dev=$(basename \"$dir\"); if [ \"$dev\" != \"$target\" ]; then systemctl stop \"wg-quick@$dev\" >/dev/null 2>&1 || true; systemctl disable \"wg-quick@$dev\" >/dev/null 2>&1 || true; wg-quick down \"$dev\" >/dev/null 2>&1 || true; ip link delete \"$dev\" >/dev/null 2>&1 || true; fi; done'"
+            "sudo bash -lc 'systemctl disable --now tailscaled >/dev/null 2>&1 || true; pkill -x tailscaled >/dev/null 2>&1 || true; target=\"{iface}\"; for dir in /sys/class/net/wg*; do [ -e \"$dir\" ] || continue; dev=$(basename \"$dir\"); if [ \"$dev\" != \"$target\" ]; then systemctl stop \"wg-quick@$dev\" >/dev/null 2>&1 || true; systemctl disable \"wg-quick@$dev\" >/dev/null 2>&1 || true; wg-quick down \"$dev\" >/dev/null 2>&1 || true; ip link delete \"$dev\" >/dev/null 2>&1 || true; fi; done'"
         );
 
         let output = {
@@ -2527,6 +2567,36 @@ fn wireguard_key_fingerprint(key: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+fn wireguard_network_cidr(value: &str) -> AppResult<String> {
+    let (address, prefix) = value.split_once('/').ok_or_else(|| {
+        AppError::InvalidInput(format!(
+            "WireGuard address `{value}` is missing a CIDR prefix"
+        ))
+    })?;
+    let address = address
+        .trim()
+        .parse::<std::net::Ipv4Addr>()
+        .map_err(|error| {
+            AppError::InvalidInput(format!("WireGuard address `{value}` is invalid: {error}"))
+        })?;
+    let prefix = prefix.trim().parse::<u8>().map_err(|error| {
+        AppError::InvalidInput(format!("WireGuard CIDR `{value}` is invalid: {error}"))
+    })?;
+    if prefix > 32 {
+        return Err(AppError::InvalidInput(format!(
+            "WireGuard CIDR `{value}` has an invalid prefix"
+        )));
+    }
+
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    let network = std::net::Ipv4Addr::from(u32::from(address) & mask);
+    Ok(format!("{network}/{prefix}"))
 }
 
 fn strip_cidr(ip: &str) -> String {
