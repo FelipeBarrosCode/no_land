@@ -126,11 +126,11 @@ static void obl_axpyb32_ref(u8 *a, const u32 *b, u8 u, unsigned k)
             VEC_CORE(bx, prod);                                                                                                    \
             VEC_STORE(ap, f(VEC_LOAD(ap), prod));                                                                                  \
         }                                                                                                                          \
-        op##_ref((u8 *)ap, (u8 *)bp, u, k % sizeof(VEC_TYPE));                                                                     \
+        op##_ref((u8 *)ap, (const u8 *)bp, u, k % sizeof(VEC_TYPE));                                                               \
     } while (0)
 
 #define GENERATE_IMPL(suffix, attr, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR)                                    \
-    attr static void obl_axpy_##suffix(u8 *restrict a, u8 *restrict b, u8 u, unsigned k)                                           \
+    attr static void obl_axpy_##suffix(u8 *restrict a, const u8 *restrict b, u8 u, unsigned k)                                     \
     {                                                                                                                              \
         if (u == 1) {                                                                                                              \
             u8 *restrict ap = a;                                                                                                   \
@@ -142,7 +142,7 @@ static void obl_axpyb32_ref(u8 *a, const u32 *b, u8 u, unsigned k)
             OBL_SHUF_TEMPLATE(obl_axpy, a, b, VEC_XOR, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR);                \
         }                                                                                                                          \
     }                                                                                                                              \
-    attr static void obl_axiy_##suffix(u8 *a, u8 *b, u8 u, unsigned k)                                                             \
+    attr static void obl_axiy_##suffix(u8 *a, const u8 *b, u8 u, unsigned k)                                                       \
     {                                                                                                                              \
         OBL_SHUF_TEMPLATE(obl_axiy, a, b, OBL_NOOP, VEC_TYPE, VEC_LOAD, VEC_STORE, VEC_INIT, VEC_CORE, VEC_XOR);                   \
     }                                                                                                                              \
@@ -350,7 +350,7 @@ static void obl_axpyb32_neon(u8 *a, const u32 *b, u8 u, unsigned k)
 #if defined(OBLAS_ARCH_RISCV) && defined(__riscv_vector)
 #include <riscv_vector.h>
 
-static void obl_axpy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
+static void obl_axpy_rvv(u8 *a, const u8 *b, u8 u, unsigned k)
 {
     if (u == 0) {
         return;
@@ -385,7 +385,7 @@ static void obl_axpy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
     }
 }
 
-static void obl_axiy_rvv(u8 *a, u8 *b, u8 u, unsigned k)
+static void obl_axiy_rvv(u8 *a, const u8 *b, u8 u, unsigned k)
 {
     if (u == 0) {
         size_t vl;
