@@ -54,45 +54,60 @@ for (const source of approvedFiles) {
   console.log(`[prepare-release-assets] Included ${relative(repoRoot, source)} -> ${relative(repoRoot, destination)}`);
 }
 
-const windowsStoreInstaller = publishedAssets.find((file) => /_x64-store-setup\.exe$/iu.test(basename(file)));
-if (windowsStoreInstaller) {
-  const objectKey = [windowsStorePathPrefix, releaseTag, basename(windowsStoreInstaller)].filter(Boolean).join('/');
-  const packageUrl = windowsStoreBaseUrl
-    ? `${windowsStoreBaseUrl}/${objectKey}`
+for (const architecture of ['x64', 'arm64']) {
+  const windowsStoreInstaller = publishedAssets.find((file) => new RegExp(`_${architecture}-store-setup\\.exe$`, 'iu').test(basename(file)));
+  if (!windowsStoreInstaller) continue;
+
+  const versionedObjectKey = [windowsStorePathPrefix, releaseTag, basename(windowsStoreInstaller)].filter(Boolean).join('/');
+  const stableObjectKey = [windowsStorePathPrefix, 'windows-store', `latest-${architecture}-setup.exe`].filter(Boolean).join('/');
+  const versionedPackageUrl = windowsStoreBaseUrl
+    ? `${windowsStoreBaseUrl}/${versionedObjectKey}`
     : `https://github.com/${repositoryOwner}/${repositoryName}/releases/download/${releaseTag}/${basename(windowsStoreInstaller)}`;
+  const stablePackageUrl = windowsStoreBaseUrl ? `${windowsStoreBaseUrl}/${stableObjectKey}` : versionedPackageUrl;
   const metadata = {
     product_name: productName,
     app_version: appVersion,
     release_tag: releaseTag,
-    package_url: packageUrl,
-    object_key: objectKey,
-    architecture: 'x64',
+    package_url: stablePackageUrl,
+    object_key: stableObjectKey,
+    versioned_package_url: versionedPackageUrl,
+    versioned_object_key: versionedObjectKey,
+    architecture,
     installer_type: 'exe',
     silent_install_args: '/S',
   };
+  const metadataPrefix = `windows-store-${architecture}`;
 
-  writeFileSync(join(publishRoot, 'windows-store-x64-submission.json'), `${JSON.stringify(metadata, null, 2)}\n`);
-  writeFileSync(join(publishRoot, 'windows-store-x64-package-url.txt'), `${packageUrl}\n`);
-  writeFileSync(join(publishRoot, 'windows-store-x64-object-key.txt'), `${objectKey}\n`);
+  writeFileSync(join(publishRoot, `${metadataPrefix}-submission.json`), `${JSON.stringify(metadata, null, 2)}\n`);
+  writeFileSync(join(publishRoot, `${metadataPrefix}-package-url.txt`), `${stablePackageUrl}\n`);
+  writeFileSync(join(publishRoot, `${metadataPrefix}-object-key.txt`), `${stableObjectKey}\n`);
+  writeFileSync(join(publishRoot, `${metadataPrefix}-versioned-package-url.txt`), `${versionedPackageUrl}\n`);
+  writeFileSync(join(publishRoot, `${metadataPrefix}-versioned-object-key.txt`), `${versionedObjectKey}\n`);
   writeFileSync(
-    join(publishRoot, 'windows-store-x64-submission.md'),
+    join(publishRoot, `${metadataPrefix}-submission.md`),
     [
-      '# Windows Store submission (x64)',
+      `# Windows Store submission (${architecture})`,
       '',
       `- Product: ${productName}`,
       `- App version: ${appVersion}`,
       `- Release tag: ${releaseTag}`,
-      `- Package URL: ${packageUrl}`,
-      `- Object key: ${objectKey}`,
-      '- Architecture: x64',
+      `- Stable package URL: ${stablePackageUrl}`,
+      `- Stable object key: ${stableObjectKey}`,
+      `- Versioned package URL: ${versionedPackageUrl}`,
+      `- Versioned object key: ${versionedObjectKey}`,
+      `- Architecture: ${architecture}`,
       '- Installer type: exe',
       '- Silent install args: `/S`',
       '',
+      architecture === 'arm64'
+        ? '- Known limitation: microphone passthrough is unavailable on Windows ARM64 because the required GStreamer SDK is not published for this target.'
+        : null,
+      '',
       windowsStoreBaseUrl
-        ? 'Use the package URL above in Microsoft Partner Center for the traditional desktop app submission. The CI release job is configured to upload the Store installer to Cloudflare R2 using this object key.'
+        ? 'Use the stable package URL above in Microsoft Partner Center for the traditional desktop app submission. The CI release job uploads both the stable object and a versioned object to Cloudflare R2 on each release.'
         : 'Use the package URL above in Microsoft Partner Center for the traditional desktop app submission.',
       '',
-    ].join('\n'),
+    ].filter((line) => line !== null).join('\n'),
   );
 }
 
@@ -105,7 +120,7 @@ function shouldPublish(relativePath, baseName) {
   if (baseName.endsWith('.rpm')) return true;
   if (baseName.endsWith('.msi')) return true;
   if (/_(x64|arm64)\.app\.zip$/iu.test(baseName)) return true;
-  if (/_x64-store-setup\.exe$/iu.test(baseName)) return true;
+  if (/_(x64|arm64)-store-setup\.exe$/iu.test(baseName)) return true;
   if (/_(x64|arm64)-setup\.exe$/iu.test(baseName)) return true;
 
   console.log(`[prepare-release-assets] Skipped ${relativePath}`);
