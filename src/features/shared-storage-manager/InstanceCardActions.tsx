@@ -13,6 +13,7 @@ interface Props {
   onPlay: (instanceId: number) => void;
   onPair: (instanceId: number) => void;
   onReconnect: (instanceId: number) => void;
+  onDisplay: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
   onPause: (instanceId: number) => void;
   onDestroy: (instanceId: number) => void;
@@ -29,6 +30,7 @@ export function InstanceCardActions({
   onPlay,
   onPair,
   onReconnect,
+  onDisplay,
   onReboot,
   onPause,
   onDestroy,
@@ -120,7 +122,16 @@ export function InstanceCardActions({
         </Button>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        <Button
+          variant="ghost"
+          className="w-full text-[14px]"
+          disabled={actionDisabled || !isRunning}
+          onClick={() => onDisplay(instance.instanceId)}
+        >
+          Display
+        </Button>
+
         <Button
           variant="ghost"
           className="w-full text-[14px]"

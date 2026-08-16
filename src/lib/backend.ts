@@ -27,6 +27,7 @@ import type {
   RestoreJob,
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
+  MicSidecarMetrics,
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
@@ -39,6 +40,9 @@ import type {
   SetupStage,
   SunshineVerificationResult,
   VastWalletSummary,
+  DisplayModeSpec,
+  InstanceDisplayStatus,
+  ApplyDisplayModeResult,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -625,6 +629,24 @@ export async function reconnectInstanceWireguard(
   return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
 }
 
+export async function getInstanceDisplayStatus(
+  instanceId: number,
+): Promise<InstanceDisplayStatus> {
+  return invokeSafe<InstanceDisplayStatus>("get_instance_display_status", {
+    instanceId,
+  });
+}
+
+export async function applyInstanceDisplayMode(
+  instanceId: number,
+  mode: DisplayModeSpec,
+): Promise<ApplyDisplayModeResult> {
+  return invokeSafe<ApplyDisplayModeResult>("apply_instance_display_mode", {
+    instanceId,
+    mode,
+  });
+}
+
 export async function rebootInstanceServices(
   instanceId: number,
 ): Promise<string> {
@@ -708,6 +730,22 @@ export async function reconnectInstanceMic(
   instanceId: number,
 ): Promise<MicSessionResponse> {
   return invokeSafe<MicSessionResponse>("reconnect_instance_mic", {
+    instanceId,
+  });
+}
+
+export async function muteInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("mute_instance_mic", { instanceId });
+}
+
+export async function unmuteInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("unmute_instance_mic", { instanceId });
+}
+
+export async function getInstanceMicMetrics(
+  instanceId: number,
+): Promise<MicSidecarMetrics> {
+  return invokeSafe<MicSidecarMetrics>("get_instance_mic_metrics", {
     instanceId,
   });
 }

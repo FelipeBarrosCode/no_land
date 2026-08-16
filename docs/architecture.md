@@ -46,7 +46,10 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `reboot_helper.rs`: reboot/reconnect/service re-init pipeline
 - `post_provision.rs`: executes packaged `scripts/post_provision.sh`
 - `shared_storage/*`: backup/export/restore orchestration
-- `mic_passthrough.rs`: cloud mic session control and runtime status
+- `mic_passthrough.rs`: independent microphone control plane, game-session hooks, sidecar supervision, and aggregated health
+- `mic-sidecar/`: CPAL capture, bounded ring, optional WebRTC DSP, Opus/RTP/RTCP sender, and JSON-lines IPC
+- `vm-cloud-mic-agent/`: supervised host RTP receiver, adaptive jitter buffer, Opus PLC/FEC, metrics, and deterministic PipeWire injection
+- `scripts/install_cloud_mic_agent.sh`: persistent `noland_mic_sink` → `noland_mic_source` topology and peer-restricted media-session control
 
 ## State model
 

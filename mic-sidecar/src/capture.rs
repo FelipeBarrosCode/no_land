@@ -1,0 +1,448 @@
+use crate::metrics::Metrics;
+use crate::ring::AudioRing;
+use arc_swap::ArcSwap;
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedStreamConfig};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Sender;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+
+pub const TARGET_SAMPLE_RATE: u32 = 48_000;
+pub const RING_MILLIS: usize = 40;
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceKind {
+    #[default]
+    Microphone,
+    Sine,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceInfo {
+    pub id: String,
+    pub name: String,
+    pub is_default: bool,
+    pub sample_rates: Vec<u32>,
+    pub channels: u16,
+    pub id_stability: IdStability,
+    pub id_note: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum IdStability {
+    Fallback,
+}
+
+pub struct AudioInput {
+    pub ring: Arc<AudioRing>,
+    pub sample_rate: u32,
+    pub generation: u64,
+}
+
+impl AudioInput {
+    pub fn silent() -> Arc<Self> {
+        Arc::new(Self {
+            ring: Arc::new(AudioRing::new(ring_capacity(TARGET_SAMPLE_RATE))),
+            sample_rate: TARGET_SAMPLE_RATE,
+            generation: 0,
+        })
+    }
+}
+
+pub type SharedInput = Arc<ArcSwap<AudioInput>>;
+
+#[derive(Debug)]
+pub enum CaptureSignal {
+    Error(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureStarted {
+    pub active_device_id: String,
+    pub active_device_name: String,
+    pub sample_rate: u32,
+    pub used_fallback: bool,
+}
+
+enum CaptureHandle {
+    Native {
+        _stream: cpal::Stream,
+    },
+    Synthetic {
+        stop: Arc<AtomicBool>,
+        thread: Option<JoinHandle<()>>,
+    },
+}
+
+impl Drop for CaptureHandle {
+    fn drop(&mut self) {
+        if let Self::Synthetic { stop, thread } = self {
+            stop.store(true, Ordering::Release);
+            if let Some(thread) = thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+}
+
+pub struct CaptureController {
+    handle: Option<CaptureHandle>,
+    generation: u64,
+    active_device_id: Option<String>,
+}
+
+impl Default for CaptureController {
+    fn default() -> Self {
+        Self {
+            handle: None,
+            generation: 0,
+            active_device_id: None,
+        }
+    }
+}
+
+impl CaptureController {
+    pub fn active_device_id(&self) -> Option<&str> {
+        self.active_device_id.as_deref()
+    }
+
+    pub fn stop(&mut self) {
+        self.handle.take();
+        self.active_device_id = None;
+    }
+
+    pub fn start(
+        &mut self,
+        source: SourceKind,
+        requested_device_id: Option<&str>,
+        shared: &SharedInput,
+        metrics: Arc<Metrics>,
+        signals: Sender<CaptureSignal>,
+    ) -> Result<CaptureStarted, String> {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        let (handle, input, started) = match source {
+            SourceKind::Sine => start_sine(generation, metrics),
+            SourceKind::Microphone => {
+                start_native(requested_device_id, generation, metrics, signals)?
+            }
+        };
+
+        shared.store(input);
+        self.handle = Some(handle);
+        self.active_device_id = Some(started.active_device_id.clone());
+        Ok(started)
+    }
+}
+
+pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
+    Ok(enumerate_devices()?
+        .into_iter()
+        .map(|(_, info)| info)
+        .collect())
+}
+
+pub fn device_available(device_id: &str) -> bool {
+    enumerate_devices()
+        .map(|devices| devices.iter().any(|(_, info)| info.id == device_id))
+        .unwrap_or(false)
+}
+
+pub fn current_default_device_id() -> Option<String> {
+    enumerate_devices().ok().and_then(|devices| {
+        devices
+            .into_iter()
+            .find_map(|(_, info)| info.is_default.then_some(info.id))
+    })
+}
+
+fn enumerate_devices() -> Result<Vec<(cpal::Device, DeviceInfo)>, String> {
+    let host = cpal::default_host();
+    let host_name = format!("{:?}", host.id()).to_lowercase();
+    let default_name = host
+        .default_input_device()
+        .and_then(|device| device.name().ok());
+    let devices = host
+        .input_devices()
+        .map_err(|error| format!("failed enumerating CPAL input devices: {error}"))?;
+    let mut occurrences = HashMap::<String, usize>::new();
+    let mut result = Vec::new();
+
+    for device in devices {
+        let name = device
+            .name()
+            .unwrap_or_else(|_| "Unnamed input device".to_string());
+        let occurrence = occurrences.entry(name.clone()).or_default();
+        let id = fallback_device_id(&host_name, &name, *occurrence);
+        *occurrence += 1;
+        let (sample_rates, channels) = device_capabilities(&device);
+        result.push((
+            device,
+            DeviceInfo {
+                id,
+                name: name.clone(),
+                is_default: default_name.as_deref() == Some(name.as_str()),
+                sample_rates,
+                channels,
+                id_stability: IdStability::Fallback,
+                id_note: "CPAL's stable DeviceTrait does not expose a cross-platform device ID; this deterministic host/name/occurrence ID may change if duplicate-name enumeration order changes.".to_string(),
+            },
+        ));
+    }
+    Ok(result)
+}
+
+fn fallback_device_id(host: &str, name: &str, occurrence: usize) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in host
+        .bytes()
+        .chain([0])
+        .chain(name.bytes())
+        .chain([0])
+        .chain(occurrence.to_string().bytes())
+    {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("cpal-fallback-{hash:016x}")
+}
+
+fn device_capabilities(device: &cpal::Device) -> (Vec<u32>, u16) {
+    let Ok(configs) = device.supported_input_configs() else {
+        return (Vec::new(), 0);
+    };
+    let mut rates = BTreeSet::new();
+    let mut channels = 0;
+    for config in configs {
+        channels = channels.max(config.channels());
+        rates.insert(config.min_sample_rate().0);
+        rates.insert(config.max_sample_rate().0);
+        if config.min_sample_rate().0 <= TARGET_SAMPLE_RATE
+            && TARGET_SAMPLE_RATE <= config.max_sample_rate().0
+        {
+            rates.insert(TARGET_SAMPLE_RATE);
+        }
+    }
+    (rates.into_iter().collect(), channels)
+}
+
+fn start_native(
+    requested_device_id: Option<&str>,
+    generation: u64,
+    metrics: Arc<Metrics>,
+    signals: Sender<CaptureSignal>,
+) -> Result<(CaptureHandle, Arc<AudioInput>, CaptureStarted), String> {
+    let devices = enumerate_devices()?;
+    if devices.is_empty() {
+        return Err("no CPAL input devices are available".to_string());
+    }
+
+    let requested = requested_device_id.filter(|id| !id.trim().is_empty() && *id != "default");
+    let selected_index =
+        requested.and_then(|id| devices.iter().position(|(_, info)| info.id == id));
+    let used_fallback = requested.is_some() && selected_index.is_none();
+    let index = selected_index
+        .or_else(|| devices.iter().position(|(_, info)| info.is_default))
+        .unwrap_or(0);
+    let (device, info) = &devices[index];
+    let supported = choose_input_config(device)?;
+    let sample_format = supported.sample_format();
+    let config: StreamConfig = supported.into();
+    let sample_rate = config.sample_rate.0;
+    let channels = config.channels as usize;
+    let input = Arc::new(AudioInput {
+        ring: Arc::new(AudioRing::new(ring_capacity(sample_rate))),
+        sample_rate,
+        generation,
+    });
+    let callback_input = input.clone();
+    let callback_metrics = metrics.clone();
+    let error_signals = signals.clone();
+
+    macro_rules! build_stream {
+        ($sample:ty) => {{
+            build_typed_stream::<$sample>(
+                device,
+                &config,
+                channels,
+                callback_input,
+                callback_metrics,
+                error_signals,
+            )
+        }};
+    }
+
+    let stream = match sample_format {
+        SampleFormat::I8 => build_stream!(i8),
+        SampleFormat::I16 => build_stream!(i16),
+        SampleFormat::I32 => build_stream!(i32),
+        SampleFormat::I64 => build_stream!(i64),
+        SampleFormat::U8 => build_stream!(u8),
+        SampleFormat::U16 => build_stream!(u16),
+        SampleFormat::U32 => build_stream!(u32),
+        SampleFormat::U64 => build_stream!(u64),
+        SampleFormat::F32 => build_stream!(f32),
+        SampleFormat::F64 => build_stream!(f64),
+        other => Err(format!("unsupported CPAL input sample format {other:?}")),
+    }?;
+    stream
+        .play()
+        .map_err(|error| format!("failed starting CPAL input stream: {error}"))?;
+
+    Ok((
+        CaptureHandle::Native { _stream: stream },
+        input,
+        CaptureStarted {
+            active_device_id: info.id.clone(),
+            active_device_name: info.name.clone(),
+            sample_rate,
+            used_fallback,
+        },
+    ))
+}
+
+fn choose_input_config(device: &cpal::Device) -> Result<SupportedStreamConfig, String> {
+    let ranges = device
+        .supported_input_configs()
+        .map_err(|error| format!("failed querying CPAL input formats: {error}"))?;
+    let mut best: Option<(u64, SupportedStreamConfig)> = None;
+    for range in ranges {
+        let min = range.min_sample_rate().0;
+        let max = range.max_sample_rate().0;
+        let rate = TARGET_SAMPLE_RATE.clamp(min, max);
+        let rate_distance = rate.abs_diff(TARGET_SAMPLE_RATE) as u64;
+        let channel_penalty = range.channels().saturating_sub(1) as u64 * 1_000_000;
+        let score = channel_penalty + rate_distance;
+        let config = range.with_sample_rate(cpal::SampleRate(rate));
+        if best
+            .as_ref()
+            .is_none_or(|(best_score, _)| score < *best_score)
+        {
+            best = Some((score, config));
+        }
+    }
+    best.map(|(_, config)| config)
+        .or_else(|| device.default_input_config().ok())
+        .ok_or_else(|| "input device has no supported CPAL stream configuration".to_string())
+}
+
+fn build_typed_stream<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    channels: usize,
+    input: Arc<AudioInput>,
+    metrics: Arc<Metrics>,
+    signals: Sender<CaptureSignal>,
+) -> Result<cpal::Stream, String>
+where
+    T: SizedSample,
+    i16: FromSample<T>,
+{
+    device
+        .build_input_stream(
+            config,
+            move |data: &[T], _| {
+                let frames = data.len() / channels;
+                let report = input.ring.push_from_iter(
+                    frames,
+                    data.chunks_exact(channels)
+                        .map(|frame| frame[0].to_sample::<i16>()),
+                );
+                metrics.record_capture(frames as u64, report.dropped_stale, report.overrun);
+                metrics.set_ring_depth(input.ring.len());
+            },
+            move |error| {
+                let _ = signals.send(CaptureSignal::Error(error.to_string()));
+            },
+            None,
+        )
+        .map_err(|error| format!("failed building CPAL input stream: {error}"))
+}
+
+fn start_sine(
+    generation: u64,
+    metrics: Arc<Metrics>,
+) -> (CaptureHandle, Arc<AudioInput>, CaptureStarted) {
+    let input = Arc::new(AudioInput {
+        ring: Arc::new(AudioRing::new(ring_capacity(TARGET_SAMPLE_RATE))),
+        sample_rate: TARGET_SAMPLE_RATE,
+        generation,
+    });
+    let thread_input = input.clone();
+    let stop = Arc::new(AtomicBool::new(false));
+    let thread_stop = stop.clone();
+    let thread = thread::spawn(move || {
+        let mut phase = 0.0f32;
+        let step = 2.0 * std::f32::consts::PI * 440.0 / TARGET_SAMPLE_RATE as f32;
+        let mut samples = vec![0i16; frame_samples(TARGET_SAMPLE_RATE, 10)];
+        let mut next = Instant::now();
+        while !thread_stop.load(Ordering::Acquire) {
+            for sample in &mut samples {
+                *sample = (phase.sin() * 0.1 * i16::MAX as f32) as i16;
+                phase = (phase + step) % (2.0 * std::f32::consts::PI);
+            }
+            let report = thread_input.ring.push_slice(&samples);
+            metrics.record_capture(samples.len() as u64, report.dropped_stale, report.overrun);
+            metrics.set_ring_depth(thread_input.ring.len());
+            next += Duration::from_millis(10);
+            if let Some(delay) = next.checked_duration_since(Instant::now()) {
+                thread::sleep(delay);
+            } else {
+                next = Instant::now();
+            }
+        }
+    });
+
+    (
+        CaptureHandle::Synthetic {
+            stop,
+            thread: Some(thread),
+        },
+        input,
+        CaptureStarted {
+            active_device_id: "synthetic-sine".to_string(),
+            active_device_name: "Synthetic 440 Hz sine".to_string(),
+            sample_rate: TARGET_SAMPLE_RATE,
+            used_fallback: false,
+        },
+    )
+}
+
+pub fn frame_samples(sample_rate: u32, frame_ms: u32) -> usize {
+    ((sample_rate as u64 * frame_ms as u64 + 500) / 1_000) as usize
+}
+
+fn ring_capacity(sample_rate: u32) -> usize {
+    frame_samples(sample_rate, RING_MILLIS as u32).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_sizes_match_common_rates() {
+        assert_eq!(frame_samples(48_000, 10), 480);
+        assert_eq!(frame_samples(44_100, 10), 441);
+        assert_eq!(ring_capacity(48_000), 1_920);
+    }
+
+    #[test]
+    fn fallback_id_is_deterministic_and_disambiguates_duplicates() {
+        assert_eq!(
+            fallback_device_id("coreaudio", "Mic", 0),
+            fallback_device_id("coreaudio", "Mic", 0)
+        );
+        assert_ne!(
+            fallback_device_id("coreaudio", "Mic", 0),
+            fallback_device_id("coreaudio", "Mic", 1)
+        );
+    }
+}

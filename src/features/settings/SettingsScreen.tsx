@@ -547,7 +547,7 @@ export function SettingsScreen({
 
       <SettingsSubsection
         title="Headless EDID"
-        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}`}
+        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}. The app refreshes the native profile at startup; apply it to a running VM from its Display action.`}
       >
         <div className="grid gap-3 md:grid-cols-2">
           <SelectField
@@ -571,8 +571,9 @@ export function SettingsScreen({
               onChange={(event) => setEdidRefreshRateHz(event.target.value)}
             />
             <SettingHelp>
-              Set this to match your local display refresh rate so games report
-              the correct frame cap.
+              Set this to match your local display refresh rate. If that timing
+              cannot fit the current EDID format, the app uses a safe 60 Hz
+              native-resolution profile.
             </SettingHelp>
           </div>
         </div>
@@ -605,7 +606,7 @@ export function SettingsScreen({
               })
             }
           >
-            Regenerate EDID
+            Refresh EDID Profile
           </Button>
         </div>
       </SettingsSubsection>

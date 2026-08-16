@@ -37,36 +37,20 @@ use super::{
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use super::mic_receiver::MicReceiverProvisioner;
 
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
 
 fn microphone_receiver_provisioning_enabled() -> bool {
-    !cfg!(any(target_os = "linux", target_os = "windows"))
+    true
 }
 
 async fn provision_microphone_receiver(
     remote: &RemoteExec,
     target_user: &str,
 ) -> AppResult<String> {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        // Microphone passthrough is not part of Linux/Windows provisioning until its
-        // client runtime is production-ready. Treat the step as skipped, not failed.
-        let _ = remote;
-        info!(
-            client_os = std::env::consts::OS,
-            target_user, "Skipping remote microphone receiver provisioning"
-        );
-        Ok("Microphone receiver provisioning is disabled on Linux and Windows clients; continuing without microphone passthrough.".to_string())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        MicReceiverProvisioner::install(remote, target_user).await
-    }
+    MicReceiverProvisioner::install(remote, target_user).await
 }
 
 fn build_display_profile(

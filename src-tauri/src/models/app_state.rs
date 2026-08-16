@@ -590,6 +590,27 @@ pub struct RentedInstanceSummary {
     pub embedded_moonlight_paired: Option<bool>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteDisplayState {
+    #[serde(default)]
+    pub desired_profile_hash: String,
+    #[serde(default)]
+    pub installed_profile_hash: String,
+    #[serde(default)]
+    pub advertised_modes: Vec<crate::services::display_profile::DisplayModeSpec>,
+    #[serde(default)]
+    pub selected_mode: Option<crate::services::display_profile::DisplayModeSpec>,
+    #[serde(default)]
+    pub active_mode: Option<crate::services::display_profile::DisplayModeSpec>,
+    #[serde(default)]
+    pub output_name: Option<String>,
+    #[serde(default)]
+    pub applied_at: Option<String>,
+    #[serde(default)]
+    pub last_apply_error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionedServerState {
@@ -626,6 +647,12 @@ pub struct ProvisionedServerState {
     pub mic_device_name: String,
     #[serde(default)]
     pub mic_quality_profile: MicQualityProfile,
+    #[serde(default)]
+    pub mic_forwarding_enabled: bool,
+    #[serde(default = "default_true")]
+    pub mic_auto_connect: bool,
+    #[serde(default)]
+    pub display: RemoteDisplayState,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -676,6 +703,9 @@ impl ProvisionedServerState {
             mic_device_id: default_mic_device_id(),
             mic_device_name: default_mic_device_name(),
             mic_quality_profile: MicQualityProfile::Standard,
+            mic_forwarding_enabled: false,
+            mic_auto_connect: true,
+            display: RemoteDisplayState::default(),
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),
@@ -995,13 +1025,21 @@ pub struct RestoreJobItem {
 #[serde(rename_all = "camelCase")]
 pub struct InstanceMicConfig {
     pub instance_id: u64,
+    /// Whether a media session is currently active.
     pub enabled: bool,
+    /// Persisted feature preference. This remains true between game streams.
+    pub forwarding_enabled: bool,
+    /// Automatically start/stop forwarding with the Moonlight session.
+    pub auto_connect: bool,
     pub transport: String,
     pub codec: String,
     pub sample_rate: u32,
     pub channels: u32,
     pub vm_wireguard_ip: String,
     pub rtp_port: u16,
+    pub rtcp_port: u16,
+    pub local_rtcp_port: u16,
+    pub rtp_payload_type: u8,
     pub device_id: String,
     pub device_name: String,
     pub quality_profile: MicQualityProfile,
@@ -1017,12 +1055,17 @@ impl Default for InstanceMicConfig {
         Self {
             instance_id: 0,
             enabled: false,
+            forwarding_enabled: false,
+            auto_connect: true,
             transport: "gstreamer_rtp_udp".to_string(),
             codec: "opus".to_string(),
             sample_rate: 48000,
             channels: 1,
             vm_wireguard_ip: String::new(),
-            rtp_port: 48200,
+            rtp_port: 0,
+            rtcp_port: 0,
+            local_rtcp_port: 0,
+            rtp_payload_type: 111,
             device_id: default_mic_device_id(),
             device_name: default_mic_device_name(),
             quality_profile: MicQualityProfile::Standard,
@@ -1062,7 +1105,7 @@ impl MicQualityProfile {
         match self {
             MicQualityProfile::Standard => 10,
             MicQualityProfile::LowLatency => 10,
-            MicQualityProfile::HighQuality => 20,
+            MicQualityProfile::HighQuality => 10,
         }
     }
 }
@@ -1072,6 +1115,7 @@ impl MicQualityProfile {
 pub struct InstanceMicRuntimeStatus {
     pub enabled: bool,
     pub state: MicState,
+    pub reconnect_count: u64,
     pub vm_agent_reachable: bool,
     pub device_ready: bool,
     pub receiving_audio: bool,
@@ -1086,6 +1130,14 @@ pub struct InstanceMicRuntimeStatus {
     pub last_packet_ms_ago: Option<u64>,
     pub pipewire_connected: bool,
     pub default_source: bool,
+    pub muted: bool,
+    pub sidecar_healthy: bool,
+    pub capture_sample_rate: u32,
+    pub capture_overruns: u64,
+    pub ring_fill_ms: f64,
+    pub appsrc_queue_ms: f64,
+    pub opus_packets_sent: u64,
+    pub bytes_sent: u64,
     pub error: Option<String>,
 }
 
@@ -1094,6 +1146,7 @@ impl Default for InstanceMicRuntimeStatus {
         Self {
             enabled: false,
             state: MicState::Disabled,
+            reconnect_count: 0,
             vm_agent_reachable: false,
             device_ready: false,
             receiving_audio: false,
@@ -1108,6 +1161,14 @@ impl Default for InstanceMicRuntimeStatus {
             last_packet_ms_ago: None,
             pipewire_connected: false,
             default_source: false,
+            muted: false,
+            sidecar_healthy: false,
+            capture_sample_rate: 0,
+            capture_overruns: 0,
+            ring_fill_ms: 0.0,
+            appsrc_queue_ms: 0.0,
+            opus_packets_sent: 0,
+            bytes_sent: 0,
             error: None,
         }
     }
@@ -1126,6 +1187,12 @@ pub enum MicState {
     CloudMicMissing,
     PacketLossHigh,
     PipewireUnavailable,
+    NoMicrophone,
+    CaptureFailure,
+    PipelineFailure,
+    NetworkFailure,
+    Reconnecting,
+    Degraded,
     Error,
 }
 
@@ -1134,6 +1201,8 @@ pub enum MicState {
 pub struct MicSettingsUpdate {
     pub device_id: Option<String>,
     pub quality_profile: Option<MicQualityProfile>,
+    pub forwarding_enabled: Option<bool>,
+    pub auto_connect: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1144,6 +1213,9 @@ pub struct MicSessionResponse {
     pub ssrc: u32,
     pub vm_wireguard_ip: String,
     pub rtp_port: u16,
+    pub rtcp_port: u16,
+    pub local_rtcp_port: u16,
+    pub rtp_payload_type: u8,
     pub sample_rate: u32,
     pub channels: u32,
     pub frame_ms: u32,

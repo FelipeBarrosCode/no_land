@@ -113,8 +113,12 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `enable_instance_mic`
 - `disable_instance_mic`
 - `reconnect_instance_mic`
+- `mute_instance_mic`
+- `unmute_instance_mic`
+- `get_instance_mic_metrics`
 - `recreate_instance_mic_device`
 - `get_instance_mic_status`
+- `list_microphones`
 
 ## Notes
 

@@ -126,7 +126,9 @@ Key types:
 - `MicSettingsUpdate`
 - `MicSessionResponse`
 
-Session IDs and tokens are generated at runtime and tracked in-memory by the mic service.
+`ProvisionedServerState` persists `micForwardingEnabled`, `micAutoConnect`, the selected device, and quality profile. `InstanceMicConfig.enabled` describes the current runtime session, while `forwardingEnabled` and `autoConnect` describe saved behavior between streams.
+
+Session IDs, tokens, randomized RTP offsets, negotiated ports, and sidecar reconnect counts are runtime data. The media-session record remains in memory; stopping a session does not delete the persistent host PipeWire source.
 
 ## 8) Frontend API type mirror
 

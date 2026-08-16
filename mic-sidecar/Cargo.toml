@@ -2,16 +2,18 @@
 name = "noland-mic-sender"
 version = "0.1.0"
 edition = "2021"
-description = "Noland microphone sender sidecar"
+description = "Noland production microphone media sidecar"
+
+[[bin]]
+name = "noland-mic-sender"
+path = "src/main.rs"
 
 [dependencies]
+arc-swap = "1.7"
+cpal = "0.15.3"
 ctrlc = "3.5.2"
+gstreamer = "0.23.7"
+gstreamer-app = "0.23.5"
+rand = "0.8.5"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
-
-[target.'cfg(any(target_os = "macos", target_os = "linux", all(target_os = "windows", not(target_arch = "aarch64"))))'.dependencies]
-gstreamer = "0.23.7"
-
-[target.'cfg(target_os = "macos")'.dependencies]
-core-foundation-sys = "0.8.7"
-coreaudio-sys = "0.2.18"

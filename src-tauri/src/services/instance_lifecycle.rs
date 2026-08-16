@@ -292,7 +292,7 @@ impl InstanceLifecycleService {
     }
 
     /// Acquire a lifecycle action lock for an instance.
-    async fn acquire_lock(instance_id: u64, action: &str) -> AppResult<()> {
+    pub(crate) async fn acquire_lock(instance_id: u64, action: &str) -> AppResult<()> {
         let mut actions = get_lifecycle_actions().write().await;
         if let Some(running) = actions.get(&instance_id) {
             return Err(AppError::Provisioning(format!(
@@ -304,7 +304,7 @@ impl InstanceLifecycleService {
         Ok(())
     }
 
-    async fn release_lock(instance_id: u64) {
+    pub(crate) async fn release_lock(instance_id: u64) {
         let mut actions = get_lifecycle_actions().write().await;
         actions.remove(&instance_id);
     }

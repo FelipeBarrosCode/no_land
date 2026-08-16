@@ -1,6 +1,7 @@
 pub mod app_config;
 pub mod app_context;
 pub mod audio_latency;
+pub mod display_profile;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 pub mod location;
@@ -14,6 +15,7 @@ pub mod os_detection;
 pub mod post_provision;
 pub mod post_wireguard_setup;
 pub mod reboot_helper;
+pub mod remote_display;
 pub mod remote_exec;
 pub mod shared_storage;
 pub mod sleep_inhibit;

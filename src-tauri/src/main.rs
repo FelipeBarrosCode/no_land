@@ -15,6 +15,7 @@ use commands::*;
 use services::{
     app_config::AppConfig,
     app_context::AppContext,
+    mic_passthrough::MicPassthroughService,
     moonlight::detect_client_display_for_provisioning,
     orchestration::OrchestrationService,
     ssh_keys::normalize_ssh_state_from_disk,
@@ -118,40 +119,89 @@ fn main() {
                 .sunshine
                 .edid_refresh_rate_hz
                 .clamp(EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ);
-            if initial_state
+            let (width, height, refresh_hz, source_label) = match initial_state.sunshine.edid_mode {
+                crate::models::app_state::EdidMode::Manual => (
+                    initial_state.moonlight_preferences.width,
+                    initial_state.moonlight_preferences.height,
+                    initial_state.sunshine.edid_refresh_rate_hz,
+                    "Manual".to_string(),
+                ),
+                crate::models::app_state::EdidMode::AutoDetect => {
+                    if let Some((detected_width, detected_height, detected_refresh)) =
+                        detect_client_display_for_provisioning()
+                    {
+                        (
+                            detected_width,
+                            detected_height,
+                            detected_refresh,
+                            "Auto-Detected".to_string(),
+                        )
+                    } else {
+                        (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+                    }
+                }
+            };
+            let mut candidates = vec![(width, height, refresh_hz, source_label)];
+            if initial_state.sunshine.edid_mode == crate::models::app_state::EdidMode::AutoDetect {
+                if refresh_hz != 60 {
+                    candidates.push((
+                        width,
+                        height,
+                        60,
+                        "Auto-Detected (EDID refresh limited to 60 Hz)".to_string(),
+                    ));
+                }
+                candidates.push((
+                    3840,
+                    2160,
+                    60,
+                    "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string(),
+                ));
+                candidates.push((1920, 1080, 60, "Fallback 1920x1080@60".to_string()));
+            }
+            let mut generated = None;
+            let mut last_generation_error = None;
+            for (candidate_width, candidate_height, candidate_refresh, candidate_source) in
+                candidates
+            {
+                match generate_headless_edid_base64(
+                    candidate_width,
+                    candidate_height,
+                    candidate_refresh,
+                ) {
+                    Ok(edid) => {
+                        generated = Some((edid, candidate_source));
+                        break;
+                    }
+                    Err(error) => last_generation_error = Some(error),
+                }
+            }
+            if let Some((generated_edid, generated_source)) = generated {
+                if initial_state.sunshine.headless_edid_base64 != generated_edid
+                    || initial_state.sunshine.edid_source_label != generated_source
+                {
+                    initial_state.sunshine.headless_edid_base64 = generated_edid;
+                    initial_state.sunshine.edid_source_label = generated_source;
+                    state_changed = true;
+                }
+            } else if initial_state
                 .sunshine
                 .headless_edid_base64
                 .trim()
                 .is_empty()
             {
-                let (width, height, refresh_hz, source_label) =
-                    match initial_state.sunshine.edid_mode {
-                        crate::models::app_state::EdidMode::Manual => (
-                            initial_state.moonlight_preferences.width,
-                            initial_state.moonlight_preferences.height,
-                            initial_state.sunshine.edid_refresh_rate_hz,
-                            "Manual".to_string(),
-                        ),
-                        crate::models::app_state::EdidMode::AutoDetect => {
-                            if let Some((detected_width, detected_height, detected_refresh)) =
-                                detect_client_display_for_provisioning()
-                            {
-                                (
-                                    detected_width,
-                                    detected_height,
-                                    detected_refresh,
-                                    "Auto-Detected".to_string(),
-                                )
-                            } else {
-                                (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
-                            }
-                        }
-                    };
-                initial_state.sunshine.headless_edid_base64 =
-                    generate_headless_edid_base64(width, height, refresh_hz)
-                        .map_err(|error| format!("Failed generating default EDID: {error}"))?;
-                initial_state.sunshine.edid_source_label = source_label;
-                state_changed = true;
+                return Err(format!(
+                    "Failed generating startup EDID: {}",
+                    last_generation_error
+                        .map(|error| error.to_string())
+                        .unwrap_or_else(|| "no compatible timing".to_string())
+                )
+                .into());
+            } else if let Some(error) = last_generation_error {
+                warn!(
+                    "Could not refresh the startup EDID; retaining the last valid profile: {}",
+                    error
+                );
             }
 
             if state_changed {
@@ -177,6 +227,14 @@ fn main() {
             let resume_context = context.clone();
             tauri::async_runtime::spawn(async move {
                 OrchestrationService::resume_if_needed(&app_handle, &resume_context).await;
+            });
+
+            tauri::async_runtime::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
+                loop {
+                    interval.tick().await;
+                    MicPassthroughService::maintain_active_sessions().await;
+                }
             });
 
             Ok(())
@@ -240,6 +298,8 @@ fn main() {
             let runtime = moonlight.runtime.clone();
             let input = moonlight.input.clone();
             let active_session_preferences = moonlight.active_session_preferences.clone();
+            let active_stream_instance_id = moonlight.active_stream_instance_id.clone();
+            let mic_context = app.state::<AppContext>().inner().clone();
 
             tauri::async_runtime::spawn(async move {
                 let _ = runtime.stop().await;
@@ -248,7 +308,18 @@ fn main() {
                 if let Ok(mut active_preferences) = active_session_preferences.lock() {
                     *active_preferences = None;
                 }
+                let mic_instance_id = active_stream_instance_id
+                    .lock()
+                    .ok()
+                    .and_then(|mut instance| instance.take());
                 let _ = moonlight::platform::close_stream_window(&app);
+                if let Some(instance_id) = mic_instance_id {
+                    if let Err(error) =
+                        MicPassthroughService::stop_for_game_stream(&mic_context, instance_id).await
+                    {
+                        warn!(instance_id, %error, "Microphone stop failed while closing the stream window");
+                    }
+                }
             });
         })
         .invoke_handler(tauri::generate_handler![
@@ -316,6 +387,8 @@ fn main() {
             update_instance_sunshine_settings,
             reset_instance_sunshine_settings,
             reconnect_instance_wireguard,
+            get_instance_display_status,
+            apply_instance_display_mode,
             reboot_instance_services,
             pause_instance,
             destroy_instance,
@@ -329,6 +402,9 @@ fn main() {
             enable_instance_mic,
             disable_instance_mic,
             reconnect_instance_mic,
+            mute_instance_mic,
+            unmute_instance_mic,
+            get_instance_mic_metrics,
             recreate_instance_mic_device,
             get_instance_mic_status,
             list_microphones,

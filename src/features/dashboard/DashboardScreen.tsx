@@ -29,6 +29,7 @@ import type {
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
+import { InstanceDisplayModal } from "./InstanceDisplayModal";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
@@ -133,6 +134,7 @@ export function DashboardScreen({
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [displayInstanceId, setDisplayInstanceId] = useState<number | null>(null);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -143,6 +145,9 @@ export function DashboardScreen({
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
+  const displayInstance = rentedInstances.find(
+    (instance) => instance.instanceId === displayInstanceId,
+  );
 
   const hasProvisioningToResume = useMemo(() => {
     const hasActiveProvisioningInstance =
@@ -213,6 +218,10 @@ export function DashboardScreen({
 
   async function handleReconnect(instanceId: number) {
     await onReconnectWireguard(instanceId);
+  }
+
+  function handleDisplay(instanceId: number) {
+    setDisplayInstanceId(instanceId);
   }
 
   async function handleReboot(instanceId: number) {
@@ -568,6 +577,7 @@ export function DashboardScreen({
                       onPlay={handlePlayEmbedded}
                       onPair={handlePair}
                       onReconnect={handleReconnect}
+                      onDisplay={handleDisplay}
                       onReboot={handleReboot}
                       onPause={handlePause}
                       onDestroy={handleDestroy}
@@ -844,6 +854,13 @@ export function DashboardScreen({
             </div>
           </ModalBody>
         </ModalFrame>
+      ) : null}
+
+      {displayInstance ? (
+        <InstanceDisplayModal
+          instance={displayInstance}
+          onClose={() => setDisplayInstanceId(null)}
+        />
       ) : null}
 
       <SharedStorageSyncModal
