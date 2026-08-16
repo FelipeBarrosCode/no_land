@@ -33,6 +33,34 @@ This phase implements a full vertical slice:
 - Tailwind CSS
 - Zustand
 
+## Shout-outs / upstream projects
+
+Big shout-out to the upstream projects that make Noland Connect possible.
+
+### App and developer tooling
+
+- [Tauri](https://github.com/tauri-apps/tauri) — desktop app framework
+- [React](https://github.com/facebook/react) — frontend UI layer
+- [Vite](https://github.com/vitejs/vite) — frontend build/dev tooling
+- [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) — styling system
+- [Zustand](https://github.com/pmndrs/zustand) — client-side state management
+
+### Streaming, networking, and media stack
+
+- [Sunshine](https://github.com/LizardByte/Sunshine) — remote game streaming host
+- [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) — Moonlight desktop client lineage
+- [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) — core GameStream protocol implementation used by the embedded client stack
+- [WireGuard tools](https://github.com/WireGuard/wireguard-tools) — tunnel tooling reference and interoperability target
+- [GotaTun](https://github.com/mullvad/gotatun) — embedded userspace tunnel engine used by `noland-net-helper`
+- [GStreamer](https://github.com/GStreamer/gstreamer) — media runtime used in the native streaming stack
+- [PipeWire](https://github.com/PipeWire/pipewire) — low-latency Linux audio/media runtime on provisioned hosts
+- [WirePlumber](https://github.com/PipeWire/wireplumber) — PipeWire session manager used in the host audio setup
+
+### Service integrations
+
+- Vast.ai — core cloud provider integration used by Noland Connect. I did not find a clearly verifiable official public source repository for Vast.ai, so the repo shout-out here stays with their docs instead:
+  - https://docs.vast.ai/api-reference/introduction
+
 ## Project layout
 
 ```text
