@@ -187,6 +187,43 @@ pub fn generate_headless_edid_base64(
     Ok(STANDARD.encode(bytes))
 }
 
+pub fn decode_headless_edid_preferred_mode(edid_base64: &str) -> AppResult<(u32, u32, u32)> {
+    let bytes = STANDARD.decode(edid_base64.trim()).map_err(|error| {
+        AppError::InvalidInput(format!("Headless EDID is not valid base64: {error}"))
+    })?;
+    if bytes.len() < 128 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID is shorter than one base block".to_string(),
+        ));
+    }
+
+    let dtd = 54usize;
+    let pixel_clock_10khz = u16::from_le_bytes([bytes[dtd], bytes[dtd + 1]]) as u64;
+    if pixel_clock_10khz == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID has no preferred detailed timing".to_string(),
+        ));
+    }
+    let width = u32::from(bytes[dtd + 2]) | (u32::from(bytes[dtd + 4] & 0xF0) << 4);
+    let h_blanking = u32::from(bytes[dtd + 3]) | (u32::from(bytes[dtd + 4] & 0x0F) << 8);
+    let height = u32::from(bytes[dtd + 5]) | (u32::from(bytes[dtd + 7] & 0xF0) << 4);
+    let v_blanking = u32::from(bytes[dtd + 6]) | (u32::from(bytes[dtd + 7] & 0x0F) << 8);
+    let h_total = width.saturating_add(h_blanking);
+    let v_total = height.saturating_add(v_blanking);
+    if width == 0 || height == 0 || h_total == 0 || v_total == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID preferred timing is invalid".to_string(),
+        ));
+    }
+    let refresh_millihz = pixel_clock_10khz
+        .saturating_mul(10_000)
+        .saturating_mul(1_000)
+        .saturating_add((u64::from(h_total) * u64::from(v_total)) / 2)
+        / (u64::from(h_total) * u64::from(v_total));
+
+    Ok((width, height, refresh_millihz as u32))
+}
+
 fn encode_standard_timing(mode: DisplayModeSpec) -> Option<[u8; 2]> {
     if mode.width < 256 || mode.width > 2_288 || mode.width % 8 != 0 {
         return None;
@@ -222,43 +259,33 @@ pub struct DisplayProfile {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    pub refresh_rate_mode: RefreshRateMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshRateMode {
-    Integer60,
-    Ntsc5994,
+    pub refresh_millihz: u32,
 }
 
 impl DisplayProfile {
-    pub fn from_moonlight_prefs(
+    pub fn from_edid_timing(
         width: u32,
         height: u32,
-        fps: u32,
-        refresh_rate_mode: &str,
+        refresh_millihz: u32,
+        target_fps: u32,
     ) -> Self {
-        let width = width.clamp(640, 7680);
-        let height = height.clamp(360, 4320);
-        let fps = fps.clamp(24, 240);
-        let refresh_rate_mode = if refresh_rate_mode == "59.94" {
-            RefreshRateMode::Ntsc5994
-        } else {
-            RefreshRateMode::Integer60
-        };
         Self {
             width,
             height,
-            fps,
-            refresh_rate_mode,
+            fps: target_fps.clamp(24, 240),
+            refresh_millihz,
         }
     }
 
     pub fn virtual_hz_string(&self) -> String {
-        match self.refresh_rate_mode {
-            RefreshRateMode::Integer60 => (self.fps * 2).to_string(),
-            RefreshRateMode::Ntsc5994 if self.fps == 60 => "119.88".to_string(),
-            RefreshRateMode::Ntsc5994 => format!("{:.2}", (self.fps as f32) * 1.998),
+        let whole = self.refresh_millihz / 1_000;
+        let fraction = self.refresh_millihz % 1_000;
+        if fraction == 0 {
+            whole.to_string()
+        } else {
+            format!("{whole}.{fraction:03}")
+                .trim_end_matches('0')
+                .to_string()
         }
     }
 }
@@ -2302,7 +2329,7 @@ context.properties = {
             let expected = format!("{}x{}", display.width, display.height);
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    &format!("DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query | grep -q \"{expected}\" && echo ok || (DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query && exit 1)"),
+                    &format!("DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query | grep -Eq '^[[:space:]]+{expected}[[:space:]].*\\*' && echo ok || (DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query && exit 1)"),
                     Duration::from_secs(40),
                 )
             })

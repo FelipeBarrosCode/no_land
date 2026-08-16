@@ -211,7 +211,10 @@ fn build_pipeline(
     opusenc.set_property("complexity", OPUS_COMPLEXITY);
     opusenc.set_property("dtx", config.dtx);
     opusenc.set_property("inband-fec", config.fec);
-    opusenc.set_property("packet-loss-percentage", config.packet_loss_percent);
+    opusenc.set_property(
+        "packet-loss-percentage",
+        opus_packet_loss_percentage(config.packet_loss_percent)?,
+    );
 
     pay.set_property("pt", RTP_PAYLOAD_TYPE);
     pay.set_property("mtu", MAX_RTP_PAYLOAD_BYTES);
@@ -340,6 +343,13 @@ fn set_bool_property_if_present(element: &gst::Element, property: &str, value: b
     if element.find_property(property).is_some() {
         element.set_property(property, value);
     }
+}
+
+fn opus_packet_loss_percentage(value: u32) -> Result<i32, String> {
+    if value > 100 {
+        return Err("packetLossPercent must be between 0 and 100".to_string());
+    }
+    i32::try_from(value).map_err(|_| "packetLossPercent exceeds GStreamer gint range".to_string())
 }
 
 fn link_to_request_pad(
@@ -519,5 +529,12 @@ mod tests {
     fn payload_constraints_are_production_defaults() {
         assert_eq!(RTP_PAYLOAD_TYPE, 111);
         assert!(MAX_RTP_PAYLOAD_BYTES <= 1_200);
+    }
+
+    #[test]
+    fn opus_packet_loss_is_a_bounded_signed_gstreamer_value() {
+        assert_eq!(opus_packet_loss_percentage(0), Ok(0i32));
+        assert_eq!(opus_packet_loss_percentage(100), Ok(100i32));
+        assert!(opus_packet_loss_percentage(101).is_err());
     }
 }

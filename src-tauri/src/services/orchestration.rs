@@ -55,13 +55,16 @@ async fn provision_microphone_receiver(
 
 fn build_display_profile(
     preferences: &MoonlightPreferences,
-) -> crate::services::sunshine::DisplayProfile {
-    crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
-        preferences.width,
-        preferences.height,
+    edid_base64: &str,
+) -> AppResult<crate::services::sunshine::DisplayProfile> {
+    let (width, height, refresh_millihz) =
+        crate::services::sunshine::decode_headless_edid_preferred_mode(edid_base64)?;
+    Ok(crate::services::sunshine::DisplayProfile::from_edid_timing(
+        width,
+        height,
+        refresh_millihz,
         preferences.fps,
-        &preferences.refresh_rate_mode,
-    )
+    ))
 }
 
 fn resolve_edid_profile(
@@ -1274,7 +1277,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 state.sunshine.headless_edid_base64.clone(),
             )
         };
-        let display_profile = build_display_profile(&moonlight_preferences);
         let resolved_edid =
             resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
         let should_generate_edid = headless_edid_base64.trim().is_empty();
@@ -1287,6 +1289,8 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         } else {
             headless_edid_base64
         };
+        let display_profile =
+            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
         let generated_edid_for_save = effective_edid_base64.clone();
         let edid_source_for_save = resolved_edid.source_label.clone();
         context
@@ -2172,7 +2176,6 @@ async fn run_existing_instance_orchestration(
                 state.sunshine.headless_edid_base64.clone(),
             )
         };
-        let display_profile = build_display_profile(&moonlight_preferences);
         let resolved_edid =
             resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
         let should_generate_edid = headless_edid_base64.trim().is_empty();
@@ -2185,6 +2188,8 @@ async fn run_existing_instance_orchestration(
         } else {
             headless_edid_base64
         };
+        let display_profile =
+            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
         let generated_edid_for_save = effective_edid_base64.clone();
         let edid_source_for_save = resolved_edid.source_label.clone();
         context

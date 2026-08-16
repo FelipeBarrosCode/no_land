@@ -777,6 +777,7 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
 
   const requiredPluginNames = new Set([
     'libgstcoreelements.so',
+    'libgstapp.so',
     'libgstautodetect.so',
     'libgstplayback.so',
     'libgstvideoconvertscale.so',

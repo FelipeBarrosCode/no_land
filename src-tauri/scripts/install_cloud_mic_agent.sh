@@ -292,6 +292,7 @@ import re
 import socket
 import subprocess
 import tempfile
+import time
 
 CONFIG = pathlib.Path("/etc/noland/microphone.toml")
 LOCK = pathlib.Path("/run/noland/mic-session-control.lock")
@@ -426,9 +427,50 @@ def start(args):
     result = run_user_systemctl(args.user, "start", "noland-mic-receiver.service", check=False)
     if result.returncode != 0:
         fail(f"receiver start failed: {result.stderr.strip()}")
-    active = run_user_systemctl(args.user, "is-active", "noland-mic-receiver.service", check=False)
-    if active.returncode != 0:
-        fail(f"receiver is not active: {active.stdout.strip()} {active.stderr.strip()}")
+    active = None
+    stable_active_samples = 0
+    for _ in range(60):
+        active = run_user_systemctl(
+            args.user,
+            "is-active",
+            "noland-mic-receiver.service",
+            check=False,
+        )
+        state = active.stdout.strip()
+        if active.returncode == 0 and state == "active":
+            stable_active_samples += 1
+            if stable_active_samples >= 4:
+                break
+        else:
+            stable_active_samples = 0
+        if state == "failed":
+            status = run_user_systemctl(
+                args.user,
+                "--no-pager",
+                "--full",
+                "status",
+                "noland-mic-receiver.service",
+                check=False,
+            )
+            fail(
+                f"receiver entered terminal state {state}: "
+                f"{status.stdout.strip()} {status.stderr.strip()}"
+            )
+        time.sleep(0.25)
+    else:
+        state = active.stdout.strip() if active is not None else "unknown"
+        status = run_user_systemctl(
+            args.user,
+            "--no-pager",
+            "--full",
+            "status",
+            "noland-mic-receiver.service",
+            check=False,
+        )
+        fail(
+            f"receiver did not become active within 15 seconds (last state: {state}): "
+            f"{status.stdout.strip()} {status.stderr.strip()}"
+        )
     print(json.dumps({
         "sessionId": args.session_id,
         "host": bind,
@@ -498,16 +540,9 @@ Type=simple
 ExecStart=${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_FILE}
 Restart=on-failure
 RestartSec=2s
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ProtectControlGroups=true
-ProtectKernelModules=true
-ProtectKernelTunables=true
-RestrictSUIDSGID=true
-LockPersonality=true
-ReadWritePaths=${RUNTIME_DIR_BASE}
+# This is already an unprivileged user service. Capability- and namespace-based
+# sandbox directives are intentionally omitted because restricted Ubuntu VM and
+# container kernels can reject them before ExecStart with 218/CAPABILITIES.
 UMask=0077
 LimitNOFILE=4096
 
@@ -555,6 +590,7 @@ sleep 2
 
 echo
 echo "=== Verification ==="
+verification_failed=0
 missing_elements=()
 for element in pipewiresink rtpbin rtpopusdepay opusdec; do
     if ! run_user gst-inspect-1.0 "$element" >/dev/null 2>&1; then
@@ -565,17 +601,22 @@ if (( ${#missing_elements[@]} == 0 )); then
     echo "[OK] Required GStreamer elements are installed"
 else
     echo "[FAIL] Missing GStreamer elements: ${missing_elements[*]}"
+    verification_failed=1
 fi
-if run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_sink'; then
+if run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_sink' || \
+   run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink'; then
     echo "[OK] Private PipeWire sink noland_mic_sink exists"
 else
     echo "[FAIL] Private PipeWire sink noland_mic_sink was not found"
+    verification_failed=1
 fi
-if run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_source' && \
+if { run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_source' || \
+     run_user pactl list short sources 2>/dev/null | grep -q 'noland_mic_source'; } && \
    run_user pactl list sources 2>/dev/null | grep -q 'Description: Noland Microphone'; then
     echo "[OK] PipeWire source noland_mic_source is published as Noland Microphone"
 else
     echo "[FAIL] PipeWire source or exact friendly description was not found"
+    verification_failed=1
 fi
 if run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink' && \
    run_user pactl list short sources 2>/dev/null | grep -q 'noland_mic_source'; then
@@ -588,17 +629,32 @@ if run_user_systemctl is-active noland-mic-receiver.service >/dev/null 2>&1; the
 else
     echo "[FAIL] noland-mic-receiver failed to start"
     run_user_systemctl --no-pager status noland-mic-receiver.service || true
+    verification_failed=1
 fi
 if ss -uln | grep -q ":${RTP_PORT} " && ss -uln | grep -q ":${RTCP_PORT} "; then
     echo "[OK] RTP ${RTP_PORT}/udp and RTCP ${RTCP_PORT}/udp are listening"
 else
-    echo "[WARN] One or both UDP listeners were not detected"
+    echo "[FAIL] One or both UDP listeners were not detected"
+    verification_failed=1
 fi
 if [[ -f "$STATUS_FILE" ]]; then
     echo "[OK] Receiver status JSON exists at ${STATUS_FILE}"
 else
-    echo "[WARN] Receiver status JSON is not available yet"
+    echo "[FAIL] Receiver status JSON is not available yet"
+    verification_failed=1
 fi
+
+if (( verification_failed != 0 )); then
+    echo
+    echo "Installation verification failed; inspect the service status above." >&2
+    exit 1
+fi
+
+# Written only after the unit, PipeWire topology, listeners, and status writer
+# have all passed verification. The client uses this to force safe upgrades of
+# older remote helpers before allocating a media session.
+echo "2" > "$CONFIG_DIR/microphone-agent.version"
+chmod 0644 "$CONFIG_DIR/microphone-agent.version"
 
 echo
 echo "Installation complete."

@@ -25,12 +25,25 @@ const frameworkLibexecDir = join(frameworkRoot, 'libexec');
 const frameworkPluginDir = join(frameworkLibDir, 'gstreamer-1.0');
 const frameworkPluginValidateDir = join(frameworkPluginDir, 'validate');
 const frameworkShareValidateDir = join(frameworkRoot, 'share', 'gstreamer-1.0', 'validate');
+const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
+  || process.env.GSTREAMER_VERSION?.trim()
+  || '1.24.13';
+const projectManagedRuntimeRoot = resolve(
+  repoRoot,
+  'src-tauri',
+  '.native-deps',
+  'cache',
+  `gstreamer-${gstreamerVersion}-macos-universal`,
+  'root',
+);
 const frameworkSourceCandidates = [
+  projectManagedRuntimeRoot,
   process.env.NOLAND_GSTREAMER_FRAMEWORK?.trim(),
 ].filter(Boolean);
 const nativePrefix = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim() ? resolve(process.env.NOLAND_NATIVE_DEPS_PREFIX.trim()) : null;
 const allowedGStreamerPlugins = new Set([
   'libgstcoreelements.dylib',
+  'libgstapp.dylib',
   'libgstaudioconvert.dylib',
   'libgstaudioresample.dylib',
   'libgstaudiorate.dylib',
@@ -88,6 +101,7 @@ console.log(`Patched macOS dev sidecar runtime: ${sidecarPath}`);
 
 function prepareBundledFramework() {
   if (hasFrameworkRuntime(frameworkDir)) {
+    restoreAllowedPlugins();
     pruneBundledPlugins();
     return;
   }
@@ -103,7 +117,29 @@ function prepareBundledFramework() {
     copyDirResolved(sourceFramework, frameworkDir);
   }
 
+  restoreAllowedPlugins();
   pruneBundledPlugins();
+}
+
+function restoreAllowedPlugins() {
+  const sourceFramework = resolveFrameworkSource();
+  if (!sourceFramework || resolve(sourceFramework) === resolve(frameworkDir)) return;
+
+  const sourcePluginDirs = [
+    join(sourceFramework, 'Versions', 'Current', 'lib', 'gstreamer-1.0'),
+    join(sourceFramework, 'lib', 'gstreamer-1.0'),
+  ];
+  const sourcePluginDir = sourcePluginDirs.find((candidate) => existsSync(candidate));
+  if (!sourcePluginDir) return;
+
+  mkdirSync(frameworkPluginDir, { recursive: true });
+  for (const plugin of allowedGStreamerPlugins) {
+    const destination = join(frameworkPluginDir, plugin);
+    const source = join(sourcePluginDir, plugin);
+    if (!existsSync(destination) && existsSync(source)) {
+      copyFileSync(source, destination);
+    }
+  }
 }
 
 function resolveFrameworkSource() {

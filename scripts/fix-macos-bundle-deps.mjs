@@ -55,6 +55,7 @@ const frameworkPluginValidateDir = join(frameworkPluginDir, 'validate');
 const frameworkShareValidateDir = join(frameworkRoot, 'share', 'gstreamer-1.0', 'validate');
 const allowedGStreamerPlugins = new Set([
   'libgstcoreelements.dylib',
+  'libgstapp.dylib',
   'libgstaudioconvert.dylib',
   'libgstaudioresample.dylib',
   'libgstaudiorate.dylib',
