@@ -1079,10 +1079,12 @@ impl Default for InstanceMicConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 pub enum MicQualityProfile {
     Standard,
+    #[serde(alias = "lowlatency")]
     LowLatency,
+    #[serde(alias = "highquality")]
     HighQuality,
 }
 
@@ -1220,4 +1222,41 @@ pub struct MicSessionResponse {
     pub channels: u32,
     pub frame_ms: u32,
     pub bitrate_kbps: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MicQualityProfile;
+
+    #[test]
+    fn mic_quality_profiles_use_frontend_camel_case() {
+        assert_eq!(
+            serde_json::to_string(&MicQualityProfile::LowLatency).unwrap(),
+            r#""lowLatency""#
+        );
+        assert_eq!(
+            serde_json::to_string(&MicQualityProfile::HighQuality).unwrap(),
+            r#""highQuality""#
+        );
+        assert_eq!(
+            serde_json::from_str::<MicQualityProfile>(r#""lowLatency""#).unwrap(),
+            MicQualityProfile::LowLatency
+        );
+        assert_eq!(
+            serde_json::from_str::<MicQualityProfile>(r#""highQuality""#).unwrap(),
+            MicQualityProfile::HighQuality
+        );
+    }
+
+    #[test]
+    fn mic_quality_profiles_accept_legacy_lowercase_values() {
+        assert_eq!(
+            serde_json::from_str::<MicQualityProfile>(r#""lowlatency""#).unwrap(),
+            MicQualityProfile::LowLatency
+        );
+        assert_eq!(
+            serde_json::from_str::<MicQualityProfile>(r#""highquality""#).unwrap(),
+            MicQualityProfile::HighQuality
+        );
+    }
 }

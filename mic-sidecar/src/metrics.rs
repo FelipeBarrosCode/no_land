@@ -1,10 +1,47 @@
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub enum CaptureBackend {
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    #[serde(rename = "cpal")]
+    Cpal,
+    #[serde(rename = "gstreamer-osx")]
+    GstreamerOsx,
+    #[serde(rename = "synthetic")]
+    Synthetic,
+}
+
+impl CaptureBackend {
+    fn from_code(code: u8) -> Self {
+        match code {
+            1 => Self::Cpal,
+            2 => Self::GstreamerOsx,
+            3 => Self::Synthetic,
+            _ => Self::None,
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Cpal => 1,
+            Self::GstreamerOsx => 2,
+            Self::Synthetic => 3,
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct Metrics {
     captured_samples: AtomicU64,
+    capture_nonzero_samples: AtomicU64,
+    capture_peak: AtomicU64,
+    capture_silent_callbacks: AtomicU64,
+    capture_backend: AtomicU8,
     consumed_samples: AtomicU64,
     dropped_stale_samples: AtomicU64,
     overruns: AtomicU64,
@@ -25,6 +62,10 @@ pub struct Metrics {
 #[serde(rename_all = "camelCase")]
 pub struct MetricsSnapshot {
     pub captured_samples: u64,
+    pub capture_nonzero_samples: u64,
+    pub capture_peak: u16,
+    pub capture_silent_callbacks: u64,
+    pub capture_backend: CaptureBackend,
     pub consumed_samples: u64,
     pub dropped_stale_samples: u64,
     pub overruns: u64,
@@ -43,13 +84,37 @@ pub struct MetricsSnapshot {
 }
 
 impl Metrics {
-    pub fn record_capture(&self, samples: u64, dropped: u64, overrun: bool) {
+    pub fn record_capture(
+        &self,
+        samples: u64,
+        nonzero_samples: u64,
+        peak: u16,
+        dropped: u64,
+        overrun: bool,
+    ) {
         self.captured_samples.fetch_add(samples, Ordering::Relaxed);
+        self.capture_nonzero_samples
+            .fetch_add(nonzero_samples, Ordering::Relaxed);
+        self.capture_peak.store(u64::from(peak), Ordering::Relaxed);
+        if samples > 0 && nonzero_samples == 0 {
+            self.capture_silent_callbacks
+                .fetch_add(1, Ordering::Relaxed);
+        }
         self.dropped_stale_samples
             .fetch_add(dropped, Ordering::Relaxed);
         if overrun {
             self.overruns.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    pub fn capture_nonzero_samples(&self) -> u64 {
+        self.capture_nonzero_samples.load(Ordering::Relaxed)
+    }
+
+    pub fn set_capture_backend(&self, backend: CaptureBackend) {
+        self.capture_backend
+            .store(backend.code(), Ordering::Relaxed);
+        self.capture_peak.store(0, Ordering::Relaxed);
     }
 
     pub fn record_output(&self, consumed: u64, silence: u64, underrun: bool) {
@@ -92,6 +157,12 @@ impl Metrics {
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             captured_samples: self.captured_samples.load(Ordering::Relaxed),
+            capture_nonzero_samples: self.capture_nonzero_samples.load(Ordering::Relaxed),
+            capture_peak: self.capture_peak.load(Ordering::Relaxed) as u16,
+            capture_silent_callbacks: self.capture_silent_callbacks.load(Ordering::Relaxed),
+            capture_backend: CaptureBackend::from_code(
+                self.capture_backend.load(Ordering::Relaxed),
+            ),
             consumed_samples: self.consumed_samples.load(Ordering::Relaxed),
             dropped_stale_samples: self.dropped_stale_samples.load(Ordering::Relaxed),
             overruns: self.overruns.load(Ordering::Relaxed),
@@ -125,7 +196,9 @@ mod tests {
     #[test]
     fn snapshot_contains_accumulated_metrics() {
         let metrics = Metrics::default();
-        metrics.record_capture(480, 12, true);
+        metrics.set_capture_backend(CaptureBackend::GstreamerOsx);
+        metrics.record_capture(480, 123, 456, 12, true);
+        metrics.record_capture(480, 0, 0, 0, false);
         metrics.record_output(470, 10, true);
         metrics.capture_restart();
         metrics.capture_error();
@@ -134,7 +207,11 @@ mod tests {
         metrics.set_appsrc_queue_ns(12_000_000);
         metrics.record_rtp_packet(120, 77);
         let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.captured_samples, 480);
+        assert_eq!(snapshot.captured_samples, 960);
+        assert_eq!(snapshot.capture_nonzero_samples, 123);
+        assert_eq!(snapshot.capture_peak, 0);
+        assert_eq!(snapshot.capture_silent_callbacks, 1);
+        assert_eq!(snapshot.capture_backend, CaptureBackend::GstreamerOsx);
         assert_eq!(snapshot.consumed_samples, 470);
         assert_eq!(snapshot.dropped_stale_samples, 12);
         assert_eq!(snapshot.overruns, 1);

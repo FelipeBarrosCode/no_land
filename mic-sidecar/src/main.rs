@@ -10,11 +10,11 @@ use capture::{
     current_default_device_id, device_available, list_devices, AudioInput, CaptureController,
     CaptureSignal, SharedInput, SourceKind,
 };
-use metrics::Metrics;
+use metrics::{CaptureBackend, Metrics};
 use pipeline::PipelineSession;
 use protocol::{Command, Output, Request, ResponseResult, SessionConfig};
 use serde_json::{json, Value};
-use state::{SidecarState, StateMachine, Status};
+use state::{Health, SidecarState, StateMachine, Status};
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +25,9 @@ use std::time::{Duration, Instant};
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const CAPTURE_SILENCE_DEGRADE_INTERVAL: Duration = Duration::from_secs(3);
+const CAPTURE_SILENCE_ERROR: &str =
+    "microphone capture is running but has produced only zero samples";
 
 fn main() {
     if let Err(error) = run() {
@@ -243,6 +246,11 @@ struct Daemon {
     selected_device_id: Option<String>,
     active_device_id: Option<String>,
     session_config: Option<SessionConfig>,
+    capture_backend: CaptureBackend,
+    capture_started_at: Option<Instant>,
+    capture_nonzero_observed: u64,
+    capture_last_nonzero_at: Option<Instant>,
+    capture_silence_degraded: bool,
     retry_at: Instant,
     next_device_poll: Instant,
 }
@@ -262,6 +270,11 @@ impl Daemon {
             selected_device_id: None,
             active_device_id: None,
             session_config: None,
+            capture_backend: CaptureBackend::None,
+            capture_started_at: None,
+            capture_nonzero_observed: 0,
+            capture_last_nonzero_at: None,
+            capture_silence_degraded: false,
             retry_at: Instant::now(),
             next_device_poll: Instant::now(),
         }
@@ -321,6 +334,7 @@ impl Daemon {
             selected_device_id: self.selected_device_id.clone(),
             active_device_id: self.active_device_id.clone(),
             active_sample_rate: self.input.load().sample_rate,
+            capture_backend: self.capture_backend,
             session_active: self.pipeline.is_some(),
             last_error: self.state.last_error(),
         }
@@ -373,6 +387,7 @@ impl Daemon {
         let _ = self.state.transition(SidecarState::Stopping);
         self.emit_state();
         self.capture.stop();
+        self.clear_capture_health();
         self.active_device_id = None;
         if let Some(mut pipeline) = self.pipeline.take() {
             pipeline.stop();
@@ -429,12 +444,19 @@ impl Daemon {
         ) {
             Ok(started) => {
                 self.active_device_id = Some(started.active_device_id.clone());
+                self.capture_backend = started.capture_backend;
+                let now = Instant::now();
+                self.capture_started_at = Some(now);
+                self.capture_nonzero_observed = self.metrics.capture_nonzero_samples();
+                self.capture_last_nonzero_at = Some(now);
+                self.capture_silence_degraded = false;
                 self.emit_event(
                     "captureStarted",
                     json!({
                         "deviceId": started.active_device_id,
                         "deviceName": started.active_device_name,
                         "sampleRate": started.sample_rate,
+                        "captureBackend": started.capture_backend,
                         "fallback": started.used_fallback
                     }),
                 );
@@ -452,6 +474,7 @@ impl Daemon {
             }
             Err(error) => {
                 self.capture.stop();
+                self.clear_capture_health();
                 self.active_device_id = None;
                 self.metrics.capture_error();
                 let _ = self.state.transition(SidecarState::Recovering);
@@ -467,10 +490,11 @@ impl Daemon {
         while let Ok(CaptureSignal::Error(error)) = self.capture_rx.try_recv() {
             self.metrics.capture_error();
             self.capture.stop();
+            self.clear_capture_health();
             self.active_device_id = None;
             let _ = self.state.transition(SidecarState::Recovering);
             self.state
-                .degraded(format!("CPAL capture stream failed: {error}"));
+                .degraded(format!("microphone capture stream failed: {error}"));
             self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
             self.emit_event("captureError", json!({ "error": error }));
             self.emit_state();
@@ -491,6 +515,7 @@ impl Daemon {
         }
 
         let now = Instant::now();
+        self.update_capture_health(now);
         if self.capture.active_device_id().is_none() && now >= self.retry_at {
             self.restart_capture(&config);
             return;
@@ -514,6 +539,50 @@ impl Daemon {
         }
     }
 
+    fn update_capture_health(&mut self, now: Instant) {
+        let Some(started_at) = self.capture_started_at else {
+            return;
+        };
+        let nonzero_samples = self.metrics.capture_nonzero_samples();
+        if nonzero_samples > self.capture_nonzero_observed {
+            self.capture_nonzero_observed = nonzero_samples;
+            self.capture_last_nonzero_at = Some(now);
+            if self.capture_silence_degraded {
+                self.capture_silence_degraded = false;
+                if self.state.health() == Health::Degraded
+                    && self.state.last_error().as_deref() == Some(CAPTURE_SILENCE_ERROR)
+                {
+                    self.state.healthy();
+                    self.emit_event("captureAudioDetected", json!({}));
+                    self.emit_state();
+                }
+            }
+            return;
+        }
+        let silent_since = self.capture_last_nonzero_at.unwrap_or(started_at);
+        if !self.capture_silence_degraded
+            && self.state.state() == SidecarState::Running
+            && now.duration_since(silent_since) >= CAPTURE_SILENCE_DEGRADE_INTERVAL
+        {
+            self.capture_silence_degraded = true;
+            self.state.degraded(CAPTURE_SILENCE_ERROR);
+            self.emit_event(
+                "captureSilenceDetected",
+                json!({ "error": CAPTURE_SILENCE_ERROR }),
+            );
+            self.emit_state();
+        }
+    }
+
+    fn clear_capture_health(&mut self) {
+        self.capture_backend = CaptureBackend::None;
+        self.capture_started_at = None;
+        self.capture_nonzero_observed = self.metrics.capture_nonzero_samples();
+        self.capture_last_nonzero_at = None;
+        self.capture_silence_degraded = false;
+        self.metrics.set_capture_backend(CaptureBackend::None);
+    }
+
     fn emit_state(&self) {
         self.emit_event(
             "stateChanged",
@@ -526,5 +595,49 @@ impl Daemon {
             event: event.to_string(),
             data,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exact_zero_capture_degrades_and_nonzero_capture_recovers() {
+        let mut daemon = running_daemon_with_stale_capture();
+        let now = Instant::now();
+
+        daemon.update_capture_health(now);
+        assert_eq!(daemon.state.health(), Health::Degraded);
+
+        daemon.metrics.record_capture(1, 1, 7, 0, false);
+        daemon.update_capture_health(now + Duration::from_millis(1));
+        assert_eq!(daemon.state.health(), Health::Healthy);
+    }
+
+    #[test]
+    fn capture_recovery_does_not_clear_an_unrelated_failure() {
+        let mut daemon = running_daemon_with_stale_capture();
+        let now = Instant::now();
+        daemon.update_capture_health(now);
+        daemon.state.failed("sender pipeline failed");
+
+        daemon.metrics.record_capture(1, 1, 7, 0, false);
+        daemon.update_capture_health(now + Duration::from_millis(1));
+
+        assert_eq!(daemon.state.health(), Health::Failed);
+        assert_eq!(
+            daemon.state.last_error().as_deref(),
+            Some("sender pipeline failed")
+        );
+    }
+
+    fn running_daemon_with_stale_capture() -> Daemon {
+        let mut daemon = Daemon::new();
+        daemon.state.transition(SidecarState::Starting).unwrap();
+        daemon.state.transition(SidecarState::Running).unwrap();
+        let now = Instant::now();
+        daemon.capture_started_at = Some(now - CAPTURE_SILENCE_DEGRADE_INTERVAL);
+        daemon.capture_last_nonzero_at = daemon.capture_started_at;
+        daemon
     }
 }

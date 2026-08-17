@@ -1,3 +1,4 @@
+use crate::metrics::CaptureBackend;
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -29,6 +30,7 @@ pub struct Status {
     pub selected_device_id: Option<String>,
     pub active_device_id: Option<String>,
     pub active_sample_rate: u32,
+    pub capture_backend: CaptureBackend,
     pub session_active: bool,
     pub last_error: Option<String>,
 }

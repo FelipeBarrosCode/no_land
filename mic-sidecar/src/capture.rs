@@ -1,8 +1,17 @@
-use crate::metrics::Metrics;
+use crate::metrics::{CaptureBackend, Metrics};
 use crate::ring::AudioRing;
 use arc_swap::ArcSwap;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(not(target_os = "macos"))]
+use cpal::traits::StreamTrait;
+use cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(not(target_os = "macos"))]
 use cpal::{FromSample, SampleFormat, SizedSample, StreamConfig, SupportedStreamConfig};
+#[cfg(target_os = "macos")]
+use gst::prelude::*;
+#[cfg(target_os = "macos")]
+use gstreamer as gst;
+#[cfg(target_os = "macos")]
+use gstreamer_app as gst_app;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,12 +77,18 @@ pub struct CaptureStarted {
     pub active_device_id: String,
     pub active_device_name: String,
     pub sample_rate: u32,
+    pub capture_backend: CaptureBackend,
     pub used_fallback: bool,
 }
 
 enum CaptureHandle {
-    Native {
-        _stream: cpal::Stream,
+    #[cfg(not(target_os = "macos"))]
+    Native { _stream: cpal::Stream },
+    #[cfg(target_os = "macos")]
+    GStreamer {
+        pipeline: gst::Pipeline,
+        stop: Arc<AtomicBool>,
+        monitor: Option<JoinHandle<()>>,
     },
     Synthetic {
         stop: Arc<AtomicBool>,
@@ -83,11 +98,27 @@ enum CaptureHandle {
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        if let Self::Synthetic { stop, thread } = self {
-            stop.store(true, Ordering::Release);
-            if let Some(thread) = thread.take() {
-                let _ = thread.join();
+        match self {
+            #[cfg(target_os = "macos")]
+            Self::GStreamer {
+                pipeline,
+                stop,
+                monitor,
+            } => {
+                stop.store(true, Ordering::Release);
+                let _ = pipeline.set_state(gst::State::Null);
+                if let Some(monitor) = monitor.take() {
+                    let _ = monitor.join();
+                }
             }
+            Self::Synthetic { stop, thread } => {
+                stop.store(true, Ordering::Release);
+                if let Some(thread) = thread.take() {
+                    let _ = thread.join();
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            Self::Native { .. } => {}
         }
     }
 }
@@ -129,12 +160,25 @@ impl CaptureController {
         self.generation = self.generation.wrapping_add(1);
         let generation = self.generation;
         let (handle, input, started) = match source {
-            SourceKind::Sine => start_sine(generation, metrics),
+            SourceKind::Sine => start_sine(generation, metrics.clone()),
             SourceKind::Microphone => {
-                start_native(requested_device_id, generation, metrics, signals)?
+                #[cfg(target_os = "macos")]
+                {
+                    start_gstreamer_macos(
+                        requested_device_id,
+                        generation,
+                        metrics.clone(),
+                        signals,
+                    )?
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    start_native(requested_device_id, generation, metrics.clone(), signals)?
+                }
             }
         };
 
+        metrics.set_capture_backend(started.capture_backend);
         shared.store(input);
         self.handle = Some(handle);
         self.active_device_id = Some(started.active_device_id.clone());
@@ -233,6 +277,215 @@ fn device_capabilities(device: &cpal::Device) -> (Vec<u32>, u16) {
     (rates.into_iter().collect(), channels)
 }
 
+#[cfg(target_os = "macos")]
+fn start_gstreamer_macos(
+    requested_device_id: Option<&str>,
+    generation: u64,
+    metrics: Arc<Metrics>,
+    signals: Sender<CaptureSignal>,
+) -> Result<(CaptureHandle, Arc<AudioInput>, CaptureStarted), String> {
+    gst::init().map_err(|error| format!("failed initializing GStreamer capture: {error}"))?;
+    let devices = enumerate_devices()?;
+    if devices.is_empty() {
+        return Err("no microphone input devices are available".to_string());
+    }
+
+    let requested = requested_device_id.filter(|id| !id.trim().is_empty() && *id != "default");
+    let selected_index =
+        requested.and_then(|id| devices.iter().position(|(_, info)| info.id == id));
+    let used_fallback = requested.is_some() && selected_index.is_none();
+    let index = selected_index
+        .or_else(|| devices.iter().position(|(_, info)| info.is_default))
+        .unwrap_or(0);
+    let info = &devices[index].1;
+
+    let source = create_macos_gstreamer_source(&info.name)?;
+    set_i64_property_if_present(&source, "buffer-time", 40_000);
+    set_i64_property_if_present(&source, "latency-time", 10_000);
+    set_bool_property_if_present(&source, "do-timestamp", true);
+
+    let convert = gst::ElementFactory::make("audioconvert")
+        .build()
+        .map_err(|_| "required GStreamer element 'audioconvert' is unavailable".to_string())?;
+    let resample = gst::ElementFactory::make("audioresample")
+        .build()
+        .map_err(|_| "required GStreamer element 'audioresample' is unavailable".to_string())?;
+    let capsfilter = gst::ElementFactory::make("capsfilter")
+        .build()
+        .map_err(|_| "required GStreamer element 'capsfilter' is unavailable".to_string())?;
+    let appsink_element = gst::ElementFactory::make("appsink")
+        .name("macos_capture_sink")
+        .build()
+        .map_err(|_| "required GStreamer element 'appsink' is unavailable".to_string())?;
+    let appsink = appsink_element
+        .clone()
+        .downcast::<gst_app::AppSink>()
+        .map_err(|_| "GStreamer appsink has an unexpected type".to_string())?;
+
+    let caps = gst::Caps::builder("audio/x-raw")
+        .field("format", "S16LE")
+        .field("layout", "interleaved")
+        .field("rate", TARGET_SAMPLE_RATE as i32)
+        .field("channels", 1i32)
+        .build();
+    capsfilter.set_property("caps", &caps);
+    appsink.set_sync(false);
+    appsink.set_max_buffers(2);
+    appsink.set_drop(true);
+    appsink.set_wait_on_eos(false);
+
+    let input = Arc::new(AudioInput {
+        ring: Arc::new(AudioRing::new(ring_capacity(TARGET_SAMPLE_RATE))),
+        sample_rate: TARGET_SAMPLE_RATE,
+        generation,
+    });
+    let callback_input = input.clone();
+    let callback_metrics = metrics.clone();
+    let callback_signals = signals.clone();
+    appsink.set_callbacks(
+        gst_app::AppSinkCallbacks::builder()
+            .new_sample(move |sink| {
+                let sample = sink.pull_sample().map_err(|_| gst::FlowError::Eos)?;
+                let buffer = sample.buffer().ok_or(gst::FlowError::Error)?;
+                let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
+                let bytes = map.as_slice();
+                if bytes.len() % 2 != 0 {
+                    let _ = callback_signals.send(CaptureSignal::Error(
+                        "macOS GStreamer capture produced a misaligned S16LE buffer".to_string(),
+                    ));
+                    return Err(gst::FlowError::Error);
+                }
+                let sample_count = bytes.len() / 2;
+                record_capture_samples(
+                    callback_input.as_ref(),
+                    callback_metrics.as_ref(),
+                    sample_count,
+                    bytes
+                        .chunks_exact(2)
+                        .map(|sample| i16::from_le_bytes([sample[0], sample[1]])),
+                );
+                Ok(gst::FlowSuccess::Ok)
+            })
+            .build(),
+    );
+
+    let pipeline = gst::Pipeline::new();
+    pipeline
+        .add_many([&source, &convert, &resample, &capsfilter, &appsink_element])
+        .map_err(|error| format!("failed assembling macOS capture pipeline: {error}"))?;
+    gst::Element::link_many([&source, &convert, &resample, &capsfilter, &appsink_element])
+        .map_err(|error| format!("failed linking macOS capture pipeline: {error}"))?;
+    pipeline
+        .set_state(gst::State::Playing)
+        .map_err(|error| format!("failed starting macOS capture pipeline: {error:?}"))?;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let monitor_stop = stop.clone();
+    let bus = pipeline
+        .bus()
+        .ok_or_else(|| "macOS capture pipeline has no GStreamer bus".to_string())?;
+    let monitor_signals = signals;
+    let monitor = thread::Builder::new()
+        .name("noland-macos-capture-bus".to_string())
+        .spawn(move || {
+            while !monitor_stop.load(Ordering::Acquire) {
+                let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(100)) else {
+                    continue;
+                };
+                match message.view() {
+                    gst::MessageView::Error(error) => {
+                        let _ = monitor_signals.send(CaptureSignal::Error(format!(
+                            "macOS GStreamer capture failed: {} ({})",
+                            error.error(),
+                            error.debug().unwrap_or_default()
+                        )));
+                        break;
+                    }
+                    gst::MessageView::Eos(..) => {
+                        let _ = monitor_signals.send(CaptureSignal::Error(
+                            "macOS GStreamer capture reached unexpected EOS".to_string(),
+                        ));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .map_err(|error| {
+            let _ = pipeline.set_state(gst::State::Null);
+            format!("failed starting macOS capture monitor: {error}")
+        })?;
+
+    Ok((
+        CaptureHandle::GStreamer {
+            pipeline,
+            stop,
+            monitor: Some(monitor),
+        },
+        input,
+        CaptureStarted {
+            active_device_id: info.id.clone(),
+            active_device_name: info.name.clone(),
+            sample_rate: TARGET_SAMPLE_RATE,
+            capture_backend: CaptureBackend::GstreamerOsx,
+            used_fallback,
+        },
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn create_macos_gstreamer_source(device_name: &str) -> Result<gst::Element, String> {
+    let monitor = gst::DeviceMonitor::new();
+    monitor.add_filter(Some("Audio/Source"), None);
+    monitor
+        .start()
+        .map_err(|error| format!("failed starting GStreamer device discovery: {error}"))?;
+    let selected = monitor
+        .devices()
+        .into_iter()
+        .find(|device| macos_device_names_match(device.display_name().as_str(), device_name));
+    let result = if let Some(device) = selected {
+        device
+            .create_element(Some("macos_audio_source"))
+            .map_err(|error| format!("failed creating macOS capture source: {error}"))
+    } else {
+        gst::ElementFactory::make("osxaudiosrc")
+            .name("macos_audio_source")
+            .build()
+            .map_err(|_| {
+                format!(
+                    "GStreamer could not resolve microphone '{device_name}' and osxaudiosrc is unavailable"
+                )
+            })
+    };
+    monitor.stop();
+    result
+}
+
+#[cfg(target_os = "macos")]
+fn macos_device_names_match(gstreamer_name: &str, cpal_name: &str) -> bool {
+    let gstreamer = gstreamer_name.trim().to_lowercase();
+    let cpal = cpal_name.trim().to_lowercase();
+    gstreamer == cpal
+        || (gstreamer.len().abs_diff(cpal.len()) <= 4
+            && (gstreamer.starts_with(&cpal) || cpal.starts_with(&gstreamer)))
+}
+
+#[cfg(target_os = "macos")]
+fn set_i64_property_if_present(element: &gst::Element, name: &str, value: i64) {
+    if element.find_property(name).is_some() {
+        element.set_property(name, value);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn set_bool_property_if_present(element: &gst::Element, name: &str, value: bool) {
+    if element.find_property(name).is_some() {
+        element.set_property(name, value);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
 fn start_native(
     requested_device_id: Option<&str>,
     generation: u64,
@@ -303,11 +556,13 @@ fn start_native(
             active_device_id: info.id.clone(),
             active_device_name: info.name.clone(),
             sample_rate,
+            capture_backend: CaptureBackend::Cpal,
             used_fallback,
         },
     ))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn choose_input_config(device: &cpal::Device) -> Result<SupportedStreamConfig, String> {
     let ranges = device
         .supported_input_configs()
@@ -333,6 +588,7 @@ fn choose_input_config(device: &cpal::Device) -> Result<SupportedStreamConfig, S
         .ok_or_else(|| "input device has no supported CPAL stream configuration".to_string())
 }
 
+#[cfg(not(target_os = "macos"))]
 fn build_typed_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
@@ -350,13 +606,13 @@ where
             config,
             move |data: &[T], _| {
                 let frames = data.len() / channels;
-                let report = input.ring.push_from_iter(
+                record_capture_samples(
+                    input.as_ref(),
+                    metrics.as_ref(),
                     frames,
                     data.chunks_exact(channels)
                         .map(|frame| frame[0].to_sample::<i16>()),
                 );
-                metrics.record_capture(frames as u64, report.dropped_stale, report.overrun);
-                metrics.set_ring_depth(input.ring.len());
             },
             move |error| {
                 let _ = signals.send(CaptureSignal::Error(error.to_string()));
@@ -388,9 +644,7 @@ fn start_sine(
                 *sample = (phase.sin() * 0.1 * i16::MAX as f32) as i16;
                 phase = (phase + step) % (2.0 * std::f32::consts::PI);
             }
-            let report = thread_input.ring.push_slice(&samples);
-            metrics.record_capture(samples.len() as u64, report.dropped_stale, report.overrun);
-            metrics.set_ring_depth(thread_input.ring.len());
+            record_capture_slice(thread_input.as_ref(), metrics.as_ref(), &samples);
             next += Duration::from_millis(10);
             if let Some(delay) = next.checked_duration_since(Instant::now()) {
                 thread::sleep(delay);
@@ -410,9 +664,51 @@ fn start_sine(
             active_device_id: "synthetic-sine".to_string(),
             active_device_name: "Synthetic 440 Hz sine".to_string(),
             sample_rate: TARGET_SAMPLE_RATE,
+            capture_backend: CaptureBackend::Synthetic,
             used_fallback: false,
         },
     )
+}
+
+fn record_capture_slice(input: &AudioInput, metrics: &Metrics, samples: &[i16]) {
+    let nonzero_samples = samples.iter().filter(|sample| **sample != 0).count() as u64;
+    let peak = samples
+        .iter()
+        .map(|sample| sample.unsigned_abs())
+        .max()
+        .unwrap_or(0);
+    let report = input.ring.push_slice(samples);
+    metrics.record_capture(
+        samples.len() as u64,
+        nonzero_samples,
+        peak,
+        report.dropped_stale,
+        report.overrun,
+    );
+    metrics.set_ring_depth(input.ring.len());
+}
+
+fn record_capture_samples<I>(input: &AudioInput, metrics: &Metrics, sample_count: usize, samples: I)
+where
+    I: IntoIterator<Item = i16>,
+{
+    let mut nonzero_samples = 0u64;
+    let mut peak = 0u16;
+    let samples = samples.into_iter().inspect(|sample| {
+        if *sample != 0 {
+            nonzero_samples += 1;
+        }
+        peak = peak.max(sample.unsigned_abs());
+    });
+    let report = input.ring.push_from_iter(sample_count, samples);
+    metrics.record_capture(
+        sample_count as u64,
+        nonzero_samples,
+        peak,
+        report.dropped_stale,
+        report.overrun,
+    );
+    metrics.set_ring_depth(input.ring.len());
 }
 
 pub fn frame_samples(sample_rate: u32, frame_ms: u32) -> usize {
@@ -432,6 +728,40 @@ mod tests {
         assert_eq!(frame_samples(48_000, 10), 480);
         assert_eq!(frame_samples(44_100, 10), 441);
         assert_eq!(ring_capacity(48_000), 1_920);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_device_name_matching_accepts_gstreamer_truncation() {
+        assert!(macos_device_names_match(
+            "MacBook Air Microphone",
+            "MacBook Air Microphone"
+        ));
+        assert!(macos_device_names_match(
+            "Felipe’s iPhone Micropho",
+            "Felipe’s iPhone Microphone"
+        ));
+        assert!(!macos_device_names_match(
+            "MacBook Air Microphone",
+            "Studio Display Microphone"
+        ));
+    }
+
+    #[test]
+    fn capture_levels_count_nonzero_samples_and_peak() {
+        let input = AudioInput {
+            ring: Arc::new(AudioRing::new(4)),
+            sample_rate: TARGET_SAMPLE_RATE,
+            generation: 1,
+        };
+        let metrics = Metrics::default();
+        record_capture_samples(&input, &metrics, 4, [0, -12, i16::MIN, 4]);
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.captured_samples, 4);
+        assert_eq!(snapshot.capture_nonzero_samples, 3);
+        assert_eq!(snapshot.capture_peak, 32_768);
+        assert_eq!(snapshot.capture_silent_callbacks, 0);
     }
 
     #[test]

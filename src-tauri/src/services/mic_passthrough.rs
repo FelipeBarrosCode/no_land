@@ -321,6 +321,11 @@ impl MicPassthroughService {
             }
         };
 
+        if let Err(error) = Self::ensure_remote_audio_defaults(&remote, &target_user).await {
+            let _ = Self::call_vm_agent_stop_session(&remote, &target_user, &session_id).await;
+            return Err(error);
+        }
+
         let pipeline_config = MicClientConfig {
             device_id: capture_device_id,
             quality_profile: profile.clone(),
@@ -838,6 +843,27 @@ impl MicPassthroughService {
             ));
         }
         Ok(endpoint)
+    }
+
+    async fn ensure_remote_audio_defaults(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+        let cmd = remote_user_bus_command(
+            target_user,
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\" >&2; exit 1; fi; current_sink=\"$(run_user pactl get-default-sink 2>/dev/null || true)\"; if [[ -z \"$current_sink\" || \"$current_sink\" == noland_mic_* ]]; then fallback_sink=\"\"; while read -r _ sink _; do if [[ -n \"$sink\" && \"$sink\" != noland_mic_* ]]; then fallback_sink=\"$sink\"; break; fi; done < <(run_user pactl list short sinks 2>/dev/null); if [[ -z \"$fallback_sink\" ]]; then echo \"no safe non-Noland audio sink is available\" >&2; exit 1; fi; run_user pactl set-default-sink \"$fallback_sink\"; current_sink=\"$fallback_sink\"; fi; current_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; if [[ -z \"$current_source\" || \"$current_source\" == noland_mic_* ]]; then preferred_source=\"${current_sink}.monitor\"; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])${preferred_source}([[:space:]]|$)\"; then safe_source=\"$preferred_source\"; else safe_source=\"\"; while read -r _ source _; do if [[ -n \"$source\" && \"$source\" != noland_mic_* ]]; then safe_source=\"$source\"; break; fi; done < <(run_user pactl list short sources 2>/dev/null); fi; if [[ -z \"$safe_source\" ]]; then echo \"no safe non-Noland audio source is available\" >&2; exit 1; fi; run_user pactl set-default-source \"$safe_source\"; fi; final_sink=\"$(run_user pactl get-default-sink 2>/dev/null || true)\"; final_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; if [[ -z \"$final_sink\" || \"$final_sink\" == noland_mic_* || -z \"$final_source\" || \"$final_source\" == noland_mic_* ]]; then echo \"Noland microphone nodes became desktop defaults\" >&2; exit 1; fi",
+        )?;
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(15)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed restoring safe remote audio defaults: {} {}",
+                output.stderr.trim(),
+                output.stdout.trim()
+            )));
+        }
+        Ok(())
     }
 
     async fn call_vm_agent_stop_session(
