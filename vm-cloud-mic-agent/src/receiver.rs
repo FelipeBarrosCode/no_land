@@ -207,16 +207,10 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
         .map_err(|error| {
             format!("pipewiresink is unavailable; install gstreamer1.0-pipewire: {error}")
         })?;
-    let target_property = if sink.find_property("path").is_some() {
-        "path"
-    } else if sink.find_property("target-object").is_some() {
-        "target-object"
-    } else {
-        return Err(
-            "pipewiresink exposes neither path nor target-object; refusing to use the desktop default output"
-                .to_string(),
-        );
-    };
+    let target_property = select_pipewire_target_property(
+        sink.find_property("target-object").is_some(),
+        sink.find_property("path").is_some(),
+    )?;
     sink.set_property(target_property, &config.audio.pipewire_sink_name);
     info!(
         property = target_property,
@@ -235,6 +229,24 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
         .map_err(|error| format!("failed linking decoded audio to pipewiresink: {error}"))?;
 
     Ok(pipeline)
+}
+
+fn select_pipewire_target_property(
+    has_target_object: bool,
+    has_path: bool,
+) -> Result<&'static str, String> {
+    if has_target_object {
+        // `target-object` accepts a PipeWire node name or serial. Prefer it over
+        // deprecated `path`, which falls back to the default sink on Ubuntu 22.04.
+        Ok("target-object")
+    } else if has_path {
+        Ok("path")
+    } else {
+        Err(
+            "pipewiresink exposes neither target-object nor path; refusing to use the desktop default output"
+                .to_string(),
+        )
+    }
 }
 
 fn attach_jitterbuffer_observer(
@@ -770,6 +782,20 @@ fn lock_status(shared: &Arc<Mutex<SharedStatus>>) -> std::sync::MutexGuard<'_, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pipewire_target_object_is_preferred_over_deprecated_path() {
+        assert_eq!(
+            select_pipewire_target_property(true, true),
+            Ok("target-object")
+        );
+        assert_eq!(
+            select_pipewire_target_property(true, false),
+            Ok("target-object")
+        );
+        assert_eq!(select_pipewire_target_property(false, true), Ok("path"));
+        assert!(select_pipewire_target_property(false, false).is_err());
+    }
 
     #[test]
     fn sequence_tracker_counts_loss_reorder_and_duplicates() {

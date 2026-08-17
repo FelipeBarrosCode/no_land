@@ -154,6 +154,29 @@ context.properties = {
 }
 EOF
 
+log "Writing persistent Sunshine audio sink"
+cat <<EOF | sudo -u "$TARGET_USER" tee "$user_home/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf" >/dev/null
+context.objects = [
+    {
+        factory = adapter
+        args = {
+            factory.name = support.null-audio-sink
+            node.name = "${CANONICAL_SINK}"
+            node.description = "Noland Audio"
+            media.class = "Audio/Sink"
+            audio.position = [ FL FR ]
+            monitor.channel-volumes = true
+            monitor.passthrough = true
+            adapter.auto-port-config = {
+                mode = dsp
+                monitor = true
+                position = preserve
+            }
+        }
+    }
+]
+EOF
+
 log "Writing pipewire-pulse low-latency fragment (${PROFILE})"
 # This drop-in sets pulse request/quantum for low-latency client compatibility.
 cat <<EOF | sudo -u "$TARGET_USER" tee "$user_home/.config/pipewire/pipewire-pulse.conf.d/10-lowlatency.conf" >/dev/null

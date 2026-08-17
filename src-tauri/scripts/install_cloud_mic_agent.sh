@@ -80,7 +80,9 @@ fi
 INSTALL_DIR="${home_dir}/.local/bin"
 SERVICE_DIR="${home_dir}/.config/systemd/user"
 PIPEWIRE_DROPIN_DIR="${home_dir}/.config/pipewire/pipewire.conf.d"
+SUNSHINE_AUDIO_DROPIN="${PIPEWIRE_DROPIN_DIR}/70-noland-sunshine-audio.conf"
 PIPEWIRE_DROPIN="${PIPEWIRE_DROPIN_DIR}/80-noland-microphone.conf"
+SUNSHINE_CONFIG="${home_dir}/.config/sunshine/sunshine.conf"
 CONFIG_DIR="/etc/noland"
 CONFIG_FILE="${CONFIG_DIR}/microphone.toml"
 RUNTIME_DIR_BASE="/run/noland"
@@ -172,6 +174,7 @@ apt-get install -y --no-install-recommends \
     pipewire-pulse \
     wireplumber \
     pulseaudio-utils \
+    python3 \
     gstreamer1.0-tools \
     gstreamer1.0-pipewire \
     gstreamer1.0-plugins-base \
@@ -196,6 +199,20 @@ if [[ ! -S "$bus_path" ]]; then
     exit 1
 fi
 run_user_systemctl stop noland-mic-receiver.service >/dev/null 2>&1 || true
+previous_default_sink="$(run_user pactl get-default-sink 2>/dev/null || true)"
+previous_default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
+sunshine_audio_sink=""
+if [[ -f "$SUNSHINE_CONFIG" ]]; then
+    sunshine_audio_sink="$(sed -n -E 's/^[[:space:]]*audio_sink[[:space:]]*=[[:space:]]*([^[:space:]#;]+).*$/\1/p' "$SUNSHINE_CONFIG" | tail -n 1)"
+fi
+if [[ -n "$sunshine_audio_sink" && ! "$sunshine_audio_sink" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+    echo "Warning: ignoring unsafe Sunshine audio_sink value '$sunshine_audio_sink'" >&2
+    sunshine_audio_sink=""
+fi
+if [[ "$sunshine_audio_sink" == noland_mic_* ]]; then
+    echo "Warning: refusing to use Noland microphone nodes as Sunshine audio output" >&2
+    sunshine_audio_sink=""
+fi
 rm -f "$INSTALL_DIR/noland-mic-source-setup" "$INSTALL_DIR/noland-mic-source-cleanup"
 rm -f /tmp/noland_remote_microphone.pcm /tmp/noland_remote_microphone.module
 
@@ -208,6 +225,35 @@ fi
 
 echo "d ${RUNTIME_DIR_BASE} 0750 ${USER_NAME} ${group_name} -" > /etc/tmpfiles.d/noland-mic.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/noland-mic.conf
+
+# The existing Sunshine audio sink was historically created with a transient
+# pactl module. Persist the configured sink before restarting PipeWire so mic
+# provisioning cannot remove game audio or promote a Noland mic node to default.
+if [[ -n "$sunshine_audio_sink" ]]; then
+    cat > "$SUNSHINE_AUDIO_DROPIN" <<PIPEWIRE
+context.objects = [
+    {
+        factory = adapter
+        args = {
+            factory.name = support.null-audio-sink
+            node.name = "${sunshine_audio_sink}"
+            node.description = "Noland Audio"
+            media.class = "Audio/Sink"
+            audio.position = [ FL FR ]
+            monitor.channel-volumes = true
+            monitor.passthrough = true
+            adapter.auto-port-config = {
+                mode = dsp
+                monitor = true
+                position = preserve
+            }
+        }
+    }
+]
+PIPEWIRE
+    chown "$USER_NAME:$group_name" "$SUNSHINE_AUDIO_DROPIN"
+    chmod 0644 "$SUNSHINE_AUDIO_DROPIN"
+fi
 
 # This topology belongs to PipeWire, not the receiver. The private Audio/Sink
 # accepts decoded PCM and the loopback publishes the stable Audio/Source.
@@ -585,6 +631,43 @@ run_user_systemctl enable pipewire.socket pipewire-pulse.socket wireplumber.serv
 # receiver restarts are independent and leave the topology untouched.
 run_user_systemctl restart pipewire.service pipewire-pulse.service wireplumber.service
 sleep 2
+
+set_default_node_by_name() {
+    local node_name="$1"
+    local node_id
+    node_id="$(run_user pw-dump | python3 -c 'import json, sys
+name = sys.argv[1]
+for item in json.load(sys.stdin):
+    if item.get("type") == "PipeWire:Interface:Node" and item.get("info", {}).get("props", {}).get("node.name") == name:
+        print(item["id"])
+        break' "$node_name")"
+    [[ -n "$node_id" ]] || return 1
+    run_user wpctl set-default "$node_id"
+}
+
+restored_default_sink=""
+if [[ -n "$sunshine_audio_sink" ]] && run_user pactl list short sinks | awk '{print $2}' | grep -qx "$sunshine_audio_sink"; then
+    set_default_node_by_name "$sunshine_audio_sink"
+    restored_default_sink="$sunshine_audio_sink"
+elif [[ -n "$previous_default_sink" && "$previous_default_sink" != noland_mic_* ]] && \
+     run_user pactl list short sinks | awk '{print $2}' | grep -qx "$previous_default_sink"; then
+    set_default_node_by_name "$previous_default_sink"
+    restored_default_sink="$previous_default_sink"
+else
+    fallback_sink="$(run_user pactl list short sinks | awk '$2 !~ /^noland_mic_/ {print $2; exit}')"
+    if [[ -n "$fallback_sink" ]]; then
+        set_default_node_by_name "$fallback_sink"
+        restored_default_sink="$fallback_sink"
+    fi
+fi
+
+if [[ -n "$restored_default_sink" ]] && run_user pactl list short sources | awk '{print $2}' | grep -qx "${restored_default_sink}.monitor"; then
+    run_user pactl set-default-source "${restored_default_sink}.monitor"
+elif [[ -n "$previous_default_source" && "$previous_default_source" != noland_mic_* ]] && \
+     run_user pactl list short sources | awk '{print $2}' | grep -qx "$previous_default_source"; then
+    run_user pactl set-default-source "$previous_default_source"
+fi
+
 run_user_systemctl restart noland-mic-receiver.service
 sleep 2
 
@@ -624,6 +707,15 @@ if run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink' && \
 else
     echo "[WARN] pactl did not expose both endpoints; inspect WirePlumber policy/logs"
 fi
+default_sink="$(run_user pactl get-default-sink 2>/dev/null || true)"
+default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
+if [[ -n "$default_sink" && "$default_sink" != noland_mic_* && \
+      -n "$default_source" && "$default_source" != noland_mic_* ]]; then
+    echo "[OK] Existing desktop defaults preserved: sink=${default_sink} source=${default_source}"
+else
+    echo "[FAIL] Noland microphone topology must never become the desktop default: sink=${default_sink:-missing} source=${default_source:-missing}"
+    verification_failed=1
+fi
 if run_user_systemctl is-active noland-mic-receiver.service >/dev/null 2>&1; then
     echo "[OK] noland-mic-receiver is running"
 else
@@ -653,7 +745,7 @@ fi
 # Written only after the unit, PipeWire topology, listeners, and status writer
 # have all passed verification. The client uses this to force safe upgrades of
 # older remote helpers before allocating a media session.
-echo "2" > "$CONFIG_DIR/microphone-agent.version"
+echo "4" > "$CONFIG_DIR/microphone-agent.version"
 chmod 0644 "$CONFIG_DIR/microphone-agent.version"
 
 echo

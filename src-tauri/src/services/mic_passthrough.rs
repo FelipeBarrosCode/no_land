@@ -803,7 +803,7 @@ impl MicPassthroughService {
             ))
         })?;
         let cmd = format!(
-            "test \"$(cat /etc/noland/microphone-agent.version 2>/dev/null || true)\" = \"2\" || {{ echo 'Noland microphone agent upgrade required' >&2; exit 42; }}; sudo /usr/local/sbin/noland-mic-session-control start --user {target_user} --session-id {session_id} --peer-ip {peer_ip} --bind-address {vm_wg_ip} --interface wg0 --ssrc {ssrc} --client-rtcp-port {client_rtcp_port} --jitter-ms 20"
+            "test \"$(cat /etc/noland/microphone-agent.version 2>/dev/null || true)\" = \"4\" || {{ echo 'Noland microphone agent upgrade required' >&2; exit 42; }}; sudo /usr/local/sbin/noland-mic-session-control start --user {target_user} --session-id {session_id} --peer-ip {peer_ip} --bind-address {vm_wg_ip} --interface wg0 --ssrc {ssrc} --client-rtcp-port {client_rtcp_port} --jitter-ms 20"
         );
         let output = {
             let remote = remote.clone();
