@@ -2,6 +2,7 @@
 
 mod desktop;
 mod portable;
+mod portable_apps;
 mod steam;
 mod wine;
 
@@ -25,6 +26,7 @@ pub struct DiscoveryScan {
 pub fn discover_all(home: &Path) -> DiscoveryScan {
     let mut scan = DiscoveryScan::default();
     scan.apps.extend(discover_desktop_apps(home));
+    scan.apps.extend(portable_apps::discover_portable_apps(home));
     if let Some(steam) = discover_steam(home) {
         for app in &steam.apps {
             scan.apps.push(app.to_identity());

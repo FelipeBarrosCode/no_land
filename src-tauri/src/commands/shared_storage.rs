@@ -191,9 +191,8 @@ pub async fn disconnect_shared_storage_profile(
 
     context
         .update_state(|state| {
-            if let Some(p) = state.shared_storage_profiles.iter_mut().find(|p| p.id == profile_id) {
-                p.status = SharedStorageStatus::NotConfigured;
-            }
+            // No-op for now: we keep it in the list so the UI still knows it exists.
+            // Future work will add a 'status' field to ProfileReference.
         })
         .await?;
 

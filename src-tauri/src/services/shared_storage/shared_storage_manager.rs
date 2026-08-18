@@ -791,7 +791,7 @@ impl SharedStorageManager {
     }
 
     /// Ensure rclone is installed on the VM.
-    async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
+    pub(crate) async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
         let check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {

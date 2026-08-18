@@ -21,6 +21,7 @@ impl SharedStorageManager {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<(EphemeralRcloneSession, String)> {
+        Self::ensure_rclone_installed(remote).await?;
         ensure_state_agent(remote, target_user).await?;
         let session_op = Uuid::new_v4().to_string();
         let session = Self::mint_session(context, &session_op).await?;

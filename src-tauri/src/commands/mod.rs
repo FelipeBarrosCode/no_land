@@ -4780,3 +4780,29 @@ pub async fn moonlight_get_session_state(
         state: session_state_name(&state).to_string(),
     })
 }
+
+#[tauri::command]
+pub async fn force_update_state_agent(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    let api_key = {
+        let state = context.state.read().await;
+        state.credentials.vast_api_key.clone()
+    };
+    if api_key.trim().is_empty() {
+        return Err(crate::errors::AppError::InvalidInput("Vast API key is missing.".to_string()).into());
+    }
+    let vast = crate::services::vast_api::VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        api_key,
+    );
+    let remote = crate::services::instance_lifecycle::build_remote_exec_for_instance(context.inner(), &vast, instance_id).await.map_err(|e| crate::errors::AppError::State(e.to_string()))?;
+    
+    // Kill the remote agent and its socket
+    let _ = remote.ssh("systemctl stop noland-state-agent && rm -f /run/noland/state-agent.sock", std::time::Duration::from_secs(10));
+    
+    // `ensure_state_agent` will now automatically upload and recompile it when the next command runs!
+    Ok(())
+}

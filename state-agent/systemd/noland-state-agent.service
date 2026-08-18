@@ -21,7 +21,7 @@ Environment=NOLAND_RUN_ROOT=/run/noland
 # Control stays on the existing authenticated Noland instance channel.
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
+ProtectHome=false
 ReadWritePaths=/var/lib/noland /run/noland
 PrivateTmp=true
 Nice=10

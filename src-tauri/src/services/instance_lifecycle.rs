@@ -809,7 +809,7 @@ impl InstanceLifecycleService {
     }
 }
 
-async fn build_remote_exec_for_instance(
+pub async fn build_remote_exec_for_instance(
     context: &AppContext,
     vast: &VastApiClient,
     instance_id: u64,

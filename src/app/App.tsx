@@ -126,7 +126,14 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
-      onRefreshIndexing={async () => {
+      onRefreshIndexing={async (instanceId?: number) => {
+        if (instanceId) {
+          try {
+            await import("../lib/backend").then(m => m.forceUpdateStateAgent(instanceId));
+          } catch (e) {
+            console.error("Failed to force update state agent", e);
+          }
+        }
         await generateBundleIndex();
       }}
     />

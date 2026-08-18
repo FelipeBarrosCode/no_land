@@ -36,7 +36,8 @@ impl AgentConfig {
         let run_root = std::env::var("NOLAND_RUN_ROOT")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from(constants::RUN_ROOT));
-        let home = std::env::var("HOME")
+        let home = std::env::var("NOLAND_HOME")
+            .or_else(|_| std::env::var("HOME"))
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("/home/gamer"));
         let instance_id = std::env::var("NOLAND_INSTANCE_ID")

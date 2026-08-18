@@ -823,3 +823,7 @@ export async function listMicrophones(
   microphoneListInFlight = request;
   return request;
 }
+
+export async function forceUpdateStateAgent(instanceId: number) {
+  return invokeSafe<void>("force_update_state_agent", { instanceId });
+}
