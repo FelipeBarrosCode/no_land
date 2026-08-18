@@ -191,17 +191,8 @@ pub async fn disconnect_shared_storage_profile(
 
     context
         .update_state(|state| {
-            let was_active = state
-                .shared_storage_profiles
-                .iter()
-                .find(|p| p.id == profile_id)
-                .map(|p| p.active)
-                .unwrap_or(false);
-            state.shared_storage_profiles.retain(|p| p.id != profile_id);
-            if was_active {
-                if let Some(first) = state.shared_storage_profiles.first_mut() {
-                    first.active = true;
-                }
+            if let Some(p) = state.shared_storage_profiles.iter_mut().find(|p| p.id == profile_id) {
+                p.status = SharedStorageStatus::NotConfigured;
             }
         })
         .await?;
