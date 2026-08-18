@@ -56,7 +56,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         bootstrap.as_bytes(),
     );
     let setup = format!(
-        "sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent && sudo chown -R {user}:{user} /var/lib/noland /run/noland || true",
+        "sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user} && sudo chown -R {user}:{user} /var/lib/noland /run/noland || true",
         tar = shell_escape(&remote_tar),
         script = shell_escape(&encoded_script),
         user = shell_escape(target_user),

@@ -45,6 +45,7 @@ const GAMING_OR_STORE_MARKERS: &[&str] = &[
     "league",
     "valorant",
     "pinokio",
+    "sklauncher",
 ];
 
 /// Noland / OS / streaming plumbing — never a user bundle.

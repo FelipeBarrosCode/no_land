@@ -14,6 +14,7 @@ RuntimeDirectory=noland
 RuntimeDirectoryMode=0750
 StateDirectory=noland/state
 StateDirectoryMode=0750
+Environment=NOLAND_HOME=/home/user
 Environment=NOLAND_STATE_ROOT=/var/lib/noland/state
 Environment=NOLAND_RUN_ROOT=/run/noland
 # Never expose the tracker RPC on a network socket.

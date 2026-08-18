@@ -89,6 +89,7 @@ interface Props {
   onListExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
+  onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
 
 export function DashboardScreen({
@@ -122,6 +123,7 @@ export function DashboardScreen({
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
+  onRefreshIndexing,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
@@ -854,6 +856,7 @@ export function DashboardScreen({
         onClose={() => setExportInstanceId(null)}
         onLoadObjects={onListExportableStorageObjects}
         onConfirmExport={handleExportSelection}
+        onRefreshIndexing={onRefreshIndexing}
       />
 
       {connectionInfoModalType && (

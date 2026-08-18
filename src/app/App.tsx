@@ -45,6 +45,7 @@ function RootRoute() {
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
+  const generateBundleIndex = useAppStore((state) => state.generateBundleIndex);
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
     (state) => state.setEmbeddedMoonlightPipelineEnabled,
@@ -125,6 +126,9 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
+      onRefreshIndexing={async () => {
+        await generateBundleIndex();
+      }}
     />
   );
 }
@@ -341,9 +345,9 @@ export function App() {
       {error && (
         <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
           <div className="flex items-start justify-between gap-3">
-            <p>{error}</p>
+            <p className="break-words break-all">{error}</p>
             <button
-              className="font-display text-[10px] uppercase tracking-[0.12em]"
+              className="font-display text-[10px] uppercase tracking-[0.12em] shrink-0"
               onClick={clearError}
               type="button"
             >
