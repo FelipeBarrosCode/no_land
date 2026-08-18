@@ -467,9 +467,10 @@ impl InstanceLifecycleService {
                 .trim()
                 .is_empty();
         let api_key = state.credentials.vast_api_key.clone();
+        let has_profile = !state.shared_storage_profiles.is_empty();
         drop(state);
 
-        if !ss_enabled || !has_credentials {
+        if !has_profile && (!ss_enabled || !has_credentials) {
             info!(
                 instance_id = instance_id,
                 "Shared storage not configured, skipping pre-action backup"
@@ -497,8 +498,14 @@ impl InstanceLifecycleService {
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
-            .await?;
+        SharedStorageManager::start_agent_seal(
+            context,
+            &remote,
+            &target_user,
+            "personal_state",
+            None,
+        )
+        .await?;
 
         info!(
             instance_id = instance_id,
@@ -621,10 +628,30 @@ impl InstanceLifecycleService {
         instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
         let _ = (context, instance_id);
-        Err(AppError::InvalidInput(
-            "Shared storage now only saves files you explicitly select in the interface. Use Export Selected instead of full backup."
-                .to_string(),
-        ))
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".into()));
+        }
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::start_agent_backup(
+            context,
+            &remote,
+            &target_user,
+            "*",
+            "personal_state",
+            None,
+        )
+        .await?;
+        SharedStorageManager::get_backup_status(context).await
     }
 
     pub async fn sync_instance_from_shared_storage(

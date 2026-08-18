@@ -1595,9 +1595,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.sync",
-          label: "Syncing files from shared storage",
+          label: "Restoring application state",
           detail:
-            "Copying the selected files and folders to the remote instance.",
+            "Downloading, verifying, and applying selected app bundles on the instance.",
           blocking: true,
         },
         async () => {
@@ -1648,8 +1648,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
-          label: "Exporting files to shared storage",
-          detail: "Saving the selected instance files back to cloud storage.",
+          label: "Backing up application state",
+          detail: "The state agent is packing, encrypting, and committing selected apps.",
           blocking: true,
         },
         async () =>

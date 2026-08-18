@@ -51,7 +51,7 @@ export function SharedStorageExportModal({
     setPendingAction({
       key: "export-modal.load",
       label: "Loading instance files",
-      detail: "Scanning the remote machine for exportable files and folders.",
+      detail: "Asking the state agent which applications it has learned.",
       mode: "indeterminate",
       progress: null,
       startedAt: Date.now()
@@ -115,7 +115,7 @@ export function SharedStorageExportModal({
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
             <h2 className="font-display text-base text-white">Export To Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Choose local files/folders to export to shared storage.</p>
+            <p className="text-[1.2rem] text-[#b4c8de]">Choose applications the tracker learned. Noland packs their state through the state agent.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Close</Button>
         </div>
@@ -140,7 +140,7 @@ export function SharedStorageExportModal({
                 setPendingAction({
                   key: "export-modal.run",
                   label: "Exporting selected files",
-                  detail: "Saving the selected instance files to shared storage.",
+                  detail: "Backing up selected application state through the state agent.",
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()

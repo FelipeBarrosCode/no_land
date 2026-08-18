@@ -57,7 +57,7 @@ export function SharedStorageSyncModal({
     setPendingAction({
       key: "sync-modal.load",
       label: "Loading shared storage tree",
-      detail: "Fetching the available cloud files and folders.",
+      detail: "Reading the application catalog from Shared Storage.",
       mode: "indeterminate",
       progress: null,
       startedAt: Date.now()
@@ -70,7 +70,7 @@ export function SharedStorageSyncModal({
         setLoadError("Loading is taking too long. Please retry.");
         setLoading(false);
       }
-    }, 25000);
+    }, 600000);
 
     void onLoadObjects(instanceId)
       .then((result) => {
