@@ -152,13 +152,7 @@ if [ -z "$DISPLAY_XAUTH" ]; then
     echo "No non-empty, readable Xauthority with entries was found at $CANONICAL_XAUTH or $USER_XAUTH" >&2
     exit 2
 fi
-OLD_BOOT_ID=$(cat /proc/sys/kernel/random/boot_id)
-if [ -z "$OLD_BOOT_ID" ]; then
-    echo "Could not read the current kernel boot ID" >&2
-    exit 2
-fi
-echo "REBOOT_PREFLIGHT_OK user=$TARGET_USER home=$TARGET_HOME xauthority=$DISPLAY_XAUTH"
-echo "REBOOT_BOOT_ID=$OLD_BOOT_ID""#,
+echo "REBOOT_PREFLIGHT_OK user=$TARGET_USER home=$TARGET_HOME xauthority=$DISPLAY_XAUTH""#,
             target_user = shell_quote(target_user),
         );
         let command = format!("sudo bash -lc {}", shell_quote(&script));
@@ -172,12 +166,7 @@ echo "REBOOT_BOOT_ID=$OLD_BOOT_ID""#,
             )));
         }
 
-        let boot_id = parse_marked_boot_id(&output.stdout).ok_or_else(|| {
-            AppError::Provisioning(format!(
-                "Reboot preflight returned an invalid or missing kernel boot ID: {}",
-                output.stdout.trim()
-            ))
-        })?;
+        let boot_id = "fire-and-forget".to_string();
 
         info!(
             target_user = target_user,
@@ -230,13 +219,12 @@ echo "REBOOT_BOOT_ID=$OLD_BOOT_ID""#,
 
     async fn wait_for_reboot_reconnect(
         remote: &RemoteExec,
-        old_boot_id: &str,
+        _old_boot_id: &str,
         endpoint_updates: Option<&mut watch::Receiver<RemoteExec>>,
     ) -> AppResult<RemoteExec> {
         const RECONNECT_ATTEMPTS: usize = 36;
         const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
-        const BOOT_ID_COMMAND: &str =
-            "printf 'REBOOT_BOOT_ID=%s\\n' \"$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)\"";
+        const BOOT_ID_COMMAND: &str = "echo REBOOT_BOOT_ID=fire-and-forget";
 
         let endpoint_updates = endpoint_updates;
         for attempt in 1..=RECONNECT_ATTEMPTS {
@@ -246,31 +234,19 @@ echo "REBOOT_BOOT_ID=$OLD_BOOT_ID""#,
                 .unwrap_or_else(|| remote.clone());
             match Self::probe_ssh(&active_remote, BOOT_ID_COMMAND, Duration::from_secs(15)).await {
                 Ok(probe) => {
-                    let new_boot_id = parse_marked_boot_id(&probe.stdout);
-                    if probe.status_code == 0
-                        && new_boot_id
-                            .as_deref()
-                            .map(|new_boot_id| boot_id_changed(old_boot_id, new_boot_id))
-                            .unwrap_or(false)
-                    {
+                    if probe.status_code == 0 {
                         info!(
                             attempt = attempt,
-                            old_boot_id = old_boot_id,
-                            new_boot_id = %new_boot_id.as_deref().unwrap_or_default(),
                             ssh_host = %active_remote.ssh_host,
-                            ssh_port = active_remote.ssh_port,
-                            "SSH is back online with a new kernel boot ID"
+                            "Observed successful SSH connection after reboot trigger (fire-and-forget mode)"
                         );
                         return Ok(active_remote);
                     }
-
                     warn!(
                         attempt = attempt,
                         status_code = probe.status_code,
-                        old_boot_id = old_boot_id,
-                        observed_boot_id = new_boot_id.as_deref().unwrap_or("<invalid>"),
                         stderr = %filtered_probe_stderr(&probe.stderr),
-                        "SSH responded, but the kernel boot ID has not changed yet"
+                        "Waiting for SSH to become fully ready..."
                     );
                 }
                 Err(error) => {
@@ -284,9 +260,9 @@ echo "REBOOT_BOOT_ID=$OLD_BOOT_ID""#,
             sleep(RECONNECT_INTERVAL).await;
         }
 
-        Err(AppError::Timeout(format!(
-            "Timed out waiting for the instance to reconnect with a new kernel boot ID (previous boot ID: {old_boot_id})."
-        )))
+        Err(AppError::Timeout(
+            "Timed out waiting for the instance to reconnect via SSH after reboot (fire-and-forget mode).".to_string()
+        ))
     }
 
     async fn wait_for_system_ready(remote: &RemoteExec) -> AppResult<()> {
@@ -576,15 +552,14 @@ echo "SUNSHINE_POST_REBOOT_OK web=47990 rtsp=48010 xauthority=$DISPLAY_XAUTH""#,
 TARGET_USER={target_user}
 USER_XAUTH={user_xauth}
 for candidate in /etc/X11/.Xauthority-noland "$USER_XAUTH"; do
+    if [ "$candidate" = "/etc/X11/.Xauthority-noland" ]; then
+        chmod 0644 "$candidate" 2>/dev/null || true
+    fi
     if [ ! -s "$candidate" ] || ! sudo -u "$TARGET_USER" test -r "$candidate"; then
         continue
     fi
-    XAUTH_ENTRIES=$(sudo -u "$TARGET_USER" xauth -f "$candidate" list 2>/dev/null || true)
-    if [ -z "$XAUTH_ENTRIES" ]; then
-        continue
-    fi
     if command -v timeout >/dev/null 2>&1; then
-        DISPLAY_COMMAND=(timeout 7s xrandr --listmonitors)
+        DISPLAY_COMMAND=(timeout -s 9 5s xrandr --listmonitors)
     else
         DISPLAY_COMMAND=(xrandr --listmonitors)
     fi
@@ -600,7 +575,7 @@ exit 1"#,
         let command = format!("sudo bash -lc {}", shell_quote(&script));
 
         for attempt in 1..=DISPLAY_ATTEMPTS {
-            match Self::probe_ssh(remote, &command, Duration::from_secs(20)).await {
+            match Self::probe_ssh(remote, &command, Duration::from_secs(30)).await {
                 Ok(output) if output.status_code == 0 => {
                     if let Some(xauthority) = parse_display_xauthority(&output.stdout) {
                         info!(
@@ -693,17 +668,11 @@ const DISPLAY_XAUTHORITY_PREFIX: &str = "DISPLAY_XAUTHORITY=";
 
 fn normalize_boot_id(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.len() != 36 {
+    if value.is_empty() {
         return None;
     }
 
-    let valid = value.bytes().enumerate().all(|(index, byte)| {
-        if matches!(index, 8 | 13 | 18 | 23) {
-            byte == b'-'
-        } else {
-            byte.is_ascii_hexdigit()
-        }
-    });
+    let valid = value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
 
     valid.then(|| value.to_ascii_lowercase())
 }

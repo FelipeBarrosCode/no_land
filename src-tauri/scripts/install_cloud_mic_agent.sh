@@ -586,6 +586,11 @@ Type=simple
 ExecStart=${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_FILE}
 Restart=on-failure
 RestartSec=2s
+# Prevent GStreamer from forking a plugin-scanner process on every start.
+# The scanner tries to load libgstwebrtcds which is unavailable in the VM,
+# producing spurious warnings. GST_REGISTRY_FORK=no skips the fork entirely;
+# the in-process scan still runs but does not emit the external-scan failure.
+Environment="GST_REGISTRY_FORK=no"
 # This is already an unprivileged user service. Capability- and namespace-based
 # sandbox directives are intentionally omitted because restricted Ubuntu VM and
 # container kernels can reject them before ExecStart with 218/CAPABILITIES.

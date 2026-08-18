@@ -90,13 +90,21 @@ pub fn generate_headless_edid_base64(
     let pixel_clock_hz = (h_total as u64)
         .saturating_mul(v_total as u64)
         .saturating_mul(refresh_hz as u64);
-    let pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
+    let mut pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
 
-    if pixel_clock_10khz == 0 || pixel_clock_10khz > u16::MAX as u32 {
+    if pixel_clock_10khz == 0 {
         return Err(AppError::InvalidInput(format!(
             "Computed pixel clock is out of EDID DTD range: {} (10 kHz units)",
             pixel_clock_10khz
         )));
+    }
+
+    if pixel_clock_10khz > u16::MAX as u32 {
+        warn!(
+            "Computed pixel clock {} exceeds DTD 16-bit limit. Clamping to 65535. The guest OS will rely on explicit Xrandr cvt modelines for the true refresh rate.",
+            pixel_clock_10khz
+        );
+        pixel_clock_10khz = u16::MAX as u32;
     }
 
     let dtd = 54usize;

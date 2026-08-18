@@ -244,7 +244,7 @@ ACTIVE=$(DISPLAY=:0 XAUTHORITY="$XAUTH" xrandr --query | grep -E "^[[:space:]]+$
 ACTIVE_RATE=""
 for TOKEN in $ACTIVE; do case "$TOKEN" in *\**) ACTIVE_RATE=${{TOKEN%%\**}} ;; esac; done
 [ -n "$ACTIVE_RATE" ]
-awk -v actual="$ACTIVE_RATE" -v expected="$REFRESH_HZ" 'BEGIN {{ delta=actual-expected; if (delta<0) delta=-delta; exit(delta<=0.5 ? 0 : 1) }}'
+  awk -v actual="$ACTIVE_RATE" -v expected="$REFRESH_HZ" '\''BEGIN {{ delta=actual-expected; if (delta<0) delta=-delta; exit(delta<=0.5 ? 0 : 1) }}'\''
 printf "%s" "$OUTPUT" > /run/noland-display-output
 NOLANDSCRIPT
 chmod 0755 /usr/local/sbin/noland-apply-display-mode
