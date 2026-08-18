@@ -33,7 +33,8 @@ impl RpcHandler for AgentRpc {
             }
             "ListApps" => {
                 let _ = agent.discover();
-                Ok(serde_json::to_value(agent.db.list_apps()?)?)
+                let apps = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
+                Ok(serde_json::to_value(apps)?)
             }
             "GetAppDetails" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);

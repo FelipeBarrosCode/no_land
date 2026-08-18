@@ -623,11 +623,7 @@ export async function resetInstanceSunshineSettings(
   });
 }
 
-export async function reconnectInstanceWireguard(
-  instanceId: number,
-): Promise<string> {
-  return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
-}
+
 
 export async function getInstanceDisplayStatus(
   instanceId: number,
@@ -653,9 +649,6 @@ export async function rebootInstanceServices(
   return invokeSafe<string>("reboot_instance_services", { instanceId });
 }
 
-export async function pauseInstance(instanceId: number): Promise<void> {
-  return invokeSafe<void>("pause_instance", { instanceId });
-}
 
 export async function destroyInstance(instanceId: number): Promise<void> {
   return invokeSafe<void>("destroy_instance", { instanceId });

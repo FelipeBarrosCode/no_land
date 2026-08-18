@@ -243,9 +243,19 @@ pub async fn run_backup_all_with_session(
     master: &MasterKey,
 ) -> Result<Vec<BundleManifest>> {
     let dirty = agent.db.list_dirty_apps()?;
-    let mut targets: Vec<AppId> = dirty.into_iter().map(|d| d.app_id).collect();
+    let portable: std::collections::HashSet<String> = noland_discovery::filter_backup_candidates(
+        agent.db.list_apps()?,
+    )
+    .into_iter()
+    .map(|a| a.app_id.as_str().to_string())
+    .collect();
+    let mut targets: Vec<AppId> = dirty
+        .into_iter()
+        .map(|d| d.app_id)
+        .filter(|id| portable.contains(id.as_str()))
+        .collect();
     if targets.is_empty() {
-        targets = agent.db.list_apps()?.into_iter().map(|a| a.app_id).collect();
+        targets = portable.into_iter().map(AppId).collect();
     }
     let mut out = Vec::new();
     for app_id in targets {

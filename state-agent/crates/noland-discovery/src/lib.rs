@@ -1,10 +1,12 @@
 //! Application discovery: .desktop, Steam, Proton, Wine, Bottles.
 
 mod desktop;
+mod portable;
 mod steam;
 mod wine;
 
 pub use desktop::{discover_desktop_apps, parse_desktop_entry, DesktopEntry};
+pub use portable::{filter_backup_candidates, is_backup_candidate, is_system_desktop_path};
 pub use steam::{discover_steam, parse_acf, parse_vdf_map, SteamApp, SteamDiscovery};
 pub use wine::{discover_bottles, discover_wine_prefixes, PrefixDiscovery};
 

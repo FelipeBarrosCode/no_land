@@ -11,11 +11,8 @@ interface Props {
   blockingAction: BlockingActionState | null;
   onProvisioning: (instanceId: number) => void;
   onPlay: (instanceId: number) => void;
-  onPair: (instanceId: number) => void;
-  onReconnect: (instanceId: number) => void;
   onDisplay: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
-  onPause: (instanceId: number) => void;
   onDestroy: (instanceId: number) => void;
   onSaveStorage: (instanceId: number) => void;
   onSyncStorage: (instanceId: number) => void;
@@ -28,11 +25,8 @@ export function InstanceCardActions({
   blockingAction,
   onProvisioning,
   onPlay,
-  onPair,
-  onReconnect,
   onDisplay,
   onReboot,
-  onPause,
   onDestroy,
   onSaveStorage,
   onSyncStorage,
@@ -53,7 +47,7 @@ export function InstanceCardActions({
 
   return (
     <div className="space-y-2">
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <Button
           className="w-full"
           disabled={actionDisabled}
@@ -63,17 +57,6 @@ export function InstanceCardActions({
         >
           <SpriteIcon icon="play" />
           <span className="ml-1">Provisioning</span>
-        </Button>
-
-        <Button
-          variant="ghost"
-          className="w-full"
-          disabled={actionDisabled}
-          loading={loadingKey === "instance.moonlight.pair.begin" || loadingKey === "instance.moonlight.pair.complete"}
-          loadingText="Pairing..."
-          onClick={() => onPair(instance.instanceId)}
-        >
-          <span className="ml-1">Pair</span>
         </Button>
 
         <Button
@@ -87,7 +70,7 @@ export function InstanceCardActions({
         </Button>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2">
         <Button
           variant="ghost"
           className="w-full text-[14px]"
@@ -109,20 +92,9 @@ export function InstanceCardActions({
         >
           Sync Files
         </Button>
-
-        <Button
-          variant="ghost"
-          className="w-full text-[14px]"
-          disabled={actionDisabled}
-          loading={loadingKey === "instance.wireguard.reconnect"}
-          loadingText="Syncing..."
-          onClick={() => onReconnect(instance.instanceId)}
-        >
-          Sync Connection
-        </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-3 gap-2">
         <Button
           variant="ghost"
           className="w-full text-[14px]"
@@ -141,17 +113,6 @@ export function InstanceCardActions({
           onClick={() => onReboot(instance.instanceId)}
         >
           Reboot
-        </Button>
-
-        <Button
-          variant="ghost"
-          className="w-full text-[14px]"
-          disabled={actionDisabled || !isRunning}
-          loading={loadingKey === "instance.pause"}
-          loadingText="Pausing..."
-          onClick={() => onPause(instance.instanceId)}
-        >
-          Pause
         </Button>
 
         <Button

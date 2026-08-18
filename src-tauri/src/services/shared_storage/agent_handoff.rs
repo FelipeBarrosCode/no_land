@@ -159,6 +159,29 @@ impl SharedStorageManager {
     }
 }
 
+fn looks_like_image_utility(id: &str, name: &str) -> bool {
+    let hay = format!("{} {}", id, name).to_ascii_lowercase();
+    const KEEP: &[&str] = &[
+        "steam", "lutris", "heroic", "bottles", "playonlinux", "q4wine", "winetricks",
+        "wine", "proton", "minecraft", "epic", "gog", "itch",
+    ];
+    if KEEP.iter().any(|m| hay.contains(m)) {
+        return false;
+    }
+    const DROP: &[&str] = &[
+        "kate", "dolphin", "konsole", "kwrite", "spectacle", "okular", "gwenview",
+        "kmail", "korganizer", "kaddressbook", "knotes", "kcalc", "kfind",
+        "klipper", "konqueror", "sweeper", "akregator", "ark", "juk", "dragon",
+        "bluetooth", "muon", "discover", "systemsettings", "system settings",
+        "htop", "vim", "systemd", "sunshine", "nvidia", "byobu", "texinfo",
+        "idle", "imagemagick", "kde connect", "kwallet", "partition",
+        "info center", "help", "emoji", "qsynth", "sieve", "ktnef",
+        "contact print", "contact theme", "software sources", "additional drivers",
+        "terminal", "add bluetooth",
+    ];
+    DROP.iter().any(|m| hay.contains(m))
+}
+
 fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
     let mut out = vec![SharedStorageObjectEntry {
         path: "/apps".into(),
@@ -178,6 +201,9 @@ fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
             .and_then(|v| v.as_str())
             .or_else(|| app.get("displayName").and_then(|v| v.as_str()))
             .unwrap_or(id);
+        if looks_like_image_utility(id, name) {
+            continue;
+        }
         out.push(SharedStorageObjectEntry {
             path: format!("/apps/{id}"),
             name: name.into(),

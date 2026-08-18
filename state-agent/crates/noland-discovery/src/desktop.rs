@@ -47,7 +47,11 @@ pub fn discover_desktop_apps(home: &Path) -> Vec<AppIdentity> {
                 continue;
             }
             if let Some(parsed) = parse_desktop_entry(&path) {
-                apps.push(parsed.to_identity());
+                let identity = parsed.to_identity();
+                let user_installed = path.starts_with(home);
+                if user_installed || crate::portable::is_backup_candidate(&identity) {
+                    apps.push(identity);
+                }
             }
         }
     }

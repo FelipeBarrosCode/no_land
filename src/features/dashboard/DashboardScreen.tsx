@@ -73,12 +73,7 @@ interface Props {
   onLoadEmbeddedMoonlightStatus: (
     instanceId: number,
   ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
-  onRerunEmbeddedMoonlightPairing: (
-    instanceId: number,
-  ) => Promise<unknown>;
-  onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
-  onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
   onSaveInstanceStorageSelected: (
     instanceId: number,
@@ -121,10 +116,7 @@ export function DashboardScreen({
   onSaveServerPreferences,
   onSetEmbeddedMoonlightPipelineEnabled,
   onLoadEmbeddedMoonlightStatus,
-  onRerunEmbeddedMoonlightPairing,
-  onReconnectWireguard,
   onRebootInstanceServices,
-  onPauseInstance,
   onDestroyInstance,
   onSaveInstanceStorageSelected,
   onSyncInstanceStorage,
@@ -211,26 +203,12 @@ export function DashboardScreen({
     }
   }
 
-  async function handlePair(instanceId: number) {
-    await onRerunEmbeddedMoonlightPairing(instanceId);
-    navigate("/provisioning");
-  }
-
-  async function handleReconnect(instanceId: number) {
-    await onReconnectWireguard(instanceId);
-  }
-
   function handleDisplay(instanceId: number) {
     setDisplayInstanceId(instanceId);
   }
 
   async function handleReboot(instanceId: number) {
     await onRebootInstanceServices(instanceId);
-  }
-
-  async function handlePause(instanceId: number) {
-    await onPauseInstance(instanceId);
-    await onLoadRentedInstances();
   }
 
   async function handleDestroy(instanceId: number) {
@@ -575,11 +553,8 @@ export function DashboardScreen({
                       blockingAction={blockingAction}
                       onProvisioning={handleResumeProvisioning}
                       onPlay={handlePlayEmbedded}
-                      onPair={handlePair}
-                      onReconnect={handleReconnect}
                       onDisplay={handleDisplay}
                       onReboot={handleReboot}
-                      onPause={handlePause}
                       onDestroy={handleDestroy}
                       onSaveStorage={handleSaveStorage}
                       onSyncStorage={handleSyncStorage}

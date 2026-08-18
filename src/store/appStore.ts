@@ -37,9 +37,7 @@ import {
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
   resetInstanceSunshineSettings,
-  reconnectInstanceWireguard,
   rebootInstanceServices,
-  pauseInstance,
   destroyInstance,
   generateBundleIndex,
   getInstanceRestoreBundles,
@@ -261,17 +259,12 @@ interface AppStore {
     instanceId: number,
     sessionId: string,
   ) => Promise<boolean>;
-  rerunEmbeddedMoonlightPairing: (
-    instanceId: number,
-  ) => Promise<MoonlightPairingSessionResponse | null>;
   resetSunshineSettings: (
     instanceId: number,
     sunshineUsername: string,
     sunshinePassword: string,
   ) => Promise<void>;
-  reconnectWireguard: (instanceId: number) => Promise<string | null>;
   rebootInstanceServices: (instanceId: number) => Promise<string | null>;
-  pauseInstance: (instanceId: number) => Promise<void>;
   destroyInstance: (instanceId: number) => Promise<void>;
   bundleIndex: BundleIndex | null;
   restoreJob: RestoreJob | null;
@@ -1545,14 +1538,27 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           const result = await completeOauthAuthorization(sessionId);
-          set({ oauthSessionId: null });
+          set({ oauthSessionId: null, error: null });
           await get().loadSharedStorageProfiles();
           return result;
         },
         null as never,
       );
-      if (get().error) {
-        set({ oauthSessionId: null });
+      // If the task failed, check whether it was a transient "still in
+      // progress" error (the token exchange hasn't finished yet).  In that
+      // case keep the session alive so the user can click "Complete
+      // Authorization" again instead of being silently bounced back to the
+      // start.
+      const currentError = get().error;
+      if (currentError) {
+        const isStillInProgress = currentError
+          .toLowerCase()
+          .includes("still in progress");
+        if (isStillInProgress) {
+          // Keep oauthSessionId so the user can retry.
+        } else {
+          set({ oauthSessionId: null });
+        }
       }
     },
 
@@ -1896,68 +1902,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    rerunEmbeddedMoonlightPairing: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "instance.moonlight.pipeline",
-          label: "Enabling embedded Moonlight",
-          detail: "Turning on the built-in Moonlight pipeline for this instance.",
-        },
-        async () => {
-          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, true);
-          const rentedInstances = await getRentedInstances();
-          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
-          set({ appState, rentedInstances, embeddedMoonlightStatus });
-        },
-        undefined,
-      );
-
-      return await runInstanceTask(
-        {
-          key: "instance.moonlight.pair.begin",
-          label: "Starting embedded Moonlight pairing",
-          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
-          blocking: true,
-        },
-        async () => {
-          const session = await prepareInstanceMoonlightPairing(instanceId);
-          const appState = await getAppState();
-          const rentedInstances = await getRentedInstances();
-          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
-          set({
-            activeMoonlightPairing: session,
-            appState,
-            rentedInstances,
-            embeddedMoonlightStatus,
-          });
-          return session;
-        },
-        null,
-      );
-    },
-
-    reconnectWireguard: async (instanceId) => {
-      return await runInstanceTask(
-        {
-          key: "instance.wireguard.reconnect",
-          label: "Syncing connection",
-          detail:
-            "Refreshing Vast.ai endpoint details, reprovisioning the managed tunnel if needed, and checking Sunshine.",
-          blocking: true,
-        },
-        async () => {
-          const result = await reconnectInstanceWireguard(instanceId);
-          const [appState, rentedInstances, embeddedMoonlightStatus] = await Promise.all([
-            getAppState(),
-            getRentedInstances().catch(() => get().rentedInstances),
-            getInstanceMoonlightPipelineStatus(instanceId).catch(() => null),
-          ]);
-          set({ appState, rentedInstances, embeddedMoonlightStatus });
-          return result;
-        },
-        null,
-      );
-    },
 
     rebootInstanceServices: async (instanceId) => {
       return await runInstanceTask(
@@ -1973,27 +1917,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    pauseInstance: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "instance.pause",
-          label: "Pausing instance",
-          detail: "Suspending the rented machine until you resume it.",
-          blocking: true,
-        },
-        async () => {
-          await pauseInstance(instanceId);
-          set((state) => ({
-            embeddedMoonlightStatus:
-              state.embeddedMoonlightStatus?.instanceId === instanceId
-                ? null
-                : state.embeddedMoonlightStatus,
-            activeMoonlightPairing: null,
-          }));
-        },
-        undefined,
-      );
-    },
 
     destroyInstance: async (instanceId) => {
       await runInstanceTask(

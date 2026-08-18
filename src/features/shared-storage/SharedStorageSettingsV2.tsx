@@ -3,6 +3,7 @@ import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
+import { useAppStore } from "../../store/appStore";
 import type {
   ProviderDefinition,
   SharedStorageTestResult,
@@ -58,6 +59,13 @@ export function SharedStorageSettingsV2({
   const [displayName, setDisplayName] = useState("");
   const [bucket, setBucket] = useState<string | null>(null);
   const [prefix, setPrefix] = useState<string | null>(null);
+
+  // Read the global store error so we can surface it contextually inside
+  // the OAuth panel.  The global error banner is easy to miss; showing the
+  // message right next to the "Complete Authorization" button makes it
+  // obvious why the flow reset.
+  const storeError = useAppStore((state) => state.error);
+  const clearStoreError = useAppStore((state) => state.clearError);
 
   useEffect(() => {
     void onLoadProviders();
@@ -486,6 +494,27 @@ All data is encrypted before upload and can only be decrypted with your reposito
               <div className="p-3 bg-yellow-900/30 border border-yellow-500/50 rounded text-yellow-300 text-sm">
                 Authorization in progress. Complete the sign-in in your browser, then click below.
               </div>
+              {storeError && (
+                <div className="p-3 bg-red-900/30 border border-red-500/50 rounded text-red-300 text-sm space-y-2">
+                  <p>{storeError}</p>
+                  {storeError.toLowerCase().includes("still in progress") ? (
+                    <p className="text-red-200">
+                      The token exchange hasn't finished yet. Wait a few seconds and click "Complete Authorization" again.
+                    </p>
+                  ) : (
+                    <p className="text-red-200">
+                      The authorization failed. Click "Cancel" and start again with the correct credentials.
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    className="text-xs underline text-red-400 hover:text-red-200"
+                    onClick={clearStoreError}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
               <div className="flex gap-2">
                 <Button
                   variant="primary"
@@ -499,6 +528,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                 <Button
                   variant="ghost"
                   onClick={() => {
+                    clearStoreError();
                     setSelectedProvider(null);
                   }}
                 >

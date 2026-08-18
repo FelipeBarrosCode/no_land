@@ -52,9 +52,6 @@ function RootRoute() {
   const loadEmbeddedMoonlightStatus = useAppStore(
     (state) => state.loadEmbeddedMoonlightStatus,
   );
-  const rerunEmbeddedMoonlightPairing = useAppStore(
-    (state) => state.rerunEmbeddedMoonlightPairing,
-  );
 
   useEffect(() => {
     if (!embeddedMoonlightStatus?.enabled) {
@@ -71,11 +68,9 @@ function RootRoute() {
   }, [embeddedMoonlightStatus?.enabled, embeddedMoonlightStatus?.instanceId, loadEmbeddedMoonlightStatus]);
 
 
-  const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const rebootInstanceServices = useAppStore(
     (state) => state.rebootInstanceServices,
   );
-  const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
   const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
   const listSyncableStorageObjects = useAppStore(
@@ -124,10 +119,7 @@ function RootRoute() {
       onSaveServerPreferences={saveServerPreferences}
       onSetEmbeddedMoonlightPipelineEnabled={setEmbeddedMoonlightPipelineEnabled}
       onLoadEmbeddedMoonlightStatus={loadEmbeddedMoonlightStatus}
-      onRerunEmbeddedMoonlightPairing={rerunEmbeddedMoonlightPairing}
-      onReconnectWireguard={reconnectWireguard}
       onRebootInstanceServices={rebootInstanceServices}
-      onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
       onSaveInstanceStorageSelected={saveInstanceStorageSelected}
       onSyncInstanceStorage={syncInstanceStorage}
