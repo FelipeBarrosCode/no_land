@@ -158,7 +158,7 @@ interface AppStore {
   saveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   saveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
   regenerateEdid: (payload: {
-    mode: "auto_detect" | "manual";
+    mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
   submitPin: (pin: string) => Promise<void>;

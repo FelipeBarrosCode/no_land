@@ -92,6 +92,8 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
         .resizable(true)
         .decorations(true)
         .visible(false)
+        .title_bar_style(tauri::utils::TitleBarStyle::Overlay)
+        .hidden_title(true)
         .build()
         .map_err(|error| MoonlightError::Native(error.to_string()))?;
     Ok(window)

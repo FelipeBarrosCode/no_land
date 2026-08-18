@@ -79,6 +79,23 @@ fn resolve_edid_profile(
             refresh_hz: edid_refresh_rate_hz,
             source_label: "Manual".to_string(),
         },
+        EdidMode::MacHardware => {
+            if let Some((width, height, refresh_hz)) = crate::services::moonlight::detect_hardware_display_for_provisioning() {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width,
+                    height,
+                    refresh_hz,
+                    source_label: "Mac Hardware".to_string(),
+                }
+            } else {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                    source_label: "Fallback 1920x1080@60".to_string(),
+                }
+            }
+        }
         EdidMode::AutoDetect => {
             if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
                 crate::services::sunshine::ResolvedEdidProfile {

@@ -434,6 +434,7 @@ impl Default for SunshineState {
 #[serde(rename_all = "snake_case")]
 pub enum EdidMode {
     AutoDetect,
+    MacHardware,
     Manual,
 }
 
@@ -1077,6 +1078,8 @@ impl Default for InstanceMicConfig {
         }
     }
 }
+
+
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

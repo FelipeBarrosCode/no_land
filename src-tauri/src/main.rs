@@ -126,6 +126,20 @@ fn main() {
                     initial_state.sunshine.edid_refresh_rate_hz,
                     "Manual".to_string(),
                 ),
+                crate::models::app_state::EdidMode::MacHardware => {
+                    if let Some((detected_width, detected_height, detected_refresh)) =
+                        crate::services::moonlight::detect_hardware_display_for_provisioning()
+                    {
+                        (
+                            detected_width,
+                            detected_height,
+                            detected_refresh,
+                            "Mac Hardware".to_string(),
+                        )
+                    } else {
+                        (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+                    }
+                }
                 crate::models::app_state::EdidMode::AutoDetect => {
                     if let Some((detected_width, detected_height, detected_refresh)) =
                         detect_client_display_for_provisioning()

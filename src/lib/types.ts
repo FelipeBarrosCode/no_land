@@ -189,7 +189,7 @@ export interface WireGuardState {
 export interface SunshineState {
   configured: boolean;
   headlessEdidBase64: string;
-  edidMode: "auto_detect" | "manual";
+  edidMode: "auto_detect" | "mac_hardware" | "manual";
   edidRefreshRateHz: number;
   edidSourceLabel: string;
 }

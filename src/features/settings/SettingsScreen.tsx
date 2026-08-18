@@ -225,7 +225,7 @@ export function SettingsScreen({
   const [sshPassword, setSshPassword] = useState(
     appState.ssh.sshPassword || appState.credentials.appPassword,
   );
-  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(
+  const [edidMode, setEdidMode] = useState<"auto_detect" | "mac_hardware" | "manual">(
     appState.sunshine.edidMode,
   );
   const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
@@ -554,14 +554,15 @@ export function SettingsScreen({
             label="EDID Mode"
             value={edidMode}
             options={[
-              { value: "auto_detect", label: "Auto detect" },
+              { value: "auto_detect", label: "Auto detect (Scaling matched)" },
+              { value: "mac_hardware", label: "Native Hardware (2560x1664 Panel)" },
               {
                 value: "manual",
                 label: "Manual (use Moonlight width and height)",
               },
             ]}
             onChange={(value) =>
-              setEdidMode(value as "auto_detect" | "manual")
+              setEdidMode(value as "auto_detect" | "mac_hardware" | "manual")
             }
           />
           <div>

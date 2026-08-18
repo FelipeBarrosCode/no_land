@@ -392,7 +392,7 @@ export async function moonlightGetSessionState(): Promise<{
 }
 
 export async function regenerateEdid(payload: {
-  mode: "auto_detect" | "manual";
+  mode: "auto_detect" | "mac_hardware" | "manual";
   refreshRateHz: number;
 }): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("regenerate_edid", { payload });
