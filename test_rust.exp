@@ -1,0 +1,16 @@
+#!/usr/bin/expect -f
+set timeout 60
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    "# "
+}
+send "echo 'fn main() { println!(\"{:?}\", std::fs::read_dir(\"/home/user/Downloads\").unwrap().map(|e| e.unwrap().path()).collect::<Vec<_>>()); }' > /tmp/test_dir.rs\r"
+expect "# "
+send "rustc /tmp/test_dir.rs -o /tmp/test_dir && /tmp/test_dir\r"
+expect "# "
+send "exit\r"
+expect eof

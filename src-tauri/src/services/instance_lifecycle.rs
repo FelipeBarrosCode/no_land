@@ -642,13 +642,13 @@ impl InstanceLifecycleService {
         );
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::start_agent_backup(
+        SharedStorageManager::trigger_backup(
             context,
             &remote,
+            instance_id,
             &target_user,
-            "*",
-            "personal_state",
-            None,
+            &["*".to_string()],
+            "manual",
         )
         .await?;
         SharedStorageManager::get_backup_status(context).await

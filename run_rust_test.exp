@@ -1,0 +1,38 @@
+#!/usr/bin/expect -f
+set timeout 60
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai root@184.144.255.144 "cat << 'RUST_EOF' > /tmp/test_parse.rs
+use std::fs;
+use std::path::Path;
+
+fn main() {
+    let path = Path::new(\"/home/user/.local/share/applications/sklauncher.desktop\");
+    let text = fs::read_to_string(path).unwrap();
+    println!(\"File contents:\");
+    println!(\"{}\", text);
+    
+    let mut in_desktop_entry = false;
+    for line in text.lines() {
+        let line = line.trim();
+        println!(\"Line: '{}'\", line);
+        if line.starts_with('[') {
+            in_desktop_entry = line.eq_ignore_ascii_case(\"[Desktop Entry]\");
+            println!(\"in_desktop_entry = {}\", in_desktop_entry);
+            continue;
+        }
+        if !in_desktop_entry || line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            println!(\"Key: '{}', Value: '{}'\", k.trim(), v.trim());
+        }
+    }
+}
+RUST_EOF
+rustc /tmp/test_parse.rs -o /tmp/test_parse && /tmp/test_parse"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

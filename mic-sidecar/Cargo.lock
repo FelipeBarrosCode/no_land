@@ -727,6 +727,7 @@ name = "noland-mic-sender"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "cc",
  "cpal",
  "ctrlc",
  "gstreamer",

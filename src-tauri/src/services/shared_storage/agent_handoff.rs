@@ -163,22 +163,73 @@ impl SharedStorageManager {
 fn looks_like_image_utility(id: &str, name: &str) -> bool {
     let hay = format!("{} {}", id, name).to_ascii_lowercase();
     const KEEP: &[&str] = &[
-        "steam", "lutris", "heroic", "bottles", "playonlinux", "q4wine", "winetricks",
-        "wine", "proton", "minecraft", "epic", "gog", "itch",
+        "steam",
+        "lutris",
+        "heroic",
+        "bottles",
+        "playonlinux",
+        "q4wine",
+        "winetricks",
+        "wine",
+        "proton",
+        "minecraft",
+        "epic",
+        "gog",
+        "itch",
     ];
     if KEEP.iter().any(|m| hay.contains(m)) {
         return false;
     }
     const DROP: &[&str] = &[
-        "kate", "dolphin", "konsole", "kwrite", "spectacle", "okular", "gwenview",
-        "kmail", "korganizer", "kaddressbook", "knotes", "kcalc", "kfind",
-        "klipper", "konqueror", "sweeper", "akregator", "ark", "juk", "dragon",
-        "bluetooth", "muon", "discover", "systemsettings", "system settings",
-        "htop", "vim", "systemd", "sunshine", "nvidia", "byobu", "texinfo",
-        "idle", "imagemagick", "kde connect", "kwallet", "partition",
-        "info center", "help", "emoji", "qsynth", "sieve", "ktnef",
-        "contact print", "contact theme", "software sources", "additional drivers",
-        "terminal", "add bluetooth",
+        "kate",
+        "dolphin",
+        "konsole",
+        "kwrite",
+        "spectacle",
+        "okular",
+        "gwenview",
+        "kmail",
+        "korganizer",
+        "kaddressbook",
+        "knotes",
+        "kcalc",
+        "kfind",
+        "klipper",
+        "konqueror",
+        "sweeper",
+        "akregator",
+        "ark",
+        "juk",
+        "dragon",
+        "bluetooth",
+        "muon",
+        "discover",
+        "systemsettings",
+        "system settings",
+        "htop",
+        "vim",
+        "systemd",
+        "sunshine",
+        "nvidia",
+        "byobu",
+        "texinfo",
+        "idle",
+        "imagemagick",
+        "kde connect",
+        "kwallet",
+        "partition",
+        "info center",
+        "help",
+        "emoji",
+        "qsynth",
+        "sieve",
+        "ktnef",
+        "contact print",
+        "contact theme",
+        "software sources",
+        "additional drivers",
+        "terminal",
+        "add bluetooth",
     ];
     DROP.iter().any(|m| hay.contains(m))
 }
@@ -292,9 +343,12 @@ async fn push_session(
     let dir = format!("/run/noland/storage/{}", session.operation_id);
     let payload = serde_json::to_string(session)
         .map_err(|e| AppError::State(format!("serialize session: {e}")))?;
-    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, payload.as_bytes());
+    let encoded = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        payload.as_bytes(),
+    );
     let cmd = format!(
-        "sudo mkdir -p {dir} && sudo chmod 700 {dir} && printf %s {b64} | base64 -d | sudo tee {dir}/session.json >/dev/null && sudo python3 -c \"import json; s=json.load(open('{dir}/session.json')); open('{dir}/rclone.conf','w').write(s.get('config_ini',''))\" && sudo chmod 600 {dir}/rclone.conf {dir}/session.json && sudo chown {user}:{user} {dir}/rclone.conf {dir}/session.json || true",
+        "sudo mkdir -p {dir} && sudo chmod 700 {dir} && printf %s {b64} | base64 -d | sudo tee {dir}/session.json >/dev/null && sudo python3 -c \"import json; s=json.load(open('{dir}/session.json')); open('{dir}/rclone.conf','w').write(s.get('config_ini',''))\" && sudo chmod 600 {dir}/rclone.conf {dir}/session.json && sudo chown {user}: {dir} {dir}/rclone.conf {dir}/session.json || true",
         dir = dir,
         b64 = shell_escape(&encoded),
         user = shell_escape(target_user),

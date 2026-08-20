@@ -25,7 +25,11 @@ fi
 if [[ -f /etc/systemd/system/noland-state-agent.service ]] || command -v systemctl >/dev/null 2>&1; then
   if [[ -f "$SRC/systemd/noland-state-agent.service" ]]; then
     if [[ -n "$TARGET_USER" ]]; then
-      sed -e "s|Environment=NOLAND_STATE_ROOT|Environment=NOLAND_HOME=/home/$TARGET_USER\nEnvironment=NOLAND_STATE_ROOT|" "$SRC/systemd/noland-state-agent.service" > /etc/systemd/system/noland-state-agent.service
+      TARGET_GROUP="$(id -gn "$TARGET_USER")"
+      sed \
+        -e "s|^ExecStart=|User=$TARGET_USER\nGroup=$TARGET_GROUP\nExecStart=|" \
+        -e "s|Environment=NOLAND_HOME=/home/user|Environment=NOLAND_HOME=/home/$TARGET_USER|" \
+        "$SRC/systemd/noland-state-agent.service" > /etc/systemd/system/noland-state-agent.service
     else
       cp "$SRC/systemd/noland-state-agent.service" /etc/systemd/system/noland-state-agent.service
     fi
@@ -36,7 +40,11 @@ fi
 
 if ! ss -xl 2>/dev/null | grep -q "$NOLAND_RUN_ROOT/state-agent.sock"; then
   if ! systemctl is-active --quiet noland-state-agent.service 2>/dev/null; then
-    nohup "$BIN" >/var/log/noland-state-agent.log 2>&1 &
+    if [[ -n "$TARGET_USER" ]]; then
+      nohup sudo -u "$TARGET_USER" "$BIN" >/var/log/noland-state-agent.log 2>&1 &
+    else
+      nohup "$BIN" >/var/log/noland-state-agent.log 2>&1 &
+    fi
     sleep 1
   fi
 fi

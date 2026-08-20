@@ -37,7 +37,9 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         .status()
         .map_err(|e| AppError::Command(format!("tar state-agent: {e}")))?;
     if !status.success() {
-        return Err(AppError::Command("failed to pack state-agent sources".into()));
+        return Err(AppError::Command(
+            "failed to pack state-agent sources".into(),
+        ));
     }
 
     let remote_tar = format!("/tmp/noland-state-agent-{stamp}.tar.gz");
@@ -56,7 +58,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         bootstrap.as_bytes(),
     );
     let setup = format!(
-        "sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user} && sudo chown -R {user}:{user} /var/lib/noland /run/noland || true",
+        "sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user} && sudo chown -R {user}: /var/lib/noland /run/noland || true",
         tar = shell_escape(&remote_tar),
         script = shell_escape(&encoded_script),
         user = shell_escape(target_user),
@@ -130,7 +132,9 @@ pub async fn call_agent_raw(
     let value: serde_json::Value = serde_json::from_str(line)
         .map_err(|e| AppError::State(format!("agent RPC parse: {e}: {line}")))?;
     if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
-        return Err(AppError::Provisioning(format!("state-agent {method}: {err}")));
+        return Err(AppError::Provisioning(format!(
+            "state-agent {method}: {err}"
+        )));
     }
     Ok(value.get("result").cloned().unwrap_or(value))
 }

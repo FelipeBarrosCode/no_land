@@ -1,6 +1,6 @@
 pub mod device_list;
 mod permissions;
-mod runtime;
+pub mod runtime;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};

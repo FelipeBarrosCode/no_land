@@ -8,6 +8,7 @@ mod models;
 mod moonlight;
 mod services;
 mod utils;
+mod microphone;
 
 use std::sync::Arc;
 
@@ -422,7 +423,10 @@ fn main() {
             get_instance_mic_metrics,
             recreate_instance_mic_device,
             get_instance_mic_status,
-            list_microphones,
+            crate::microphone::devices::list_microphones,
+            crate::microphone::state::start_microphone,
+            crate::microphone::state::stop_microphone,
+            crate::microphone::state::microphone_status,
             moonlight_get_configuration,
             moonlight_register_host,
             moonlight_refresh_host,

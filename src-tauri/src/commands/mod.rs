@@ -21,7 +21,7 @@ use crate::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
     },
-    mic_client::device_list::MicrophoneDevice,
+    microphone::types::MicrophoneDevice,
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -4200,11 +4200,6 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
-    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]

@@ -207,13 +207,15 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
         .map_err(|error| {
             format!("pipewiresink is unavailable; install gstreamer1.0-pipewire: {error}")
         })?;
-    let target_property = select_pipewire_target_property(
+    let target_properties = pipewire_target_properties(
         sink.find_property("target-object").is_some(),
         sink.find_property("path").is_some(),
     )?;
-    sink.set_property(target_property, &config.audio.pipewire_sink_name);
+    for property in target_properties {
+        sink.set_property(*property, &config.audio.pipewire_sink_name);
+    }
     info!(
-        property = target_property,
+        properties = ?target_properties,
         target = %config.audio.pipewire_sink_name,
         "configured explicit PipeWire sink target"
     );
@@ -231,22 +233,27 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
     Ok(pipeline)
 }
 
-fn select_pipewire_target_property(
+fn pipewire_target_properties(
     has_target_object: bool,
     has_path: bool,
-) -> Result<&'static str, String> {
-    if has_target_object {
-        // `target-object` accepts a PipeWire node name or serial. Prefer it over
-        // deprecated `path`, which falls back to the default sink on Ubuntu 22.04.
-        Ok("target-object")
-    } else if has_path {
-        Ok("path")
-    } else {
-        Err(
+) -> Result<&'static [&'static str], String> {
+    if !has_target_object && !has_path {
+        return Err(
             "pipewiresink exposes neither target-object nor path; refusing to use the desktop default output"
                 .to_string(),
-        )
+        );
     }
+    // Assign every target property the installed pipewiresink exposes. Different
+    // gst-pipewire builds bind by `target-object` (node name/serial) or by the
+    // deprecated `path` (object.path); setting both maximizes the chance the
+    // sink binds to noland_mic_sink instead of falling back to the desktop
+    // default output, which would publish silence to noland_mic_source.
+    Ok(match (has_target_object, has_path) {
+        (true, true) => &["target-object", "path"],
+        (true, false) => &["target-object"],
+        (false, true) => &["path"],
+        _ => unreachable!(),
+    })
 }
 
 fn attach_jitterbuffer_observer(
@@ -784,17 +791,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pipewire_target_object_is_preferred_over_deprecated_path() {
+    fn pipewire_target_properties_sets_every_available_binding() {
+        let both = pipewire_target_properties(true, true).unwrap();
+        assert!(both.contains(&"target-object"));
+        assert!(both.contains(&"path"));
         assert_eq!(
-            select_pipewire_target_property(true, true),
-            Ok("target-object")
+            pipewire_target_properties(true, false).unwrap().to_vec(),
+            vec!["target-object"]
         );
         assert_eq!(
-            select_pipewire_target_property(true, false),
-            Ok("target-object")
+            pipewire_target_properties(false, true).unwrap().to_vec(),
+            vec!["path"]
         );
-        assert_eq!(select_pipewire_target_property(false, true), Ok("path"));
-        assert!(select_pipewire_target_property(false, false).is_err());
+        assert!(pipewire_target_properties(false, false).is_err());
     }
 
     #[test]

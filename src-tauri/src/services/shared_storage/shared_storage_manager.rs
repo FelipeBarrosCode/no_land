@@ -80,18 +80,14 @@ impl SharedStorageManager {
         target_user: &str,
         selected_paths: &[String],
     ) -> AppResult<String> {
-        let _ = instance_id;
         let app_ids = selected_app_ids(selected_paths);
-        if app_ids.is_empty() {
-            let result = Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None).await?;
-            return Ok(format!("Application-state backup completed: {result}"));
-        }
-        let mut last = String::new();
-        for app_id in app_ids {
-            let result = Self::start_agent_backup(context, remote, target_user, &app_id, "personal_state", None).await?;
-            last = result.to_string();
-        }
-        Ok(format!("Application-state backup completed: {last}"))
+        let ids: Vec<String> = if app_ids.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            app_ids
+        };
+        Self::trigger_backup(context, remote, instance_id, target_user, &ids, "manual").await?;
+        Ok("Application-state backup completed".to_string())
     }
     pub async fn list_remote_objects(
         context: &AppContext,
@@ -116,7 +112,15 @@ impl SharedStorageManager {
         let mut last = String::new();
         for path in selected_paths {
             let (app_id, bundle_id) = parse_catalog_selection(path)?;
-            let result = Self::start_agent_restore(context, remote, target_user, &app_id, &bundle_id, "personal_state").await?;
+            let result = Self::start_agent_restore(
+                context,
+                remote,
+                target_user,
+                &app_id,
+                &bundle_id,
+                "personal_state",
+            )
+            .await?;
             last = result.to_string();
         }
         Ok(format!("Application-state restore completed: {last}"))
@@ -392,22 +396,28 @@ impl SharedStorageManager {
 
     /// Legacy whole-instance backup entrypoint.
     ///
-    /// The app now only supports explicit selected-path exports via
-    /// `backup_selected_paths`, so this path is intentionally disabled.
     pub async fn trigger_manual_backup(
-        context: &AppContext,
-        remote: &RemoteExec,
-        _instance_id: u64,
-        target_user: &str,
-    ) -> AppResult<()> {
-        Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None).await?;
-        Ok(())
-    }
-    async fn trigger_backup(
         context: &AppContext,
         remote: &RemoteExec,
         instance_id: u64,
         target_user: &str,
+    ) -> AppResult<()> {
+        Self::trigger_backup(
+            context,
+            remote,
+            instance_id,
+            target_user,
+            &["*".to_string()],
+            "manual",
+        )
+        .await
+    }
+    pub(crate) async fn trigger_backup(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+        app_ids: &[String],
         trigger: &str,
     ) -> AppResult<()> {
         info!(
@@ -427,8 +437,6 @@ impl SharedStorageManager {
             }
         }
 
-        let active_profile = Self::resolve_active_profile(context).await?;
-
         // Mark backup as running
         let started_at = chrono::Local::now().to_rfc3339();
         {
@@ -446,7 +454,34 @@ impl SharedStorageManager {
             })
             .await?;
 
-        let result = Self::run_backup(remote, target_user, &active_profile, trigger).await;
+        // Route the actual work through the live state-agent RPC path. An empty
+        // list or "*" backs up every discovered app; otherwise each selected
+        // app is backed up in turn. Errors are captured (not propagated with `?`)
+        // so the running-job guard and state update below always run.
+        let run_all = app_ids.is_empty() || app_ids.iter().any(|id| id == "*");
+        let result: AppResult<()> = if run_all {
+            Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None)
+                .await
+                .map(|_| ())
+        } else {
+            let mut outcome: AppResult<()> = Ok(());
+            for app_id in app_ids {
+                if let Err(err) = Self::start_agent_backup(
+                    context,
+                    remote,
+                    target_user,
+                    app_id,
+                    "personal_state",
+                    None,
+                )
+                .await
+                {
+                    outcome = Err(err);
+                    break;
+                }
+            }
+            outcome
+        };
 
         // Mark backup as no longer running
         {
@@ -694,6 +729,10 @@ impl SharedStorageManager {
             ))
         })?;
         let provider_fields = manager.retrieve_provider_fields(context, &profile).await?;
+        // Proactively refresh OAuth access tokens that are missing or about to
+        // expire so downstream rclone sessions always start with a live token.
+        let credentials =
+            Self::refresh_oauth_if_needed(context, &profile, credentials, &provider_fields).await?;
         let remote_name = format!("noland_{}", profile.id.replace('-', ""));
 
         Ok(ActiveSharedStorageProfile {
@@ -702,6 +741,117 @@ impl SharedStorageManager {
             provider_fields,
             remote_name,
         })
+    }
+
+    /// Refresh an OAuth2 access token proactively when it is missing or about
+    /// to expire, persisting the rotated tokens back to the profile. Returns
+    /// the (possibly refreshed) credentials so callers always mint sessions
+    /// with a live token. Non-OAuth credentials are returned unchanged.
+    async fn refresh_oauth_if_needed(
+        context: &AppContext,
+        profile: &SharedStorageProfile,
+        credentials: StorageCredential,
+        provider_fields: &HashMap<String, String>,
+    ) -> AppResult<StorageCredential> {
+        let StorageCredential::OAuth2 {
+            access_token,
+            refresh_token,
+            expires_at,
+        } = &credentials
+        else {
+            return Ok(credentials);
+        };
+
+        // Refresh when the access token is empty, the expiry is unset, or the
+        // token is within the refresh skew of expiring.
+        const REFRESH_SKEW_SECS: i64 = 60;
+        let now = chrono::Utc::now().timestamp();
+        let needs_refresh = access_token.trim().is_empty()
+            || *expires_at <= 0
+            || *expires_at - now < REFRESH_SKEW_SECS;
+
+        let Some(refresh) = refresh_token.as_ref().filter(|v| !v.trim().is_empty()) else {
+            if needs_refresh {
+                warn!(
+                    "OAuth token for '{}' is expired but no refresh token is stored; re-authentication required",
+                    profile.display_name
+                );
+            }
+            return Ok(credentials);
+        };
+
+        if !needs_refresh {
+            return Ok(credentials);
+        }
+
+        let client_id = provider_fields
+            .get("client_id")
+            .map(String::as_str)
+            .unwrap_or("");
+        let client_secret = provider_fields.get("client_secret").map(String::as_str);
+        let Some(oauth_config) =
+            super::oauth_flow::get_oauth_config(&profile.provider, client_id, client_secret)
+        else {
+            warn!(
+                "OAuth token for '{}' expired but no OAuth config is available for provider {:?}; re-authentication required",
+                profile.display_name, profile.provider
+            );
+            return Ok(credentials);
+        };
+
+        info!(
+            "Refreshing OAuth access token for '{}' (provider {:?})",
+            profile.display_name, profile.provider
+        );
+        match super::oauth_flow::refresh_token(&oauth_config, refresh).await {
+            Ok(token) => {
+                let new_expires_at = now + token.expires_in.unwrap_or(3600);
+                // Some providers rotate the refresh token; keep the new one
+                // when present and fall back to the existing token otherwise.
+                let new_refresh = token
+                    .refresh_token
+                    .clone()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| refresh_token.clone());
+
+                let refreshed = StorageCredential::OAuth2 {
+                    access_token: token.access_token.clone(),
+                    refresh_token: new_refresh,
+                    expires_at: new_expires_at,
+                };
+
+                let profile_id = profile.id.clone();
+                let persisted = refreshed.clone();
+                context
+                    .update_state(move |state| {
+                        if let Some(stored) = state
+                            .shared_storage_credentials
+                            .profiles
+                            .get_mut(&profile_id)
+                        {
+                            stored.credentials = persisted.clone();
+                        }
+                    })
+                    .await?;
+
+                info!(
+                    "OAuth token refreshed for '{}' ({}), new expiry in {}s",
+                    profile.display_name,
+                    profile.id,
+                    new_expires_at - now
+                );
+                Ok(refreshed)
+            }
+            Err(e) => {
+                warn!(
+                    "OAuth token refresh failed for '{}': {e}. Re-authentication may be required.",
+                    profile.display_name
+                );
+                // Return the stale credential so rclone can attempt the call
+                // and surface the provider's specific auth error.
+                Ok(credentials)
+            }
+        }
     }
 
     pub(crate) async fn configure_rclone_remote_for_profile(
@@ -1083,7 +1233,9 @@ fn parse_catalog_selection(path: &str) -> crate::errors::AppResult<(String, Stri
     let app_id = parts.next().unwrap_or_default().to_string();
     let bundle_id = parts.next().unwrap_or("latest").to_string();
     if app_id.is_empty() {
-        return Err(crate::errors::AppError::InvalidInput("catalog app id missing".into()));
+        return Err(crate::errors::AppError::InvalidInput(
+            "catalog app id missing".into(),
+        ));
     }
     Ok((app_id, bundle_id))
 }

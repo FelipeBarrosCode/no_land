@@ -103,12 +103,19 @@ pub struct Request {
 pub enum Command {
     ListDevices,
     GetStatus,
-    SelectDevice { device_id: Option<String> },
-    StartSession { config: SessionConfig },
+    SelectDevice {
+        #[serde(rename = "deviceId")]
+        device_id: Option<String>,
+    },
+    StartSession {
+        config: SessionConfig,
+    },
     StopSession,
     Mute,
     Unmute,
-    SetBitrate { bitrate: u32 },
+    SetBitrate {
+        bitrate: u32,
+    },
     GetMetrics,
     Shutdown,
 }

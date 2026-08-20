@@ -195,7 +195,11 @@ pub fn list_devices() -> Result<Vec<DeviceInfo>, String> {
 
 pub fn device_available(device_id: &str) -> bool {
     enumerate_devices()
-        .map(|devices| devices.iter().any(|(_, info)| info.id == device_id))
+        .map(|devices| {
+            devices
+                .iter()
+                .any(|(_, info)| info.id == device_id || info.name == device_id)
+        })
         .unwrap_or(false)
 }
 
@@ -203,7 +207,7 @@ pub fn current_default_device_id() -> Option<String> {
     enumerate_devices().ok().and_then(|devices| {
         devices
             .into_iter()
-            .find_map(|(_, info)| info.is_default.then_some(info.id))
+            .find_map(|(_, info)| info.is_default.then_some(info.name.clone()))
     })
 }
 
@@ -278,12 +282,30 @@ fn device_capabilities(device: &cpal::Device) -> (Vec<u32>, u16) {
 }
 
 #[cfg(target_os = "macos")]
+fn ensure_mic_permission() -> Result<(), String> {
+    // Trigger macOS TCC microphone permission prompt. The sidecar is a
+    // separate process from the app and needs its own TCC authorization.
+    // Without this, macOS silently provides zero-filled audio buffers.
+    extern "C" {
+        fn noland_macos_ensure_microphone_access() -> i32;
+    }
+    let result = unsafe { noland_macos_ensure_microphone_access() };
+    match result {
+        0 => Ok(()),
+        1 => Err("macOS microphone access denied. Grant permission in System Settings > Privacy & Security > Microphone".to_string()),
+        2 => Err("macOS microphone permission prompt timed out (30s)".to_string()),
+        _ => Err(format!("macOS microphone permission check failed (code {result})")),
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn start_gstreamer_macos(
     requested_device_id: Option<&str>,
     generation: u64,
     metrics: Arc<Metrics>,
     signals: Sender<CaptureSignal>,
 ) -> Result<(CaptureHandle, Arc<AudioInput>, CaptureStarted), String> {
+    ensure_mic_permission()?;
     gst::init().map_err(|error| format!("failed initializing GStreamer capture: {error}"))?;
     let devices = enumerate_devices()?;
     if devices.is_empty() {
@@ -291,8 +313,11 @@ fn start_gstreamer_macos(
     }
 
     let requested = requested_device_id.filter(|id| !id.trim().is_empty() && *id != "default");
-    let selected_index =
-        requested.and_then(|id| devices.iter().position(|(_, info)| info.id == id));
+    let selected_index = requested.and_then(|id| {
+        devices
+            .iter()
+            .position(|(_, info)| info.id == id || info.name == id)
+    });
     let used_fallback = requested.is_some() && selected_index.is_none();
     let index = selected_index
         .or_else(|| devices.iter().position(|(_, info)| info.is_default))
@@ -424,7 +449,7 @@ fn start_gstreamer_macos(
         },
         input,
         CaptureStarted {
-            active_device_id: info.id.clone(),
+            active_device_id: info.name.clone(),
             active_device_name: info.name.clone(),
             sample_rate: TARGET_SAMPLE_RATE,
             capture_backend: CaptureBackend::GstreamerOsx,
@@ -440,26 +465,84 @@ fn create_macos_gstreamer_source(device_name: &str) -> Result<gst::Element, Stri
     monitor
         .start()
         .map_err(|error| format!("failed starting GStreamer device discovery: {error}"))?;
-    let selected = monitor
-        .devices()
-        .into_iter()
+
+    let devices = monitor.devices();
+    eprintln!("[mic-sidecar] GStreamer Audio/Source devices:");
+    for d in &devices {
+        eprintln!(
+            "  display_name={:?}  class={:?}",
+            d.display_name().as_str(),
+            d.device_class()
+        );
+    }
+    eprintln!("[mic-sidecar] requested device name: {:?}", device_name);
+
+    // Try exact / prefix match first, then fall back to a contains-based match.
+    let selected = devices
+        .iter()
         .find(|device| macos_device_names_match(device.display_name().as_str(), device_name));
+    let selected = selected.or_else(|| {
+        devices.iter().find(|device| {
+            macos_device_names_loose_match(device.display_name().as_str(), device_name)
+        })
+    });
+
     let result = if let Some(device) = selected {
-        device
-            .create_element(Some("macos_audio_source"))
-            .map_err(|error| format!("failed creating macOS capture source: {error}"))
+        eprintln!(
+            "[mic-sidecar] matched GStreamer device: {:?}",
+            device.display_name().as_str()
+        );
+        // Try osxaudiosrc first with device-name property — it's more
+        // reliable than macos_audio_source from the DeviceMonitor which
+        // can fail to start IO on some macOS versions.
+        let element = gst::ElementFactory::make("osxaudiosrc")
+            .name("macos_audio_source")
+            .build()
+            .map_err(|e| format!("failed creating osxaudiosrc: {e}"))?;
+        set_string_property_if_present(&element, "device-name", device_name);
+        Ok(element)
     } else {
-        gst::ElementFactory::make("osxaudiosrc")
+        eprintln!(
+            "[mic-sidecar] no GStreamer device matched '{device_name}', falling back to osxaudiosrc with device-name property"
+        );
+        // Try setting the device-name property on osxaudiosrc so it resolves
+        // to the requested device instead of the system default (which may be
+        // an output-only device on some macOS configurations).
+        let element = gst::ElementFactory::make("osxaudiosrc")
             .name("macos_audio_source")
             .build()
             .map_err(|_| {
                 format!(
                     "GStreamer could not resolve microphone '{device_name}' and osxaudiosrc is unavailable"
                 )
-            })
+            })?;
+        // osxaudiosrc may expose a `device-name` property on some GStreamer
+        // versions; set it if available.
+        set_string_property_if_present(&element, "device-name", device_name);
+        Ok(element)
     };
     monitor.stop();
     result
+}
+
+/// Probe GStreamer's Audio/Source device monitor and print display names.
+/// Used by the `probe-devices` CLI subcommand for debugging device matching.
+#[cfg(target_os = "macos")]
+pub fn probe_gstreamer_source_devices() -> Result<(), String> {
+    gst::init().map_err(|e| format!("gst init: {e}"))?;
+    let monitor = gst::DeviceMonitor::new();
+    monitor.add_filter(Some("Audio/Source"), None);
+    monitor.start().map_err(|e| format!("monitor start: {e}"))?;
+    println!("GStreamer Audio/Source devices:");
+    for d in monitor.devices() {
+        println!(
+            "  display_name={:?}  class={:?}",
+            d.display_name().as_str(),
+            d.device_class()
+        );
+    }
+    monitor.stop();
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]
@@ -469,6 +552,29 @@ fn macos_device_names_match(gstreamer_name: &str, cpal_name: &str) -> bool {
     gstreamer == cpal
         || (gstreamer.len().abs_diff(cpal.len()) <= 4
             && (gstreamer.starts_with(&cpal) || cpal.starts_with(&gstreamer)))
+}
+
+/// Looser match: checks whether both names contain a common significant
+/// token (e.g., "microphone", "macbook", "iphone").  This handles cases
+/// where GStreamer and CPAL use slightly different device naming conventions
+/// on macOS (GStreamer may prefix/suffix the CoreAudio device name).
+#[cfg(target_os = "macos")]
+fn macos_device_names_loose_match(gstreamer_name: &str, cpal_name: &str) -> bool {
+    let g = gstreamer_name.trim().to_lowercase();
+    let c = cpal_name.trim().to_lowercase();
+    // If one name contains the other entirely, that's good enough.
+    if g.contains(&c) || c.contains(&g) {
+        return true;
+    }
+    // Check for shared significant tokens (at least 4 chars).
+    let g_tokens: Vec<&str> = g.split_whitespace().filter(|t| t.len() >= 4).collect();
+    let c_tokens: Vec<&str> = c.split_whitespace().filter(|t| t.len() >= 4).collect();
+    let shared = g_tokens
+        .iter()
+        .filter(|gt| c_tokens.iter().any(|ct| *ct == **gt))
+        .count();
+    // Require at least 2 shared tokens, or 1 if one of the names is short.
+    shared >= 2 || (shared >= 1 && (g_tokens.len() <= 2 || c_tokens.len() <= 2))
 }
 
 #[cfg(target_os = "macos")]
@@ -485,6 +591,13 @@ fn set_bool_property_if_present(element: &gst::Element, name: &str, value: bool)
     }
 }
 
+#[cfg(target_os = "macos")]
+fn set_string_property_if_present(element: &gst::Element, name: &str, value: &str) {
+    if element.find_property(name).is_some() {
+        element.set_property(name, value.to_string());
+    }
+}
+
 #[cfg(not(target_os = "macos"))]
 fn start_native(
     requested_device_id: Option<&str>,
@@ -498,8 +611,11 @@ fn start_native(
     }
 
     let requested = requested_device_id.filter(|id| !id.trim().is_empty() && *id != "default");
-    let selected_index =
-        requested.and_then(|id| devices.iter().position(|(_, info)| info.id == id));
+    let selected_index = requested.and_then(|id| {
+        devices
+            .iter()
+            .position(|(_, info)| info.id == id || info.name == id)
+    });
     let used_fallback = requested.is_some() && selected_index.is_none();
     let index = selected_index
         .or_else(|| devices.iter().position(|(_, info)| info.is_default))
@@ -553,7 +669,7 @@ fn start_native(
         CaptureHandle::Native { _stream: stream },
         input,
         CaptureStarted {
-            active_device_id: info.id.clone(),
+            active_device_id: info.name.clone(),
             active_device_name: info.name.clone(),
             sample_rate,
             capture_backend: CaptureBackend::Cpal,

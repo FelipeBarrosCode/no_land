@@ -54,6 +54,8 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "tim
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 x509-parser = "0.16.0"
+cpal = "0.18.2"
+ringbuf = "0.5.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

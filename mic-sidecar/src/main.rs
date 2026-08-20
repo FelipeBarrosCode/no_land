@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const CAPTURE_SILENCE_DEGRADE_INTERVAL: Duration = Duration::from_secs(3);
+const CAPTURE_SILENCE_DEGRADE_INTERVAL: Duration = Duration::from_secs(10);
 const CAPTURE_SILENCE_ERROR: &str =
     "microphone capture is running but has produced only zero samples";
 
@@ -41,6 +41,7 @@ fn run() -> Result<(), String> {
     match args.first().map(String::as_str) {
         None | Some("daemon") => run_daemon(),
         Some("list-devices") => run_list_devices(&args[1..]),
+        Some("probe-devices") => run_probe_devices(),
         Some("stream") => run_compat_stream(&args[1..]),
         Some(other) => Err(format!("unsupported microphone sidecar command '{other}'")),
     }
@@ -59,6 +60,19 @@ fn run_list_devices(args: &[String]) -> Result<(), String> {
             println!("{}\t{}", device.id, device.name);
         }
     }
+    Ok(())
+}
+
+/// Probe GStreamer's Audio/Source device monitor and print display names so
+/// we can compare them with CPAL device names for matching.
+#[cfg(target_os = "macos")]
+fn run_probe_devices() -> Result<(), String> {
+    capture::probe_gstreamer_source_devices()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn run_probe_devices() -> Result<(), String> {
+    println!("probe-devices is macOS-only");
     Ok(())
 }
 
@@ -195,6 +209,7 @@ fn spawn_stdin_reader(sender: Sender<InputMessage>) {
                 if line.trim().is_empty() {
                     continue;
                 }
+                eprintln!("[mic-sidecar] raw stdin: {:?}", line);
                 let value = match serde_json::from_str::<Value>(&line) {
                     Ok(value) => value,
                     Err(error) => {
@@ -407,7 +422,12 @@ impl Daemon {
     }
 
     fn select_device(&mut self, device_id: Option<String>) -> Result<(), String> {
+        eprintln!("[mic-sidecar] select_device called with: {:?}", device_id);
         self.selected_device_id = device_id.filter(|id| !id.trim().is_empty() && id != "default");
+        eprintln!(
+            "[mic-sidecar] selected_device_id set to: {:?}",
+            self.selected_device_id
+        );
         self.emit_event(
             "deviceSelected",
             json!({ "deviceId": self.selected_device_id }),
@@ -434,6 +454,10 @@ impl Daemon {
     }
 
     fn restart_capture(&mut self, config: &SessionConfig) {
+        eprintln!(
+            "[mic-sidecar] restart_capture: selected_device_id={:?}",
+            self.selected_device_id
+        );
         self.metrics.capture_restart();
         match self.capture.start(
             config.source,
@@ -526,9 +550,24 @@ impl Daemon {
         self.next_device_poll = now + DEVICE_POLL_INTERVAL;
 
         let should_restart = if let Some(preferred) = self.selected_device_id.as_deref() {
-            self.capture.active_device_id() != Some(preferred) || !device_available(preferred)
+            let active = self.capture.active_device_id();
+            let avail = device_available(preferred);
+            eprintln!(
+                "[mic-sidecar] tick: preferred={:?} active={:?} device_available={} match={}",
+                preferred,
+                active,
+                avail,
+                active == Some(preferred)
+            );
+            active != Some(preferred) || !avail
         } else {
-            current_default_device_id().as_deref() != self.capture.active_device_id()
+            let default_name = current_default_device_id();
+            let active = self.capture.active_device_id();
+            eprintln!(
+                "[mic-sidecar] tick: no preferred, default={:?} active={:?}",
+                default_name, active
+            );
+            default_name.as_deref() != active
         };
         if should_restart {
             self.emit_event(

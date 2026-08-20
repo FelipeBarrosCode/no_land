@@ -1,0 +1,8 @@
+#!/usr/bin/expect -f
+set timeout 60
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180
+expect "# "
+send "cat << 'RUST' > /tmp/test_discovery.rs\nfn main() { println!(\\\"Hello\\\"); }\nRUST\n"
+expect "# "
+send "exit\r"
+expect eof
