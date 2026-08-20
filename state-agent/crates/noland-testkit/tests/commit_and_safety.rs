@@ -37,9 +37,14 @@ async fn committed_catalog_only_after_marker() {
     let keys = derive_keys(&master);
     let mut manifest = BundleManifest::new(
         ManifestApp {
-            app_id: AppId::desktop("game"),
+            app_id: AppId::steam(480),
             display_name: "Game".into(),
-            aliases: vec![],
+            aliases: vec!["Game Alias".into()],
+            desktop_entry_id: Some("steam-480.desktop".into()),
+            steam_app_id: Some(480),
+            launcher: Some(LauncherKind::Steam),
+            canonical_executable: Some("/usr/bin/game".into()),
+            icon_path: Some("/usr/share/icons/game.png".into()),
         },
         ManifestSource {
             instance_id: Uuid::new_v4(),
@@ -85,6 +90,19 @@ async fn committed_catalog_only_after_marker() {
         .await
         .unwrap();
     assert_eq!(catalog.apps.len(), 1);
+    let app = &catalog.apps[0];
+    assert_eq!(app.aliases, vec!["Game Alias"]);
+    assert_eq!(app.desktop_entry_id.as_deref(), Some("steam-480.desktop"));
+    assert_eq!(app.steam_app_id, Some(480));
+    assert_eq!(app.launcher, Some(LauncherKind::Steam));
+    assert_eq!(
+        app.canonical_executable.as_deref(),
+        Some(std::path::Path::new("/usr/bin/game"))
+    );
+    assert_eq!(
+        app.icon_path.as_deref(),
+        Some(std::path::Path::new("/usr/share/icons/game.png"))
+    );
     let _ = std::fs::remove_dir_all(root);
 }
 

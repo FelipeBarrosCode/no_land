@@ -70,6 +70,10 @@ import {
   disconnectSharedStorageProfile,
   beginOauthAuthorization,
   completeOauthAuthorization,
+  getInstanceLaunchLibrary,
+  launchInstanceSoftware as launchInstanceSoftwareCommand,
+  getLaunchInstanceSoftwareJob,
+  getSoftwareArtwork,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -112,6 +116,9 @@ import type {
   ProfileReference,
   SharedStorageProfile,
   SharedStorageTestResult,
+  LaunchLibraryResponse,
+  LaunchSoftwareJob,
+  SoftwareArtworkResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -146,6 +153,22 @@ interface AppStore {
   startPlay: () => Promise<void>;
   resumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
   startPlayExisting: (instanceId: number) => Promise<string | null>;
+  launchLibrary: LaunchLibraryResponse | null;
+  launchLibraryLoading: boolean;
+  launchSoftwareJob: LaunchSoftwareJob | null;
+  launchingSoftwareAppId: string | null;
+  softwareArtwork: Record<string, SoftwareArtworkResult>;
+  softwareArtworkLoading: Record<string, boolean>;
+  loadInstanceLaunchLibrary: (
+    instanceId: number,
+  ) => Promise<LaunchLibraryResponse | null>;
+  launchInstanceSoftware: (
+    instanceId: number,
+    appId: string,
+  ) => Promise<LaunchSoftwareJob | null>;
+  pollLaunchSoftwareJob: (jobId: string) => Promise<LaunchSoftwareJob | null>;
+  loadSoftwareArtwork: (name: string) => Promise<SoftwareArtworkResult | null>;
+  clearLaunchLibrary: () => void;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
   refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
@@ -779,6 +802,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     embeddedMoonlightStatus: null,
     activeMoonlightPairing: null,
     instanceActionRunning: false,
+    launchLibrary: null,
+    launchLibraryLoading: false,
+    launchSoftwareJob: null,
+    launchingSoftwareAppId: null,
+    softwareArtwork: {},
+    softwareArtworkLoading: {},
     bundleIndex: null,
     restoreJob: null,
     micConfig: null,
@@ -1002,6 +1031,107 @@ export const useAppStore = create<AppStore>((set, get) => {
         set({ error: mapError(error) });
         return null;
       }
+    },
+
+    loadInstanceLaunchLibrary: async (instanceId) => {
+      set({
+        launchLibrary: null,
+        launchLibraryLoading: true,
+        launchSoftwareJob: null,
+        launchingSoftwareAppId: null,
+        error: null,
+      });
+      try {
+        const launchLibrary = await getInstanceLaunchLibrary(instanceId);
+        set({ launchLibrary, launchLibraryLoading: false });
+        return launchLibrary;
+      } catch (error) {
+        set({ launchLibraryLoading: false, error: mapError(error) });
+        return null;
+      }
+    },
+
+    launchInstanceSoftware: async (instanceId, appId) => {
+      set({
+        launchingSoftwareAppId: appId,
+        launchSoftwareJob: null,
+        error: null,
+      });
+      try {
+        const launchSoftwareJob = await launchInstanceSoftwareCommand(
+          instanceId,
+          appId,
+        );
+        set({ launchSoftwareJob, launchingSoftwareAppId: null });
+        return launchSoftwareJob;
+      } catch (error) {
+        set({ launchingSoftwareAppId: null, error: mapError(error) });
+        return null;
+      }
+    },
+
+    pollLaunchSoftwareJob: async (jobId) => {
+      try {
+        const launchSoftwareJob = await getLaunchInstanceSoftwareJob(jobId);
+        set({ launchSoftwareJob });
+        return launchSoftwareJob;
+      } catch (error) {
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
+    loadSoftwareArtwork: async (name) => {
+      const artworkName = name.trim();
+      if (!artworkName) {
+        return null;
+      }
+
+      const existing = get().softwareArtwork[artworkName];
+      if (existing) {
+        return existing;
+      }
+      if (get().softwareArtworkLoading[artworkName]) {
+        return null;
+      }
+
+      set((state) => ({
+        softwareArtworkLoading: {
+          ...state.softwareArtworkLoading,
+          [artworkName]: true,
+        },
+      }));
+      try {
+        const result = await getSoftwareArtwork(artworkName);
+        set((state) => ({
+          softwareArtwork: {
+            ...state.softwareArtwork,
+            [artworkName]: result,
+          },
+          softwareArtworkLoading: {
+            ...state.softwareArtworkLoading,
+            [artworkName]: false,
+          },
+        }));
+        return result;
+      } catch {
+        set((state) => ({
+          softwareArtworkLoading: {
+            ...state.softwareArtworkLoading,
+            [artworkName]: false,
+          },
+        }));
+        return null;
+      }
+    },
+
+    clearLaunchLibrary: () => {
+      set({
+        launchLibrary: null,
+        launchLibraryLoading: false,
+        launchSoftwareJob: null,
+        launchingSoftwareAppId: null,
+      });
     },
 
     loadRentedInstances: async () => {

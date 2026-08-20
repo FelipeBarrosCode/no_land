@@ -330,6 +330,45 @@ export interface RentedInstanceSummary {
   embeddedMoonlightPaired?: boolean | null;
 }
 
+export interface LaunchLibraryItem {
+  appId: string;
+  displayName: string;
+  aliases: string[];
+  installed: boolean;
+  inSharedStorage: boolean;
+  latestBundleId: string | null;
+  sourceLabels: string[];
+  launchable: boolean;
+  launchMethod: string;
+  restoreRequired: boolean;
+  artworkKey: string;
+}
+
+export interface LaunchLibraryResponse {
+  instanceId: number;
+  launchPcAvailable: boolean;
+  items: LaunchLibraryItem[];
+}
+
+export interface LaunchSoftwareJob {
+  jobId: string;
+  instanceId: number;
+  appId: string;
+  status: string;
+  restorePerformed: boolean;
+  streamStarted: boolean;
+  message: string;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface SoftwareArtworkResult {
+  key: string;
+  imageUrl: string | null;
+  source: string;
+}
+
 export interface ServerPreferencesUpdate {
   minReliability: number;
   storageGb: number;

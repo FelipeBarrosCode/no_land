@@ -1,10 +1,12 @@
+use std::path::PathBuf;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::classify::{BackupMode, ConsistencyKind, PersistenceClass, SemanticRole};
 use crate::constants;
-use crate::identity::AppId;
+use crate::identity::{AppId, AppIdentity, LauncherKind};
 use crate::logical_path::LogicalRoot;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,31 @@ pub struct ManifestApp {
     pub display_name: String,
     #[serde(default)]
     pub aliases: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_entry_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steam_app_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launcher: Option<LauncherKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical_executable: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_path: Option<PathBuf>,
+}
+
+impl From<&AppIdentity> for ManifestApp {
+    fn from(identity: &AppIdentity) -> Self {
+        Self {
+            app_id: identity.app_id.clone(),
+            display_name: identity.display_name.clone(),
+            aliases: identity.aliases.clone(),
+            desktop_entry_id: identity.desktop_entry_id.clone(),
+            steam_app_id: identity.steam_app_id,
+            launcher: identity.launcher,
+            canonical_executable: identity.canonical_executable.clone(),
+            icon_path: identity.icon_path.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -195,4 +222,26 @@ pub struct CheckpointBundleRef {
     pub app_id: AppId,
     pub bundle_id: Uuid,
     pub commit_id: Uuid,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_manifest_app_json_uses_launch_metadata_defaults() {
+        let app: ManifestApp = serde_json::from_value(serde_json::json!({
+            "app_id": "desktop:game",
+            "display_name": "Game",
+            "aliases": []
+        }))
+        .unwrap();
+
+        assert_eq!(app.app_id, AppId::desktop("game"));
+        assert!(app.desktop_entry_id.is_none());
+        assert!(app.steam_app_id.is_none());
+        assert!(app.launcher.is_none());
+        assert!(app.canonical_executable.is_none());
+        assert!(app.icon_path.is_none());
+    }
 }

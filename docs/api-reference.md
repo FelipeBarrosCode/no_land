@@ -106,6 +106,17 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `restore_bundle`
 - `get_restore_job`
 
+## Launch library
+
+- `get_instance_launch_library`
+- `launch_instance_software`
+- `get_launch_instance_software_job`
+- `get_software_artwork`
+
+`start_play_existing_instance` remains the full-PC launch path used by the Launch PC card. Software launches restore the latest cloud bundle when necessary, start the same embedded desktop stream, and then launch the tracked application over SSH.
+
+IGDB artwork lookup uses the free IGDB API and prefers wide artwork or screenshots up to the 1080p image size, with cover fallback. Configure `NOLAND_TWITCH_CLIENT_ID` and `NOLAND_TWITCH_CLIENT_SECRET`; without them the UI uses placeholder artwork. The launch library shows user-facing IGDB attribution.
+
 ## Microphone passthrough
 
 - `get_instance_mic_config`

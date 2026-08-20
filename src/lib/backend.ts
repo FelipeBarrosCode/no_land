@@ -43,6 +43,9 @@ import type {
   DisplayModeSpec,
   InstanceDisplayStatus,
   ApplyDisplayModeResult,
+  LaunchLibraryResponse,
+  LaunchSoftwareJob,
+  SoftwareArtworkResult,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -101,6 +104,38 @@ export async function startPlayExistingInstance(
   instanceId: number,
 ): Promise<string> {
   return invokeSafe<string>("start_play_existing_instance", { instanceId });
+}
+
+export async function getInstanceLaunchLibrary(
+  instanceId: number,
+): Promise<LaunchLibraryResponse> {
+  return invokeSafe<LaunchLibraryResponse>("get_instance_launch_library", {
+    instanceId,
+  });
+}
+
+export async function launchInstanceSoftware(
+  instanceId: number,
+  appId: string,
+): Promise<LaunchSoftwareJob> {
+  return invokeSafe<LaunchSoftwareJob>("launch_instance_software", {
+    instanceId,
+    appId,
+  });
+}
+
+export async function getLaunchInstanceSoftwareJob(
+  jobId: string,
+): Promise<LaunchSoftwareJob> {
+  return invokeSafe<LaunchSoftwareJob>("get_launch_instance_software_job", {
+    jobId,
+  });
+}
+
+export async function getSoftwareArtwork(
+  name: string,
+): Promise<SoftwareArtworkResult> {
+  return invokeSafe<SoftwareArtworkResult>("get_software_artwork", { name });
 }
 
 export async function submitPairingPin(

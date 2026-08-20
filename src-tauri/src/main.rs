@@ -4,11 +4,11 @@ mod commands;
 mod errors;
 mod input;
 mod mic_client;
+mod microphone;
 mod models;
 mod moonlight;
 mod services;
 mod utils;
-mod microphone;
 
 use std::sync::Arc;
 
@@ -226,8 +226,14 @@ fn main() {
 
             info!("Loaded state for Noland Connect");
 
+            let artwork_service = services::software_artwork::SoftwareArtworkService::new(
+                config.igdb.clone(),
+                reqwest::Client::new(),
+                app_data_dir.join("software-artwork-cache.json"),
+            );
             let context = AppContext::new(config, state_store, initial_state);
             app.manage(context.clone());
+            app.manage(artwork_service);
             app.manage(moonlight::platform::StreamWindowCloseState::default());
             let moonlight_manager = moonlight::composition::MoonlightManager::new(
                 state_path.clone(),
@@ -349,6 +355,10 @@ fn main() {
             start_play_flow,
             resume_provisioning_existing_instance,
             start_play_existing_instance,
+            get_instance_launch_library,
+            launch_instance_software,
+            get_launch_instance_software_job,
+            get_software_artwork,
             submit_pairing_pin,
             skip_pairing_and_continue,
             local_environment_preflight,

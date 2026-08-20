@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use noland_rclone_adapter::EphemeralRcloneSession;
+use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -14,6 +15,54 @@ use crate::services::shared_storage::agent_runtime::{call_agent_raw, ensure_stat
 use crate::services::shared_storage::provider_profiles::shared_profile_manager;
 use crate::services::shared_storage::rclone_adapter::mint_ephemeral_session;
 use crate::services::shared_storage::shared_storage_manager::SharedStorageManager;
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub(crate) struct AgentAppRecord {
+    #[serde(alias = "appId")]
+    pub app_id: String,
+    #[serde(alias = "displayName")]
+    pub display_name: String,
+    #[serde(default, alias = "canonicalExecutable")]
+    pub canonical_executable: Option<String>,
+    #[serde(default, alias = "desktopEntryId")]
+    pub desktop_entry_id: Option<String>,
+    #[serde(default, alias = "steamAppId")]
+    pub steam_app_id: Option<u32>,
+    #[serde(default)]
+    pub launcher: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default, alias = "iconPath")]
+    pub icon_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct AgentCatalogAppRecord {
+    #[serde(alias = "appId")]
+    pub app_id: String,
+    #[serde(alias = "displayName")]
+    pub display_name: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    #[serde(default, alias = "canonicalExecutable")]
+    pub canonical_executable: Option<String>,
+    #[serde(default, alias = "desktopEntryId")]
+    pub desktop_entry_id: Option<String>,
+    #[serde(default, alias = "steamAppId")]
+    pub steam_app_id: Option<u32>,
+    #[serde(default)]
+    pub launcher: Option<String>,
+    #[serde(default, alias = "iconPath")]
+    pub icon_path: Option<String>,
+    #[serde(default, alias = "latestBundleId")]
+    pub latest_bundle_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentCatalogDocument {
+    #[serde(default)]
+    apps: Vec<AgentCatalogAppRecord>,
+}
 
 impl SharedStorageManager {
     pub async fn prepare_agent_operation(
@@ -135,6 +184,24 @@ impl SharedStorageManager {
         Ok(catalog_to_entries(&catalog))
     }
 
+    pub(crate) async fn list_agent_app_records(
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<Vec<AgentAppRecord>> {
+        ensure_state_agent(remote, target_user).await?;
+        let apps = call_agent_raw(remote, "ListApps", json!({})).await?;
+        parse_agent_apps(&apps)
+    }
+
+    pub(crate) async fn list_agent_catalog_records(
+        context: &AppContext,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<Vec<AgentCatalogAppRecord>> {
+        let catalog = Self::list_agent_catalog(context, remote, target_user, None).await?;
+        parse_agent_catalog(&catalog)
+    }
+
     async fn mint_session(
         context: &AppContext,
         operation_id: &str,
@@ -158,6 +225,22 @@ impl SharedStorageManager {
             .await?;
         Ok(hex::encode(key))
     }
+}
+
+fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>> {
+    serde_json::from_value(value.clone()).map_err(|error| {
+        AppError::State(format!("state-agent ListApps payload is invalid: {error}"))
+    })
+}
+
+fn parse_agent_catalog(value: &serde_json::Value) -> AppResult<Vec<AgentCatalogAppRecord>> {
+    serde_json::from_value::<AgentCatalogDocument>(value.clone())
+        .map(|catalog| catalog.apps)
+        .map_err(|error| {
+            AppError::State(format!(
+                "state-agent ListCloudCatalog payload is invalid: {error}"
+            ))
+        })
 }
 
 fn looks_like_image_utility(id: &str, name: &str) -> bool {
@@ -371,4 +454,51 @@ async fn push_session(
 
 fn shell_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_agent_apps, parse_agent_catalog};
+    use serde_json::json;
+
+    #[test]
+    fn parses_agent_apps_with_launch_metadata() {
+        let apps = parse_agent_apps(&json!([{
+            "app_id": "steam:480",
+            "display_name": "Spacewar",
+            "canonical_executable": "/games/spacewar",
+            "desktop_entry_id": null,
+            "steam_app_id": 480,
+            "launcher": "steam",
+            "aliases": ["Space War"],
+            "icon_path": "/icons/spacewar.png"
+        }]))
+        .expect("valid app payload");
+
+        assert_eq!(apps[0].app_id, "steam:480");
+        assert_eq!(apps[0].steam_app_id, Some(480));
+        assert_eq!(
+            apps[0].canonical_executable.as_deref(),
+            Some("/games/spacewar")
+        );
+    }
+
+    #[test]
+    fn parses_catalog_camel_case_compatibly() {
+        let apps = parse_agent_catalog(&json!({
+            "apps": [{
+                "appId": "desktop:org.example.Game",
+                "displayName": "Example Game",
+                "latestBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef",
+                "bundles": []
+            }]
+        }))
+        .expect("valid catalog payload");
+
+        assert_eq!(apps[0].app_id, "desktop:org.example.Game");
+        assert_eq!(
+            apps[0].latest_bundle_id.as_deref(),
+            Some("f30a42a8-3dc9-4aea-a71c-f57f4b66bbef")
+        );
+    }
 }

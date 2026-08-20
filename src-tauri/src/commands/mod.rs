@@ -1,5 +1,10 @@
+pub mod launch_library;
 pub mod shared_storage;
 
+pub use self::launch_library::{
+    get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
+    launch_instance_software,
+};
 pub use self::shared_storage::{
     begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
     get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
@@ -1924,7 +1929,16 @@ pub async fn start_play_existing_instance(
     context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<String, FrontendError> {
-    stop_active_stream_if_needed(&app, moonlight.inner()).await?;
+    start_launch_pc_for_instance(&app, instance_id, context.inner(), moonlight.inner()).await
+}
+
+pub(super) async fn start_launch_pc_for_instance(
+    app: &AppHandle,
+    instance_id: u64,
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+) -> Result<String, FrontendError> {
+    stop_active_stream_if_needed(app, moonlight).await?;
     context
         .update_state(|state| {
             if let Some(server) = state
@@ -1941,7 +1955,7 @@ pub async fn start_play_existing_instance(
         .await?;
 
     {
-        ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+        ensure_embedded_identity_ready_for_explicit_action(context, moonlight)
             .await
             .map_err(moonlight_frontend_error)?;
 
@@ -1967,7 +1981,7 @@ pub async fn start_play_existing_instance(
                 .map(|pairing| &pairing.status),
             Some(PairingStatus::Paired)
         ) {
-            auto_pair_embedded_host(context.inner(), moonlight.inner(), &host_id)
+            auto_pair_embedded_host(context, moonlight, &host_id)
                 .await
                 .map_err(moonlight_frontend_error)?;
             host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
@@ -1988,13 +2002,8 @@ pub async fn start_play_existing_instance(
         {
             Ok(apps) => apps,
             Err(error) if is_embedded_applist_not_found_error(&error) => {
-                fetch_embedded_apps_via_sunshine_api(
-                    context.inner(),
-                    moonlight.inner(),
-                    &host_id,
-                    &host_address,
-                )
-                .await?
+                fetch_embedded_apps_via_sunshine_api(context, moonlight, &host_id, &host_address)
+                    .await?
             }
             Err(error) => return Err(moonlight_frontend_error(error)),
         };
@@ -2005,14 +2014,8 @@ pub async fn start_play_existing_instance(
             retryable: true,
         })?;
 
-        let response = start_embedded_stream_for_host(
-            &app,
-            context.inner(),
-            moonlight.inner(),
-            host_id,
-            target_app.id,
-        )
-        .await?;
+        let response =
+            start_embedded_stream_for_host(app, context, moonlight, host_id, target_app.id).await?;
         context
             .update_state(|state| {
                 state.moonlight.configured = true;
@@ -4786,18 +4789,29 @@ pub async fn force_update_state_agent(
         state.credentials.vast_api_key.clone()
     };
     if api_key.trim().is_empty() {
-        return Err(crate::errors::AppError::InvalidInput("Vast API key is missing.".to_string()).into());
+        return Err(
+            crate::errors::AppError::InvalidInput("Vast API key is missing.".to_string()).into(),
+        );
     }
     let vast = crate::services::vast_api::VastApiClient::new(
         context.http_client.clone(),
         context.config.vast_base_url.clone(),
         api_key,
     );
-    let remote = crate::services::instance_lifecycle::build_remote_exec_for_instance(context.inner(), &vast, instance_id).await.map_err(|e| crate::errors::AppError::State(e.to_string()))?;
-    
+    let remote = crate::services::instance_lifecycle::build_remote_exec_for_instance(
+        context.inner(),
+        &vast,
+        instance_id,
+    )
+    .await
+    .map_err(|e| crate::errors::AppError::State(e.to_string()))?;
+
     // Kill the remote agent and its socket
-    let _ = remote.ssh("systemctl stop noland-state-agent && rm -f /run/noland/state-agent.sock", std::time::Duration::from_secs(10));
-    
+    let _ = remote.ssh(
+        "systemctl stop noland-state-agent && rm -f /run/noland/state-agent.sock",
+        std::time::Duration::from_secs(10),
+    );
+
     // `ensure_state_agent` will now automatically upload and recompile it when the next command runs!
     Ok(())
 }

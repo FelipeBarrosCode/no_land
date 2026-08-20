@@ -81,11 +81,7 @@ pub async fn run_backup(
     agent.db.upsert_operation(&op)?;
 
     let mut manifest = BundleManifest::new(
-        ManifestApp {
-            app_id: identity.app_id.clone(),
-            display_name: identity.display_name.clone(),
-            aliases: identity.aliases.clone(),
-        },
+        ManifestApp::from(&identity),
         ManifestSource {
             instance_id: agent.config.instance_id,
             image_id: agent.config.image_id.clone(),

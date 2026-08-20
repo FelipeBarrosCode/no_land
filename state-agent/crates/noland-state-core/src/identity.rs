@@ -131,6 +131,15 @@ impl LauncherKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaunchMethod {
+    Steam,
+    DesktopEntry,
+    Launcher,
+    Executable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppIdentity {
     pub app_id: AppId,
@@ -166,6 +175,30 @@ impl AppIdentity {
             && !self.aliases.iter().any(|existing| existing == &alias)
         {
             self.aliases.push(alias);
+        }
+    }
+
+    /// Derive how this app should be launched without storing redundant DB state.
+    pub fn launch_method(&self) -> Option<LaunchMethod> {
+        if self.steam_app_id.is_some()
+            || self.launcher == Some(LauncherKind::Steam)
+            || self.app_id.as_str().starts_with("steam:")
+        {
+            return Some(LaunchMethod::Steam);
+        }
+        if self.desktop_entry_id.is_some() {
+            return Some(LaunchMethod::DesktopEntry);
+        }
+        match self.launcher {
+            Some(LauncherKind::Native | LauncherKind::AppImage) => self
+                .canonical_executable
+                .as_ref()
+                .map(|_| LaunchMethod::Executable),
+            Some(_) => Some(LaunchMethod::Launcher),
+            None => self
+                .canonical_executable
+                .as_ref()
+                .map(|_| LaunchMethod::Executable),
         }
     }
 }
@@ -214,5 +247,20 @@ mod tests {
         assert_eq!(id.as_str(), "steam:1234");
         assert_eq!(id.storage_safe(), "steam_1234");
         assert!(identity_priority(&id) > identity_priority(&AppId::learned(uuid::Uuid::nil())));
+    }
+
+    #[test]
+    fn derives_launch_method_from_existing_identity_fields() {
+        let steam = AppIdentity::new(AppId::steam(1234), "Steam Game");
+        assert_eq!(steam.launch_method(), Some(LaunchMethod::Steam));
+
+        let mut desktop = AppIdentity::new(AppId::desktop("game"), "Desktop Game");
+        desktop.desktop_entry_id = Some("game.desktop".into());
+        desktop.canonical_executable = Some("/usr/bin/game".into());
+        assert_eq!(desktop.launch_method(), Some(LaunchMethod::DesktopEntry));
+
+        let mut executable = AppIdentity::new(AppId::from("exe:game:hash"), "Executable Game");
+        executable.canonical_executable = Some("/opt/game/game".into());
+        assert_eq!(executable.launch_method(), Some(LaunchMethod::Executable));
     }
 }

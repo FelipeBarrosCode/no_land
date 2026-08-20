@@ -34,7 +34,11 @@ impl RpcHandler for AgentRpc {
             "ListApps" => {
                 let _ = agent.discover();
                 let apps = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
-                Ok(serde_json::to_value(apps)?)
+                let apps = apps
+                    .iter()
+                    .map(serialize_app_identity)
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(serde_json::Value::Array(apps))
             }
             "GetAppDetails" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
@@ -42,7 +46,7 @@ impl RpcHandler for AgentRpc {
                     .db
                     .get_app(&app_id)?
                     .ok_or_else(|| StateError::NotFound(app_id.to_string()))?;
-                Ok(serde_json::to_value(app)?)
+                serialize_app_identity(&app)
             }
             "GetAppPaths" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
@@ -257,6 +261,17 @@ impl RpcHandler for AgentRpc {
     }
 }
 
+fn serialize_app_identity(app: &AppIdentity) -> Result<serde_json::Value> {
+    let mut value = serde_json::to_value(app)?;
+    if let Some(method) = app.launch_method() {
+        value
+            .as_object_mut()
+            .expect("AppIdentity serializes as an object")
+            .insert("launch_method".into(), serde_json::to_value(method)?);
+    }
+    Ok(value)
+}
+
 fn req_str(params: &serde_json::Value, key: &str) -> Result<String> {
     params
         .get(key)
@@ -296,4 +311,31 @@ fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
                 .map_err(|_| StateError::Crypto("invalid master_key_hex".into()))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn app_identity_rpc_value_includes_launch_metadata() {
+        let mut app = AppIdentity::new(AppId::steam(480), "Spacewar");
+        app.aliases = vec!["Steam Test".into()];
+        app.desktop_entry_id = Some("steam-480.desktop".into());
+        app.steam_app_id = Some(480);
+        app.launcher = Some(LauncherKind::Steam);
+        app.canonical_executable = Some("/games/spacewar".into());
+        app.icon_path = Some("/icons/spacewar.png".into());
+
+        let value = serialize_app_identity(&app).unwrap();
+        assert_eq!(value["app_id"], "steam:480");
+        assert_eq!(value["display_name"], "Spacewar");
+        assert_eq!(value["aliases"], serde_json::json!(["Steam Test"]));
+        assert_eq!(value["desktop_entry_id"], "steam-480.desktop");
+        assert_eq!(value["steam_app_id"], 480);
+        assert_eq!(value["launcher"], "steam");
+        assert_eq!(value["canonical_executable"], "/games/spacewar");
+        assert_eq!(value["icon_path"], "/icons/spacewar.png");
+        assert_eq!(value["launch_method"], "steam");
+    }
 }

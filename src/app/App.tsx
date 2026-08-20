@@ -42,6 +42,29 @@ function RootRoute() {
     (state) => state.resumeProvisioningExisting,
   );
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
+  const launchLibrary = useAppStore((state) => state.launchLibrary);
+  const launchLibraryLoading = useAppStore((state) => state.launchLibraryLoading);
+  const launchSoftwareJob = useAppStore((state) => state.launchSoftwareJob);
+  const launchingSoftwareAppId = useAppStore(
+    (state) => state.launchingSoftwareAppId,
+  );
+  const softwareArtwork = useAppStore((state) => state.softwareArtwork);
+  const softwareArtworkLoading = useAppStore(
+    (state) => state.softwareArtworkLoading,
+  );
+  const loadInstanceLaunchLibrary = useAppStore(
+    (state) => state.loadInstanceLaunchLibrary,
+  );
+  const launchInstanceSoftware = useAppStore(
+    (state) => state.launchInstanceSoftware,
+  );
+  const pollLaunchSoftwareJob = useAppStore(
+    (state) => state.pollLaunchSoftwareJob,
+  );
+  const loadSoftwareArtwork = useAppStore(
+    (state) => state.loadSoftwareArtwork,
+  );
+  const clearLaunchLibrary = useAppStore((state) => state.clearLaunchLibrary);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
@@ -115,6 +138,17 @@ function RootRoute() {
       onRefreshVastWalletSummary={refreshVastWalletSummary}
       onResumeProvisioningExisting={resumeProvisioningExisting}
       onStartPlayExisting={startPlayExisting}
+      launchLibrary={launchLibrary}
+      launchLibraryLoading={launchLibraryLoading}
+      launchSoftwareJob={launchSoftwareJob}
+      launchingSoftwareAppId={launchingSoftwareAppId}
+      softwareArtwork={softwareArtwork}
+      softwareArtworkLoading={softwareArtworkLoading}
+      onLoadInstanceLaunchLibrary={loadInstanceLaunchLibrary}
+      onLaunchInstanceSoftware={launchInstanceSoftware}
+      onPollLaunchSoftwareJob={pollLaunchSoftwareJob}
+      onLoadSoftwareArtwork={loadSoftwareArtwork}
+      onClearLaunchLibrary={clearLaunchLibrary}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
       onSaveServerPreferences={saveServerPreferences}

@@ -23,6 +23,7 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `src/features/settings/*`: settings and shared storage entrypoint
 - `src/features/shared-storage-manager/*`: backup, sync, export, and Sunshine settings UI
 - `src/features/restore/*`: bundle restore UI
+- `src/features/launch-library/*`: full-PC and tracked-software launch modal
 - `src/features/servers/*`: rented server picker
 
 ### Backend
@@ -46,6 +47,8 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `reboot_helper.rs`: reboot/reconnect/service re-init pipeline
 - `post_provision.rs`: executes packaged `scripts/post_provision.sh`
 - `shared_storage/*`: backup/export/restore orchestration
+- `launch_library.rs`: merges installed and cloud software metadata and builds secure SSH launch plans
+- `software_artwork.rs`: on-demand IGDB artwork lookup with local caching and placeholder fallback
 - `mic_passthrough.rs`: independent microphone control plane, game-session hooks, sidecar supervision, and aggregated health
 - `mic-sidecar/`: CPAL capture, bounded ring, optional WebRTC DSP, Opus/RTP/RTCP sender, and JSON-lines IPC
 - `vm-cloud-mic-agent/`: supervised host RTP receiver, adaptive jitter buffer, Opus PLC/FEC, metrics, and deterministic PipeWire injection

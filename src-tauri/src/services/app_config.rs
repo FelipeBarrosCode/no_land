@@ -1,6 +1,6 @@
 use std::{env, time::Duration};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AppConfig {
     pub state_schema_version: u32,
     pub default_template_hash: String,
@@ -19,10 +19,17 @@ pub struct AppConfig {
     pub moonlight_download_url_windows: String,
     pub moonlight_download_url_macos: String,
     pub moonlight_download_url_linux: String,
+    pub igdb: IgdbConfig,
 
     pub sunshine: SunshineDefaults,
     pub wireguard: WireGuardDefaults,
     pub scoring: OfferScoring,
+}
+
+#[derive(Clone, Default)]
+pub struct IgdbConfig {
+    pub twitch_client_id: Option<String>,
+    pub twitch_client_secret: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +119,12 @@ impl Default for AppConfig {
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
             moonlight_download_url_linux:
                 "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
+            igdb: IgdbConfig {
+                twitch_client_id: non_empty_env("NOLAND_TWITCH_CLIENT_ID")
+                    .or_else(|| non_empty_env("TWITCH_CLIENT_ID")),
+                twitch_client_secret: non_empty_env("NOLAND_TWITCH_CLIENT_SECRET")
+                    .or_else(|| non_empty_env("TWITCH_CLIENT_SECRET")),
+            },
 
             sunshine: SunshineDefaults {
                 av1_mode: 1,
@@ -161,6 +174,13 @@ impl Default for AppConfig {
             },
         }
     }
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn env_bool(key: &str) -> bool {

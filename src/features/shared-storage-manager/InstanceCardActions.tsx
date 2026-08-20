@@ -10,7 +10,7 @@ interface Props {
   instanceActionRunning: boolean;
   blockingAction: BlockingActionState | null;
   onProvisioning: (instanceId: number) => void;
-  onPlay: (instanceId: number) => void;
+  onOpenLaunchLibrary: (instanceId: number) => void;
   onDisplay: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
   onDestroy: (instanceId: number) => void;
@@ -24,7 +24,7 @@ export function InstanceCardActions({
   instanceActionRunning,
   blockingAction,
   onProvisioning,
-  onPlay,
+  onOpenLaunchLibrary,
   onDisplay,
   onReboot,
   onDestroy,
@@ -63,7 +63,7 @@ export function InstanceCardActions({
           variant="secondary"
           className="w-full"
           disabled={actionDisabled}
-          onClick={() => onPlay(instance.instanceId)}
+          onClick={() => onOpenLaunchLibrary(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
           <span className="ml-1">Play</span>

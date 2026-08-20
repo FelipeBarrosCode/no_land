@@ -179,9 +179,8 @@ pub async fn update_catalog_with_bundle(
     let mut catalog = load_catalog(provider, master).await?;
     catalog.catalog_commit_id = Uuid::new_v4();
     catalog.created_at = chrono::Utc::now();
-    catalog.upsert_bundle(
-        manifest.app.app_id.clone(),
-        manifest.app.display_name.clone(),
+    catalog.upsert_bundle_from_manifest(
+        &manifest.app,
         CatalogBundle {
             bundle_id: manifest.bundle_id,
             commit_id: manifest.commit_id,
