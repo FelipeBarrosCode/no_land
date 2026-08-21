@@ -226,8 +226,20 @@ fn main() {
 
             info!("Loaded state for Noland Connect");
 
+            let artwork_config = services::app_config::IgdbConfig {
+                twitch_client_id: if initial_state.credentials.twitch_client_id.trim().is_empty() {
+                    config.igdb.twitch_client_id.clone()
+                } else {
+                    Some(initial_state.credentials.twitch_client_id.trim().to_string())
+                },
+                twitch_client_secret: if initial_state.credentials.twitch_client_secret.trim().is_empty() {
+                    config.igdb.twitch_client_secret.clone()
+                } else {
+                    Some(initial_state.credentials.twitch_client_secret.trim().to_string())
+                },
+            };
             let artwork_service = services::software_artwork::SoftwareArtworkService::new(
-                config.igdb.clone(),
+                artwork_config,
                 reqwest::Client::new(),
                 app_data_dir.join("software-artwork-cache.json"),
             );
@@ -359,6 +371,7 @@ fn main() {
             launch_instance_software,
             get_launch_instance_software_job,
             get_software_artwork,
+            update_igdb_credentials,
             submit_pairing_pin,
             skip_pairing_and_continue,
             local_environment_preflight,

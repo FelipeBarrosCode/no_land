@@ -6,9 +6,13 @@ use uuid::Uuid;
 
 use crate::{
     errors::{AppError, FrontendError},
-    models::launch_library::{LaunchLibraryResponse, LaunchSoftwareJob, SoftwareArtworkResult},
+    models::{
+        app_state::PersistedAppState,
+        launch_library::{LaunchLibraryResponse, LaunchSoftwareJob, SoftwareArtworkResult},
+    },
     moonlight::composition::MoonlightManager,
     services::{
+        app_config::IgdbConfig,
         app_context::AppContext,
         launch_library::{launch_remote_software, load_launch_library, LaunchLibraryEntry},
         shared_storage::shared_storage_manager::SharedStorageManager,
@@ -111,12 +115,50 @@ pub async fn get_launch_instance_software_job(
         })
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IgdbCredentialsUpdate {
+    pub twitch_client_id: String,
+    pub twitch_client_secret: String,
+}
+
 #[tauri::command]
 pub async fn get_software_artwork(
     name: String,
     artwork: State<'_, SoftwareArtworkService>,
 ) -> Result<SoftwareArtworkResult, FrontendError> {
     Ok(artwork.get(&name).await)
+}
+
+#[tauri::command]
+pub async fn update_igdb_credentials(
+    payload: IgdbCredentialsUpdate,
+    context: State<'_, AppContext>,
+    artwork: State<'_, SoftwareArtworkService>,
+) -> Result<PersistedAppState, FrontendError> {
+    let twitch_client_id = payload.twitch_client_id.trim().to_string();
+    let twitch_client_secret = payload.twitch_client_secret.trim().to_string();
+    if twitch_client_id.is_empty() != twitch_client_secret.is_empty() {
+        return Err(AppError::InvalidInput(
+            "Enter both Twitch Client ID and Twitch Client Secret, or leave both empty."
+                .to_string(),
+        )
+        .into());
+    }
+
+    let next_state = context
+        .update_state(|state| {
+            state.credentials.twitch_client_id = twitch_client_id.clone();
+            state.credentials.twitch_client_secret = twitch_client_secret.clone();
+            state.last_error = None;
+        })
+        .await?;
+
+    artwork
+        .update_config(resolve_igdb_config(context.inner(), &next_state))
+        .await;
+
+    Ok(next_state)
 }
 
 async fn run_launch(
@@ -238,5 +280,22 @@ fn frontend_error_message(error: FrontendError) -> String {
     match error.details {
         Some(details) if !details.trim().is_empty() => format!("{}: {}", error.message, details),
         _ => error.message,
+    }
+}
+
+fn resolve_igdb_config(context: &AppContext, state: &PersistedAppState) -> IgdbConfig {
+    let twitch_client_id = if state.credentials.twitch_client_id.trim().is_empty() {
+        context.config.igdb.twitch_client_id.clone()
+    } else {
+        Some(state.credentials.twitch_client_id.trim().to_string())
+    };
+    let twitch_client_secret = if state.credentials.twitch_client_secret.trim().is_empty() {
+        context.config.igdb.twitch_client_secret.clone()
+    } else {
+        Some(state.credentials.twitch_client_secret.trim().to_string())
+    };
+    IgdbConfig {
+        twitch_client_id,
+        twitch_client_secret,
     }
 }

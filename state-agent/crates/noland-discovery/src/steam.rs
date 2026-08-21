@@ -75,7 +75,10 @@ pub fn discover_steam(home: &Path) -> Option<SteamDiscovery> {
 pub fn parse_appmanifest(text: &str, library_id: &str, steamapps: &Path) -> Option<SteamApp> {
     let map = parse_acf(text);
     let app_id: u32 = map.get("appid")?.parse().ok()?;
-    let name = map.get("name").cloned().unwrap_or_else(|| format!("Steam {app_id}"));
+    let name = map
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| format!("Steam {app_id}"));
     let installdir = map
         .get("installdir")
         .cloned()

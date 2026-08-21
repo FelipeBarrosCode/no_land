@@ -23,6 +23,7 @@ import {
   setupMoonlightSunshine,
   retrySetupStage,
   updatePlatformCredentials,
+  updateIgdbCredentials,
   updateMoonlightPreferences,
   regenerateEdid,
   updateServerPreferences,
@@ -83,6 +84,7 @@ import type {
   OfferCandidate,
   OnboardingPayload,
   PlatformCredentialsUpdate,
+  IgdbCredentialsUpdate,
   PersistedAppState,
   ProvisioningEvent,
   RentedInstanceSummary,
@@ -175,6 +177,7 @@ interface AppStore {
   savePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
+  saveIgdbCredentials: (payload: IgdbCredentialsUpdate) => Promise<void>;
   saveServerPreferences: (
     payload: Partial<ServerPreferencesUpdate>,
   ) => Promise<void>;
@@ -1132,6 +1135,21 @@ export const useAppStore = create<AppStore>((set, get) => {
         launchSoftwareJob: null,
         launchingSoftwareAppId: null,
       });
+    },
+
+    saveIgdbCredentials: async (payload) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateIgdbCredentials(payload);
+        set({
+          appState,
+          busy: false,
+          softwareArtwork: {},
+          softwareArtworkLoading: {},
+        });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
     },
 
     loadRentedInstances: async () => {

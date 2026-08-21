@@ -80,7 +80,9 @@ fn resolve_edid_profile(
             source_label: "Manual".to_string(),
         },
         EdidMode::MacHardware => {
-            if let Some((width, height, refresh_hz)) = crate::services::moonlight::detect_hardware_display_for_provisioning() {
+            if let Some((width, height, refresh_hz)) =
+                crate::services::moonlight::detect_hardware_display_for_provisioning()
+            {
                 crate::services::sunshine::ResolvedEdidProfile {
                     width,
                     height,

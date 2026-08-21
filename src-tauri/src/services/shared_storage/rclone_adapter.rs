@@ -131,9 +131,9 @@ fn map_credential(credential: &StorageCredential) -> AppResult<AdapterCredential
                 password: password.clone(),
             }
         }
-        StorageCredential::ServiceAccount { json } => AdapterCredential::ServiceAccount {
-            json: json.clone(),
-        },
+        StorageCredential::ServiceAccount { json } => {
+            AdapterCredential::ServiceAccount { json: json.clone() }
+        }
         StorageCredential::SshKey { username, .. } => {
             return Err(AppError::InvalidInput(format!(
                 "SSH key credentials for user {username} are not mapped to rclone yet."

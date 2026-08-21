@@ -3,7 +3,7 @@ pub mod shared_storage;
 
 pub use self::launch_library::{
     get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
-    launch_instance_software,
+    launch_instance_software, update_igdb_credentials,
 };
 pub use self::shared_storage::{
     begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
@@ -3782,13 +3782,6 @@ async fn teardown_local_instance_session(
                 "Failed to disable mic passthrough during teardown: {}", error
             );
         }
-    }
-
-    if let Err(error) = crate::mic_client::cleanup_stale_pipeline_processes() {
-        warn!(
-            instance_id = instance_id,
-            "Failed to clean up stale mic sender processes: {}", error
-        );
     }
 
     let active_instance_id = context.load_state().await.instance.instance_id;

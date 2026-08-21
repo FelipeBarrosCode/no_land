@@ -76,7 +76,7 @@ pub fn parse_desktop_entry(path: &Path) -> Option<DesktopEntry> {
         if let Some((k, v)) = line.split_once('=') {
             match k.trim() {
                 "Name" => name = Some(v.trim().to_string()),
-                "Exec" => exec = Some(first_exec_path(v.trim())),
+                "Exec" => exec = executable_from_exec(v.trim()),
                 "Icon" => icon = Some(PathBuf::from(v.trim())),
                 "NoDisplay" if v.trim().eq_ignore_ascii_case("true") => return None,
                 "Hidden" if v.trim().eq_ignore_ascii_case("true") => return None,
@@ -97,18 +97,127 @@ pub fn parse_desktop_entry(path: &Path) -> Option<DesktopEntry> {
     })
 }
 
-fn first_exec_path(exec: &str) -> PathBuf {
-    let token = exec
-        .split_whitespace()
-        .find(|t| !t.starts_with('%') && !t.starts_with('-'))
-        .unwrap_or(exec);
-    PathBuf::from(token.trim_matches('"'))
+fn executable_from_exec(exec: &str) -> Option<PathBuf> {
+    let tokens = exec_tokens(exec)?;
+    let mut index = 0;
+
+    if tokens
+        .first()
+        .is_some_and(|token| command_name(token) == "env")
+    {
+        index += 1;
+        while let Some(token) = tokens.get(index) {
+            if token == "--" {
+                index += 1;
+                break;
+            }
+            if matches!(token.as_str(), "-u" | "--unset" | "-C" | "--chdir") {
+                index += 2;
+            } else if token.starts_with('-') || is_env_assignment(token) {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    let command = tokens.get(index)?;
+    if command.starts_with('%') || is_generic_wrapper(command) {
+        return None;
+    }
+    Some(PathBuf::from(command))
+}
+
+fn exec_tokens(exec: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in exec.chars() {
+        if escaped {
+            token.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if quote == Some(ch) {
+            quote = None;
+        } else if quote.is_none() && matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+        } else if quote.is_none() && ch.is_whitespace() {
+            if !token.is_empty() {
+                tokens.push(std::mem::take(&mut token));
+            }
+        } else {
+            token.push(ch);
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    (!tokens.is_empty()).then_some(tokens)
+}
+
+fn command_name(command: &str) -> &str {
+    Path::new(command)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(command)
+}
+
+fn is_env_assignment(token: &str) -> bool {
+    token
+        .split_once('=')
+        .is_some_and(|(name, _)| !name.is_empty() && !name.contains('/'))
+}
+
+fn is_generic_wrapper(command: &str) -> bool {
+    matches!(
+        command_name(command),
+        "flatpak" | "gtk-launch" | "sh" | "bash" | "dash" | "zsh"
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn recovers_direct_and_env_executables() {
+        assert_eq!(
+            executable_from_exec("\"/opt/Example App/bin/app\" --open %U"),
+            Some(PathBuf::from("/opt/Example App/bin/app"))
+        );
+        assert_eq!(
+            executable_from_exec("/usr/bin/env FOO=bar -- /opt/example/bin/app %f"),
+            Some(PathBuf::from("/opt/example/bin/app"))
+        );
+        assert_eq!(
+            executable_from_exec("env -u OLD_SETTING example-app --new-window"),
+            Some(PathBuf::from("example-app"))
+        );
+    }
+
+    #[test]
+    fn rejects_generic_wrappers_and_unsafe_exec_lines() {
+        for exec in [
+            "flatpak run org.example.App",
+            "/bin/sh -c /opt/example/app",
+            "gtk-launch org.example.App",
+            "env FOO=bar /usr/bin/flatpak run org.example.App",
+            "\"/opt/unterminated app",
+        ] {
+            assert_eq!(
+                executable_from_exec(exec),
+                None,
+                "unexpected target for {exec}"
+            );
+        }
+    }
 
     #[test]
     fn parses_desktop_file() {
@@ -123,7 +232,10 @@ mod tests {
         .unwrap();
         let parsed = parse_desktop_entry(&path).unwrap();
         assert_eq!(parsed.name, "Example Game");
-        assert_eq!(parsed.exec.unwrap(), PathBuf::from("/opt/example-game/bin/game"));
+        assert_eq!(
+            parsed.exec.unwrap(),
+            PathBuf::from("/opt/example-game/bin/game")
+        );
         std::fs::remove_dir_all(dir).ok();
     }
 }

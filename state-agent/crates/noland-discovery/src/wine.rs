@@ -29,7 +29,10 @@ pub fn discover_wine_prefixes(home: &Path) -> Vec<PrefixDiscovery> {
             associated_app: None,
         });
     }
-    for dir in [home.join(".local/share/wineprefixes"), home.join(".wine-prefixes")] {
+    for dir in [
+        home.join(".local/share/wineprefixes"),
+        home.join(".wine-prefixes"),
+    ] {
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };

@@ -1,6 +1,6 @@
-use std::process::{Child, Command, Stdio};
-use std::path::{Path, PathBuf};
 use crate::microphone::types::MicrophoneError;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
 
 fn resolve_gstreamer_binary() -> Result<PathBuf, MicrophoneError> {
     let Ok(current_exe) = std::env::current_exe() else {
@@ -12,22 +12,43 @@ fn resolve_gstreamer_binary() -> Result<PathBuf, MicrophoneError> {
         // We can just use the environment to find it, or simply use `gst-launch-1.0`
         // if we assume it's in PATH. To be safe, let's try to locate it near current_exe
         let candidates = vec![
-            std::env::current_dir().unwrap_or_default().join("src-tauri").join("bundled").join("macos").join("GStreamer.framework"),
-            current_exe.parent().unwrap_or(Path::new("")).join("..").join("Resources").join("gstreamer").join("macos").join("GStreamer.framework"),
-            current_exe.parent().unwrap_or(Path::new("")).join("..").join("Frameworks").join("GStreamer.framework"),
+            std::env::current_dir()
+                .unwrap_or_default()
+                .join("src-tauri")
+                .join("bundled")
+                .join("macos")
+                .join("GStreamer.framework"),
+            current_exe
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join("..")
+                .join("Resources")
+                .join("gstreamer")
+                .join("macos")
+                .join("GStreamer.framework"),
+            current_exe
+                .parent()
+                .unwrap_or(Path::new(""))
+                .join("..")
+                .join("Frameworks")
+                .join("GStreamer.framework"),
         ];
-        
+
         for candidate in candidates {
             let bin = candidate.join("bin").join("gst-launch-1.0");
             if bin.is_file() {
                 return Ok(bin);
             }
-            let bin2 = candidate.join("Versions").join("Current").join("bin").join("gst-launch-1.0");
+            let bin2 = candidate
+                .join("Versions")
+                .join("Current")
+                .join("bin")
+                .join("gst-launch-1.0");
             if bin2.is_file() {
                 return Ok(bin2);
             }
         }
-        
+
         // Fallback
         return Ok(PathBuf::from("gst-launch-1.0"));
     }
@@ -58,20 +79,34 @@ pub fn spawn_gstreamer_pipeline(
     local_rtcp_port: Option<u16>,
 ) -> Result<Child, MicrophoneError> {
     let mut command = Command::new(resolve_gstreamer_binary()?);
-    
+
     if let Ok(current_exe) = std::env::current_exe() {
         crate::mic_client::runtime::configure_gstreamer_command(&mut command, &current_exe);
     }
 
     let mut args = vec!["rtpbin".to_string(), "name=rtpbin".to_string()];
     args.extend(vec![
-        "fdsrc".to_string(), "fd=0".to_string(), "do-timestamp=true".to_string(),
-        "!".to_string(), format!("audio/x-raw,format=F32LE,rate={},channels={},layout=interleaved", sample_rate, channels),
-        "!".to_string(), "audioconvert".to_string(),
-        "!".to_string(), "audioresample".to_string(),
-        "!".to_string(), "audio/x-raw,format=S16LE,rate=48000,channels=1".to_string(),
-        "!".to_string(), "opusenc".to_string(), "bitrate=96000".to_string(), "frame-size=10".to_string(),
-        "!".to_string(), "rtpopuspay".to_string(), "pt=111".to_string(),
+        "fdsrc".to_string(),
+        "fd=0".to_string(),
+        "do-timestamp=true".to_string(),
+        "!".to_string(),
+        format!(
+            "audio/x-raw,format=F32LE,rate={},channels={},layout=interleaved",
+            sample_rate, channels
+        ),
+        "!".to_string(),
+        "audioconvert".to_string(),
+        "!".to_string(),
+        "audioresample".to_string(),
+        "!".to_string(),
+        "audio/x-raw,format=S16LE,rate=48000,channels=1".to_string(),
+        "!".to_string(),
+        "opusenc".to_string(),
+        "bitrate=96000".to_string(),
+        "frame-size=10".to_string(),
+        "!".to_string(),
+        "rtpopuspay".to_string(),
+        "pt=111".to_string(),
     ]);
 
     if let Some(s) = ssrc {
@@ -88,7 +123,7 @@ pub fn spawn_gstreamer_pipeline(
         // Link to rtpbin
         args.push("!".to_string());
         args.push("rtpbin.send_rtp_sink_0".to_string());
-        
+
         args.push("rtpbin.send_rtp_src_0".to_string());
         args.push("!".to_string());
         args.push("udpsink".to_string());
@@ -123,9 +158,12 @@ pub fn spawn_gstreamer_pipeline(
 
     command.args(args);
 
-    command.stdin(Stdio::piped())
-           .stdout(Stdio::null())
-           .stderr(Stdio::null());
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
 
-    command.spawn().map_err(|e| MicrophoneError::GStreamerSpawnFailed(e.to_string()))
+    command
+        .spawn()
+        .map_err(|e| MicrophoneError::GStreamerSpawnFailed(e.to_string()))
 }

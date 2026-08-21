@@ -1,4 +1,4 @@
-use ringbuf::traits::{Producer, Consumer, Split};
+use ringbuf::traits::{Consumer, Producer, Split};
 fn main() {
     let rb = ringbuf::HeapRb::<f32>::new(10);
     let (mut prod, mut cons) = rb.split();

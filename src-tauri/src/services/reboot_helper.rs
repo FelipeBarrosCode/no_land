@@ -672,7 +672,9 @@ fn normalize_boot_id(value: &str) -> Option<String> {
         return None;
     }
 
-    let valid = value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+    let valid = value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
 
     valid.then(|| value.to_ascii_lowercase())
 }

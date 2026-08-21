@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type {
@@ -50,6 +51,7 @@ export function LaunchLibraryModal({
 }: Props) {
   const [loadRequested, setLoadRequested] = useState(false);
   const [search, setSearch] = useState("");
+  const navigate = useNavigate();
 
   useEffect(() => {
     setLoadRequested(true);
@@ -94,6 +96,11 @@ export function LaunchLibraryModal({
     await onLaunchPc(instanceId);
   }
 
+  function openIgdbSettings() {
+    onClose();
+    navigate("/settings");
+  }
+
   return (
     <ModalFrame
       labelledBy="launch-library-title"
@@ -136,7 +143,12 @@ export function LaunchLibraryModal({
             aria-label="Search software"
             className="min-w-0 flex-1 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-sm text-[#dff8ff] outline-none placeholder:text-[#5e7396] focus:border-neon-cyan"
           />
-          <p className="text-xs text-[#7890ae]">Artwork provided by IGDB</p>
+          <div className="flex items-center gap-2">
+            <p className="text-xs text-[#7890ae]">Artwork provided by IGDB</p>
+            <Button variant="ghost" className="px-3 py-1 text-[11px]" onClick={openIgdbSettings}>
+              Add Twitch Auth
+            </Button>
+          </div>
         </div>
 
         {loading || !loadRequested ? (

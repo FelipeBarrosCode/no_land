@@ -46,6 +46,7 @@ import type {
   LaunchLibraryResponse,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
+  IgdbCredentialsUpdate,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -136,6 +137,12 @@ export async function getSoftwareArtwork(
   name: string,
 ): Promise<SoftwareArtworkResult> {
   return invokeSafe<SoftwareArtworkResult>("get_software_artwork", { name });
+}
+
+export async function updateIgdbCredentials(
+  payload: IgdbCredentialsUpdate,
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("update_igdb_credentials", { payload });
 }
 
 export async function submitPairingPin(

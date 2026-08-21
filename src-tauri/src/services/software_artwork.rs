@@ -50,7 +50,7 @@ struct PersistedArtworkCache {
 }
 
 pub struct SoftwareArtworkService {
-    config: IgdbConfig,
+    config: RwLock<IgdbConfig>,
     client: reqwest::Client,
     cache_path: PathBuf,
     cache: RwLock<HashMap<String, SoftwareArtworkResult>>,
@@ -65,12 +65,17 @@ impl SoftwareArtworkService {
             .map(|cache| cache.entries)
             .unwrap_or_default();
         Self {
-            config,
+            config: RwLock::new(config),
             client,
             cache_path,
             cache: RwLock::new(entries),
             token: Mutex::new(None),
         }
+    }
+
+    pub async fn update_config(&self, config: IgdbConfig) {
+        *self.config.write().await = config;
+        *self.token.lock().await = None;
     }
 
     pub async fn get(&self, name: &str) -> SoftwareArtworkResult {
@@ -79,11 +84,12 @@ impl SoftwareArtworkService {
             return cached;
         }
 
-        if self.config.twitch_client_id.is_none() || self.config.twitch_client_secret.is_none() {
+        let config = self.config.read().await.clone();
+        if config.twitch_client_id.is_none() || config.twitch_client_secret.is_none() {
             return placeholder(key);
         }
 
-        match self.lookup_igdb(name).await {
+        match self.lookup_igdb(&config, name).await {
             Ok(image_url) => {
                 let source = if image_url.is_some() {
                     "igdb".to_string()
@@ -105,13 +111,12 @@ impl SoftwareArtworkService {
         }
     }
 
-    async fn lookup_igdb(&self, name: &str) -> AppResult<Option<String>> {
-        let client_id = self
-            .config
+    async fn lookup_igdb(&self, config: &IgdbConfig, name: &str) -> AppResult<Option<String>> {
+        let client_id = config
             .twitch_client_id
             .as_deref()
             .ok_or_else(|| AppError::State("IGDB client ID is not configured".to_string()))?;
-        let access_token = self.access_token().await?;
+        let access_token = self.access_token(config).await?;
         let escaped_name = name.trim().replace('\\', "\\\\").replace('"', "\\\"");
         let query = format!(
             "search \"{escaped_name}\"; fields artworks.image_id,screenshots.image_id,cover.image_id; limit 1;"
@@ -150,7 +155,7 @@ impl SoftwareArtworkService {
             }))
     }
 
-    async fn access_token(&self) -> AppResult<String> {
+    async fn access_token(&self, config: &IgdbConfig) -> AppResult<String> {
         let mut token = self.token.lock().await;
         if let Some(cached) = token.as_ref() {
             if Instant::now() < cached.refresh_at {
@@ -158,15 +163,14 @@ impl SoftwareArtworkService {
             }
         }
 
-        let client_id = self
-            .config
+        let client_id = config
             .twitch_client_id
             .as_deref()
             .ok_or_else(|| AppError::State("IGDB client ID is not configured".to_string()))?;
-        let client_secret =
-            self.config.twitch_client_secret.as_deref().ok_or_else(|| {
-                AppError::State("IGDB client secret is not configured".to_string())
-            })?;
+        let client_secret = config
+            .twitch_client_secret
+            .as_deref()
+            .ok_or_else(|| AppError::State("IGDB client secret is not configured".to_string()))?;
         let response = self
             .client
             .post(TWITCH_TOKEN_URL)

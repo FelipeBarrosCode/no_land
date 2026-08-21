@@ -248,7 +248,6 @@ pub fn start_pipeline(config: MicClientConfig) -> AppResult<MicClientHandle> {
     }
 
     let sidecar = runtime::resolve_mic_sender_binary()?;
-    cleanup_stale_stream_processes(&sidecar);
 
     let mut command = Command::new(&sidecar);
     runtime::configure_gstreamer_command(&mut command, &sidecar);

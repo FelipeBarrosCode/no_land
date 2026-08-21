@@ -26,7 +26,8 @@ pub struct DiscoveryScan {
 pub fn discover_all(home: &Path) -> DiscoveryScan {
     let mut scan = DiscoveryScan::default();
     scan.apps.extend(discover_desktop_apps(home));
-    scan.apps.extend(portable_apps::discover_portable_apps(home));
+    scan.apps
+        .extend(portable_apps::discover_portable_apps(home));
     if let Some(steam) = discover_steam(home) {
         for app in &steam.apps {
             scan.apps.push(app.to_identity());
@@ -50,17 +51,13 @@ pub fn normalize_identities(apps: Vec<AppIdentity>) -> Vec<AppIdentity> {
                 for alias in existing.aliases.drain(..) {
                     merged.merge_alias(alias);
                 }
-                if merged.canonical_executable.is_none() {
-                    merged.canonical_executable = existing.canonical_executable.clone();
-                }
+                merge_missing_metadata(&mut merged, existing);
                 *existing = merged;
             } else {
+                merge_missing_metadata(existing, &app);
                 existing.merge_alias(app.display_name);
                 for alias in app.aliases {
                     existing.merge_alias(alias);
-                }
-                if existing.canonical_executable.is_none() {
-                    existing.canonical_executable = app.canonical_executable;
                 }
             }
         } else {
@@ -68,6 +65,24 @@ pub fn normalize_identities(apps: Vec<AppIdentity>) -> Vec<AppIdentity> {
         }
     }
     out
+}
+
+fn merge_missing_metadata(target: &mut AppIdentity, source: &AppIdentity) {
+    if target.desktop_entry_id.is_none() {
+        target.desktop_entry_id = source.desktop_entry_id.clone();
+    }
+    if target.steam_app_id.is_none() {
+        target.steam_app_id = source.steam_app_id;
+    }
+    if target.launcher.is_none() {
+        target.launcher = source.launcher;
+    }
+    if target.icon_path.is_none() {
+        target.icon_path = source.icon_path.clone();
+    }
+    if target.canonical_executable.is_none() {
+        target.canonical_executable = source.canonical_executable.clone();
+    }
 }
 
 fn same_logical_app(a: &AppIdentity, b: &AppIdentity) -> bool {
@@ -85,8 +100,12 @@ fn same_logical_app(a: &AppIdentity, b: &AppIdentity) -> bool {
         }
     }
     names_equivalent(&a.display_name, &b.display_name)
-        || a.aliases.iter().any(|alias| names_equivalent(alias, &b.display_name))
-        || b.aliases.iter().any(|alias| names_equivalent(alias, &a.display_name))
+        || a.aliases
+            .iter()
+            .any(|alias| names_equivalent(alias, &b.display_name))
+        || b.aliases
+            .iter()
+            .any(|alias| names_equivalent(alias, &a.display_name))
 }
 
 pub fn names_equivalent(a: &str, b: &str) -> bool {
@@ -166,6 +185,59 @@ pub fn default_search_roots(home: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_launch_metadata_when_higher_priority_identity_wins() {
+        let mut desktop = AppIdentity::new(AppId::desktop("spacewar"), "Spacewar");
+        desktop.desktop_entry_id = Some("spacewar.desktop".into());
+        desktop.canonical_executable = Some(PathBuf::from("/opt/spacewar/game"));
+        desktop.icon_path = Some(PathBuf::from("spacewar"));
+        desktop.launcher = Some(LauncherKind::Native);
+
+        let mut steam = AppIdentity::new(AppId::steam(480), "Spacewar");
+        steam.steam_app_id = Some(480);
+        steam.launcher = Some(LauncherKind::Steam);
+
+        let merged = normalize_identities(vec![desktop, steam]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].app_id, AppId::steam(480));
+        assert_eq!(
+            merged[0].desktop_entry_id.as_deref(),
+            Some("spacewar.desktop")
+        );
+        assert_eq!(merged[0].steam_app_id, Some(480));
+        assert_eq!(merged[0].launcher, Some(LauncherKind::Steam));
+        assert_eq!(merged[0].icon_path, Some(PathBuf::from("spacewar")));
+        assert_eq!(
+            merged[0].canonical_executable,
+            Some(PathBuf::from("/opt/spacewar/game"))
+        );
+    }
+
+    #[test]
+    fn fills_missing_metadata_on_existing_identity() {
+        let existing = AppIdentity::new(AppId::desktop("example"), "Example");
+        let mut duplicate = AppIdentity::new(AppId::desktop("example"), "Example App");
+        duplicate.desktop_entry_id = Some("example.desktop".into());
+        duplicate.steam_app_id = Some(42);
+        duplicate.launcher = Some(LauncherKind::Flatpak);
+        duplicate.icon_path = Some(PathBuf::from("example-icon"));
+        duplicate.canonical_executable = Some(PathBuf::from("/opt/example/app"));
+
+        let merged = normalize_identities(vec![existing, duplicate]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged[0].desktop_entry_id.as_deref(),
+            Some("example.desktop")
+        );
+        assert_eq!(merged[0].steam_app_id, Some(42));
+        assert_eq!(merged[0].launcher, Some(LauncherKind::Flatpak));
+        assert_eq!(merged[0].icon_path, Some(PathBuf::from("example-icon")));
+        assert_eq!(
+            merged[0].canonical_executable,
+            Some(PathBuf::from("/opt/example/app"))
+        );
+    }
 
     #[test]
     fn merges_minecraft_aliases() {

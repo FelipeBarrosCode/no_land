@@ -10,11 +10,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
+use crate::mic_client::{self, MicClientConfig, MicClientHandle};
+use crate::microphone::devices::list_microphones_sync;
 use crate::microphone::types::MicrophoneDevice;
-use crate::microphone::devices::{self, list_microphones_sync, get_device_by_id};
-use crate::microphone::capture::{start_capture, CaptureStream};
-use crate::microphone::pipeline::spawn_gstreamer_pipeline;
-use crate::mic_client::{self, MicClientConfig};
 use crate::models::app_state::{
     InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse,
     MicSettingsUpdate, MicState,
@@ -73,18 +71,16 @@ struct CachedDeviceList {
 /// for native microphone passthrough to provisioned instances.
 
 pub struct ActiveMicPipeline {
-    stream: CaptureStream,
-    child: std::process::Child,
+    client: MicClientHandle,
 }
 
 impl ActiveMicPipeline {
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.client.stop();
     }
 
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        self.client.is_running()
     }
 }
 
@@ -204,12 +200,21 @@ impl MicPassthroughService {
         };
 
         if was_active {
-            // For the new implementation, we would need to restart the capture stream.
-            // Since on-the-fly change isn't trivial without the sidecar IPC, we'll
-            // just update the session struct. The user or frontend can reconnect.
+            let active_device_id = (device_id != "default").then_some(device_id.clone());
+            {
+                let mut handles = get_mic_handles().lock();
+                let handle = handles.get_mut(&instance_id).ok_or_else(|| {
+                    AppError::Command(
+                        "Microphone session exists without an active media sidecar".to_string(),
+                    )
+                })?;
+                handle.client.select_device(active_device_id.as_deref())?;
+                handle
+                    .client
+                    .set_bitrate(quality_profile.bitrate_kbps() * 1000)?;
+            }
             if let Some(session) = get_mic_sessions().write().await.get_mut(&instance_id) {
-                session.client_config.device_id =
-                    (device_id != "default").then_some(device_id.clone());
+                session.client_config.device_id = active_device_id;
                 session.client_config.quality_profile = quality_profile.clone();
                 session.quality_profile = quality_profile.clone();
             }
@@ -217,7 +222,7 @@ impl MicPassthroughService {
                 instance_id,
                 device_id = %device_id,
                 bitrate_kbps = quality_profile.bitrate_kbps(),
-                "Applied microphone settings (reconnect required for changes to take effect)"
+                "Applied microphone settings to active media sidecar"
             );
         }
 
@@ -280,8 +285,6 @@ impl MicPassthroughService {
         mic_client::ensure_microphone_access()?;
 
         let selected_device_id = normalize_device_id(&persisted_config.device_id);
-        let selected_device_name =
-            resolved_device_name(&selected_device_id, persisted_config.device_name.as_str());
         let capture_device_id = if selected_device_id == "default" {
             None
         } else {
@@ -350,48 +353,6 @@ impl MicPassthroughService {
             return Err(error);
         }
 
-        use cpal::traits::DeviceTrait;
-        let device = get_device_by_id(capture_device_id.as_deref()).map_err(|e| AppError::Command(e.to_string()))?;
-        let config_default = device.default_input_config().map_err(|e| AppError::Command(e.to_string()))?;
-        let capture_sample_rate = config_default.sample_rate();
-        let capture_channels = config_default.channels();
-
-        let mut child = match spawn_gstreamer_pipeline(
-            capture_sample_rate, 
-            capture_channels, 
-            &endpoint.host, 
-            endpoint.rtp_port,
-            Some(ssrc),
-            Some(sequence_offset),
-            Some(timestamp_offset),
-            Some(endpoint.rtcp_port),
-            Some(local_rtcp_port),
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = Self::call_vm_agent_stop_session(&remote, &target_user, &session_id).await;
-                return Err(AppError::Provisioning(format!("Failed to spawn gstreamer: {}", e)));
-            }
-        };
-
-        let stdin = child.stdin.take().ok_or_else(|| {
-            AppError::Command("Failed to get gstreamer stdin".to_string())
-        })?;
-
-        let (stream, _, _) = match start_capture(device, stdin) {
-            Ok(res) => res,
-            Err(e) => {
-                let _ = child.kill();
-                let _ = Self::call_vm_agent_stop_session(&remote, &target_user, &session_id).await;
-                return Err(AppError::Provisioning(format!("Failed to start capture: {}", e)));
-            }
-        };
-
-        let handle = ActiveMicPipeline {
-            stream,
-            child,
-        };
-
         let pipeline_config = MicClientConfig {
             device_id: capture_device_id,
             quality_profile: profile.clone(),
@@ -404,6 +365,16 @@ impl MicPassthroughService {
             rtcp_port: endpoint.rtcp_port,
             local_rtcp_port,
         };
+        let client = match mic_client::start_pipeline(pipeline_config.clone()) {
+            Ok(client) => client,
+            Err(error) => {
+                let _ = Self::call_vm_agent_stop_session(&remote, &target_user, &session_id).await;
+                return Err(AppError::Provisioning(format!(
+                    "Failed to start local microphone sidecar: {error}"
+                )));
+            }
+        };
+        let handle = ActiveMicPipeline { client };
         {
             let mut handles = get_mic_handles().lock();
             if let Some(mut previous) = handles.insert(instance_id, handle) {
@@ -605,34 +576,10 @@ impl MicPassthroughService {
             if let Some(mut stale) = get_mic_handles().lock().remove(&instance_id) {
                 stale.stop();
             }
-            
-            use cpal::traits::DeviceTrait;
-            let device_res = get_device_by_id(client_config.device_id.as_deref());
-            if device_res.is_err() { continue; }
-            let device = device_res.unwrap();
-            
-            let config_res = device.default_input_config();
-            if config_res.is_err() { continue; }
-            let config_default = config_res.unwrap();
-            
-            let capture_sample_rate = config_default.sample_rate();
-            let capture_channels = config_default.channels();
-            
-            match spawn_gstreamer_pipeline(
-                capture_sample_rate, 
-                capture_channels, 
-                &client_config.remote_host, 
-                client_config.rtp_port,
-                Some(client_config.ssrc),
-                Some(client_config.sequence_offset),
-                Some(client_config.timestamp_offset),
-                Some(client_config.rtcp_port),
-                Some(client_config.local_rtcp_port),
-            ) {
-                Ok(mut child) => {
-                    let stdin = child.stdin.take().unwrap();
-                    let (stream, _, _) = start_capture(device, stdin).unwrap();
-                    let mut replacement = ActiveMicPipeline { stream, child };
+
+            match mic_client::start_pipeline(client_config) {
+                Ok(client) => {
+                    let mut replacement = ActiveMicPipeline { client };
                     let session_still_active = get_mic_sessions()
                         .read()
                         .await
@@ -669,14 +616,14 @@ impl MicPassthroughService {
     }
 
     /// Mute or unmute without tearing down capture, Opus, RTP, or the host device.
-    pub fn set_muted(instance_id: u64, _muted: bool) -> AppResult<()> {
+    pub fn set_muted(instance_id: u64, muted: bool) -> AppResult<()> {
         let mut handles = get_mic_handles().lock();
-        let _handle = handles.get_mut(&instance_id).ok_or_else(|| {
+        let handle = handles.get_mut(&instance_id).ok_or_else(|| {
             AppError::InvalidInput(
                 "Microphone forwarding is not active for this instance.".to_string(),
             )
         })?;
-        // Not implemented in the new capture pipeline yet.
+        handle.client.set_muted(muted)?;
         Ok(())
     }
 
@@ -688,11 +635,8 @@ impl MicPassthroughService {
                 "Microphone forwarding is not active for this instance.".to_string(),
             )
         })?;
-        
-        let dropped = handle.stream.metrics.dropped_samples.load(std::sync::atomic::Ordering::Relaxed);
-        Ok(serde_json::json!({
-            "dropped_samples": dropped
-        }))
+
+        handle.client.metrics()
     }
 
     /// Recreate the Cloud Mic device on the VM.
@@ -736,18 +680,71 @@ impl MicPassthroughService {
                 Some(handle) => {
                     if !handle.is_running() {
                         status.sidecar_healthy = false;
-                        status.error = Some("Noland microphone media sidecar exited".to_string());
+                        status.error =
+                            Some("Noland microphone media sidecar is not running".to_string());
                     } else {
-                        status.sidecar_healthy = true;
-                        status.muted = false;
-                        status.capture_sample_rate = 48000;
-                        let dropped = handle.stream.metrics.dropped_samples.load(std::sync::atomic::Ordering::Relaxed);
-                        status.capture_overruns = dropped;
+                        match handle.client.status() {
+                            Ok(sidecar_status) => {
+                                status.sidecar_healthy = sidecar_status
+                                    .get("health")
+                                    .and_then(serde_json::Value::as_str)
+                                    != Some("failed")
+                                    && sidecar_status
+                                        .get("sessionActive")
+                                        .and_then(serde_json::Value::as_bool)
+                                        .unwrap_or(false);
+                                status.muted = sidecar_status
+                                    .get("muted")
+                                    .and_then(serde_json::Value::as_bool)
+                                    .unwrap_or(false);
+                                status.capture_sample_rate = sidecar_status
+                                    .get("activeSampleRate")
+                                    .and_then(serde_json::Value::as_u64)
+                                    .unwrap_or(0)
+                                    as u32;
+                                status.error = sidecar_status
+                                    .get("lastError")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(ToOwned::to_owned);
+                            }
+                            Err(error) => {
+                                status.sidecar_healthy = false;
+                                status.error = Some(error.to_string());
+                            }
+                        }
+                        if let Ok(metrics) = handle.client.metrics() {
+                            status.capture_overruns = metrics
+                                .get("overruns")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            let ring_samples = metrics
+                                .get("ringDepthSamples")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            if status.capture_sample_rate > 0 {
+                                status.ring_fill_ms = ring_samples as f64 * 1000.0
+                                    / f64::from(status.capture_sample_rate);
+                            }
+                            status.appsrc_queue_ms = metrics
+                                .get("appsrcQueueMs")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0)
+                                as f64;
+                            status.opus_packets_sent = metrics
+                                .get("opusPacketsSent")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            status.bytes_sent = metrics
+                                .get("bytesSent")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                        }
                     }
                 }
                 _ => {
                     status.sidecar_healthy = false;
-                    status.error = Some("Noland microphone media sidecar exited".to_string());
+                    status.error =
+                        Some("Noland microphone media sidecar is not running".to_string());
                 }
             }
         }

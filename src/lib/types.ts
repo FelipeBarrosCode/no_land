@@ -97,6 +97,8 @@ export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  twitchClientId: string;
+  twitchClientSecret: string;
 }
 
 export interface SshState {
@@ -398,6 +400,11 @@ export interface SshCredentialsUpdate {
 export interface PlatformCredentialsUpdate {
   appUsername: string;
   appPassword: string;
+}
+
+export interface IgdbCredentialsUpdate {
+  twitchClientId: string;
+  twitchClientSecret: string;
 }
 
 export type VastBrowserBillingAction =

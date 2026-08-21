@@ -292,6 +292,7 @@ export function App() {
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
   );
+  const saveIgdbCredentials = useAppStore((state) => state.saveIgdbCredentials);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
@@ -427,6 +428,7 @@ export function App() {
                   onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
+                  onSaveIgdbCredentials={saveIgdbCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}

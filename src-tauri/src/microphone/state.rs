@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::sync::OnceLock;
-use std::process::Child;
 use cpal::traits::DeviceTrait;
+use std::process::Child;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use tokio::sync::Mutex;
 
-use crate::microphone::types::{MicrophoneState, MicrophoneStatus, MicrophoneError};
-use crate::microphone::devices::get_device_by_id;
 use crate::microphone::capture::{start_capture, CaptureStream};
+use crate::microphone::devices::get_device_by_id;
 use crate::microphone::pipeline::spawn_gstreamer_pipeline;
+use crate::microphone::types::{MicrophoneError, MicrophoneState, MicrophoneStatus};
 
 static MIC_STATE: OnceLock<Arc<Mutex<MicStateWrapper>>> = OnceLock::new();
 
@@ -18,21 +18,23 @@ pub struct MicStateWrapper {
 }
 
 pub fn get_mic_state() -> Arc<Mutex<MicStateWrapper>> {
-    MIC_STATE.get_or_init(|| {
-        Arc::new(Mutex::new(MicStateWrapper {
-            status: MicrophoneStatus {
-                state: MicrophoneState::Stopped,
-                device_id: None,
-                device_name: None,
-                sample_rate: None,
-                channels: None,
-                destination: None,
-                dropped_samples: 0,
-            },
-            stream: None,
-            child: None,
-        }))
-    }).clone()
+    MIC_STATE
+        .get_or_init(|| {
+            Arc::new(Mutex::new(MicStateWrapper {
+                status: MicrophoneStatus {
+                    state: MicrophoneState::Stopped,
+                    device_id: None,
+                    device_name: None,
+                    sample_rate: None,
+                    channels: None,
+                    destination: None,
+                    dropped_samples: 0,
+                },
+                stream: None,
+                child: None,
+            }))
+        })
+        .clone()
 }
 
 #[tauri::command]
@@ -82,7 +84,17 @@ pub async fn start_microphone(
     state.status.sample_rate = Some(sample_rate);
     state.status.channels = Some(channels);
 
-    let mut child = match spawn_gstreamer_pipeline(sample_rate, channels, &destination_host, destination_port, None, None, None, None, None) {
+    let mut child = match spawn_gstreamer_pipeline(
+        sample_rate,
+        channels,
+        &destination_host,
+        destination_port,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) {
         Ok(c) => c,
         Err(e) => {
             state.status.state = MicrophoneState::Error;
@@ -140,7 +152,10 @@ pub async fn microphone_status() -> Result<MicrophoneStatus, String> {
             }
         }
         if let Some(stream) = &state.stream {
-            state.status.dropped_samples = stream.metrics.dropped_samples.load(std::sync::atomic::Ordering::Relaxed);
+            state.status.dropped_samples = stream
+                .metrics
+                .dropped_samples
+                .load(std::sync::atomic::Ordering::Relaxed);
         }
     }
 

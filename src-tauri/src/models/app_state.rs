@@ -67,6 +67,10 @@ pub struct CredentialsState {
     pub app_username: String,
     pub app_password: String,
     pub vast_api_key: String,
+    #[serde(default)]
+    pub twitch_client_id: String,
+    #[serde(default)]
+    pub twitch_client_secret: String,
 }
 
 impl Default for CredentialsState {
@@ -75,6 +79,8 @@ impl Default for CredentialsState {
             app_username: String::new(),
             app_password: String::new(),
             vast_api_key: String::new(),
+            twitch_client_id: String::new(),
+            twitch_client_secret: String::new(),
         }
     }
 }
@@ -1078,8 +1084,6 @@ impl Default for InstanceMicConfig {
         }
     }
 }
-
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
