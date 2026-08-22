@@ -9,9 +9,9 @@ use noland_cas::blake3_file;
 use noland_crypto::MasterKey;
 use noland_pack::{extract_chunk, PackIndexEntry};
 use noland_snapshot::{create_view, discard, SnapshotView};
+use noland_state_core::pack_key as remote_pack_key;
 use noland_state_core::*;
 use noland_state_db::StateDb;
-use noland_state_core::pack_key as remote_pack_key;
 use noland_storage::{read_committed_manifest, RemoteKey, SharedStorageProvider};
 use uuid::Uuid;
 
@@ -36,7 +36,13 @@ pub async fn prepare_restore(
     for child in ["manifest", "packs", "materialized", "pre_restore", "logs"] {
         fs::create_dir_all(staging.join(child))?;
     }
-    let manifest = read_committed_manifest(provider, master, app_id, bundle_id).await?;
+    let manifest = match read_committed_manifest(provider, master, app_id, bundle_id).await {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
     fs::write(
         staging.join("manifest/manifest.json"),
         serde_json::to_vec_pretty(&manifest)?,
@@ -65,7 +71,10 @@ pub async fn download_and_verify(
         if !needed.contains(&entry.chunk_hash) {
             continue;
         }
-        let dest = plan.staging.join("packs").join(format!("{}.pack", entry.pack_id));
+        let dest = plan
+            .staging
+            .join("packs")
+            .join(format!("{}.pack", entry.pack_id));
         if !dest.exists() {
             provider
                 .download(&RemoteKey::new(remote_pack_key(&entry.pack_id)), &dest)
@@ -104,7 +113,10 @@ pub fn materialize_tree(plan: &RestorePlan, roots: &LogicalRootMap) -> Result<Ve
             .logical_root_parsed()
             .ok_or_else(|| StateError::UnsafePath(file.logical_root.clone()))?;
         // Materialize under the staging tree using the logical token so apply can remap.
-        let staged = join_validated(&tree.join(sanitize_token(&file.logical_root)), &file.relative_path)?;
+        let staged = join_validated(
+            &tree.join(sanitize_token(&file.logical_root)),
+            &file.relative_path,
+        )?;
         if let Some(parent) = staged.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -123,7 +135,9 @@ pub fn materialize_tree(plan: &RestorePlan, roots: &LogicalRootMap) -> Result<Ve
             }
             "file" => {
                 if file.file_type == "other" {
-                    return Err(StateError::UnsafePath("special files are not restored".into()));
+                    return Err(StateError::UnsafePath(
+                        "special files are not restored".into(),
+                    ));
                 }
                 let mut data = Vec::new();
                 for chunk in &file.chunks {
@@ -181,7 +195,11 @@ pub fn apply_restore(
     let rollback = if targets.is_empty() {
         None
     } else {
-        Some(create_view(&plan.staging.join("pre_restore"), &targets, false)?)
+        Some(create_view(
+            &plan.staging.join("pre_restore"),
+            &targets,
+            false,
+        )?)
     };
 
     for file in &plan.manifest.files {
@@ -294,7 +312,11 @@ fn sanitize_token(token: &str) -> String {
     token.replace(['$', ':', '/'], "_")
 }
 
-fn validate_symlink_target(target: &str, _roots: &LogicalRootMap, _root: &LogicalRoot) -> Result<()> {
+fn validate_symlink_target(
+    target: &str,
+    _roots: &LogicalRootMap,
+    _root: &LogicalRoot,
+) -> Result<()> {
     if target.starts_with("/proc")
         || target.starts_with("/sys")
         || target.starts_with("/dev")

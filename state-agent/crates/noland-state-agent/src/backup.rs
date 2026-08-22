@@ -5,11 +5,11 @@ use noland_cas::{blake3_file, chunk_file};
 use noland_classifier::Classifier;
 use noland_crypto::MasterKey;
 use noland_pack::pack_chunks;
+use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_snapshot::{create_view, discard};
 use noland_state_core::*;
-use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_storage::{
-    commit_bundle_with_index, update_catalog_with_bundle, shred_ephemeral_session,
+    commit_bundle_with_index, shred_ephemeral_session, update_catalog_with_bundle,
     write_ephemeral_session, LocalStorage, RcloneStorage, SharedStorageProvider,
 };
 use uuid::Uuid;
@@ -56,7 +56,9 @@ pub async fn run_backup(
     for (record, assoc) in &associations {
         let decision = classifier.decide(record, assoc, mode)?;
         match decision {
-            BackupDecision::Exclude | BackupDecision::MetadataOnly | BackupDecision::DeferAndReconcile => {
+            BackupDecision::Exclude
+            | BackupDecision::MetadataOnly
+            | BackupDecision::DeferAndReconcile => {
                 continue;
             }
             BackupDecision::Include
@@ -70,6 +72,14 @@ pub async fn run_backup(
                     files.push((record.clone(), assoc.clone()));
                 }
             }
+        }
+    }
+
+    if let Some((record, association)) = track_steam_appmanifest(agent, &identity, &roots)? {
+        let path = PathBuf::from(&record.canonical_path);
+        if !include_paths.iter().any(|included| included == &path) {
+            include_paths.push(path);
+            files.push((record, association));
         }
     }
 
@@ -97,14 +107,15 @@ pub async fn run_backup(
 
     let mut chunk_payloads = Vec::new();
     for mapping in &view.mappings {
-        let Some((record, assoc)) = files.iter().find(|(r, _)| {
-            PathBuf::from(&r.canonical_path) == mapping.source
-        }) else {
+        let Some((record, assoc)) = files
+            .iter()
+            .find(|(r, _)| PathBuf::from(&r.canonical_path) == mapping.source)
+        else {
             continue;
         };
-        let logical = roots
-            .classify(&mapping.source)
-            .unwrap_or_else(|| LogicalPath::new(LogicalRoot::Home, mapping.source.display().to_string()));
+        let logical = roots.classify(&mapping.source).unwrap_or_else(|| {
+            LogicalPath::new(LogicalRoot::Home, mapping.source.display().to_string())
+        });
         validate_relative_path(&logical.relative_path).ok();
         let chunks = chunk_file(&mapping.staged)?;
         let file_hash = if chunks.file_hash.is_empty() {
@@ -148,7 +159,11 @@ pub async fn run_backup(
 
     op.state = BackupState::Packing.as_str().into();
     agent.db.upsert_operation(&op)?;
-    let pack_dir = agent.config.paths.packs.join(manifest.bundle_id.to_string());
+    let pack_dir = agent
+        .config
+        .paths
+        .packs
+        .join(manifest.bundle_id.to_string());
     let packs = pack_chunks(&pack_dir, master, chunk_payloads, |hash| {
         agent.db.known_chunk(hash).unwrap_or(false)
     })?;
@@ -160,12 +175,17 @@ pub async fn run_backup(
         pack_files.push((pack.pack_id.clone(), pack.path.clone()));
         pack_index.extend(pack.entries.iter().cloned());
         for entry in &pack.entries {
-            agent
-                .db
-                .remember_chunk(&entry.chunk_hash, Some(&pack.pack_id), entry.plaintext_len as u64)?;
+            agent.db.remember_chunk(
+                &entry.chunk_hash,
+                Some(&pack.pack_id),
+                entry.plaintext_len as u64,
+            )?;
             noland_state_core::metrics::Metrics::inc(&agent.metrics.chunks_created_total);
         }
-        noland_state_core::metrics::Metrics::add(&agent.metrics.pack_bytes_created_total, pack.bytes);
+        noland_state_core::metrics::Metrics::add(
+            &agent.metrics.pack_bytes_created_total,
+            pack.bytes,
+        );
     }
 
     op.state = BackupState::Uploading.as_str().into();
@@ -205,6 +225,91 @@ pub async fn run_backup(
     Ok(manifest)
 }
 
+fn track_steam_appmanifest(
+    agent: &StateAgent,
+    identity: &AppIdentity,
+    roots: &LogicalRootMap,
+) -> Result<Option<(PathRecord, PathAssociation)>> {
+    let Some(path) = steam_appmanifest_path(identity, roots) else {
+        return Ok(None);
+    };
+    let metadata = std::fs::metadata(&path)?;
+    let canonical_path = path.to_string_lossy().into_owned();
+    let logical = roots
+        .classify(&path)
+        .ok_or_else(|| StateError::NotFound(format!("logical root for {}", path.display())))?;
+    let path_id = agent.db.upsert_path(&canonical_path)?;
+    let now = Utc::now();
+
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    let record = PathRecord {
+        path_id,
+        canonical_path,
+        logical_root: Some(logical.logical_root.as_token()),
+        relative_path: Some(logical.relative_path),
+        file_type: Some("file".into()),
+        #[cfg(unix)]
+        inode: Some(metadata.ino() as i64),
+        #[cfg(not(unix))]
+        inode: None,
+        mount_id: None,
+        size: Some(metadata.len() as i64),
+        mtime_ns: metadata
+            .modified()
+            .ok()
+            .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|value| value.as_nanos().min(i64::MAX as u128) as i64),
+        #[cfg(unix)]
+        mode: Some(metadata.mode() as i64),
+        #[cfg(not(unix))]
+        mode: None,
+        #[cfg(unix)]
+        uid: Some(metadata.uid() as i64),
+        #[cfg(not(unix))]
+        uid: None,
+        #[cfg(unix)]
+        gid: Some(metadata.gid() as i64),
+        #[cfg(not(unix))]
+        gid: None,
+        content_hash: None,
+        last_scanned_at: Some(now.timestamp()),
+    };
+    agent.db.update_path_meta(path_id, &record)?;
+
+    let association = PathAssociation {
+        app_id: identity.app_id.clone(),
+        path_id,
+        confidence: CONF_EXPLICIT,
+        evidence: vec![Evidence::new(EvidenceKind::SteamMetadata)],
+        persistence_class: PersistenceClass::PersistentState,
+        semantic_role: SemanticRole::AppContent,
+        first_seen_at: now,
+        last_seen_at: now,
+    };
+    agent.db.upsert_association(&association)?;
+
+    Ok(Some((record, association)))
+}
+
+fn steam_appmanifest_path(identity: &AppIdentity, roots: &LogicalRootMap) -> Option<PathBuf> {
+    let steam_app_id = identity.steam_app_id.or_else(|| {
+        identity
+            .app_id
+            .as_str()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+    })?;
+    let filename = format!("appmanifest_{steam_app_id}.acf");
+
+    roots
+        .steam_libraries
+        .values()
+        .map(|steamapps| steamapps.join(&filename))
+        .find(|path| path.is_file())
+}
+
 pub async fn run_backup_to_local(
     agent: &StateAgent,
     app_id: &AppId,
@@ -239,12 +344,11 @@ pub async fn run_backup_all_with_session(
     master: &MasterKey,
 ) -> Result<Vec<BundleManifest>> {
     let dirty = agent.db.list_dirty_apps()?;
-    let portable: std::collections::HashSet<String> = noland_discovery::filter_backup_candidates(
-        agent.db.list_apps()?,
-    )
-    .into_iter()
-    .map(|a| a.app_id.as_str().to_string())
-    .collect();
+    let portable: std::collections::HashSet<String> =
+        noland_discovery::filter_backup_candidates(agent.db.list_apps()?)
+            .into_iter()
+            .map(|a| a.app_id.as_str().to_string())
+            .collect();
     let mut targets: Vec<AppId> = dirty
         .into_iter()
         .map(|d| d.app_id)
@@ -262,4 +366,33 @@ pub async fn run_backup_all_with_session(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::steam_appmanifest_path;
+    use noland_state_core::{AppId, AppIdentity, LogicalRootMap};
+
+    #[test]
+    fn finds_manifest_in_registered_steam_library() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-steam-manifest-tracking-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let steamapps = root.join("steamapps");
+        std::fs::create_dir_all(&steamapps).unwrap();
+        let manifest = steamapps.join("appmanifest_3241660.acf");
+        std::fs::write(&manifest, b"appmanifest").unwrap();
+
+        let mut roots = LogicalRootMap::default();
+        roots.steam_libraries.insert("0".into(), steamapps);
+        let identity = AppIdentity::new(AppId::steam(3241660), "R.E.P.O.");
+
+        assert_eq!(steam_appmanifest_path(&identity, &roots), Some(manifest));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

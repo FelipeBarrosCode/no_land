@@ -109,9 +109,13 @@ impl SharedStorageManager {
                 "Select at least one application bundle to restore.".into(),
             ));
         }
+        let selections = selected_paths
+            .iter()
+            .map(|path| parse_catalog_selection(path))
+            .collect::<AppResult<Vec<_>>>()?;
+
         let mut last = String::new();
-        for path in selected_paths {
-            let (app_id, bundle_id) = parse_catalog_selection(path)?;
+        for (app_id, bundle_id) in selections {
             let result = Self::start_agent_restore(
                 context,
                 remote,
@@ -1226,18 +1230,35 @@ fn selected_app_ids(paths: &[String]) -> Vec<String> {
 fn parse_catalog_selection(path: &str) -> crate::errors::AppResult<(String, String)> {
     let rest = path.strip_prefix("/catalog/").ok_or_else(|| {
         crate::errors::AppError::InvalidInput(format!(
-            "Restore selection '{path}' is not a catalog application bundle. Choose an app from Shared Storage."
+            "Restore selection '{path}' is not a catalog application bundle. Expand an application and choose a specific backup bundle."
         ))
     })?;
     let mut parts = rest.split('/');
-    let app_id = parts.next().unwrap_or_default().to_string();
-    let bundle_id = parts.next().unwrap_or("latest").to_string();
+    let app_id = parts.next().unwrap_or_default();
+    let bundle_id = parts.next().filter(|value| !value.is_empty()).ok_or_else(|| {
+        crate::errors::AppError::InvalidInput(
+            "An application folder cannot be restored directly. Expand it and choose a specific backup bundle."
+                .into(),
+        )
+    })?;
+
     if app_id.is_empty() {
         return Err(crate::errors::AppError::InvalidInput(
-            "catalog app id missing".into(),
+            "Catalog application ID is missing. Reload the Sync catalog and try again.".into(),
         ));
     }
-    Ok((app_id, bundle_id))
+    if parts.next().is_some() {
+        return Err(crate::errors::AppError::InvalidInput(format!(
+            "Restore selection '{path}' contains an unexpected nested path. Reload the Sync catalog and choose a bundle."
+        )));
+    }
+    uuid::Uuid::parse_str(bundle_id).map_err(|_| {
+        crate::errors::AppError::InvalidInput(format!(
+            "Backup bundle '{bundle_id}' has an invalid ID. Reload the Sync catalog or create a new backup."
+        ))
+    })?;
+
+    Ok((app_id.to_string(), bundle_id.to_string()))
 }
 
 fn shell_escape(input: &str) -> String {
@@ -1466,4 +1487,34 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_catalog_selection;
+
+    #[test]
+    fn parses_specific_catalog_bundle_selection() {
+        let bundle_id = "15c739e7-6fd8-4bd8-b8b6-beb335156c76";
+        let parsed = parse_catalog_selection(&format!("/catalog/steam:480/{bundle_id}"))
+            .expect("specific bundle selection should be valid");
+
+        assert_eq!(parsed, ("steam:480".to_string(), bundle_id.to_string()));
+    }
+
+    #[test]
+    fn rejects_catalog_application_folder_selection() {
+        let error = parse_catalog_selection("/catalog/steam:480")
+            .expect_err("application folder should not be accepted as a bundle");
+
+        assert!(error.to_string().contains("application folder"));
+    }
+
+    #[test]
+    fn rejects_non_uuid_catalog_bundle_selection() {
+        let error = parse_catalog_selection("/catalog/steam:480/latest")
+            .expect_err("non-UUID bundle IDs should be rejected");
+
+        assert!(error.to_string().contains("invalid ID"));
+    }
 }

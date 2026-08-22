@@ -207,7 +207,7 @@ pub fn current_default_device_id() -> Option<String> {
     enumerate_devices().ok().and_then(|devices| {
         devices
             .into_iter()
-            .find_map(|(_, info)| info.is_default.then_some(info.name.clone()))
+            .find_map(|(_, info)| info.is_default.then_some(info.id))
     })
 }
 
@@ -449,7 +449,7 @@ fn start_gstreamer_macos(
         },
         input,
         CaptureStarted {
-            active_device_id: info.name.clone(),
+            active_device_id: info.id.clone(),
             active_device_name: info.name.clone(),
             sample_rate: TARGET_SAMPLE_RATE,
             capture_backend: CaptureBackend::GstreamerOsx,
@@ -669,7 +669,7 @@ fn start_native(
         CaptureHandle::Native { _stream: stream },
         input,
         CaptureStarted {
-            active_device_id: info.name.clone(),
+            active_device_id: info.id.clone(),
             active_device_name: info.name.clone(),
             sample_rate,
             capture_backend: CaptureBackend::Cpal,

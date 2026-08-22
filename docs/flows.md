@@ -157,7 +157,7 @@ Service: `MicPassthroughService`
 1. persist forwarding, auto-connect, device, and quality preferences per instance
 2. when a Moonlight session starts, resolve its Noland instance and schedule mic startup independently
 3. authorize a short-lived host endpoint over SSH, allocate RTP/RTCP ports, and restrict them to the WireGuard peer
-4. start `noland-mic-sender`; CPAL capture feeds a bounded stale-dropping ring and GStreamer RTP/Opus pipeline
+4. enumerate and select devices through `noland-mic-sender`, then capture with CPAL on Windows/Linux or GStreamer CoreAudio on macOS into a bounded stale-dropping ring and GStreamer RTP/Opus pipeline
 5. supervise the sidecar every three seconds and replace a dead, hung, or failed child without recreating the remote PipeWire source
 6. receive/decode into persistent `noland_mic_sink` / `noland_mic_source` topology on the host
 7. on stream close, stop sender/receiver while preserving the user's auto-connect preference and `Noland Microphone`

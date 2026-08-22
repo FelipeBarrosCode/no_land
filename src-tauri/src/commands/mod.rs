@@ -26,7 +26,7 @@ use crate::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
     },
-    microphone::types::MicrophoneDevice,
+    mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
             BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
@@ -4107,6 +4107,11 @@ pub async fn get_restore_job(job_id: String) -> Result<RestoreJob, FrontendError
     BundleRestoreService::get_job(&job_id)
         .await
         .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
+    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]

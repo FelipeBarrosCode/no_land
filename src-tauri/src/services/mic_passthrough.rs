@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, UdpSocket},
     path::Path,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use parking_lot::Mutex as SyncMutex;
@@ -10,9 +10,11 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
-use crate::mic_client::{self, MicClientConfig, MicClientHandle};
-use crate::microphone::devices::list_microphones_sync;
-use crate::microphone::types::MicrophoneDevice;
+use crate::mic_client::{
+    self,
+    device_list::{list_devices as list_sidecar_devices, MicrophoneDevice},
+    MicClientConfig, MicClientHandle,
+};
 use crate::models::app_state::{
     InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse,
     MicSettingsUpdate, MicState,
@@ -30,8 +32,6 @@ static MIC_SESSIONS: std::sync::OnceLock<RwLock<HashMap<u64, MicSession>>> =
 /// Pipeline handles keyed by instance_id.
 static MIC_HANDLES: std::sync::OnceLock<SyncMutex<HashMap<u64, ActiveMicPipeline>>> =
     std::sync::OnceLock::new();
-static MIC_DEVICE_CACHE: std::sync::OnceLock<SyncMutex<Option<CachedDeviceList>>> =
-    std::sync::OnceLock::new();
 
 fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
     MIC_SESSIONS.get_or_init(|| RwLock::new(HashMap::new()))
@@ -39,10 +39,6 @@ fn get_mic_sessions() -> &'static RwLock<HashMap<u64, MicSession>> {
 
 fn get_mic_handles() -> &'static SyncMutex<HashMap<u64, ActiveMicPipeline>> {
     MIC_HANDLES.get_or_init(|| SyncMutex::new(HashMap::new()))
-}
-
-fn get_mic_device_cache() -> &'static SyncMutex<Option<CachedDeviceList>> {
-    MIC_DEVICE_CACHE.get_or_init(|| SyncMutex::new(None))
 }
 
 #[derive(Debug, Clone)]
@@ -57,12 +53,6 @@ struct MicSession {
     quality_profile: MicQualityProfile,
     client_config: MicClientConfig,
     reconnect_count: u64,
-}
-
-#[derive(Debug, Clone)]
-struct CachedDeviceList {
-    fetched_at: Instant,
-    devices: Vec<MicrophoneDevice>,
 }
 
 /// Microphone passthrough service.
@@ -93,23 +83,7 @@ pub struct MicPassthroughService;
 impl MicPassthroughService {
     /// List available recording devices on this machine.
     pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
-        const CACHE_TTL: Duration = Duration::from_secs(30);
-
-        if let Some(cached) = get_mic_device_cache()
-            .lock()
-            .as_ref()
-            .filter(|cached| cached.fetched_at.elapsed() < CACHE_TTL)
-            .cloned()
-        {
-            return Ok(cached.devices);
-        }
-
-        let devices = list_microphones_sync().map_err(|e| AppError::Command(e.to_string()))?;
-        *get_mic_device_cache().lock() = Some(CachedDeviceList {
-            fetched_at: Instant::now(),
-            devices: devices.clone(),
-        });
-        Ok(devices)
+        list_sidecar_devices()
     }
 
     /// Get mic configuration for an instance.
@@ -130,9 +104,11 @@ impl MicPassthroughService {
         let mut config = InstanceMicConfig::default();
         config.instance_id = instance_id;
         config.vm_wireguard_ip = server.wireguard_server_ip.clone();
-        config.device_id = normalize_device_id(&server.mic_device_id);
-        config.device_name =
-            resolved_device_name(&config.device_id, server.mic_device_name.as_str());
+        let stored_device_id = normalize_device_id(&server.mic_device_id);
+        let (device_id, device_name) =
+            resolve_stored_device(&stored_device_id, server.mic_device_name.as_str());
+        config.device_id = device_id;
+        config.device_name = device_name;
         config.quality_profile = server.mic_quality_profile.clone();
         config.forwarding_enabled = server.mic_forwarding_enabled;
         config.auto_connect = server.mic_auto_connect;
@@ -161,12 +137,12 @@ impl MicPassthroughService {
         payload: MicSettingsUpdate,
     ) -> AppResult<InstanceMicConfig> {
         let current_config = Self::get_config(context, instance_id).await?;
-        let device_id = payload
+        let requested_device_id = payload
             .device_id
             .as_deref()
             .map(normalize_device_id)
             .unwrap_or_else(|| current_config.device_id.clone());
-        let device_name = resolve_selected_device_name(&device_id)?;
+        let (device_id, device_name) = resolve_selected_device(&requested_device_id)?;
         let quality_profile = payload
             .quality_profile
             .unwrap_or_else(|| current_config.quality_profile.clone());
@@ -1160,20 +1136,46 @@ fn resolved_device_name(device_id: &str, fallback_name: &str) -> String {
     }
 }
 
-fn resolve_selected_device_name(device_id: &str) -> AppResult<String> {
+fn resolve_stored_device(device_id: &str, fallback_name: &str) -> (String, String) {
     if device_id == "default" {
-        return Ok("System Default".to_string());
+        return ("default".to_string(), "System Default".to_string());
     }
 
-    let devices = list_microphones_sync().map_err(|e| AppError::Command(e.to_string()))?;
+    match MicPassthroughService::list_devices() {
+        Ok(devices) => {
+            let fallback_name = fallback_name.trim();
+            if let Some(device) = devices.into_iter().find(|device| {
+                device.id == device_id
+                    || device.name == device_id
+                    || (!fallback_name.is_empty() && device.name == fallback_name)
+            }) {
+                return (device.id, device.name);
+            }
+        }
+        Err(error) => {
+            warn!(%error, "Could not canonicalize the persisted microphone device");
+        }
+    }
+
+    (
+        device_id.to_string(),
+        resolved_device_name(device_id, fallback_name),
+    )
+}
+
+fn resolve_selected_device(device_id: &str) -> AppResult<(String, String)> {
+    if device_id == "default" {
+        return Ok(("default".to_string(), "System Default".to_string()));
+    }
+
+    let devices = MicPassthroughService::list_devices()?;
     devices
         .into_iter()
-        .find(|device| device.id == device_id)
-        .map(|device| device.name)
+        .find(|device| device.id == device_id || device.name == device_id)
+        .map(|device| (device.id, device.name))
         .ok_or_else(|| {
             AppError::InvalidInput(format!(
-                "Microphone device '{}' is no longer available on this machine.",
-                device_id
+                "Selected microphone device '{device_id}' is no longer available"
             ))
         })
 }

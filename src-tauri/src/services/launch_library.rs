@@ -103,6 +103,12 @@ pub(crate) async fn launch_remote_software(
             .find(|value| !value.is_empty())
             .unwrap_or("remote launcher returned no details")
             .to_string();
+        if matches!(plan, LaunchPlan::Steam(_)) {
+            return Err(AppError::Command(format!(
+                "Could not launch {} through Steam: {}",
+                entry.item.display_name, details
+            )));
+        }
         if let Some(fallback_executable) =
             search_remote_executable(remote, target_user, entry).await?
         {
@@ -356,7 +362,7 @@ async fn run_launch_plan(
     let script = launch_script(plan)?;
     let encoded = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
     let remote_command = format!(
-        "printf %s {payload} | base64 -d | sudo -H -u {user} sh",
+        "printf %s {payload} | base64 -d | sudo -i -u {user} sh",
         payload = shell_quote(&encoded),
         user = shell_quote(target_user),
     );
@@ -641,11 +647,34 @@ fn launcher_descriptor_hints(value: &str) -> Vec<&'static str> {
         .collect()
 }
 
+const GUI_SESSION_ENVIRONMENT_PRELUDE: &str = r#"export DISPLAY="${DISPLAY:-:0}"
+if [ -z "${XAUTHORITY:-}" ]; then
+  for candidate in /etc/X11/.Xauthority-noland "$HOME/.Xauthority"; do
+    if [ -s "$candidate" ] && [ -r "$candidate" ]; then export XAUTHORITY="$candidate"; break; fi
+  done
+fi
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+"#;
+
+const STEAM_LAUNCH_TEMPLATE: &str = r#"export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games:/snap/bin:${PATH:-}"
+if command -v steam >/dev/null 2>&1; then
+  steam -applaunch __STEAM_APP_ID__
+elif command -v flatpak >/dev/null 2>&1 && flatpak info --user com.valvesoftware.Steam >/dev/null 2>&1; then
+  flatpak run --user com.valvesoftware.Steam -applaunch __STEAM_APP_ID__
+elif command -v flatpak >/dev/null 2>&1 && flatpak info --system com.valvesoftware.Steam >/dev/null 2>&1; then
+  flatpak run --system com.valvesoftware.Steam -applaunch __STEAM_APP_ID__
+else
+  echo 'Steam is not installed on this instance.' >&2
+  exit 127
+fi
+"#;
+
 fn launch_script(plan: &LaunchPlan) -> AppResult<String> {
     let launch = match plan {
-        LaunchPlan::Steam(app_id) => format!(
-            "if ! command -v steam >/dev/null 2>&1; then echo 'Steam is not installed on this instance.' >&2; exit 127; fi\nnohup steam -applaunch {app_id} >\"/tmp/noland-launch-steam-{app_id}.log\" 2>&1 &"
-        ),
+        LaunchPlan::Steam(app_id) => {
+            STEAM_LAUNCH_TEMPLATE.replace("__STEAM_APP_ID__", &app_id.to_string())
+        }
         LaunchPlan::Desktop(desktop_id) => {
             if !valid_desktop_id(desktop_id) {
                 return Err(AppError::InvalidInput(
@@ -662,9 +691,16 @@ fn launch_script(plan: &LaunchPlan) -> AppResult<String> {
             exe = shell_quote(executable),
         ),
     };
-    Ok(format!(
-        "export DISPLAY=\"${{DISPLAY:-:0}}\"\nif [ -z \"${{XAUTHORITY:-}}\" ]; then\n  for candidate in /etc/X11/.Xauthority-noland \"$HOME/.Xauthority\"; do\n    if [ -s \"$candidate\" ] && [ -r \"$candidate\" ]; then export XAUTHORITY=\"$candidate\"; break; fi\n  done\nfi\nexport XDG_RUNTIME_DIR=\"${{XDG_RUNTIME_DIR:-/run/user/$(id -u)}}\"\nexport DBUS_SESSION_BUS_ADDRESS=\"${{DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}}\"\n{launch}\n"
-    ))
+    if matches!(plan, LaunchPlan::Steam(_)) {
+        return Ok(launch);
+    }
+
+    let mut script =
+        String::with_capacity(GUI_SESSION_ENVIRONMENT_PRELUDE.len() + launch.len() + 1);
+    script.push_str(GUI_SESSION_ENVIRONMENT_PRELUDE);
+    script.push_str(&launch);
+    script.push('\n');
+    Ok(script)
 }
 
 fn parse_steam_app_id(app_id: &str, launcher: Option<&str>) -> Option<u32> {
@@ -1062,6 +1098,19 @@ mod tests {
             select_steam_app_id(&response, &["Different Game".to_string()]),
             None
         );
+    }
+
+    #[test]
+    fn steam_launch_script_sends_the_app_id_without_starting_a_display() {
+        let script = launch_script(&LaunchPlan::Steam(3_241_660)).unwrap();
+
+        assert!(script.contains("/usr/games:/snap/bin:${PATH:-}"));
+        assert!(script.contains("steam -applaunch 3241660"));
+        assert!(script.contains("flatpak run --user com.valvesoftware.Steam -applaunch 3241660"));
+        assert!(!script.contains("DISPLAY"));
+        assert!(!script.contains("DBUS_SESSION_BUS_ADDRESS"));
+        assert!(!script.contains("xrandr"));
+        assert!(!script.contains("python3"));
     }
 
     #[test]

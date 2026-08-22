@@ -4,7 +4,6 @@ mod commands;
 mod errors;
 mod input;
 mod mic_client;
-mod microphone;
 mod models;
 mod moonlight;
 mod services;
@@ -446,10 +445,7 @@ fn main() {
             get_instance_mic_metrics,
             recreate_instance_mic_device,
             get_instance_mic_status,
-            crate::microphone::devices::list_microphones,
-            crate::microphone::state::start_microphone,
-            crate::microphone::state::stop_microphone,
-            crate::microphone::state::microphone_status,
+            list_microphones,
             moonlight_get_configuration,
             moonlight_register_host,
             moonlight_refresh_host,

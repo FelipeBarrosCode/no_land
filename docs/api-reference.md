@@ -129,7 +129,9 @@ IGDB artwork lookup uses the free IGDB API and prefers wide artwork or screensho
 - `get_instance_mic_metrics`
 - `recreate_instance_mic_device`
 - `get_instance_mic_status`
-- `list_microphones`
+- `list_microphones` — enumerates devices through the same `noland-mic-sender` sidecar that performs capture; `default` follows the operating system default input and explicit selections use sidecar device IDs
+
+The legacy in-process CPAL + `gst-launch-1.0` command path has been removed. All product microphone operations use `MicPassthroughService` and the managed sender sidecar.
 
 ## Notes
 

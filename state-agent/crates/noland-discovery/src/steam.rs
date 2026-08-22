@@ -35,6 +35,7 @@ impl SteamApp {
 pub fn discover_steam(home: &Path) -> Option<SteamDiscovery> {
     let candidates = [
         home.join(".steam/steam"),
+        home.join(".steam/debian-installation"),
         home.join(".local/share/Steam"),
         home.join(".var/app/com.valvesoftware.Steam/data/Steam"),
         PathBuf::from("/usr/share/steam"),
@@ -134,6 +135,29 @@ fn parse_libraryfolders(text: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovers_debian_packaged_steam_root() {
+        let home = std::env::temp_dir().join(format!(
+            "noland-steam-debian-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = home.join(".steam/debian-installation");
+        std::fs::create_dir_all(root.join("steamapps")).unwrap();
+
+        let discovery = discover_steam(&home).expect("Debian Steam root should be discovered");
+
+        assert_eq!(discovery.root, root);
+        assert_eq!(
+            discovery.libraries,
+            vec![("0".into(), root.join("steamapps"))]
+        );
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
     #[test]
     fn parses_appmanifest() {
