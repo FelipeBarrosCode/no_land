@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::Engine;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -13,6 +14,7 @@ use crate::models::application_bundle::{
 
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
+use super::agent_handoff::AgentCatalogAppRecord;
 use super::bundle_indexer::BundleIndexer;
 use super::object_storage::StorageCredential;
 use super::provider_profiles::shared_profile_manager;
@@ -113,6 +115,11 @@ impl SharedStorageManager {
             .iter()
             .map(|path| parse_catalog_selection(path))
             .collect::<AppResult<Vec<_>>>()?;
+        let catalog = Self::list_agent_catalog_records(context, remote, target_user).await?;
+        let catalog_by_app_id = catalog
+            .into_iter()
+            .map(|app| (app.app_id.clone(), app))
+            .collect::<HashMap<_, _>>();
 
         let mut last = String::new();
         for (app_id, bundle_id) in selections {
@@ -125,6 +132,9 @@ impl SharedStorageManager {
                 "personal_state",
             )
             .await?;
+            if let Some(app) = catalog_by_app_id.get(&app_id) {
+                ensure_restored_steam_manifest(remote, target_user, app).await?;
+            }
             last = result.to_string();
         }
         Ok(format!("Application-state restore completed: {last}"))
@@ -1261,6 +1271,155 @@ fn parse_catalog_selection(path: &str) -> crate::errors::AppResult<(String, Stri
     Ok((app_id.to_string(), bundle_id.to_string()))
 }
 
+async fn ensure_restored_steam_manifest(
+    remote: &RemoteExec,
+    target_user: &str,
+    app: &AgentCatalogAppRecord,
+) -> AppResult<()> {
+    let Some(steam_app_id) = infer_steam_app_id_from_catalog(app) else {
+        return Ok(());
+    };
+    let payload = serde_json::json!({
+        "app_id": steam_app_id,
+        "display_name": non_empty_or(&app.display_name, &app.app_id),
+        "aliases": app.aliases,
+    });
+    let payload = serde_json::to_string(&payload).map_err(|error| {
+        AppError::Serialization(format!(
+            "steam sync manifest payload serialization failed: {error}"
+        ))
+    })?;
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    let script_b64 =
+        base64::engine::general_purpose::STANDARD.encode(STEAM_SYNC_MANIFEST_SCRIPT.as_bytes());
+    let command = format!(
+        "tmp_root=/tmp/noland-steam-manifest-sync && sudo rm -rf \"$tmp_root\" && sudo mkdir -p \"$tmp_root\" && printf %s '{script_b64}' | base64 -d | sudo tee \"$tmp_root/script.py\" >/dev/null && printf %s '{payload_b64}' | sudo tee \"$tmp_root/payload.b64\" >/dev/null && sudo chmod 644 \"$tmp_root/script.py\" \"$tmp_root/payload.b64\" && sudo -i -u '{user}' python3 \"$tmp_root/script.py\" \"$tmp_root/payload.b64\"; status=$?; sudo rm -rf \"$tmp_root\"; exit $status",
+        payload_b64 = shell_escape(&payload_b64),
+        script_b64 = shell_escape(&script_b64),
+        user = shell_escape(target_user),
+    );
+    let output = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+    };
+    if output.status_code == 0 {
+        return Ok(());
+    }
+    let details = [output.stderr.trim(), output.stdout.trim()]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or("remote Steam manifest sync repair returned no details");
+    Err(AppError::Command(format!(
+        "Could not prepare Steam manifest for restored app {}: {}",
+        app.display_name, details
+    )))
+}
+
+fn infer_steam_app_id_from_catalog(app: &AgentCatalogAppRecord) -> Option<u32> {
+    app.steam_app_id.or_else(|| {
+        app.app_id
+            .trim()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| {
+                app.launcher
+                    .as_deref()
+                    .filter(|value| value.trim().eq_ignore_ascii_case("steam"))
+                    .and_then(|_| app.app_id.trim().parse::<u32>().ok())
+            })
+    })
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+const STEAM_SYNC_MANIFEST_SCRIPT: &str = r#"import base64, json, os, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as handle:
+    payload = json.loads(base64.b64decode(handle.read()).decode('utf-8'))
+app_id = int(payload['app_id'])
+display_name = (payload.get('display_name') or '').strip() or f'Steam {app_id}'
+aliases = [str(value).strip() for value in payload.get('aliases') or [] if str(value).strip()]
+
+def normalize(value):
+    return ''.join(ch.lower() for ch in value if ch.isalnum())
+
+steam_roots = [
+    '/home/user/.steam/steam',
+    '/home/user/.steam/debian-installation',
+    '/home/user/.local/share/Steam',
+    '/home/user/.var/app/com.valvesoftware.Steam/data/Steam',
+]
+steamapps_dirs = []
+for root in steam_roots:
+    import os
+    base = os.path.join(root, 'steamapps')
+    if os.path.isdir(base):
+        steamapps_dirs.append(base)
+    vdf = os.path.join(base, 'libraryfolders.vdf')
+    if os.path.isfile(vdf):
+        try:
+            text = open(vdf, 'r', encoding='utf-8', errors='ignore').read()
+        except OSError:
+            text = ''
+        current_id = None
+        for line in text.splitlines():
+            toks = [tok for tok in line.split('"') if tok.strip()]
+            if len(toks) == 1 and toks[0].isdigit():
+                current_id = toks[0]
+            elif len(toks) >= 2 and toks[0] == 'path':
+                candidate = os.path.join(toks[1], 'steamapps')
+                if os.path.isdir(candidate):
+                    steamapps_dirs.append(candidate)
+seen = []
+for path in steamapps_dirs:
+    if path not in seen:
+        seen.append(path)
+steamapps_dirs = seen
+
+def install_dir_hint():
+    candidates = [display_name] + aliases
+    normalized_candidates = {normalize(value) for value in candidates if normalize(value)}
+    for steamapps in steamapps_dirs:
+        common = os.path.join(steamapps, 'common')
+        if not os.path.isdir(common):
+            continue
+        for name in os.listdir(common):
+            full = os.path.join(common, name)
+            if not os.path.isdir(full):
+                continue
+            if normalize(name) in normalized_candidates:
+                return name
+    sanitized = ''.join(ch if ch.isalnum() or ch in ' ._-' else '_' for ch in display_name)
+    compact = ' '.join(sanitized.split()).strip(' .')
+    if compact:
+        return compact.replace('.', '') if normalize(compact.replace('.', '')) == normalize(display_name) else compact
+    return f'Steam-{app_id}'
+
+for steamapps in steamapps_dirs:
+    manifest = os.path.join(steamapps, f'appmanifest_{app_id}.acf')
+    if os.path.isfile(manifest) and os.path.getsize(manifest) > 0:
+        sys.exit(0)
+
+target = steamapps_dirs[0] if steamapps_dirs else '/home/user/.local/share/Steam/steamapps'
+os.makedirs(os.path.join(target, 'common'), exist_ok=True)
+manifest = os.path.join(target, f'appmanifest_{app_id}.acf')
+with open(manifest, 'w', encoding='utf-8') as handle:
+    handle.write('"AppState"\n{\n')
+    handle.write(f'\t"appid"\t\t"{app_id}"\n')
+    handle.write(f'\t"name"\t\t"{display_name.replace(chr(34), chr(39))}"\n')
+    handle.write('\t"StateFlags"\t\t"4"\n')
+    handle.write(f'\t"installdir"\t\t"{install_dir_hint().replace(chr(34), chr(39))}"\n')
+    handle.write('}\n')
+"#;
+
 fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
 }
@@ -1491,7 +1650,7 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
 
 #[cfg(test)]
 mod tests {
-    use super::parse_catalog_selection;
+    use super::{infer_steam_app_id_from_catalog, parse_catalog_selection, AgentCatalogAppRecord};
 
     #[test]
     fn parses_specific_catalog_bundle_selection() {
@@ -1516,5 +1675,47 @@ mod tests {
             .expect_err("non-UUID bundle IDs should be rejected");
 
         assert!(error.to_string().contains("invalid ID"));
+    }
+
+    #[test]
+    fn infers_steam_app_id_from_catalog_metadata_or_app_id() {
+        let explicit = AgentCatalogAppRecord {
+            app_id: "desktop:repo".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: Some(3_241_660),
+            launcher: None,
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&explicit), Some(3_241_660));
+
+        let prefixed = AgentCatalogAppRecord {
+            app_id: "steam:3241660".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: None,
+            launcher: None,
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&prefixed), Some(3_241_660));
+
+        let numeric = AgentCatalogAppRecord {
+            app_id: "3241660".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: None,
+            launcher: Some("steam".to_string()),
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&numeric), Some(3_241_660));
     }
 }
