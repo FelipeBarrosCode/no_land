@@ -27,6 +27,7 @@ import type {
   RestoreJob,
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
+  MicSidecarMetrics,
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
@@ -39,6 +40,13 @@ import type {
   SetupStage,
   SunshineVerificationResult,
   VastWalletSummary,
+  DisplayModeSpec,
+  InstanceDisplayStatus,
+  ApplyDisplayModeResult,
+  LaunchLibraryResponse,
+  LaunchSoftwareJob,
+  SoftwareArtworkResult,
+  IgdbCredentialsUpdate,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -97,6 +105,44 @@ export async function startPlayExistingInstance(
   instanceId: number,
 ): Promise<string> {
   return invokeSafe<string>("start_play_existing_instance", { instanceId });
+}
+
+export async function getInstanceLaunchLibrary(
+  instanceId: number,
+): Promise<LaunchLibraryResponse> {
+  return invokeSafe<LaunchLibraryResponse>("get_instance_launch_library", {
+    instanceId,
+  });
+}
+
+export async function launchInstanceSoftware(
+  instanceId: number,
+  appId: string,
+): Promise<LaunchSoftwareJob> {
+  return invokeSafe<LaunchSoftwareJob>("launch_instance_software", {
+    instanceId,
+    appId,
+  });
+}
+
+export async function getLaunchInstanceSoftwareJob(
+  jobId: string,
+): Promise<LaunchSoftwareJob> {
+  return invokeSafe<LaunchSoftwareJob>("get_launch_instance_software_job", {
+    jobId,
+  });
+}
+
+export async function getSoftwareArtwork(
+  name: string,
+): Promise<SoftwareArtworkResult> {
+  return invokeSafe<SoftwareArtworkResult>("get_software_artwork", { name });
+}
+
+export async function updateIgdbCredentials(
+  payload: IgdbCredentialsUpdate,
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("update_igdb_credentials", { payload });
 }
 
 export async function submitPairingPin(
@@ -388,7 +434,7 @@ export async function moonlightGetSessionState(): Promise<{
 }
 
 export async function regenerateEdid(payload: {
-  mode: "auto_detect" | "manual";
+  mode: "auto_detect" | "mac_hardware" | "manual";
   refreshRateHz: number;
 }): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("regenerate_edid", { payload });
@@ -619,10 +665,24 @@ export async function resetInstanceSunshineSettings(
   });
 }
 
-export async function reconnectInstanceWireguard(
+
+
+export async function getInstanceDisplayStatus(
   instanceId: number,
-): Promise<string> {
-  return invokeSafe<string>("reconnect_instance_wireguard", { instanceId });
+): Promise<InstanceDisplayStatus> {
+  return invokeSafe<InstanceDisplayStatus>("get_instance_display_status", {
+    instanceId,
+  });
+}
+
+export async function applyInstanceDisplayMode(
+  instanceId: number,
+  mode: DisplayModeSpec,
+): Promise<ApplyDisplayModeResult> {
+  return invokeSafe<ApplyDisplayModeResult>("apply_instance_display_mode", {
+    instanceId,
+    mode,
+  });
 }
 
 export async function rebootInstanceServices(
@@ -631,9 +691,6 @@ export async function rebootInstanceServices(
   return invokeSafe<string>("reboot_instance_services", { instanceId });
 }
 
-export async function pauseInstance(instanceId: number): Promise<void> {
-  return invokeSafe<void>("pause_instance", { instanceId });
-}
 
 export async function destroyInstance(instanceId: number): Promise<void> {
   return invokeSafe<void>("destroy_instance", { instanceId });
@@ -708,6 +765,22 @@ export async function reconnectInstanceMic(
   instanceId: number,
 ): Promise<MicSessionResponse> {
   return invokeSafe<MicSessionResponse>("reconnect_instance_mic", {
+    instanceId,
+  });
+}
+
+export async function muteInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("mute_instance_mic", { instanceId });
+}
+
+export async function unmuteInstanceMic(instanceId: number): Promise<void> {
+  return invokeSafe<void>("unmute_instance_mic", { instanceId });
+}
+
+export async function getInstanceMicMetrics(
+  instanceId: number,
+): Promise<MicSidecarMetrics> {
+  return invokeSafe<MicSidecarMetrics>("get_instance_mic_metrics", {
     instanceId,
   });
 }
@@ -791,4 +864,8 @@ export async function listMicrophones(
 
   microphoneListInFlight = request;
   return request;
+}
+
+export async function forceUpdateStateAgent(instanceId: number) {
+  return invokeSafe<void>("force_update_state_agent", { instanceId });
 }

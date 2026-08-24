@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/noland-state-core",
+    "crates/noland-state-db",
+    "crates/noland-observer",
+    "crates/noland-discovery",
+    "crates/noland-attribution",
+    "crates/noland-classifier",
+    "crates/noland-baseline",
+    "crates/noland-snapshot",
+    "crates/noland-cas",
+    "crates/noland-pack",
+    "crates/noland-crypto",
+    "crates/noland-rclone-adapter",
+    "crates/noland-storage",
+    "crates/noland-restore",
+    "crates/noland-rpc",
+    "crates/noland-state-agent",
+    "crates/noland-testkit",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Noland"]
+rust-version = "1.80"
+
+[workspace.dependencies]
+async-trait = "0.1"
+base64 = "0.22"
+blake3 = "1.5"
+bytes = "1.7"
+chacha20poly1305 = "0.10"
+chrono = { version = "0.4", features = ["serde"] }
+hkdf = "0.12"
+hex = "0.4"
+parking_lot = "0.12"
+rand = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync", "net", "io-util", "signal"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+noland-state-core = { path = "crates/noland-state-core" }
+noland-state-db = { path = "crates/noland-state-db" }
+noland-observer = { path = "crates/noland-observer" }
+noland-discovery = { path = "crates/noland-discovery" }
+noland-attribution = { path = "crates/noland-attribution" }
+noland-classifier = { path = "crates/noland-classifier" }
+noland-baseline = { path = "crates/noland-baseline" }
+noland-snapshot = { path = "crates/noland-snapshot" }
+noland-cas = { path = "crates/noland-cas" }
+noland-pack = { path = "crates/noland-pack" }
+noland-crypto = { path = "crates/noland-crypto" }
+noland-rclone-adapter = { path = "crates/noland-rclone-adapter" }
+noland-storage = { path = "crates/noland-storage" }
+noland-restore = { path = "crates/noland-restore" }
+noland-rpc = { path = "crates/noland-rpc" }
+noland-state-agent = { path = "crates/noland-state-agent" }
+noland-testkit = { path = "crates/noland-testkit" }

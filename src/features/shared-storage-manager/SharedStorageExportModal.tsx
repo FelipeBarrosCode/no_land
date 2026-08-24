@@ -11,6 +11,7 @@ interface Props {
   onClose: () => void;
   onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onConfirmExport: (selectedPaths: string[]) => Promise<void>;
+  onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
 
 function buildChildrenMap(entries: SharedStorageObjectEntry[]) {
@@ -36,7 +37,8 @@ export function SharedStorageExportModal({
   instanceId,
   onClose,
   onLoadObjects,
-  onConfirmExport
+  onConfirmExport,
+  onRefreshIndexing
 }: Props) {
   const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
   const [loading, setLoading] = useState(false);
@@ -51,7 +53,7 @@ export function SharedStorageExportModal({
     setPendingAction({
       key: "export-modal.load",
       label: "Loading instance files",
-      detail: "Scanning the remote machine for exportable files and folders.",
+      detail: "Asking the state agent which applications it has learned.",
       mode: "indeterminate",
       progress: null,
       startedAt: Date.now()
@@ -115,7 +117,7 @@ export function SharedStorageExportModal({
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
             <h2 className="font-display text-base text-white">Export To Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Choose local files/folders to export to shared storage.</p>
+            <p className="text-[1.2rem] text-[#b4c8de]">Choose applications the tracker learned. Noland packs their state through the state agent.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Close</Button>
         </div>
@@ -131,6 +133,36 @@ export function SharedStorageExportModal({
         <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
           <p className="text-[1.1rem] text-[#9ec0e4]">Selected: {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
+            {onRefreshIndexing && (
+              <Button
+                variant="ghost"
+                disabled={busy || loading}
+                onClick={async () => {
+                  if (instanceId !== null) {
+                    setLoading(true);
+                    setPendingAction({
+                      key: "export-modal.refresh",
+                      label: "Refreshing indexed applications",
+                      detail: "Running the discovery agent on the remote instance.",
+                      mode: "indeterminate",
+                      progress: null,
+                      startedAt: Date.now()
+                    });
+                    try {
+                      await onRefreshIndexing(instanceId);
+                      const result = await onLoadObjects(instanceId);
+                      setEntries(result ?? []);
+                      setSelectedPaths([]);
+                    } finally {
+                      setLoading(false);
+                      setPendingAction(null);
+                    }
+                  }
+                }}
+              >
+                Refresh Indexing
+              </Button>
+            )}
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Cancel</Button>
             <Button
               disabled={busy || loading || selectedPaths.length === 0}
@@ -140,7 +172,7 @@ export function SharedStorageExportModal({
                 setPendingAction({
                   key: "export-modal.run",
                   label: "Exporting selected files",
-                  detail: "Saving the selected instance files to shared storage.",
+                  detail: "Backing up selected application state through the state agent.",
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()

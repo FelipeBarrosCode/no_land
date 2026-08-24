@@ -191,18 +191,8 @@ pub async fn disconnect_shared_storage_profile(
 
     context
         .update_state(|state| {
-            let was_active = state
-                .shared_storage_profiles
-                .iter()
-                .find(|p| p.id == profile_id)
-                .map(|p| p.active)
-                .unwrap_or(false);
-            state.shared_storage_profiles.retain(|p| p.id != profile_id);
-            if was_active {
-                if let Some(first) = state.shared_storage_profiles.first_mut() {
-                    first.active = true;
-                }
-            }
+            // No-op for now: we keep it in the list so the UI still knows it exists.
+            // Future work will add a 'status' field to ProfileReference.
         })
         .await?;
 
@@ -697,25 +687,16 @@ async fn run_loopback_server(
     let code = extract_query_param(path, "code");
     let returned_state = extract_query_param(path, "state");
     let error = extract_query_param(path, "error");
+    let had_callback_error = error.is_some();
 
-    // Respond to browser
-    let response_body = if error.is_some() {
-        "<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>Authorization Failed</h1><p>The authorization was denied or an error occurred.</p><p>You can close this window and try again in Noland.</p></body></html>"
-    } else if code.is_some() {
-        "<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#2e7d32'>Authorization Complete</h1><p>You've successfully authorized Noland.</p><p>You can close this window and return to Noland to complete setup.</p></body></html>"
-    } else {
-        "<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1>Invalid Request</h1><p>No authorization code received.</p></body></html>"
-    };
+    // Process the OAuth completion FIRST, then respond to the browser with the
+    // real outcome.  Previously the browser was told "Authorization Complete"
+    // before the token exchange finished, so a failed exchange still showed a
+    // success page and the user clicked "Complete Authorization" only to be
+    // bounced back to the start.
+    let mut outcome_ok = false;
+    let mut outcome_message = String::new();
 
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        response_body.len(),
-        response_body
-    );
-    let _ = socket.write_all(response.as_bytes()).await;
-    let _ = socket.shutdown().await;
-
-    // Process the OAuth completion
     if let Some(auth_code) = code {
         let stored_state = {
             let sessions = get_oauth_sessions().read().await;
@@ -731,76 +712,112 @@ async fn run_loopback_server(
         if let Some((expected_state, code_verifier, _display_name)) = stored_state {
             if returned_state.as_deref() != Some(&expected_state) {
                 tracing::warn!("OAuth state mismatch for session {session_id}");
-                return Err("State mismatch".to_string());
-            }
+                outcome_message = "State mismatch — please try again.".to_string();
+                {
+                    let mut sessions = get_oauth_sessions().write().await;
+                    if let Some(s) = sessions.get_mut(&session_id) {
+                        s.status = OAuthSessionStatus::Failed(outcome_message.clone());
+                    }
+                }
+            } else {
+                // Exchange code for tokens
+                let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+                match crate::services::shared_storage::oauth_flow::exchange_code(
+                    &oauth_config,
+                    &auth_code,
+                    &code_verifier,
+                    &redirect_uri,
+                )
+                .await
+                {
+                    Ok(token) => {
+                        let now = chrono::Utc::now().timestamp();
+                        let credentials = StorageCredential::OAuth2 {
+                            access_token: token.access_token.clone(),
+                            refresh_token: token.refresh_token.clone(),
+                            expires_at: now + token.expires_in.unwrap_or(3600),
+                        };
 
-            // Exchange code for tokens
-            let redirect_uri = format!("http://127.0.0.1:{port}/callback");
-            match crate::services::shared_storage::oauth_flow::exchange_code(
-                &oauth_config,
-                &auth_code,
-                &code_verifier,
-                &redirect_uri,
-            )
-            .await
-            {
-                Ok(token) => {
-                    let now = chrono::Utc::now().timestamp();
-                    let credentials = StorageCredential::OAuth2 {
-                        access_token: token.access_token.clone(),
-                        refresh_token: token.refresh_token.clone(),
-                        expires_at: now + token.expires_in.unwrap_or(3600),
-                    };
+                        get_profile_manager()
+                            .store_oauth_session_credentials(&context, &session_id, &credentials)
+                            .await
+                            .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
 
-                    get_profile_manager()
-                        .store_oauth_session_credentials(&context, &session_id, &credentials)
-                        .await
-                        .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
+                        let verify: Option<StorageCredential> = get_profile_manager()
+                            .retrieve_oauth_session_credentials(&context, &session_id)
+                            .await
+                            .map_err(|e| {
+                                format!("Verify persisted OAuth session credentials: {e}")
+                            })?;
+                        tracing::info!(
+                            "OAuth tokens stored for session {session_id}, verified: {}",
+                            verify.is_some()
+                        );
 
-                    let verify: Option<StorageCredential> = get_profile_manager()
-                        .retrieve_oauth_session_credentials(&context, &session_id)
-                        .await
-                        .map_err(|e| format!("Verify persisted OAuth session credentials: {e}"))?;
-                    tracing::info!(
-                        "OAuth tokens stored for session {session_id}, verified: {}",
-                        verify.is_some()
-                    );
-
-                    // Mark session as completed
-                    {
-                        let mut sessions = get_oauth_sessions().write().await;
-                        if let Some(s) = sessions.get_mut(&session_id) {
-                            s.status = OAuthSessionStatus::Completed;
+                        // Mark session as completed
+                        {
+                            let mut sessions = get_oauth_sessions().write().await;
+                            if let Some(s) = sessions.get_mut(&session_id) {
+                                s.status = OAuthSessionStatus::Completed;
+                            }
+                        }
+                        outcome_ok = true;
+                    }
+                    Err(e) => {
+                        tracing::warn!("OAuth token exchange failed for {session_id}: {e}");
+                        outcome_message = format!("Token exchange failed: {e}");
+                        // Mark session as failed
+                        {
+                            let mut sessions = get_oauth_sessions().write().await;
+                            if let Some(s) = sessions.get_mut(&session_id) {
+                                s.status = OAuthSessionStatus::Failed(e.clone());
+                            }
                         }
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("OAuth token exchange failed for {session_id}: {e}");
-                    // Mark session as failed
-                    {
-                        let mut sessions = get_oauth_sessions().write().await;
-                        if let Some(s) = sessions.get_mut(&session_id) {
-                            s.status = OAuthSessionStatus::Failed(e.clone());
-                        }
-                    }
-                    return Err(e);
-                }
             }
+        } else {
+            outcome_message = "Session not found — please try again.".to_string();
         }
-    } else if error.is_some() {
+    } else if let Some(err) = error {
+        outcome_message = format!("Authorization denied: {err}");
         // Mark session as failed
         {
             let mut sessions = get_oauth_sessions().write().await;
             if let Some(s) = sessions.get_mut(&session_id) {
-                s.status = OAuthSessionStatus::Failed(
-                    error.unwrap_or_else(|| "Authorization denied".to_string()),
-                );
+                s.status = OAuthSessionStatus::Failed(outcome_message.clone());
             }
         }
         tracing::warn!("OAuth authorization denied for session {session_id}");
+    } else {
+        outcome_message = "No authorization code received.".to_string();
     }
 
+    // NOW respond to the browser with the accurate outcome
+    let response_body: String = if outcome_ok {
+        "<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#2e7d32'>Authorization Complete</h1><p>You've successfully authorized Noland.</p><p>You can close this window and return to Noland to complete setup.</p></body></html>".to_string()
+    } else if had_callback_error || outcome_message.contains("denied") {
+        format!("<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>Authorization Failed</h1><p>{}</p><p>You can close this window and try again in Noland.</p></body></html>", html_escape(&outcome_message))
+    } else {
+        format!("<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>Authorization Incomplete</h1><p>{}</p><p>You can close this window and try again in Noland.</p></body></html>", html_escape(&outcome_message))
+    };
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        response_body.len(),
+        response_body
+    );
+    let _ = socket.write_all(response.as_bytes()).await;
+    let _ = socket.shutdown().await;
+
     Ok(())
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn extract_query_param(path: &str, param: &str) -> Option<String> {

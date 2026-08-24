@@ -1,0 +1,32 @@
+[Unit]
+Description=Noland application-state agent
+Documentation=file:///usr/share/doc/noland/state-agent.md
+After=local-fs.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/noland-state-agent
+Restart=on-failure
+RestartSec=2
+# Runtime state only. Durable data lives in user Shared Storage.
+RuntimeDirectory=noland
+RuntimeDirectoryMode=0750
+StateDirectory=noland/state
+StateDirectoryMode=0750
+Environment=NOLAND_HOME=/home/user
+Environment=NOLAND_STATE_ROOT=/var/lib/noland/state
+Environment=NOLAND_RUN_ROOT=/run/noland
+# Never expose the tracker RPC on a network socket.
+# Control stays on the existing authenticated Noland instance channel.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=false
+ReadWritePaths=/var/lib/noland /run/noland
+PrivateTmp=true
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+[Install]
+WantedBy=multi-user.target

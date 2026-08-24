@@ -60,7 +60,7 @@ export RUSTUP_HOME=/root/.rustup
 export CARGO_HOME=/root/.cargo
 export PATH="$CARGO_HOME/bin:$PATH"
 apt-get update -y
-apt-get install -y build-essential pkg-config cmake curl clang ca-certificates libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pipewire pipewire-pulse wireplumber gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav pulseaudio-utils
+apt-get install -y --no-install-recommends build-essential pkg-config curl clang ca-certificates libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pipewire pipewire-pulse wireplumber gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good pulseaudio-utils python3 ufw
 if ! command -v rustup >/dev/null 2>&1; then
   curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 fi

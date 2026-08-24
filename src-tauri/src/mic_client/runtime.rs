@@ -3,7 +3,7 @@ use std::process::Command;
 
 use crate::{
     errors::{AppError, AppResult},
-    utils::managed_binaries::locate_bundled_binary,
+    utils::managed_binaries::{is_executable_file, locate_bundled_binary},
 };
 
 fn framework_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
@@ -239,6 +239,35 @@ fn mic_sender_binary_names() -> Vec<String> {
 }
 
 pub fn resolve_mic_sender_binary() -> AppResult<PathBuf> {
+    if let Ok(explicit) = std::env::var("NOLAND_MIC_SENDER_BIN") {
+        let path = PathBuf::from(explicit.trim());
+        if is_executable_file(&path) {
+            return Ok(path);
+        }
+    }
+
+    // `prepare-mic-sidecar.mjs dev` intentionally builds into .native-deps
+    // without replacing the release-packaging asset under src-tauri/binaries.
+    // Prefer that fresh development binary so `cargo run` cannot accidentally
+    // launch an older bundled sidecar with an incompatible IPC protocol.
+    #[cfg(debug_assertions)]
+    {
+        let executable = if cfg!(target_os = "windows") {
+            "noland-mic-sender.exe"
+        } else {
+            "noland-mic-sender"
+        };
+        let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join(".native-deps")
+            .join("mic-sidecar-target")
+            .join(mic_sender_target_triple())
+            .join("debug")
+            .join(executable);
+        if is_executable_file(&development) {
+            return Ok(development);
+        }
+    }
+
     if let Some(path) = locate_bundled_binary(
         "noland-mic-sender",
         "NOLAND_MIC_SENDER_BIN",

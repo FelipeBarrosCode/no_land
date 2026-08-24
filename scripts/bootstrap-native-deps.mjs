@@ -10,6 +10,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -125,22 +126,29 @@ function bootstrapWindowsTarget(targetTriple) {
 }
 
 function ensureMacGstreamerFramework() {
-  if (hasGstreamerFramework(bundledGstreamerFramework)) {
+  if (hasStructuredGstreamerFramework(bundledGstreamerFramework)) {
     console.log(`Using staged project GStreamer framework: ${bundledGstreamerFramework}`);
     return;
   }
 
   const explicitSource = process.env.NOLAND_GSTREAMER_FRAMEWORK?.trim();
-  if (explicitSource && hasGstreamerFramework(explicitSource)) {
+  if (explicitSource && hasGstreamerFrameworkSource(explicitSource)) {
     stageFrameworkCopy(explicitSource, bundledGstreamerFramework);
     console.log(`Staged GStreamer framework from NOLAND_GSTREAMER_FRAMEWORK=${explicitSource}`);
     return;
   }
 
   const systemFramework = '/Library/Frameworks/GStreamer.framework';
-  if (hasGstreamerFramework(systemFramework)) {
+  if (hasGstreamerFrameworkSource(systemFramework)) {
     stageFrameworkCopy(systemFramework, bundledGstreamerFramework);
     console.log(`Staged GStreamer framework from ${systemFramework}`);
+    return;
+  }
+
+  const extractedFramework = ensureExtractedMacGstreamerFramework();
+  if (extractedFramework) {
+    stageFrameworkCopy(extractedFramework, bundledGstreamerFramework);
+    console.log(`Staged GStreamer framework from extracted runtime package for ${gstreamerVersion}`);
     return;
   }
 
@@ -149,13 +157,6 @@ function ensureMacGstreamerFramework() {
   if (installedFramework) {
     stageFrameworkCopy(installedFramework, bundledGstreamerFramework);
     console.log(`Staged GStreamer framework from installed runtime at ${installedFramework}`);
-    return;
-  }
-
-  const extractedFramework = ensureExtractedMacGstreamerFramework();
-  if (extractedFramework) {
-    stageFrameworkCopy(extractedFramework, bundledGstreamerFramework);
-    console.log(`Staged GStreamer framework from extracted runtime package for ${gstreamerVersion}`);
     return;
   }
 
@@ -197,8 +198,11 @@ function ensureExtractedMacGstreamerFramework() {
   const cacheRoot = macGstreamerCacheRoot();
   const extractedRoot = join(cacheRoot, 'root');
   const extractedFramework = join(extractedRoot, 'Library', 'Frameworks', 'GStreamer.framework');
-  if (hasGstreamerFramework(extractedFramework)) {
+  if (hasGstreamerFrameworkSource(extractedFramework)) {
     return extractedFramework;
+  }
+  if (hasFlattenedGstreamerRuntime(extractedRoot)) {
+    return extractedRoot;
   }
 
   const { runtimePkg } = ensureExpandedMacGstreamerPackages();
@@ -206,18 +210,21 @@ function ensureExtractedMacGstreamerFramework() {
   mkdirSync(extractedRoot, { recursive: true });
   extractFlatPkg(runtimePkg, extractedRoot, join(cacheRoot, 'runtime-expanded'));
 
-  if (hasGstreamerFramework(extractedFramework)) {
+  if (hasGstreamerFrameworkSource(extractedFramework)) {
     return extractedFramework;
+  }
+  if (hasFlattenedGstreamerRuntime(extractedRoot)) {
+    return extractedRoot;
   }
 
   const discoveredFramework = findDirectoriesNamed(extractedRoot, 'GStreamer.framework')
-    .find((candidate) => hasGstreamerFramework(candidate));
+    .find((candidate) => hasGstreamerFrameworkSource(candidate));
   if (discoveredFramework) {
     return discoveredFramework;
   }
 
   const runtimeExpandedFramework = findDirectoriesNamed(join(cacheRoot, 'runtime-expanded'), 'GStreamer.framework')
-    .find((candidate) => hasGstreamerFramework(candidate));
+    .find((candidate) => hasGstreamerFrameworkSource(candidate));
   if (runtimeExpandedFramework) {
     return runtimeExpandedFramework;
   }
@@ -777,6 +784,7 @@ function stageLinuxSystemGstreamerRoot(systemRoot, destination) {
 
   const requiredPluginNames = new Set([
     'libgstcoreelements.so',
+    'libgstapp.so',
     'libgstautodetect.so',
     'libgstplayback.so',
     'libgstvideoconvertscale.so',
@@ -1047,24 +1055,61 @@ function windowsGstreamerDownloadArch(targetTriple) {
   throw new Error(`Unsupported Windows GStreamer download target: ${targetTriple}`);
 }
 
-function hasGstreamerFramework(path) {
-  if (!path) return false;
+function requiredMacGstreamerRuntimeFiles() {
+  return [
+    'lib/libgstreamer-1.0.0.dylib',
+    'lib/libgstapp-1.0.0.dylib',
+    'lib/libgstbase-1.0.0.dylib',
+    'lib/libgstaudio-1.0.0.dylib',
+    'lib/libgstrtp-1.0.0.dylib',
+    'lib/libgstnet-1.0.0.dylib',
+    'lib/libgstpbutils-1.0.0.dylib',
+    'lib/libgsttag-1.0.0.dylib',
+    'lib/libgobject-2.0.0.dylib',
+    'lib/libglib-2.0.0.dylib',
+    'lib/libgio-2.0.0.dylib',
+    'lib/libintl.8.dylib',
+    'lib/libopus.0.dylib',
+    'lib/gstreamer-1.0/libgstcoreelements.dylib',
+    'lib/gstreamer-1.0/libgstapp.dylib',
+    'lib/gstreamer-1.0/libgstaudioconvert.dylib',
+    'lib/gstreamer-1.0/libgstaudioresample.dylib',
+    'lib/gstreamer-1.0/libgstosxaudio.dylib',
+    'lib/gstreamer-1.0/libgstopus.dylib',
+    'lib/gstreamer-1.0/libgstrtp.dylib',
+    'lib/gstreamer-1.0/libgstrtpmanager.dylib',
+    'lib/gstreamer-1.0/libgstudp.dylib',
+  ];
+}
 
-  const versionRoots = [
+function isUsableFile(file) {
+  try {
+    return statSync(file).isFile() && statSync(file).size > 0;
+  } catch {
+    return false;
+  }
+}
+
+function hasRuntimeFiles(root, requiredFiles) {
+  const files = requiredFiles ?? requiredMacGstreamerRuntimeFiles();
+  return files.every((relativePath) => isUsableFile(join(root, relativePath)));
+}
+
+function hasStructuredGstreamerFramework(path) {
+  if (!path) return false;
+  return [
     join(path, 'Versions', 'Current'),
     join(path, 'Versions', '1.0'),
     join(path, 'Versions', gstreamerVersion),
-    path,
-  ];
+  ].some((root) => hasRuntimeFiles(root));
+}
 
-  return versionRoots.some((root) => (
-    existsSync(join(root, 'lib', 'GStreamer'))
-    || existsSync(join(root, 'lib', 'libgstreamer-1.0.dylib'))
-    || existsSync(join(root, 'lib', 'libgstreamer-1.0.0.dylib'))
-    || existsSync(join(root, 'Libraries', 'GStreamer'))
-    || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.dylib'))
-    || existsSync(join(root, 'Libraries', 'libgstreamer-1.0.0.dylib'))
-  ));
+function hasFlattenedGstreamerRuntime(path) {
+  return Boolean(path) && hasRuntimeFiles(path);
+}
+
+function hasGstreamerFrameworkSource(path) {
+  return hasStructuredGstreamerFramework(path) || hasFlattenedGstreamerRuntime(path);
 }
 
 function hasLinuxGstreamerRoot(path) {
@@ -1106,12 +1151,50 @@ function findWindowsGstreamerRoot(root) {
 function stageFrameworkCopy(source, destination) {
   rmSync(destination, { recursive: true, force: true });
   mkdirSync(dirname(destination), { recursive: true });
-  cpSync(source, destination, {
-    recursive: true,
-    force: true,
-    dereference: false,
-    verbatimSymlinks: true,
-  });
+
+  if (hasStructuredGstreamerFramework(source)) {
+    cpSync(source, destination, {
+      recursive: true,
+      force: true,
+      dereference: false,
+      verbatimSymlinks: true,
+    });
+    return;
+  }
+
+  if (hasFlattenedGstreamerRuntime(source)) {
+    synthesizeFrameworkFromFlattenedRuntime(source, destination);
+    return;
+  }
+
+  throw new Error(`Cannot stage macOS GStreamer framework from unusable source ${source}`);
+}
+
+function synthesizeFrameworkFromFlattenedRuntime(source, destination) {
+  const versionsDir = join(destination, 'Versions');
+  const versionDir = join(versionsDir, '1.0');
+  mkdirSync(versionDir, { recursive: true });
+
+  for (const entry of ['bin', 'etc', 'lib', 'libexec', 'share', 'Resources']) {
+    const sourcePath = join(source, entry);
+    if (!existsSync(sourcePath)) continue;
+    cpSync(sourcePath, join(versionDir, entry), {
+      recursive: true,
+      force: true,
+      dereference: true,
+    });
+  }
+
+  const frameworkBinary = join(source, 'GStreamer');
+  if (existsSync(frameworkBinary)) {
+    copyFileSync(frameworkBinary, join(versionDir, 'GStreamer'));
+  }
+
+  symlinkSync('1.0', join(versionsDir, 'Current'));
+  symlinkSync('Versions/Current/GStreamer', join(destination, 'GStreamer'));
+  if (existsSync(join(versionDir, 'Resources'))) {
+    symlinkSync('Versions/Current/Resources', join(destination, 'Resources'));
+  }
 }
 
 function stageDirectory(source, destination) {

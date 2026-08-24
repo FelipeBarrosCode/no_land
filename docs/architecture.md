@@ -23,6 +23,7 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `src/features/settings/*`: settings and shared storage entrypoint
 - `src/features/shared-storage-manager/*`: backup, sync, export, and Sunshine settings UI
 - `src/features/restore/*`: bundle restore UI
+- `src/features/launch-library/*`: full-PC and tracked-software launch modal
 - `src/features/servers/*`: rented server picker
 
 ### Backend
@@ -46,7 +47,12 @@ The UI invokes backend commands through Tauri IPC and reacts to live provisionin
 - `reboot_helper.rs`: reboot/reconnect/service re-init pipeline
 - `post_provision.rs`: executes packaged `scripts/post_provision.sh`
 - `shared_storage/*`: backup/export/restore orchestration
-- `mic_passthrough.rs`: cloud mic session control and runtime status
+- `launch_library.rs`: merges installed and cloud software metadata and builds secure SSH launch plans
+- `software_artwork.rs`: on-demand IGDB artwork lookup with local caching and placeholder fallback
+- `mic_passthrough.rs`: independent microphone control plane, game-session hooks, sidecar supervision, and aggregated health
+- `mic-sidecar/`: the only local microphone runtime; it owns sidecar-backed device enumeration, CPAL capture on Windows/Linux, GStreamer CoreAudio capture on macOS, the bounded ring, optional WebRTC DSP, Opus/RTP/RTCP, and JSON-lines IPC
+- `vm-cloud-mic-agent/`: supervised host RTP receiver, adaptive jitter buffer, Opus PLC/FEC, metrics, and deterministic PipeWire injection
+- `scripts/install_cloud_mic_agent.sh`: persistent `noland_mic_sink` → `noland_mic_source` topology and peer-restricted media-session control
 
 ## State model
 

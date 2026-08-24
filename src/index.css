@@ -78,6 +78,8 @@ body.stream-window,
 body.stream-window #root {
   background: transparent !important;
   background-image: none !important;
+  scrollbar-gutter: auto !important;
+  overflow: hidden !important;
 }
 
 body.stream-window::before,

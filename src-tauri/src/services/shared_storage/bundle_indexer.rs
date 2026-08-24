@@ -433,6 +433,27 @@ def detect_config_folders(home: Path, user: str) -> list:
     return results
 
 
+def detect_top_level_dot_folders(home: Path, user: str) -> list:
+    """Detect ~/.<app> folders (e.g. ~/.minecraft, ~/.sklauncher)."""
+    results = []
+    ignores = {".config", ".local", ".cache", ".ssh", ".gnupg", ".bash_history", ".profile", ".bashrc", ".pki", ".var", ".rustup", ".cargo", ".npm", ".nvm", ".wget-hsts", ".sudo_as_admin_successful"}
+    for entry in home.iterdir():
+        if entry.is_dir() and entry.name.startswith(".") and entry.name not in ignores:
+            name = entry.name.lstrip(".")
+            norm = normalize_name(name)
+            results.append({
+                "normalized_key": norm,
+                "name": name.capitalize(),
+                "signal": "hidden_home_folder",
+                "source": f"home/{user}/{entry.name}",
+                "target": f"/home/{user}/{entry.name}",
+                "kind": "folder",
+                "default_selected": True,
+                "confidence_boost": 0.20,
+            })
+    return results
+
+
 def detect_local_share(home: Path, user: str) -> list:
     """Detect ~/.local/share/* folders (excluding applications)."""
     results = []
@@ -461,7 +482,7 @@ def detect_local_share(home: Path, user: str) -> list:
 def detect_downloaded_apps(home: Path, user: str) -> list:
     """Detect AppImages, .deb, archives under ~/Applications and ~/Downloads."""
     results = []
-    app_exts = {".appimage", ".deb", ".tar.gz", ".tgz", ".zip", ".7z", ".rar"}
+    app_exts = {".appimage", ".deb", ".tar.gz", ".tgz", ".zip", ".7z", ".rar", ".jar"}
 
     for scan_dir in [home / "Applications", home / "Downloads"]:
         if not scan_dir.exists():
@@ -622,6 +643,7 @@ def main():
     partials = []
     partials.extend(detect_launchers(home, args.user))
     partials.extend(detect_config_folders(home, args.user))
+    partials.extend(detect_top_level_dot_folders(home, args.user))
     partials.extend(detect_local_share(home, args.user))
     partials.extend(detect_downloaded_apps(home, args.user))
     partials.extend(detect_projects(home, args.user))

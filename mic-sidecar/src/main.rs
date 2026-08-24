@@ -1,760 +1,689 @@
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-use std::collections::HashSet;
+mod capture;
+mod metrics;
+mod pipeline;
+mod protocol;
+mod ring;
+mod state;
+
+use arc_swap::ArcSwap;
+use capture::{
+    current_default_device_id, device_available, list_devices, AudioInput, CaptureController,
+    CaptureSignal, SharedInput, SourceKind,
+};
+use metrics::{CaptureBackend, Metrics};
+use pipeline::PipelineSession;
+use protocol::{Command, Output, Request, ResponseResult, SessionConfig};
+use serde_json::{json, Value};
+use state::{Health, SidecarState, StateMachine, Status};
+use std::io::{self, BufRead, Write};
 use std::process;
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
-};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-use gst::prelude::*;
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-use gstreamer as gst;
-use serde::{Deserialize, Serialize};
-
-#[cfg(target_os = "macos")]
-use std::{
-    ffi::{c_void, CStr},
-    mem::{size_of, MaybeUninit},
-    os::raw::c_char,
-    ptr, slice,
-};
-
-#[cfg(target_os = "macos")]
-use core_foundation_sys::string::{
-    kCFStringEncodingUTF8, CFStringGetCString, CFStringGetLength,
-    CFStringGetMaximumSizeForEncoding, CFStringRef,
-};
-#[cfg(target_os = "macos")]
-use coreaudio_sys::{
-    kAudioDevicePropertyDeviceUID, kAudioDevicePropertyStreamConfiguration,
-    kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDevices,
-    kAudioObjectPropertyElementMain, kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal,
-    kAudioObjectPropertyScopeInput, kAudioObjectSystemObject, AudioBufferList, AudioDeviceID,
-    AudioObjectGetPropertyData, AudioObjectGetPropertyDataSize, AudioObjectID,
-    AudioObjectPropertyAddress,
-};
-
-const SAMPLE_RATE: i32 = 48_000;
-const CHANNELS: i32 = 1;
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-const COMPLEXITY: i32 = 5;
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-const RTP_PAYLOAD_TYPE: i32 = 96;
-
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-const WINDOWS_ARM64_UNSUPPORTED_MESSAGE: &str = "Microphone passthrough is not yet supported on Windows ARM64 because the required GStreamer SDK is not published for that target.";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct MicrophoneDevice {
-    id: String,
-    name: String,
-    is_default: bool,
-    sample_rates: Vec<u32>,
-    channels: u8,
-}
-
-#[derive(Debug, Clone)]
-struct StreamArgs {
-    host: String,
-    port: u16,
-    device_id: Option<String>,
-    bitrate_kbps: u32,
-    frame_ms: u32,
-}
-
-#[cfg(target_os = "macos")]
-#[derive(Debug, Clone)]
-struct MacosAudioInputDevice {
-    name: String,
-    uid: String,
-    is_default: bool,
-    channels: u32,
-}
+const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const CAPTURE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const CAPTURE_SILENCE_DEGRADE_INTERVAL: Duration = Duration::from_secs(10);
+const CAPTURE_SILENCE_ERROR: &str =
+    "microphone capture is running but has produced only zero samples";
 
 fn main() {
-    match run() {
-        Ok(()) => process::exit(0),
-        Err(error) => {
-            eprintln!("{error}");
-            process::exit(1);
-        }
+    if let Err(error) = run() {
+        eprintln!("{error}");
+        process::exit(1);
     }
 }
 
 fn run() -> Result<(), String> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
-    let Some(command) = args.first().map(String::as_str) else {
-        return Err("Missing microphone sender sidecar command".to_string());
-    };
-
-    match command {
-        "list-devices" => {
-            let devices = list_devices()?;
-            if args.iter().any(|arg| arg == "--json") {
-                let payload = serde_json::to_string(&devices)
-                    .map_err(|error| format!("Failed serializing device list: {error}"))?;
-                println!("{payload}");
-            } else {
-                for device in devices {
-                    println!("{}\t{}", device.id, device.name);
-                }
-            }
-            Ok(())
-        }
-        "stream" => run_stream(parse_stream_args(&args[1..])?),
-        other => Err(format!(
-            "Unsupported microphone sender sidecar command '{other}'"
-        )),
+    match args.first().map(String::as_str) {
+        None | Some("daemon") => run_daemon(),
+        Some("list-devices") => run_list_devices(&args[1..]),
+        Some("probe-devices") => run_probe_devices(),
+        Some("stream") => run_compat_stream(&args[1..]),
+        Some(other) => Err(format!("unsupported microphone sidecar command '{other}'")),
     }
 }
 
-fn parse_stream_args(args: &[String]) -> Result<StreamArgs, String> {
-    let host = required_arg(args, "--host")?;
-    let port = required_arg(args, "--port")?
-        .parse::<u16>()
-        .map_err(|error| format!("Invalid --port value: {error}"))?;
-    let bitrate_kbps = required_arg(args, "--bitrate-kbps")?
-        .parse::<u32>()
-        .map_err(|error| format!("Invalid --bitrate-kbps value: {error}"))?;
-    let frame_ms = required_arg(args, "--frame-ms")?
-        .parse::<u32>()
-        .map_err(|error| format!("Invalid --frame-ms value: {error}"))?;
-    let device_id = optional_arg(args, "--device-id");
-
-    Ok(StreamArgs {
-        host,
-        port,
-        device_id,
-        bitrate_kbps,
-        frame_ms,
-    })
-}
-
-fn required_arg(args: &[String], flag: &str) -> Result<String, String> {
-    optional_arg(args, flag).ok_or_else(|| format!("Missing required argument {flag}"))
-}
-
-fn optional_arg(args: &[String], flag: &str) -> Option<String> {
-    args.windows(2)
-        .find(|window| window[0] == flag)
-        .map(|window| window[1].clone())
-}
-
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-fn list_devices() -> Result<Vec<MicrophoneDevice>, String> {
-    gst::init().map_err(|error| format!("Failed initializing GStreamer: {error}"))?;
-
-    #[cfg(target_os = "macos")]
-    {
-        let devices_in_coreaudio = list_macos_audio_input_devices()?;
-        let mut devices = vec![MicrophoneDevice {
-            id: "default".to_string(),
-            name: "System Default".to_string(),
-            is_default: true,
-            sample_rates: vec![SAMPLE_RATE as u32],
-            channels: CHANNELS as u8,
-        }];
-
-        let mut seen_names = HashSet::new();
-        for device in devices_in_coreaudio {
-            if device.name.trim().is_empty() || !seen_names.insert(device.name.clone()) {
-                continue;
-            }
-
-            devices.push(MicrophoneDevice {
-                id: device.name.clone(),
-                name: device.name,
-                is_default: device.is_default,
-                sample_rates: vec![SAMPLE_RATE as u32],
-                channels: device.channels.clamp(1, u8::MAX as u32) as u8,
-            });
-        }
-
-        return Ok(devices);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let devices_in_monitor = list_audio_source_devices()?;
-        let mut devices = vec![MicrophoneDevice {
-            id: "default".to_string(),
-            name: "System Default".to_string(),
-            is_default: true,
-            sample_rates: vec![SAMPLE_RATE as u32],
-            channels: CHANNELS as u8,
-        }];
-
-        let mut seen_names = HashSet::new();
-        for device in devices_in_monitor {
-            let display_name = device.display_name().to_string();
-            if display_name.trim().is_empty() || !seen_names.insert(display_name.clone()) {
-                continue;
-            }
-
-            devices.push(MicrophoneDevice {
-                id: display_name.clone(),
-                name: display_name,
-                is_default: device_is_default(&device),
-                sample_rates: vec![SAMPLE_RATE as u32],
-                channels: CHANNELS as u8,
-            });
-        }
-
-        Ok(devices)
-    }
-}
-
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-fn list_devices() -> Result<Vec<MicrophoneDevice>, String> {
-    Ok(Vec::new())
-}
-
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-fn run_stream(args: StreamArgs) -> Result<(), String> {
-    gst::init().map_err(|error| format!("Failed initializing GStreamer: {error}"))?;
-
-    let pipeline = build_pipeline(&args)?;
-
-    pipeline
-        .set_state(gst::State::Playing)
-        .map_err(|error| format!("Failed starting microphone sender pipeline: {error:?}"))?;
-
-    let running = Arc::new(AtomicBool::new(true));
-    let signal_flag = running.clone();
-    ctrlc::set_handler(move || {
-        signal_flag.store(false, Ordering::SeqCst);
-    })
-    .map_err(|error| format!("Failed installing microphone sender signal handler: {error}"))?;
-
-    let bus = pipeline
-        .bus()
-        .ok_or_else(|| "Microphone sender pipeline bus is unavailable".to_string())?;
-
-    while running.load(Ordering::SeqCst) {
-        if let Some(message) = bus.timed_pop(gst::ClockTime::from_mseconds(250)) {
-            match message.view() {
-                gst::MessageView::Error(error) => {
-                    let debug = error.debug().unwrap_or_default();
-                    let _ = pipeline.set_state(gst::State::Null);
-                    return Err(format!(
-                        "Microphone sender pipeline error from {}: {} ({debug})",
-                        error
-                            .src()
-                            .map(|src| src.path_string())
-                            .unwrap_or_else(|| "unknown".to_string().into()),
-                        error.error()
-                    ));
-                }
-                gst::MessageView::Eos(..) => break,
-                _ => {}
-            }
+fn run_list_devices(args: &[String]) -> Result<(), String> {
+    let devices = list_devices()?;
+    if args.iter().any(|arg| arg == "--json") {
+        println!(
+            "{}",
+            serde_json::to_string(&devices)
+                .map_err(|error| format!("failed serializing devices: {error}"))?
+        );
+    } else {
+        for device in devices {
+            println!("{}\t{}", device.id, device.name);
         }
     }
-
-    let _ = pipeline.send_event(gst::event::Eos::new());
-    let _ = pipeline.set_state(gst::State::Null);
     Ok(())
 }
 
-#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-fn run_stream(_args: StreamArgs) -> Result<(), String> {
-    Err(WINDOWS_ARM64_UNSUPPORTED_MESSAGE.to_string())
-}
-
-#[cfg(all(
-    target_os = "macos",
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
-    let resolved_device = resolve_macos_stream_device(args.device_id.as_deref())?;
-    eprintln!(
-        "Using macOS microphone '{}' with CoreAudio UID '{}'",
-        resolved_device.name, resolved_device.uid
-    );
-
-    let description = format!(
-        concat!(
-            "osxaudiosrc unique-id=\"{}\" ",
-            "! queue max-size-buffers=2 leaky=downstream ",
-            "! audioconvert input-channels-reorder-mode=unpositioned input-channels-reorder=mono ",
-            "! audioresample ",
-            "! audio/x-raw,format=S16LE,rate={},channels={} ",
-            "! opusenc audio-type=voice bitrate={} bitrate-type=constrained-vbr frame-size={} complexity={} dtx=false inband-fec=false ",
-            "! rtpopuspay pt={} ",
-            "! udpsink host=\"{}\" port={} sync=false async=false"
-        ),
-        gst_string_literal(&resolved_device.uid),
-        SAMPLE_RATE,
-        CHANNELS,
-        (args.bitrate_kbps * 1000),
-        args.frame_ms,
-        COMPLEXITY,
-        RTP_PAYLOAD_TYPE,
-        gst_string_literal(&args.host),
-        args.port
-    );
-
-    let element = gst::parse::launch(&description)
-        .map_err(|error| format!("Failed building macOS microphone pipeline: {error}"))?;
-
-    element.downcast::<gst::Pipeline>().map_err(|element| {
-        format!(
-            "macOS microphone pipeline description did not produce a pipeline (got '{}')",
-            element.type_().name()
-        )
-    })
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn build_pipeline(args: &StreamArgs) -> Result<gst::Pipeline, String> {
-    let pipeline = gst::Pipeline::new();
-    let source = build_source(args.device_id.as_deref())?;
-    let queue = make_element("queue")?;
-    let convert = make_element("audioconvert")?;
-    let resample = make_element("audioresample")?;
-    let capsfilter = make_element("capsfilter")?;
-    let opusenc = make_element("opusenc")?;
-    let pay = make_element("rtpopuspay")?;
-    let sink = make_element("udpsink")?;
-
-    queue.set_property("max-size-buffers", 2u32);
-    queue.set_property_from_str("leaky", "downstream");
-
-    let raw_caps = gst::Caps::builder("audio/x-raw")
-        .field("format", "S16LE")
-        .field("rate", SAMPLE_RATE)
-        .field("channels", CHANNELS)
-        .build();
-    capsfilter.set_property("caps", raw_caps);
-
-    opusenc.set_property_from_str("audio-type", "voice");
-    opusenc.set_property("bitrate", (args.bitrate_kbps * 1000) as i32);
-    opusenc.set_property_from_str("bitrate-type", "constrained-vbr");
-    opusenc.set_property_from_str("frame-size", &args.frame_ms.to_string());
-    opusenc.set_property("complexity", COMPLEXITY);
-    opusenc.set_property("dtx", false);
-    opusenc.set_property("inband-fec", false);
-
-    pay.set_property("pt", RTP_PAYLOAD_TYPE as u32);
-
-    sink.set_property("host", args.host.as_str());
-    sink.set_property("port", args.port as i32);
-    sink.set_property("sync", false);
-    sink.set_property("async", false);
-
-    pipeline
-        .add_many([
-            &source,
-            &queue,
-            &convert,
-            &resample,
-            &capsfilter,
-            &opusenc,
-            &pay,
-            &sink,
-        ])
-        .map_err(|error| format!("Failed assembling microphone sender pipeline: {error}"))?;
-    gst::Element::link_many([
-        &source,
-        &queue,
-        &convert,
-        &resample,
-        &capsfilter,
-        &opusenc,
-        &pay,
-        &sink,
-    ])
-    .map_err(|error| format!("Failed linking microphone sender pipeline: {error}"))?;
-
-    Ok(pipeline)
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn build_source(device_id: Option<&str>) -> Result<gst::Element, String> {
-    let source = if let Some(requested) = device_id.map(str::trim).filter(|value| !value.is_empty())
-    {
-        create_monitored_device_source(requested)?
-    } else {
-        create_default_source()?
-    };
-
-    if source.find_property("do-timestamp").is_some() {
-        source.set_property("do-timestamp", true);
-    }
-    if source.find_property("low-latency").is_some() {
-        source.set_property("low-latency", true);
-    }
-
-    Ok(source)
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn create_monitored_device_source(requested: &str) -> Result<gst::Element, String> {
-    let device = list_audio_source_devices()?
-        .into_iter()
-        .find(|device| device.display_name().as_str() == requested)
-        .ok_or_else(|| {
-            format!(
-                "Requested microphone device '{}' is no longer available via GStreamer",
-                requested
-            )
-        })?;
-
-    create_source_for_device(&device).map_err(|error| {
-        format!(
-            "Failed creating source element for '{}': {error}",
-            requested
-        )
-    })
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn create_default_source() -> Result<gst::Element, String> {
-    let factory_name = if cfg!(target_os = "windows") {
-        "wasapisrc"
-    } else {
-        "pipewiresrc"
-    };
-
-    make_element(factory_name)
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn list_audio_source_devices() -> Result<Vec<gst::Device>, String> {
-    let monitor = gst::DeviceMonitor::new();
-    let caps = gst::Caps::builder("audio/x-raw").build();
-    monitor.add_filter(Some("Audio/Source"), Some(&caps));
-    monitor
-        .start()
-        .map_err(|error| format!("Failed starting device monitor: {error}"))?;
-    let devices = monitor.devices().into_iter().collect::<Vec<_>>();
-    monitor.stop();
-    Ok(devices)
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn create_source_for_device(device: &gst::Device) -> Result<gst::Element, String> {
-    device.create_element(None).map_err(|error| {
-        format!(
-            "Failed to create source element for '{}': {error}",
-            device.display_name()
-        )
-    })
-}
-
-#[cfg(all(
-    not(target_os = "macos"),
-    not(all(target_os = "windows", target_arch = "aarch64"))
-))]
-fn device_is_default(device: &gst::Device) -> bool {
-    device
-        .properties()
-        .and_then(|properties| properties.get_optional::<bool>("is-default").ok().flatten())
-        .unwrap_or(false)
+/// Probe GStreamer's Audio/Source device monitor and print display names so
+/// we can compare them with CPAL device names for matching.
+#[cfg(target_os = "macos")]
+fn run_probe_devices() -> Result<(), String> {
+    capture::probe_gstreamer_source_devices()
 }
 
 #[cfg(not(target_os = "macos"))]
-#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-fn make_element(factory_name: &str) -> Result<gst::Element, String> {
-    gst::ElementFactory::make(factory_name)
-        .build()
-        .map_err(|_| {
-            format!(
-                "Required GStreamer element '{}' is not available",
-                factory_name
-            )
-        })
-}
-
-#[cfg(target_os = "macos")]
-fn gst_string_literal(value: &str) -> String {
-    value.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_macos_stream_device(requested: Option<&str>) -> Result<MacosAudioInputDevice, String> {
-    let devices = list_macos_audio_input_devices()?;
-    if devices.is_empty() {
-        return Err("No macOS audio input devices are available".to_string());
-    }
-
-    let requested = requested
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && *value != "default");
-
-    match requested {
-        Some(requested) => devices
-            .iter()
-            .find(|device| device.name == requested || device.uid == requested)
-            .cloned()
-            .ok_or_else(|| {
-                let available = devices
-                    .iter()
-                    .map(|device| format!("{} [{}]", device.name, device.uid))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!(
-                    "Requested macOS microphone '{}' was not found. Available devices: {}",
-                    requested, available
-                )
-            }),
-        None => devices
-            .iter()
-            .find(|device| device.is_default)
-            .cloned()
-            .or_else(|| devices.first().cloned())
-            .ok_or_else(|| "No macOS default audio input device is available".to_string()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn list_macos_audio_input_devices() -> Result<Vec<MacosAudioInputDevice>, String> {
-    let device_ids = list_macos_device_ids()?;
-    let default_device_id = get_macos_default_input_device_id()?;
-    let mut devices = Vec::new();
-
-    for device_id in device_ids {
-        let channels = get_macos_input_channel_count(device_id)?;
-        if channels == 0 {
-            continue;
-        }
-
-        let name = get_macos_device_name(device_id)?;
-        let uid = get_macos_device_uid(device_id)?;
-        if name.trim().is_empty() || uid.trim().is_empty() {
-            continue;
-        }
-
-        devices.push(MacosAudioInputDevice {
-            name,
-            uid,
-            is_default: device_id == default_device_id,
-            channels,
-        });
-    }
-
-    Ok(devices)
-}
-
-#[cfg(target_os = "macos")]
-fn list_macos_device_ids() -> Result<Vec<AudioDeviceID>, String> {
-    let address = macos_property_address(
-        kAudioHardwarePropertyDevices,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    let size = get_macos_property_data_size(kAudioObjectSystemObject, &address)? as usize;
-    let count = size / size_of::<AudioDeviceID>();
-    let mut devices = vec![0 as AudioDeviceID; count];
-    get_macos_property_data_into(
-        kAudioObjectSystemObject,
-        &address,
-        (devices.len() * size_of::<AudioDeviceID>()) as u32,
-        devices.as_mut_ptr().cast::<c_void>(),
-    )?;
-    Ok(devices)
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_default_input_device_id() -> Result<AudioDeviceID, String> {
-    let address = macos_property_address(
-        kAudioHardwarePropertyDefaultInputDevice,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    get_macos_scalar_property(kAudioObjectSystemObject, &address)
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_input_channel_count(device_id: AudioDeviceID) -> Result<u32, String> {
-    let address = macos_property_address(
-        kAudioDevicePropertyStreamConfiguration,
-        kAudioObjectPropertyScopeInput,
-    );
-    let size = get_macos_property_data_size(device_id, &address)? as usize;
-    if size < size_of::<AudioBufferList>() {
-        return Ok(0);
-    }
-
-    let mut storage = vec![0u8; size];
-    get_macos_property_data_into(
-        device_id,
-        &address,
-        size as u32,
-        storage.as_mut_ptr().cast(),
-    )?;
-
-    let buffer_list = unsafe { &*(storage.as_ptr().cast::<AudioBufferList>()) };
-    let buffers = unsafe {
-        slice::from_raw_parts(
-            buffer_list.mBuffers.as_ptr(),
-            buffer_list.mNumberBuffers as usize,
-        )
-    };
-
-    Ok(buffers.iter().map(|buffer| buffer.mNumberChannels).sum())
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_device_name(device_id: AudioDeviceID) -> Result<String, String> {
-    let address = macos_property_address(kAudioObjectPropertyName, kAudioObjectPropertyScopeGlobal);
-    get_macos_cfstring_property(device_id, &address)
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_device_uid(device_id: AudioDeviceID) -> Result<String, String> {
-    let address = macos_property_address(
-        kAudioDevicePropertyDeviceUID,
-        kAudioObjectPropertyScopeGlobal,
-    );
-    get_macos_cfstring_property(device_id, &address)
-}
-
-#[cfg(target_os = "macos")]
-fn macos_property_address(selector: u32, scope: u32) -> AudioObjectPropertyAddress {
-    AudioObjectPropertyAddress {
-        mSelector: selector,
-        mScope: scope,
-        mElement: kAudioObjectPropertyElementMain,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_scalar_property<T: Copy>(
-    object_id: AudioObjectID,
-    address: &AudioObjectPropertyAddress,
-) -> Result<T, String> {
-    let mut value = MaybeUninit::<T>::uninit();
-    get_macos_property_data_into(
-        object_id,
-        address,
-        size_of::<T>() as u32,
-        value.as_mut_ptr().cast::<c_void>(),
-    )?;
-    Ok(unsafe { value.assume_init() })
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_cfstring_property(
-    object_id: AudioObjectID,
-    address: &AudioObjectPropertyAddress,
-) -> Result<String, String> {
-    let cf_string = get_macos_scalar_property::<CFStringRef>(object_id, address)?;
-    if cf_string.is_null() {
-        return Err(format!(
-            "CoreAudio returned a null CFString for selector '{}' on object {}",
-            fourcc(address.mSelector),
-            object_id
-        ));
-    }
-
-    let length = unsafe { CFStringGetLength(cf_string) };
-    let capacity = unsafe { CFStringGetMaximumSizeForEncoding(length, kCFStringEncodingUTF8) } + 1;
-    let mut buffer = vec![0 as c_char; capacity.max(1) as usize];
-    let success = unsafe {
-        CFStringGetCString(
-            cf_string,
-            buffer.as_mut_ptr(),
-            buffer.len() as isize,
-            kCFStringEncodingUTF8,
-        )
-    };
-    if success == 0 {
-        return Err(format!(
-            "Failed converting CoreAudio CFString property '{}' on object {} to UTF-8",
-            fourcc(address.mSelector),
-            object_id
-        ));
-    }
-
-    let value = unsafe { CStr::from_ptr(buffer.as_ptr()) }
-        .to_string_lossy()
-        .into_owned();
-    Ok(value)
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_property_data_size(
-    object_id: AudioObjectID,
-    address: &AudioObjectPropertyAddress,
-) -> Result<u32, String> {
-    let mut data_size = 0u32;
-    let status = unsafe {
-        AudioObjectGetPropertyDataSize(object_id, address, 0, ptr::null(), &mut data_size)
-    };
-    if status != 0 {
-        return Err(format!(
-            "CoreAudio failed getting property size '{}' for object {}: {}",
-            fourcc(address.mSelector),
-            object_id,
-            format_os_status(status)
-        ));
-    }
-    Ok(data_size)
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_property_data_into(
-    object_id: AudioObjectID,
-    address: &AudioObjectPropertyAddress,
-    mut data_size: u32,
-    data: *mut c_void,
-) -> Result<(), String> {
-    let status = unsafe {
-        AudioObjectGetPropertyData(object_id, address, 0, ptr::null(), &mut data_size, data)
-    };
-    if status != 0 {
-        return Err(format!(
-            "CoreAudio failed getting property '{}' for object {}: {}",
-            fourcc(address.mSelector),
-            object_id,
-            format_os_status(status)
-        ));
-    }
+fn run_probe_devices() -> Result<(), String> {
+    println!("probe-devices is macOS-only");
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn fourcc(value: u32) -> String {
-    let bytes = value.to_be_bytes();
-    if bytes
-        .iter()
-        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
-    {
-        String::from_utf8_lossy(&bytes).into_owned()
-    } else {
-        format!("0x{value:08x}")
+fn run_daemon() -> Result<(), String> {
+    let (input_tx, input_rx) = mpsc::channel();
+    spawn_stdin_reader(input_tx);
+    let shutdown = install_signal_handler()?;
+    let mut daemon = Daemon::new();
+
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            daemon.shutdown();
+            return Ok(());
+        }
+        match input_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(InputMessage::Request(request)) => {
+                let should_shutdown = matches!(request.command, Command::Shutdown);
+                daemon.handle_request(request);
+                if should_shutdown {
+                    return Ok(());
+                }
+            }
+            Ok(InputMessage::Invalid { id, error }) => emit(Output::error(id, error)),
+            Ok(InputMessage::Eof) => {
+                daemon.shutdown();
+                return Ok(());
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                daemon.shutdown();
+                return Ok(());
+            }
+        }
+        daemon.tick();
     }
 }
 
-#[cfg(target_os = "macos")]
-fn format_os_status(status: i32) -> String {
-    let bytes = (status as u32).to_be_bytes();
-    if bytes
-        .iter()
-        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
-    {
-        format!("{} ('{}')", status, String::from_utf8_lossy(&bytes))
+fn run_compat_stream(args: &[String]) -> Result<(), String> {
+    let host = required_arg(args, "--host")?;
+    let rtp_port = required_arg(args, "--port")?
+        .parse::<u16>()
+        .map_err(|error| format!("invalid --port: {error}"))?;
+    let bitrate_kbps = optional_arg(args, "--bitrate-kbps")
+        .unwrap_or_else(|| "32".to_string())
+        .parse::<u32>()
+        .map_err(|error| format!("invalid --bitrate-kbps: {error}"))?;
+    let frame_ms = optional_arg(args, "--frame-ms")
+        .unwrap_or_else(|| "10".to_string())
+        .parse::<u32>()
+        .map_err(|error| format!("invalid --frame-ms: {error}"))?;
+    let selected = optional_arg(args, "--device-id");
+    let source = if args.iter().any(|arg| arg == "--test-sine") {
+        SourceKind::Sine
     } else {
-        status.to_string()
+        SourceKind::Microphone
+    };
+    let config = SessionConfig {
+        session_id: optional_arg(args, "--session-id")
+            .unwrap_or_else(|| "compat-stream".to_string()),
+        host,
+        rtp_port,
+        rtcp_port: optional_arg(args, "--rtcp-port").and_then(|value| value.parse().ok()),
+        rtcp_listen_port: optional_arg(args, "--rtcp-listen-port")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        bitrate: bitrate_kbps.saturating_mul(1_000),
+        frame_ms,
+        fec: args.iter().any(|arg| arg == "--fec"),
+        packet_loss_percent: optional_arg(args, "--packet-loss-percent")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5),
+        dtx: args.iter().any(|arg| arg == "--dtx"),
+        ssrc: optional_arg(args, "--ssrc").and_then(|value| value.parse().ok()),
+        sequence_offset: optional_arg(args, "--sequence-offset")
+            .and_then(|value| value.parse().ok()),
+        timestamp_offset: optional_arg(args, "--timestamp-offset")
+            .and_then(|value| value.parse().ok()),
+        source,
+    };
+    config.validate()?;
+
+    let shutdown = install_signal_handler()?;
+    let mut daemon = Daemon::new();
+    daemon.selected_device_id = selected;
+    daemon.start_session(config)?;
+    while !shutdown.load(Ordering::Acquire) {
+        daemon.tick();
+        thread::sleep(Duration::from_millis(100));
+    }
+    daemon.shutdown();
+    Ok(())
+}
+
+fn required_arg(args: &[String], name: &str) -> Result<String, String> {
+    optional_arg(args, name).ok_or_else(|| format!("missing required argument {name}"))
+}
+
+fn optional_arg(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
+}
+
+fn install_signal_handler() -> Result<Arc<AtomicBool>, String> {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let signal_shutdown = shutdown.clone();
+    ctrlc::set_handler(move || signal_shutdown.store(true, Ordering::Release))
+        .map_err(|error| format!("failed installing signal handler: {error}"))?;
+    Ok(shutdown)
+}
+
+enum InputMessage {
+    Request(Request),
+    Invalid { id: Value, error: String },
+    Eof,
+}
+
+fn spawn_stdin_reader(sender: Sender<InputMessage>) {
+    thread::Builder::new()
+        .name("noland-mic-ipc".to_string())
+        .spawn(move || {
+            let stdin = io::stdin();
+            for line in stdin.lock().lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(error) => {
+                        let _ = sender.send(InputMessage::Invalid {
+                            id: Value::Null,
+                            error: format!("failed reading stdin: {error}"),
+                        });
+                        break;
+                    }
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                eprintln!("[mic-sidecar] raw stdin: {:?}", line);
+                let value = match serde_json::from_str::<Value>(&line) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        let _ = sender.send(InputMessage::Invalid {
+                            id: Value::Null,
+                            error: format!("invalid JSON request: {error}"),
+                        });
+                        continue;
+                    }
+                };
+                let id = value.get("id").cloned().unwrap_or(Value::Null);
+                match serde_json::from_value::<Request>(value) {
+                    Ok(request) => {
+                        if sender.send(InputMessage::Request(request)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(InputMessage::Invalid {
+                            id,
+                            error: format!("invalid command: {error}"),
+                        });
+                    }
+                }
+            }
+            let _ = sender.send(InputMessage::Eof);
+        })
+        .expect("stdin reader thread creation must succeed");
+}
+
+fn emit(output: Output) {
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    if serde_json::to_writer(&mut lock, &output).is_ok() {
+        let _ = lock.write_all(b"\n");
+        let _ = lock.flush();
+    }
+}
+
+struct Daemon {
+    state: StateMachine,
+    metrics: Arc<Metrics>,
+    input: SharedInput,
+    capture: CaptureController,
+    capture_tx: Sender<CaptureSignal>,
+    capture_rx: Receiver<CaptureSignal>,
+    pipeline: Option<PipelineSession>,
+    muted: Arc<AtomicBool>,
+    selected_device_id: Option<String>,
+    active_device_id: Option<String>,
+    session_config: Option<SessionConfig>,
+    capture_backend: CaptureBackend,
+    capture_started_at: Option<Instant>,
+    capture_nonzero_observed: u64,
+    capture_last_nonzero_at: Option<Instant>,
+    capture_silence_degraded: bool,
+    retry_at: Instant,
+    next_device_poll: Instant,
+}
+
+impl Daemon {
+    fn new() -> Self {
+        let (capture_tx, capture_rx) = mpsc::channel();
+        Self {
+            state: StateMachine::default(),
+            metrics: Arc::new(Metrics::default()),
+            input: Arc::new(ArcSwap::from(AudioInput::silent())),
+            capture: CaptureController::default(),
+            capture_tx,
+            capture_rx,
+            pipeline: None,
+            muted: Arc::new(AtomicBool::new(false)),
+            selected_device_id: None,
+            active_device_id: None,
+            session_config: None,
+            capture_backend: CaptureBackend::None,
+            capture_started_at: None,
+            capture_nonzero_observed: 0,
+            capture_last_nonzero_at: None,
+            capture_silence_degraded: false,
+            retry_at: Instant::now(),
+            next_device_poll: Instant::now(),
+        }
+    }
+
+    fn handle_request(&mut self, request: Request) {
+        let id = request.id;
+        let result = match request.command {
+            Command::ListDevices => {
+                list_devices().map(|devices| ResponseResult::Devices { devices })
+            }
+            Command::GetStatus => Ok(ResponseResult::Status(self.status())),
+            Command::SelectDevice { device_id } => self
+                .select_device(device_id)
+                .map(|_| ResponseResult::Status(self.status())),
+            Command::StartSession { config } => self
+                .start_session(config.clone())
+                .map(|_| ResponseResult::SessionConfig(config)),
+            Command::StopSession => {
+                self.stop_session();
+                Ok(ResponseResult::Ack { acknowledged: true })
+            }
+            Command::Mute => {
+                self.muted.store(true, Ordering::Release);
+                self.emit_event("muteChanged", json!({ "muted": true }));
+                Ok(ResponseResult::Status(self.status()))
+            }
+            Command::Unmute => {
+                self.muted.store(false, Ordering::Release);
+                self.emit_event("muteChanged", json!({ "muted": false }));
+                Ok(ResponseResult::Status(self.status()))
+            }
+            Command::SetBitrate { bitrate } => self
+                .set_bitrate(bitrate)
+                .map(|_| ResponseResult::Ack { acknowledged: true }),
+            Command::GetMetrics => Ok(ResponseResult::Metrics(self.metrics.snapshot())),
+            Command::Shutdown => {
+                self.shutdown();
+                Ok(ResponseResult::Ack { acknowledged: true })
+            }
+        };
+        match result {
+            Ok(result) => emit(Output::success(id, result)),
+            Err(error) => emit(Output::error(id, error)),
+        }
+    }
+
+    fn status(&self) -> Status {
+        Status {
+            session_id: self
+                .session_config
+                .as_ref()
+                .map(|config| config.session_id.clone()),
+            state: self.state.state(),
+            health: self.state.health(),
+            muted: self.muted.load(Ordering::Acquire),
+            selected_device_id: self.selected_device_id.clone(),
+            active_device_id: self.active_device_id.clone(),
+            active_sample_rate: self.input.load().sample_rate,
+            capture_backend: self.capture_backend,
+            session_active: self.pipeline.is_some(),
+            last_error: self.state.last_error(),
+        }
+    }
+
+    fn start_session(&mut self, config: SessionConfig) -> Result<(), String> {
+        if self.pipeline.is_some() {
+            return Err("a session is already active".to_string());
+        }
+        config.validate()?;
+        self.state.transition(SidecarState::Starting)?;
+        self.emit_state();
+        let pipeline = match PipelineSession::start(
+            &config,
+            self.input.clone(),
+            self.muted.clone(),
+            self.metrics.clone(),
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error) => {
+                let _ = self.state.transition(SidecarState::Idle);
+                self.state.failed(error.clone());
+                self.emit_state();
+                return Err(error);
+            }
+        };
+        self.emit_event(
+            "sessionStarted",
+            json!({
+                "sessionId": config.session_id.clone(),
+                "rtpPayloadType": pipeline::RTP_PAYLOAD_TYPE,
+                "maxRtpPayloadBytes": pipeline::MAX_RTP_PAYLOAD_BYTES,
+                "rtpOffsets": pipeline.rtp_offsets,
+                "webrtcDspEnabled": pipeline.webrtc_dsp_enabled,
+                "rtcpMux": false,
+                "rtcpPort": config.resolved_rtcp_port()?,
+                "rtcpListenPort": config.resolved_rtcp_listen_port()?
+            }),
+        );
+        self.pipeline = Some(pipeline);
+        self.session_config = Some(config.clone());
+        if let Err(error) = self.restart_capture(&config) {
+            self.stop_session();
+            self.state.failed(error.clone());
+            self.emit_state();
+            return Err(format!("microphone capture failed to start: {error}"));
+        }
+        Ok(())
+    }
+
+    fn stop_session(&mut self) {
+        if self.pipeline.is_none() {
+            return;
+        }
+        let _ = self.state.transition(SidecarState::Stopping);
+        self.emit_state();
+        self.capture.stop();
+        self.clear_capture_health();
+        self.active_device_id = None;
+        if let Some(mut pipeline) = self.pipeline.take() {
+            pipeline.stop();
+        }
+        self.session_config = None;
+        self.input.store(AudioInput::silent());
+        let _ = self.state.transition(SidecarState::Idle);
+        self.state.healthy();
+        self.emit_state();
+        self.emit_event("sessionStopped", json!({}));
+    }
+
+    fn shutdown(&mut self) {
+        self.stop_session();
+        let _ = self.state.transition(SidecarState::Shutdown);
+        self.emit_state();
+    }
+
+    fn select_device(&mut self, device_id: Option<String>) -> Result<(), String> {
+        eprintln!("[mic-sidecar] select_device called with: {:?}", device_id);
+        self.selected_device_id = device_id.filter(|id| !id.trim().is_empty() && id != "default");
+        eprintln!(
+            "[mic-sidecar] selected_device_id set to: {:?}",
+            self.selected_device_id
+        );
+        self.emit_event(
+            "deviceSelected",
+            json!({ "deviceId": self.selected_device_id }),
+        );
+        if let Some(config) = self.session_config.clone() {
+            if config.source == SourceKind::Microphone {
+                self.restart_capture(&config)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn set_bitrate(&mut self, bitrate: u32) -> Result<(), String> {
+        if let Some(pipeline) = &self.pipeline {
+            pipeline.set_bitrate(bitrate)?;
+        } else if !(6_000..=128_000).contains(&bitrate) {
+            return Err("bitrate must be between 6000 and 128000 bits/s".to_string());
+        }
+        if let Some(config) = &mut self.session_config {
+            config.bitrate = bitrate;
+        }
+        self.emit_event("bitrateChanged", json!({ "bitrate": bitrate }));
+        Ok(())
+    }
+
+    fn restart_capture(&mut self, config: &SessionConfig) -> Result<(), String> {
+        eprintln!(
+            "[mic-sidecar] restart_capture: selected_device_id={:?}",
+            self.selected_device_id
+        );
+        self.metrics.capture_restart();
+        match self.capture.start(
+            config.source,
+            self.selected_device_id.as_deref(),
+            &self.input,
+            self.metrics.clone(),
+            self.capture_tx.clone(),
+        ) {
+            Ok(started) => {
+                self.active_device_id = Some(started.active_device_id.clone());
+                self.capture_backend = started.capture_backend;
+                let now = Instant::now();
+                self.capture_started_at = Some(now);
+                self.capture_nonzero_observed = self.metrics.capture_nonzero_samples();
+                self.capture_last_nonzero_at = Some(now);
+                self.capture_silence_degraded = false;
+                self.emit_event(
+                    "captureStarted",
+                    json!({
+                        "deviceId": started.active_device_id,
+                        "deviceName": started.active_device_name,
+                        "sampleRate": started.sample_rate,
+                        "captureBackend": started.capture_backend,
+                        "fallback": started.used_fallback
+                    }),
+                );
+                if started.used_fallback {
+                    let message = "selected device is unavailable; capturing from the default device while retrying";
+                    let _ = self.state.transition(SidecarState::Recovering);
+                    self.state.degraded(message);
+                    self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
+                    self.emit_event("deviceFallback", json!({ "reason": message }));
+                } else {
+                    let _ = self.state.transition(SidecarState::Running);
+                    self.state.healthy();
+                }
+                self.emit_state();
+                Ok(())
+            }
+            Err(error) => {
+                self.capture.stop();
+                self.clear_capture_health();
+                self.active_device_id = None;
+                self.metrics.capture_error();
+                let _ = self.state.transition(SidecarState::Recovering);
+                self.state.degraded(error.clone());
+                self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
+                self.emit_event("captureRecovery", json!({ "error": error }));
+                self.emit_state();
+                Err(error)
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        while let Ok(CaptureSignal::Error(error)) = self.capture_rx.try_recv() {
+            self.metrics.capture_error();
+            self.capture.stop();
+            self.clear_capture_health();
+            self.active_device_id = None;
+            let _ = self.state.transition(SidecarState::Recovering);
+            self.state
+                .degraded(format!("microphone capture stream failed: {error}"));
+            self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
+            self.emit_event("captureError", json!({ "error": error }));
+            self.emit_state();
+        }
+
+        if let Some(error) = self.pipeline.as_ref().and_then(PipelineSession::poll_error) {
+            self.metrics.pipeline_error();
+            self.state.failed(error.clone());
+            self.emit_event("pipelineError", json!({ "error": error }));
+            self.emit_state();
+        }
+
+        let Some(config) = self.session_config.clone() else {
+            return;
+        };
+        if config.source == SourceKind::Sine {
+            return;
+        }
+
+        let now = Instant::now();
+        self.update_capture_health(now);
+        if self.capture.active_device_id().is_none() && now >= self.retry_at {
+            let _ = self.restart_capture(&config);
+            return;
+        }
+        if now < self.next_device_poll {
+            return;
+        }
+        self.next_device_poll = now + DEVICE_POLL_INTERVAL;
+
+        let should_restart = if let Some(preferred) = self.selected_device_id.as_deref() {
+            let active = self.capture.active_device_id();
+            let avail = device_available(preferred);
+            eprintln!(
+                "[mic-sidecar] tick: preferred={:?} active={:?} device_available={} match={}",
+                preferred,
+                active,
+                avail,
+                active == Some(preferred)
+            );
+            active != Some(preferred) || !avail
+        } else {
+            let default_name = current_default_device_id();
+            let active = self.capture.active_device_id();
+            eprintln!(
+                "[mic-sidecar] tick: no preferred, default={:?} active={:?}",
+                default_name, active
+            );
+            default_name.as_deref() != active
+        };
+        if should_restart {
+            self.emit_event(
+                "deviceChangeDetected",
+                json!({ "selectedDeviceId": self.selected_device_id }),
+            );
+            let _ = self.restart_capture(&config);
+        }
+    }
+
+    fn update_capture_health(&mut self, now: Instant) {
+        let Some(started_at) = self.capture_started_at else {
+            return;
+        };
+        let nonzero_samples = self.metrics.capture_nonzero_samples();
+        if nonzero_samples > self.capture_nonzero_observed {
+            self.capture_nonzero_observed = nonzero_samples;
+            self.capture_last_nonzero_at = Some(now);
+            if self.capture_silence_degraded {
+                self.capture_silence_degraded = false;
+                if self.state.health() == Health::Degraded
+                    && self.state.last_error().as_deref() == Some(CAPTURE_SILENCE_ERROR)
+                {
+                    self.state.healthy();
+                    self.emit_event("captureAudioDetected", json!({}));
+                    self.emit_state();
+                }
+            }
+            return;
+        }
+        let silent_since = self.capture_last_nonzero_at.unwrap_or(started_at);
+        if !self.capture_silence_degraded
+            && self.state.state() == SidecarState::Running
+            && now.duration_since(silent_since) >= CAPTURE_SILENCE_DEGRADE_INTERVAL
+        {
+            self.capture_silence_degraded = true;
+            self.state.degraded(CAPTURE_SILENCE_ERROR);
+            self.emit_event(
+                "captureSilenceDetected",
+                json!({ "error": CAPTURE_SILENCE_ERROR }),
+            );
+            self.emit_state();
+        }
+    }
+
+    fn clear_capture_health(&mut self) {
+        self.capture_backend = CaptureBackend::None;
+        self.capture_started_at = None;
+        self.capture_nonzero_observed = self.metrics.capture_nonzero_samples();
+        self.capture_last_nonzero_at = None;
+        self.capture_silence_degraded = false;
+        self.metrics.set_capture_backend(CaptureBackend::None);
+    }
+
+    fn emit_state(&self) {
+        self.emit_event(
+            "stateChanged",
+            serde_json::to_value(self.status()).unwrap_or_else(|_| json!({})),
+        );
+    }
+
+    fn emit_event(&self, event: &str, data: Value) {
+        emit(Output::Event {
+            event: event.to_string(),
+            data,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn exact_zero_capture_degrades_and_nonzero_capture_recovers() {
+        let mut daemon = running_daemon_with_stale_capture();
+        let now = Instant::now();
+
+        daemon.update_capture_health(now);
+        assert_eq!(daemon.state.health(), Health::Degraded);
+
+        daemon.metrics.record_capture(1, 1, 7, 0, false);
+        daemon.update_capture_health(now + Duration::from_millis(1));
+        assert_eq!(daemon.state.health(), Health::Healthy);
+    }
+
+    #[test]
+    fn capture_recovery_does_not_clear_an_unrelated_failure() {
+        let mut daemon = running_daemon_with_stale_capture();
+        let now = Instant::now();
+        daemon.update_capture_health(now);
+        daemon.state.failed("sender pipeline failed");
+
+        daemon.metrics.record_capture(1, 1, 7, 0, false);
+        daemon.update_capture_health(now + Duration::from_millis(1));
+
+        assert_eq!(daemon.state.health(), Health::Failed);
+        assert_eq!(
+            daemon.state.last_error().as_deref(),
+            Some("sender pipeline failed")
+        );
+    }
+
+    fn running_daemon_with_stale_capture() -> Daemon {
+        let mut daemon = Daemon::new();
+        daemon.state.transition(SidecarState::Starting).unwrap();
+        daemon.state.transition(SidecarState::Running).unwrap();
+        let now = Instant::now();
+        daemon.capture_started_at = Some(now - CAPTURE_SILENCE_DEGRADE_INTERVAL);
+        daemon.capture_last_nonzero_at = daemon.capture_started_at;
+        daemon
     }
 }

@@ -1,5 +1,10 @@
+pub mod launch_library;
 pub mod shared_storage;
 
+pub use self::launch_library::{
+    get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
+    launch_instance_software, update_igdb_credentials,
+};
 pub use self::shared_storage::{
     begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
     get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
@@ -58,6 +63,9 @@ use crate::{
     },
     services::{
         app_context::AppContext,
+        display_profile::{
+            build_display_profile, DisplayModeSpec, DisplayProfile, DisplayProfileSource,
+        },
         instance_lifecycle::InstanceLifecycleService,
         location::LocationService,
         mic_passthrough::MicPassthroughService,
@@ -72,6 +80,7 @@ use crate::{
             MoonlightDetectionResult, ReachabilityResult, SunshineVerificationResult,
         },
         reboot_helper::RebootHelperService,
+        remote_display::{ApplyDisplayModeResult, InstanceDisplayStatus, RemoteDisplayService},
         remote_exec::RemoteExec,
         shared_storage::bundle_indexer::BundleIndexer,
         shared_storage::bundle_restore::BundleRestoreService,
@@ -1152,6 +1161,68 @@ async fn auto_pair_embedded_host(
     }
 }
 
+async fn schedule_microphone_for_game_stream(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: &str,
+) {
+    let instance_id = MicPassthroughService::instance_id_for_game_stream(context, host_id).await;
+    let previous_instance_id =
+        moonlight
+            .active_stream_instance_id
+            .lock()
+            .ok()
+            .and_then(|mut active_instance| {
+                let previous = *active_instance;
+                *active_instance = instance_id;
+                previous
+            });
+    let Some(instance_id) = instance_id else {
+        return;
+    };
+
+    let mic_context = context.clone();
+    let active_instance = moonlight.active_stream_instance_id.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Some(previous_instance_id) =
+            previous_instance_id.filter(|previous| *previous != instance_id)
+        {
+            if let Err(error) =
+                MicPassthroughService::stop_for_game_stream(&mic_context, previous_instance_id)
+                    .await
+            {
+                warn!(previous_instance_id, %error, "Failed stopping microphone for replaced game stream");
+            }
+        }
+        let still_active = active_instance
+            .lock()
+            .ok()
+            .is_some_and(|active| *active == Some(instance_id));
+        if !still_active {
+            return;
+        }
+        match MicPassthroughService::auto_start_for_game_stream(&mic_context, instance_id).await {
+            Ok(true) => {
+                let still_active = active_instance
+                    .lock()
+                    .ok()
+                    .is_some_and(|active| *active == Some(instance_id));
+                if still_active {
+                    info!(instance_id, "Microphone auto-connected for game stream");
+                } else if let Err(error) =
+                    MicPassthroughService::stop_for_game_stream(&mic_context, instance_id).await
+                {
+                    warn!(instance_id, %error, "Failed stopping a microphone session whose game stream already ended");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(instance_id, %error, "Microphone auto-connect failed without affecting the game stream")
+            }
+        }
+    });
+}
+
 async fn start_embedded_stream_for_host(
     app: &AppHandle,
     context: &AppContext,
@@ -1279,6 +1350,8 @@ async fn start_embedded_stream_for_host(
         let _ = close_stream_window(app);
         return Err(moonlight_frontend_error(error));
     }
+
+    schedule_microphone_for_game_stream(context, moonlight, &host_id).await;
 
     stream_window.show().map_err(|error| FrontendError {
         code: "moonlight_error".to_string(),
@@ -1856,7 +1929,16 @@ pub async fn start_play_existing_instance(
     context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<String, FrontendError> {
-    stop_active_stream_if_needed(&app, moonlight.inner()).await?;
+    start_launch_pc_for_instance(&app, instance_id, context.inner(), moonlight.inner()).await
+}
+
+pub(super) async fn start_launch_pc_for_instance(
+    app: &AppHandle,
+    instance_id: u64,
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+) -> Result<String, FrontendError> {
+    stop_active_stream_if_needed(app, moonlight).await?;
     context
         .update_state(|state| {
             if let Some(server) = state
@@ -1873,7 +1955,7 @@ pub async fn start_play_existing_instance(
         .await?;
 
     {
-        ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
+        ensure_embedded_identity_ready_for_explicit_action(context, moonlight)
             .await
             .map_err(moonlight_frontend_error)?;
 
@@ -1899,7 +1981,7 @@ pub async fn start_play_existing_instance(
                 .map(|pairing| &pairing.status),
             Some(PairingStatus::Paired)
         ) {
-            auto_pair_embedded_host(context.inner(), moonlight.inner(), &host_id)
+            auto_pair_embedded_host(context, moonlight, &host_id)
                 .await
                 .map_err(moonlight_frontend_error)?;
             host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
@@ -1920,13 +2002,8 @@ pub async fn start_play_existing_instance(
         {
             Ok(apps) => apps,
             Err(error) if is_embedded_applist_not_found_error(&error) => {
-                fetch_embedded_apps_via_sunshine_api(
-                    context.inner(),
-                    moonlight.inner(),
-                    &host_id,
-                    &host_address,
-                )
-                .await?
+                fetch_embedded_apps_via_sunshine_api(context, moonlight, &host_id, &host_address)
+                    .await?
             }
             Err(error) => return Err(moonlight_frontend_error(error)),
         };
@@ -1937,14 +2014,8 @@ pub async fn start_play_existing_instance(
             retryable: true,
         })?;
 
-        let response = start_embedded_stream_for_host(
-            &app,
-            context.inner(),
-            moonlight.inner(),
-            host_id,
-            target_app.id,
-        )
-        .await?;
+        let response =
+            start_embedded_stream_for_host(app, context, moonlight, host_id, target_app.id).await?;
         context
             .update_state(|state| {
                 state.moonlight.configured = true;
@@ -2815,7 +2886,7 @@ pub async fn regenerate_edid(
     }
 
     let snapshot = context.load_state().await;
-    let (width, height, refresh_hz, source_label) = resolve_effective_edid_profile(
+    let (width, height, refresh_hz, mut source_label) = resolve_effective_edid_profile(
         payload.mode,
         snapshot.moonlight_preferences.width,
         snapshot.moonlight_preferences.height,
@@ -2825,12 +2896,32 @@ pub async fn regenerate_edid(
         "regenerate_edid resolved profile: width={} height={} refresh_hz={} source='{}'",
         width, height, refresh_hz, source_label
     );
-    let generated_edid = generate_headless_edid_base64(width, height, refresh_hz)?;
+    let mut effective_refresh_hz = refresh_hz;
+    let generated_edid = match generate_headless_edid_base64(width, height, refresh_hz) {
+        Ok(edid) => edid,
+        Err(_) if payload.mode == EdidMode::AutoDetect && refresh_hz != 60 => {
+            effective_refresh_hz = 60;
+            source_label = "Auto-Detected (EDID refresh limited to 60 Hz)".to_string();
+            generate_headless_edid_base64(width, height, 60).or_else(|_| {
+                source_label =
+                    "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string();
+                generate_headless_edid_base64(3840, 2160, 60)
+            })?
+        }
+        Err(_) if payload.mode == EdidMode::AutoDetect => {
+            effective_refresh_hz = 60;
+            source_label =
+                "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string();
+            generate_headless_edid_base64(3840, 2160, 60)
+                .or_else(|_| generate_headless_edid_base64(1920, 1080, 60))?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     let next_state = context
         .update_state(|state| {
             state.sunshine.edid_mode = payload.mode;
-            state.sunshine.edid_refresh_rate_hz = payload.refresh_rate_hz;
+            state.sunshine.edid_refresh_rate_hz = effective_refresh_hz;
             state.sunshine.headless_edid_base64 = generated_edid.clone();
             state.sunshine.edid_source_label = source_label.clone();
             state.last_error = None;
@@ -2910,6 +3001,20 @@ fn resolve_effective_edid_profile(
 ) -> (u32, u32, u32, String) {
     match mode {
         EdidMode::Manual => (width, height, refresh_hz, "Manual".to_string()),
+        EdidMode::MacHardware => {
+            if let Some((detected_width, detected_height, detected_refresh)) =
+                crate::services::moonlight::detect_hardware_display_for_provisioning()
+            {
+                (
+                    detected_width,
+                    detected_height,
+                    detected_refresh,
+                    "Mac Hardware".to_string(),
+                )
+            } else {
+                (1920, 1080, 60, "Fallback 1920x1080@60".to_string())
+            }
+        }
         EdidMode::AutoDetect => {
             if let Some((detected_width, detected_height, detected_refresh)) =
                 detect_client_display_for_provisioning()
@@ -3679,13 +3784,6 @@ async fn teardown_local_instance_session(
         }
     }
 
-    if let Err(error) = crate::mic_client::cleanup_stale_pipeline_processes() {
-        warn!(
-            instance_id = instance_id,
-            "Failed to clean up stale mic sender processes: {}", error
-        );
-    }
-
     let active_instance_id = context.load_state().await.instance.instance_id;
     if active_instance_id != Some(instance_id) {
         return;
@@ -3743,16 +3841,200 @@ pub async fn destroy_instance(
         .map_err(Into::into)
 }
 
+fn desired_display_profile(
+    state: &PersistedAppState,
+) -> Result<(DisplayProfile, String), AppError> {
+    let (width, height, refresh_hz, source_label) = resolve_effective_edid_profile(
+        state.sunshine.edid_mode,
+        state.moonlight_preferences.width,
+        state.moonlight_preferences.height,
+        state.sunshine.edid_refresh_rate_hz,
+    );
+    let source = match state.sunshine.edid_mode {
+        EdidMode::Manual => DisplayProfileSource::Manual,
+        EdidMode::MacHardware => DisplayProfileSource::AutoDetected,
+        EdidMode::AutoDetect if source_label.starts_with("Fallback") => {
+            DisplayProfileSource::Fallback
+        }
+        EdidMode::AutoDetect => DisplayProfileSource::AutoDetected,
+    };
+    let mut candidates = vec![(width, height, refresh_hz, source_label)];
+    if state.sunshine.edid_mode == EdidMode::AutoDetect {
+        if refresh_hz != 60 {
+            candidates.push((
+                width,
+                height,
+                60,
+                "Auto-Detected (EDID refresh limited to 60 Hz)".to_string(),
+            ));
+        }
+        candidates.push((
+            3840,
+            2160,
+            60,
+            "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string(),
+        ));
+        candidates.push((1920, 1080, 60, "Fallback 1920x1080@60".to_string()));
+    }
+
+    let mut last_error = None;
+    for (candidate_width, candidate_height, candidate_refresh, candidate_label) in candidates {
+        match generate_headless_edid_base64(candidate_width, candidate_height, candidate_refresh) {
+            Ok(edid) => {
+                let mut profile = build_display_profile(
+                    DisplayModeSpec::from_hz(candidate_width, candidate_height, candidate_refresh),
+                    source,
+                )
+                .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+                profile.source_label = candidate_label;
+                return Ok((profile, edid));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::InvalidInput("No EDID-compatible display timing is available".to_string())
+    }))
+}
+
+#[tauri::command]
+pub async fn get_instance_display_status(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<InstanceDisplayStatus, FrontendError> {
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    let state = context.load_state().await;
+    let (profile, edid) = desired_display_profile(&state)?;
+    RemoteDisplayService::status(&remote, profile, &edid)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn apply_instance_display_mode(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    mode: DisplayModeSpec,
+) -> Result<ApplyDisplayModeResult, FrontendError> {
+    InstanceLifecycleService::acquire_lock(instance_id, "display apply").await?;
+    let result = async {
+        let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+        let state = context.load_state().await;
+        let (profile, edid) = desired_display_profile(&state)?;
+        let target_user = context.config.audio_target_user.clone();
+        let result =
+            RemoteDisplayService::apply(&remote, &target_user, profile, &edid, mode).await?;
+        let status = result.status.clone();
+        context
+            .update_state(|state| {
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+                {
+                    server.display.desired_profile_hash = status.desired_profile_hash.clone();
+                    server.display.installed_profile_hash = status.installed_profile_hash.clone();
+                    server.display.advertised_modes =
+                        status.desired_profile.advertised_modes.clone();
+                    server.display.selected_mode = status.selected_mode;
+                    server.display.active_mode = status.active_mode;
+                    server.display.output_name = status.output_name.clone();
+                    server.display.applied_at = Some(chrono::Utc::now().to_rfc3339());
+                    server.display.last_apply_error = None;
+                }
+            })
+            .await?;
+        Ok::<_, AppError>(result)
+    }
+    .await;
+    if let Err(error) = &result {
+        let message = error.to_string();
+        let _ = context
+            .update_state(|state| {
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+                {
+                    server.display.last_apply_error = Some(message.clone());
+                }
+            })
+            .await;
+    }
+    InstanceLifecycleService::release_lock(instance_id).await;
+    result.map_err(Into::into)
+}
+
 #[tauri::command]
 pub async fn reboot_instance_services(
     context: State<'_, AppContext>,
     instance_id: u64,
 ) -> Result<String, FrontendError> {
-    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
-    let target_user = context.config.audio_target_user.clone();
-    RebootHelperService::reboot_and_reinitialize(&remote, &target_user)
-        .await
-        .map_err(Into::into)
+    InstanceLifecycleService::acquire_lock(instance_id, "reboot").await?;
+    let result = async {
+        let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        let (endpoint_tx, endpoint_rx) = tokio::sync::watch::channel(remote.clone());
+        let refresh_context = context.inner().clone();
+        let base_remote = remote.clone();
+        let endpoint_refresh = tokio::spawn(async move {
+            loop {
+                let snapshot = refresh_context.load_state().await;
+                if !snapshot.credentials.vast_api_key.trim().is_empty() {
+                    let vast = VastApiClient::new(
+                        refresh_context.http_client.clone(),
+                        refresh_context.config.vast_base_url.clone(),
+                        snapshot.credentials.vast_api_key,
+                    );
+                    if let Ok(instances) = vast.list_instances().await {
+                        if let Some(instance) =
+                            instances.into_iter().find(|item| item.id == instance_id)
+                        {
+                            if !instance.ssh_host.trim().is_empty() && instance.ssh_port != 0 {
+                                let updated_remote = RemoteExec {
+                                    ssh_host: instance.ssh_host.clone(),
+                                    ssh_port: instance.ssh_port,
+                                    ..base_remote.clone()
+                                };
+                                let _ = endpoint_tx.send(updated_remote);
+                                let _ = refresh_context
+                                    .update_state(|state| {
+                                        if let Some(server) = state
+                                            .provisioned_servers
+                                            .iter_mut()
+                                            .find(|server| server.instance_id == instance_id)
+                                        {
+                                            server.ssh_host = instance.ssh_host.clone();
+                                            server.ssh_port = instance.ssh_port;
+                                            server.status = instance.status.clone();
+                                        }
+                                        if state.instance.instance_id == Some(instance_id) {
+                                            state.instance.ssh_host = instance.ssh_host.clone();
+                                            state.instance.ssh_port = instance.ssh_port;
+                                            state.instance.status = instance.status.clone();
+                                        }
+                                    })
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+        let result = RebootHelperService::reboot_and_reinitialize_with_endpoint_updates(
+            &remote,
+            &target_user,
+            endpoint_rx,
+        )
+        .await;
+        endpoint_refresh.abort();
+        result
+    }
+    .await;
+    InstanceLifecycleService::release_lock(instance_id).await;
+    result.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -3828,6 +4110,11 @@ pub async fn get_restore_job(job_id: String) -> Result<RestoreJob, FrontendError
 }
 
 #[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
+    MicPassthroughService::list_devices().map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn get_instance_mic_config(
     context: State<'_, AppContext>,
     instance_id: u64,
@@ -3880,6 +4167,23 @@ pub async fn reconnect_instance_mic(
 }
 
 #[tauri::command]
+pub async fn mute_instance_mic(instance_id: u64) -> Result<(), FrontendError> {
+    MicPassthroughService::set_muted(instance_id, true).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn unmute_instance_mic(instance_id: u64) -> Result<(), FrontendError> {
+    MicPassthroughService::set_muted(instance_id, false).map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_instance_mic_metrics(
+    instance_id: u64,
+) -> Result<serde_json::Value, FrontendError> {
+    MicPassthroughService::get_local_metrics(instance_id).map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn recreate_instance_mic_device(
     context: State<'_, AppContext>,
     instance_id: u64,
@@ -3897,11 +4201,6 @@ pub async fn get_instance_mic_status(
     MicPassthroughService::get_status(context.inner(), instance_id)
         .await
         .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn list_microphones() -> Result<Vec<MicrophoneDevice>, FrontendError> {
-    MicPassthroughService::list_devices().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -4109,6 +4408,8 @@ pub async fn moonlight_start_stream(
         return Err(moonlight_frontend_error(error));
     }
 
+    schedule_microphone_for_game_stream(context.inner(), moonlight.inner(), &input.host_id).await;
+
     stream_window.show().map_err(|error| FrontendError {
         code: "moonlight_error".to_string(),
         message: "Moonlight operation failed".to_string(),
@@ -4154,6 +4455,7 @@ pub async fn moonlight_start_stream(
 #[tauri::command]
 pub async fn moonlight_disconnect_stream(
     app: AppHandle,
+    context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<MoonlightSessionStateResponse, FrontendError> {
     moonlight
@@ -4171,6 +4473,21 @@ pub async fn moonlight_disconnect_stream(
         *active_preferences = None;
     }
     close_stream_window(&app).map_err(moonlight_frontend_error)?;
+    let mic_instance_id = moonlight
+        .active_stream_instance_id
+        .lock()
+        .ok()
+        .and_then(|mut instance| instance.take());
+    if let Some(instance_id) = mic_instance_id {
+        let mic_context = context.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) =
+                MicPassthroughService::stop_for_game_stream(&mic_context, instance_id).await
+            {
+                warn!(instance_id, %error, "Microphone stop failed without affecting Moonlight disconnect");
+            }
+        });
+    }
     let state = moonlight
         .runtime
         .get_state()
@@ -4458,4 +4775,41 @@ pub async fn moonlight_get_session_state(
     Ok(MoonlightSessionStateResponse {
         state: session_state_name(&state).to_string(),
     })
+}
+
+#[tauri::command]
+pub async fn force_update_state_agent(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    let api_key = {
+        let state = context.state.read().await;
+        state.credentials.vast_api_key.clone()
+    };
+    if api_key.trim().is_empty() {
+        return Err(
+            crate::errors::AppError::InvalidInput("Vast API key is missing.".to_string()).into(),
+        );
+    }
+    let vast = crate::services::vast_api::VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        api_key,
+    );
+    let remote = crate::services::instance_lifecycle::build_remote_exec_for_instance(
+        context.inner(),
+        &vast,
+        instance_id,
+    )
+    .await
+    .map_err(|e| crate::errors::AppError::State(e.to_string()))?;
+
+    // Kill the remote agent and its socket
+    let _ = remote.ssh(
+        "systemctl stop noland-state-agent && rm -f /run/noland/state-agent.sock",
+        std::time::Duration::from_secs(10),
+    );
+
+    // `ensure_state_agent` will now automatically upload and recompile it when the next command runs!
+    Ok(())
 }
