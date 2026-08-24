@@ -36,10 +36,23 @@ const frameworksDir = join(contentsDir, 'Frameworks');
 const resourcesDir = join(contentsDir, 'Resources');
 const resourcesBinariesDir = join(resourcesDir, 'binaries');
 const microphoneUsageDescription = 'Noland Connect needs microphone access to forward your local mic into your cloud gaming session.';
+const micSidecarEntitlements = join(repoRoot, 'mic-sidecar', 'noland-mic-sender.entitlements');
 const frameworkBundleSource = join(frameworksDir, 'GStreamer.framework');
 const frameworkBundleDir = join(resourcesDir, 'gstreamer', 'macos', 'GStreamer.framework');
 const bundledFrameworkBuildLibDir = toPosix(join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework', 'Versions', 'Current', 'lib'));
-const nativePrefix = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim() ? resolve(process.env.NOLAND_NATIVE_DEPS_PREFIX.trim()) : null;
+const nativePrefix = (() => {
+  const explicit = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim();
+  if (explicit) return resolve(explicit);
+  // Fall back to the checked-in native deps directory for the current target.
+  // This ensures @rpath dylibs (libopus, libSDL2, libcrypto, ...) are always
+  // staged into Contents/Frameworks/ without requiring the env var to be set.
+  const local = join(repoRoot, 'src-tauri', '.native-deps', target);
+  if (existsSync(local)) {
+    console.log(`[fix-macos-bundle-deps] Using local native deps prefix: ${local}`);
+    return local;
+  }
+  return null;
+})();
 
 if (existsSync(frameworkBundleSource) && !existsSync(frameworkBundleDir)) {
   mkdirSync(dirname(frameworkBundleDir), { recursive: true });
@@ -55,6 +68,7 @@ const frameworkPluginValidateDir = join(frameworkPluginDir, 'validate');
 const frameworkShareValidateDir = join(frameworkRoot, 'share', 'gstreamer-1.0', 'validate');
 const allowedGStreamerPlugins = new Set([
   'libgstcoreelements.dylib',
+  'libgstapp.dylib',
   'libgstaudioconvert.dylib',
   'libgstaudioresample.dylib',
   'libgstaudiorate.dylib',
@@ -65,6 +79,7 @@ const allowedGStreamerPlugins = new Set([
   'libgstudp.dylib',
   'libgsttypefindfunctions.dylib',
   'libgstvolume.dylib',
+  'libgstwebrtcdsp.dylib',
 ]);
 
 if (existsSync(frameworkBinDir)) {
@@ -140,6 +155,13 @@ for (const file of [...allTargets]) {
 for (const file of [...allTargets]) {
   rewriteBuildTreeGStreamerDeps(file);
 }
+// Rewrite stale @loader_path deps that escape the framework and reference
+// the old Contents/Frameworks/ layout (e.g. @loader_path/../../../../../../../../Frameworks/libopus.0.dylib).
+// These are GStreamer plugins built with GStreamer.framework in Contents/Frameworks/
+// but now relocated to Contents/Resources/gstreamer/macos/GStreamer.framework/.
+for (const file of [...allTargets]) {
+  rewriteStaleLoaderPathFrameworkDeps(file);
+}
 
 for (const file of frameworkFiles) {
   setInstallId(file, frameworkIdFor(file));
@@ -151,10 +173,17 @@ for (const file of frameworkRootLibs) {
   setInstallId(file, `@rpath/${basename(file)}`);
 }
 
+// SIP strips DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_LIBRARY_PATH from child
+// processes of signed app bundles, so the mic sidecar cannot find GStreamer
+// dylibs at runtime even though the parent process sets those vars.
+// Inject LC_RPATH entries directly into the sidecar binary so dyld resolves
+// @rpath/libgstreamer-1.0.0.dylib etc. without any env-var assistance.
+injectMicSidecarGStreamerRpath(macosDir, frameworkLibDir);
+
 console.log(`[fix-macos-bundle-deps] Framework dylibs: ${frameworkFiles.length}, libexec tools: ${libexecFiles.length}, root framework dylibs: ${frameworkRootLibs.length}`);
 console.log(`[fix-macos-bundle-deps] Resource binaries: ${resourceBinaryFiles.length}, explicit sidecars: ${explicitMacSidecarFiles.length}, app executables: ${macosFiles.length}`);
 console.log('[fix-macos-bundle-deps] Re-signing patched bundle contents');
-resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...explicitMacSidecarFiles, ...macosFiles, frameworkBundleDir]);
+resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...explicitMacSidecarFiles, ...macosFiles, resolveFrameworkSignTarget(frameworkBundleDir)]);
 console.log('[fix-macos-bundle-deps] Verifying explicitly managed macOS sidecars');
 verifySignedMacSidecars(explicitMacSidecarFiles);
 console.log('[fix-macos-bundle-deps] Rebuilding DMG payload');
@@ -285,6 +314,34 @@ function rewriteBuildTreeGStreamerDeps(file) {
   }
 }
 
+// Rewrites @loader_path deps that escape the framework boundary and reference
+// Contents/Frameworks/libXXX.dylib — these were baked in when GStreamer.framework
+// lived in Contents/Frameworks/ but the framework is now in
+// Contents/Resources/gstreamer/macos/GStreamer.framework/.
+// Strategy: if the dep name matches a file in the framework's own lib/ dir,
+// repoint it there with a @loader_path relative to the consumer.
+function rewriteStaleLoaderPathFrameworkDeps(file) {
+  // Root app binaries legitimately load project-native libopus/SDL from
+  // Contents/Frameworks. Only consumers inside the relocated GStreamer
+  // framework can contain stale references to the framework's old location.
+  if (!resolve(file).startsWith(resolve(frameworkBundleDir))) return;
+
+  for (const dep of listDependencies(file)) {
+    if (!dep.startsWith('@loader_path/')) continue;
+    // Only handle deps that ultimately reference Contents/Frameworks/ by
+    // traversing upward many levels (the old layout).
+    if (!dep.includes('Frameworks/')) continue;
+    const name = basename(dep);
+    const target = frameworkIndex.get(name) || frameworkRootIndex.get(name);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    console.log(`[fix-macos-bundle-deps] Rewriting stale Frameworks ref in ${basename(file)}: ${dep} → ${desired}`);
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
+}
+
+
 function frameworkIdFor(file) {
   const rel = relative(frameworkLibDir, file);
   return `@rpath/GStreamer.framework/Versions/Current/lib/${toPosix(rel)}`;
@@ -348,6 +405,71 @@ function ensureMicrophoneUsageDescription(infoPlist, message) {
   run('/usr/libexec/PlistBuddy', ['-c', `Add :NSMicrophoneUsageDescription string "${escapedMessage}"`, infoPlist], { allowFailure: false });
 }
 
+// Sign the versioned bundle (Versions/1.0 or Versions/Current) rather than the
+// framework root. codesign rejects the root when any non-Versions items exist
+// there (e.g. materialized symlinks), reporting "unsealed contents present in
+// the root directory of an embedded framework".
+function resolveFrameworkSignTarget(frameworkDir) {
+  if (!existsSync(frameworkDir)) return frameworkDir;
+  for (const version of ['1.0', 'Current']) {
+    const versioned = join(frameworkDir, 'Versions', version);
+    if (existsSync(versioned)) {
+      console.log(`[fix-macos-bundle-deps] Signing framework via versioned path: Versions/${version}`);
+      return versioned;
+    }
+  }
+  return frameworkDir;
+}
+
+// Inject LC_RPATH entries pointing at the bundled GStreamer lib directory into
+// the mic-sender sidecar binary. Without this, SIP silently drops the
+// DYLD_FRAMEWORK_PATH / DYLD_FALLBACK_LIBRARY_PATH env vars that the Rust
+// host process sets, so the sidecar crashes at startup before writing any log.
+//
+// Add only the portable @executable_path-relative path. Absolute build-machine
+// rpaths make the signed app non-relocatable and can hide missing bundle files.
+function injectMicSidecarGStreamerRpath(appMacosDir, gstreamerLibDir) {
+  if (!existsSync(gstreamerLibDir)) {
+    console.warn(`[fix-macos-bundle-deps] GStreamer lib dir not found; skipping rpath injection: ${gstreamerLibDir}`);
+    return;
+  }
+  const sidecarNames = ['noland-mic-sender', `noland-mic-sender-${target}`];
+  for (const name of sidecarNames) {
+    const sidecar = join(appMacosDir, name);
+    if (!existsSync(sidecar)) continue;
+    // @executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib
+    // This resolves correctly regardless of where the .app is installed.
+    const relativeRpath = '@executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib';
+    const existingRpaths = getMachORpaths(sidecar);
+    if (!existingRpaths.includes(relativeRpath)) {
+      console.log(`[fix-macos-bundle-deps] Injecting rpath into ${name}: ${relativeRpath}`);
+      run('install_name_tool', ['-add_rpath', relativeRpath, sidecar], { allowFailure: false });
+    }
+    if (!getMachORpaths(sidecar).includes(relativeRpath)) {
+      throw new Error(`Required GStreamer rpath was not added to ${sidecar}`);
+    }
+  }
+}
+
+function getMachORpaths(file) {
+  const result = run('otool', ['-l', file], { allowFailure: true });
+  if (result.status !== 0) return [];
+  const rpaths = [];
+  const lines = result.stdout.split(/\r?\n/u);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('LC_RPATH')) {
+      // path line format: "    path /some/path with spaces (offset 12)"
+      // Use a greedy match up to the trailing " (offset" metadata.
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const match = lines[j].match(/^\s+path\s+(.+?)\s+\(offset/);
+        if (match) { rpaths.push(match[1].trim()); break; }
+      }
+    }
+  }
+  return rpaths;
+}
+
+
 function resignBundle(app, nestedFiles) {
   run('xattr', ['-cr', app], { allowFailure: true });
 
@@ -367,14 +489,18 @@ function resignBundle(app, nestedFiles) {
 function signCodeObject(path, { runtime }) {
   console.log(`[fix-macos-bundle-deps] Signing ${relative(appPath, path) || '.'}${runtime ? ' (runtime)' : ''}`);
   const args = ['--force'];
+  const isMicSidecar = basename(path).startsWith('noland-mic-sender');
   if (appleSigningIdentity) {
     args.push('--sign', appleSigningIdentity, '--timestamp');
     if (runtime) {
       args.push('--options', 'runtime');
-      args.push('--preserve-metadata=identifier,entitlements,flags,runtime,requirements');
+      args.push(`--preserve-metadata=${isMicSidecar ? 'identifier,flags,runtime,requirements' : 'identifier,entitlements,flags,runtime,requirements'}`);
     }
   } else {
     args.push('--sign', '-', '--timestamp=none');
+  }
+  if (isMicSidecar && existsSync(micSidecarEntitlements)) {
+    args.push('--entitlements', micSidecarEntitlements);
   }
   args.push(path);
   run('codesign', args, { allowFailure: false });

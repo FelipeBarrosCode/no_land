@@ -97,6 +97,8 @@ export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  twitchClientId: string;
+  twitchClientSecret: string;
 }
 
 export interface SshState {
@@ -189,7 +191,7 @@ export interface WireGuardState {
 export interface SunshineState {
   configured: boolean;
   headlessEdidBase64: string;
-  edidMode: "auto_detect" | "manual";
+  edidMode: "auto_detect" | "mac_hardware" | "manual";
   edidRefreshRateHz: number;
   edidSourceLabel: string;
 }
@@ -217,6 +219,46 @@ export interface ProvisionedServerSteps {
   pairingCompleted: boolean;
 }
 
+export interface DisplayModeSpec {
+  width: number;
+  height: number;
+  refreshMillihz: number;
+}
+
+export interface DisplayProfile {
+  preferredMode: DisplayModeSpec;
+  advertisedModes: DisplayModeSpec[];
+  sourceLabel: string;
+}
+
+export interface RemoteDisplayState {
+  desiredProfileHash: string;
+  installedProfileHash: string;
+  advertisedModes: DisplayModeSpec[];
+  selectedMode: DisplayModeSpec | null;
+  activeMode: DisplayModeSpec | null;
+  outputName: string | null;
+  appliedAt: string | null;
+  lastApplyError: string | null;
+}
+
+export interface InstanceDisplayStatus {
+  desiredProfile: DisplayProfile;
+  desiredProfileHash: string;
+  installedProfileHash: string;
+  outputName: string | null;
+  activeMode: DisplayModeSpec | null;
+  selectedMode: DisplayModeSpec | null;
+  xorgActive: boolean;
+  sunshineActive: boolean;
+  profileUpdateRequired: boolean;
+}
+
+export interface ApplyDisplayModeResult {
+  status: InstanceDisplayStatus;
+  xorgRestarted: boolean;
+}
+
 export interface ProvisionedServerState {
   instanceId: number;
   offerId: number | null;
@@ -237,6 +279,9 @@ export interface ProvisionedServerState {
   micDeviceId: string;
   micDeviceName: string;
   micQualityProfile: MicQualityProfile;
+  micForwardingEnabled: boolean;
+  micAutoConnect: boolean;
+  display: RemoteDisplayState;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -287,6 +332,45 @@ export interface RentedInstanceSummary {
   embeddedMoonlightPaired?: boolean | null;
 }
 
+export interface LaunchLibraryItem {
+  appId: string;
+  displayName: string;
+  aliases: string[];
+  installed: boolean;
+  inSharedStorage: boolean;
+  latestBundleId: string | null;
+  sourceLabels: string[];
+  launchable: boolean;
+  launchMethod: string;
+  restoreRequired: boolean;
+  artworkKey: string;
+}
+
+export interface LaunchLibraryResponse {
+  instanceId: number;
+  launchPcAvailable: boolean;
+  items: LaunchLibraryItem[];
+}
+
+export interface LaunchSoftwareJob {
+  jobId: string;
+  instanceId: number;
+  appId: string;
+  status: string;
+  restorePerformed: boolean;
+  streamStarted: boolean;
+  message: string;
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface SoftwareArtworkResult {
+  key: string;
+  imageUrl: string | null;
+  source: string;
+}
+
 export interface ServerPreferencesUpdate {
   minReliability: number;
   storageGb: number;
@@ -316,6 +400,11 @@ export interface SshCredentialsUpdate {
 export interface PlatformCredentialsUpdate {
   appUsername: string;
   appPassword: string;
+}
+
+export interface IgdbCredentialsUpdate {
+  twitchClientId: string;
+  twitchClientSecret: string;
 }
 
 export type VastBrowserBillingAction =
@@ -714,12 +803,17 @@ export type MicQualityProfile = "standard" | "lowLatency" | "highQuality";
 export interface InstanceMicConfig {
   instanceId: number;
   enabled: boolean;
+  forwardingEnabled: boolean;
+  autoConnect: boolean;
   transport: string;
   codec: string;
   sampleRate: number;
   channels: number;
   vmWireguardIp: string;
   rtpPort: number;
+  rtcpPort: number;
+  localRtcpPort: number;
+  rtpPayloadType: number;
   deviceId: string;
   deviceName: string;
   qualityProfile: MicQualityProfile;
@@ -741,11 +835,18 @@ export type MicState =
   | "cloud_mic_missing"
   | "packet_loss_high"
   | "pipewire_unavailable"
+  | "no_microphone"
+  | "capture_failure"
+  | "pipeline_failure"
+  | "network_failure"
+  | "reconnecting"
+  | "degraded"
   | "error";
 
 export interface InstanceMicRuntimeStatus {
   enabled: boolean;
   state: MicState;
+  reconnectCount: number;
   vmAgentReachable: boolean;
   deviceReady: boolean;
   receivingAudio: boolean;
@@ -760,6 +861,14 @@ export interface InstanceMicRuntimeStatus {
   lastPacketMsAgo: number | null;
   pipewireConnected: boolean;
   defaultSource: boolean;
+  muted: boolean;
+  sidecarHealthy: boolean;
+  captureSampleRate: number;
+  captureOverruns: number;
+  ringFillMs: number;
+  appsrcQueueMs: number;
+  opusPacketsSent: number;
+  bytesSent: number;
   error: string | null;
 }
 
@@ -769,15 +878,39 @@ export interface MicSessionResponse {
   ssrc: number;
   vmWireguardIp: string;
   rtpPort: number;
+  rtcpPort: number;
+  localRtcpPort: number;
+  rtpPayloadType: number;
   sampleRate: number;
   channels: number;
   frameMs: number;
   bitrateKbps: number;
 }
 
+export interface MicSidecarMetrics {
+  capturedSamples: number;
+  consumedSamples: number;
+  droppedStaleSamples: number;
+  overruns: number;
+  underruns: number;
+  silenceSamples: number;
+  buffersPushed: number;
+  captureRestarts: number;
+  captureErrors: number;
+  pipelineErrors: number;
+  ringDepthSamples: number;
+  appsrcQueueMs: number;
+  opusPacketsSent: number;
+  bytesSent: number;
+  currentRtpSequence: number | null;
+  sampledAtUnixMs: number;
+}
+
 export interface MicSettingsUpdate {
   deviceId?: string;
   qualityProfile?: MicQualityProfile;
+  forwardingEnabled?: boolean;
+  autoConnect?: boolean;
 }
 
 export interface MicrophoneDevice {

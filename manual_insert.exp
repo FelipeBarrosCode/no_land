@@ -1,0 +1,14 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    "# "
+}
+send "sqlite3 /var/lib/noland/state/state.db \"INSERT INTO apps (app_id, display_name, canonical_executable, launcher_kind, aliases_json, identity_confidence, created_at, updated_at) VALUES ('desktop:sklauncher-3.2.18', 'SKlauncher-3.2.18', '/home/user/Downloads/SKlauncher-3.2.18.jar', 'native', '\\\[\\\]', 1.0, 0, 0);\"\r"
+expect "# "
+send "exit\r"
+expect eof

@@ -68,6 +68,11 @@ impl RcloneRemoteConfig {
 }
 
 // ─── Provider Adapter ──────────────────────────────────────
+//
+// Implemented by `noland-rclone-adapter`. Desktop and the remote state
+// agent share that crate. This local trait is retained only so existing
+// type names keep compiling; new code should call
+// `crate::services::shared_storage::rclone_adapter`.
 
 pub trait RcloneProviderAdapter: Send + Sync {
     fn backend_type(&self) -> &'static str;

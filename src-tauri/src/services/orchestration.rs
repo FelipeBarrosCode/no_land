@@ -37,47 +37,34 @@ use super::{
     wireguard::{WireGuardProvisionMode, WireGuardProvisionResult, WireGuardService},
 };
 
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 use super::mic_receiver::MicReceiverProvisioner;
 
 #[derive(Debug, Clone)]
 pub struct OrchestrationService;
 
 fn microphone_receiver_provisioning_enabled() -> bool {
-    !cfg!(any(target_os = "linux", target_os = "windows"))
+    true
 }
 
 async fn provision_microphone_receiver(
     remote: &RemoteExec,
     target_user: &str,
 ) -> AppResult<String> {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
-    {
-        // Microphone passthrough is not part of Linux/Windows provisioning until its
-        // client runtime is production-ready. Treat the step as skipped, not failed.
-        let _ = remote;
-        info!(
-            client_os = std::env::consts::OS,
-            target_user, "Skipping remote microphone receiver provisioning"
-        );
-        Ok("Microphone receiver provisioning is disabled on Linux and Windows clients; continuing without microphone passthrough.".to_string())
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
-    {
-        MicReceiverProvisioner::install(remote, target_user).await
-    }
+    MicReceiverProvisioner::install(remote, target_user).await
 }
 
 fn build_display_profile(
     preferences: &MoonlightPreferences,
-) -> crate::services::sunshine::DisplayProfile {
-    crate::services::sunshine::DisplayProfile::from_moonlight_prefs(
-        preferences.width,
-        preferences.height,
+    edid_base64: &str,
+) -> AppResult<crate::services::sunshine::DisplayProfile> {
+    let (width, height, refresh_millihz) =
+        crate::services::sunshine::decode_headless_edid_preferred_mode(edid_base64)?;
+    Ok(crate::services::sunshine::DisplayProfile::from_edid_timing(
+        width,
+        height,
+        refresh_millihz,
         preferences.fps,
-        &preferences.refresh_rate_mode,
-    )
+    ))
 }
 
 fn resolve_edid_profile(
@@ -92,6 +79,25 @@ fn resolve_edid_profile(
             refresh_hz: edid_refresh_rate_hz,
             source_label: "Manual".to_string(),
         },
+        EdidMode::MacHardware => {
+            if let Some((width, height, refresh_hz)) =
+                crate::services::moonlight::detect_hardware_display_for_provisioning()
+            {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width,
+                    height,
+                    refresh_hz,
+                    source_label: "Mac Hardware".to_string(),
+                }
+            } else {
+                crate::services::sunshine::ResolvedEdidProfile {
+                    width: 1920,
+                    height: 1080,
+                    refresh_hz: 60,
+                    source_label: "Fallback 1920x1080@60".to_string(),
+                }
+            }
+        }
         EdidMode::AutoDetect => {
             if let Some((width, height, refresh_hz)) = detect_client_display_for_provisioning() {
                 crate::services::sunshine::ResolvedEdidProfile {
@@ -1290,7 +1296,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 state.sunshine.headless_edid_base64.clone(),
             )
         };
-        let display_profile = build_display_profile(&moonlight_preferences);
         let resolved_edid =
             resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
         let should_generate_edid = headless_edid_base64.trim().is_empty();
@@ -1303,6 +1308,8 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         } else {
             headless_edid_base64
         };
+        let display_profile =
+            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
         let generated_edid_for_save = effective_edid_base64.clone();
         let edid_source_for_save = resolved_edid.source_label.clone();
         context
@@ -2188,7 +2195,6 @@ async fn run_existing_instance_orchestration(
                 state.sunshine.headless_edid_base64.clone(),
             )
         };
-        let display_profile = build_display_profile(&moonlight_preferences);
         let resolved_edid =
             resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
         let should_generate_edid = headless_edid_base64.trim().is_empty();
@@ -2201,6 +2207,8 @@ async fn run_existing_instance_orchestration(
         } else {
             headless_edid_base64
         };
+        let display_profile =
+            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
         let generated_edid_for_save = effective_edid_base64.clone();
         let edid_source_for_save = resolved_edid.source_label.clone();
         context

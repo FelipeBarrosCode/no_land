@@ -285,6 +285,12 @@ fn main() {
         println!("cargo:rustc-link-lib=dylib=crypto");
         println!("cargo:rustc-link-lib=dylib=opus");
         println!("cargo:rustc-link-lib=dylib=SDL2");
+        // Dev binaries stage project-native dylibs beside the executable. Keep
+        // the bundle Frameworks rpath added by Tauri and add this deterministic
+        // local fallback so libopus/SDL2 survive Frameworks directory refreshes.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
+        stage_macos_dev_runtime_dylibs(&target, &manifest_dir)
+            .expect("failed to stage macOS dev runtime dylibs");
         println!("cargo:rustc-link-lib=framework=AVFoundation");
         println!("cargo:rustc-link-lib=framework=AppKit");
         println!("cargo:rustc-link-lib=framework=ApplicationServices");
@@ -736,6 +742,81 @@ fn resolve_macos_gstreamer_framework_source() -> Option<PathBuf> {
         .ok()
         .map(PathBuf::from)
         .filter(|path| has_macos_gstreamer_framework(path))
+}
+
+fn stage_macos_dev_runtime_dylibs(target: &str, manifest_dir: &Path) -> io::Result<()> {
+    let Some(prefix) = native_dep_prefixes(target, manifest_dir)
+        .into_iter()
+        .find(|prefix| prefix.join("lib").is_dir())
+    else {
+        return Ok(());
+    };
+
+    let lib_dir = prefix.join("lib");
+    let Some(target_dir) = cargo_target_profile_dir()? else {
+        return Ok(());
+    };
+    let destinations = [target_dir.clone(), target_dir.join("deps")];
+    let patterns = ["libopus", "libSDL2", "libcrypto", "libssl"];
+
+    for entry in fs::read_dir(&lib_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !patterns.iter().any(|prefix| name.starts_with(prefix)) {
+            continue;
+        }
+        if !(name.ends_with(".dylib") || file_type.is_symlink()) {
+            continue;
+        }
+        for destination in &destinations {
+            fs::create_dir_all(destination)?;
+            stage_runtime_entry(&path, destination.join(name))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn stage_runtime_entry(source: &Path, destination: PathBuf) -> io::Result<()> {
+    if destination.exists() {
+        let _ = fs::remove_file(&destination);
+    }
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        let link_target = fs::read_link(source)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&link_target, &destination)?;
+        #[cfg(not(unix))]
+        {
+            let resolved = source
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(link_target);
+            fs::copy(resolved, &destination)?;
+        }
+        return Ok(());
+    }
+    fs::copy(source, &destination)?;
+    Ok(())
+}
+
+fn cargo_target_profile_dir() -> io::Result<Option<PathBuf>> {
+    let out_dir = PathBuf::from(
+        env::var("OUT_DIR").map_err(|error| io::Error::new(io::ErrorKind::NotFound, error))?,
+    );
+    for ancestor in out_dir.ancestors() {
+        let Some(name) = ancestor.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if matches!(name, "debug" | "release") {
+            return Ok(Some(ancestor.to_path_buf()));
+        }
+    }
+    Ok(None)
 }
 
 fn has_macos_gstreamer_framework(path: &Path) -> bool {

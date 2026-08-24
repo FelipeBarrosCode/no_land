@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+set timeout 120
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    "# "
+}
+send "cd /opt/noland/state-agent\r"
+expect "# "
+send "cat << 'RUST' > test_disc.rs\nuse std::path::Path;\nfn main() { let res = noland_discovery::discover_all(Path::new(\\\"/home/user\\\")); println!(\\\"{:?}\\\", res.apps.iter().map(|a| a.app_id.0.clone()).collect::<Vec<_>>()); }\nRUST\n"
+expect "# "
+send "cargo run -p noland-discovery --bin test_disc\r"
+expect "# "
+send "exit\r"
+expect eof

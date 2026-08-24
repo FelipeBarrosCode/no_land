@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai root@184.144.255.144 "systemctl restart noland-state-agent.service && sleep 2 && curl -s --unix-socket /run/noland/state-agent.sock http://localhost/rpc -H 'Content-Type: application/json' -d '{\"id\": \"1\", \"method\": \"ListApps\", \"params\": {}}'"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

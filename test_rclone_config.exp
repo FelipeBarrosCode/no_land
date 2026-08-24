@@ -1,0 +1,22 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180
+expect {
+    "Enter passphrase for key" {
+        send "<SSH_KEY_PASSPHRASE>\r"
+        exp_continue
+    }
+    "# "
+}
+send "cat << 'INNER_EOF' > /tmp/rclone.conf
+\[noland_test\]
+type = drive
+client_id = <GOOGLE_OAUTH_CLIENT_ID>
+client_secret = <GOOGLE_OAUTH_CLIENT_SECRET>
+token = <RCLONE_TOKEN_JSON>
+INNER_EOF\r"
+expect "# "
+send "rclone lsjson noland_test: --config /tmp/rclone.conf\r"
+expect "# "
+send "exit\r"
+expect eof

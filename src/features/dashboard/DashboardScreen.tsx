@@ -25,11 +25,16 @@ import type {
   EmbeddedMoonlightInstanceStatus,
   VastBrowserBillingAction,
   VastWalletSummary,
+  LaunchLibraryResponse,
+  LaunchSoftwareJob,
+  SoftwareArtworkResult,
 } from "../../lib/types";
 import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
+import { InstanceDisplayModal } from "./InstanceDisplayModal";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
+import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
@@ -60,6 +65,26 @@ interface Props {
   onRefreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
   onResumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
   onStartPlayExisting: (instanceId: number) => Promise<string | null>;
+  launchLibrary: LaunchLibraryResponse | null;
+  launchLibraryLoading: boolean;
+  launchSoftwareJob: LaunchSoftwareJob | null;
+  launchingSoftwareAppId: string | null;
+  softwareArtwork: Record<string, SoftwareArtworkResult>;
+  softwareArtworkLoading: Record<string, boolean>;
+  onLoadInstanceLaunchLibrary: (
+    instanceId: number,
+  ) => Promise<LaunchLibraryResponse | null>;
+  onLaunchInstanceSoftware: (
+    instanceId: number,
+    appId: string,
+  ) => Promise<LaunchSoftwareJob | null>;
+  onPollLaunchSoftwareJob: (
+    jobId: string,
+  ) => Promise<LaunchSoftwareJob | null>;
+  onLoadSoftwareArtwork: (
+    name: string,
+  ) => Promise<SoftwareArtworkResult | null>;
+  onClearLaunchLibrary: () => void;
   onSelectOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   onStartPlay: () => Promise<void>;
   onSaveServerPreferences: (
@@ -72,12 +97,7 @@ interface Props {
   onLoadEmbeddedMoonlightStatus: (
     instanceId: number,
   ) => Promise<EmbeddedMoonlightInstanceStatus | null>;
-  onRerunEmbeddedMoonlightPairing: (
-    instanceId: number,
-  ) => Promise<unknown>;
-  onReconnectWireguard: (instanceId: number) => Promise<string | null>;
   onRebootInstanceServices: (instanceId: number) => Promise<string | null>;
-  onPauseInstance: (instanceId: number) => Promise<void>;
   onDestroyInstance: (instanceId: number) => Promise<void>;
   onSaveInstanceStorageSelected: (
     instanceId: number,
@@ -93,6 +113,7 @@ interface Props {
   onListExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
+  onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
 
 export function DashboardScreen({
@@ -115,24 +136,35 @@ export function DashboardScreen({
   onRefreshVastWalletSummary,
   onResumeProvisioningExisting,
   onStartPlayExisting,
+  launchLibrary,
+  launchLibraryLoading,
+  launchSoftwareJob,
+  launchingSoftwareAppId,
+  softwareArtwork,
+  softwareArtworkLoading,
+  onLoadInstanceLaunchLibrary,
+  onLaunchInstanceSoftware,
+  onPollLaunchSoftwareJob,
+  onLoadSoftwareArtwork,
+  onClearLaunchLibrary,
   onSelectOffer,
   onStartPlay,
   onSaveServerPreferences,
   onSetEmbeddedMoonlightPipelineEnabled,
   onLoadEmbeddedMoonlightStatus,
-  onRerunEmbeddedMoonlightPairing,
-  onReconnectWireguard,
   onRebootInstanceServices,
-  onPauseInstance,
   onDestroyInstance,
   onSaveInstanceStorageSelected,
   onSyncInstanceStorage,
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
+  onRefreshIndexing,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
+  const [displayInstanceId, setDisplayInstanceId] = useState<number | null>(null);
+  const [launchLibraryInstanceId, setLaunchLibraryInstanceId] = useState<number | null>(null);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -143,6 +175,12 @@ export function DashboardScreen({
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
+  const displayInstance = rentedInstances.find(
+    (instance) => instance.instanceId === displayInstanceId,
+  );
+  const launchLibraryInstance = rentedInstances.find(
+    (instance) => instance.instanceId === launchLibraryInstanceId,
+  );
 
   const hasProvisioningToResume = useMemo(() => {
     const hasActiveProvisioningInstance =
@@ -206,22 +244,22 @@ export function DashboardScreen({
     }
   }
 
-  async function handlePair(instanceId: number) {
-    await onRerunEmbeddedMoonlightPairing(instanceId);
-    navigate("/provisioning");
+  function handleOpenLaunchLibrary(instanceId: number) {
+    onClearLaunchLibrary();
+    setLaunchLibraryInstanceId(instanceId);
   }
 
-  async function handleReconnect(instanceId: number) {
-    await onReconnectWireguard(instanceId);
+  function handleCloseLaunchLibrary() {
+    setLaunchLibraryInstanceId(null);
+    onClearLaunchLibrary();
+  }
+
+  function handleDisplay(instanceId: number) {
+    setDisplayInstanceId(instanceId);
   }
 
   async function handleReboot(instanceId: number) {
     await onRebootInstanceServices(instanceId);
-  }
-
-  async function handlePause(instanceId: number) {
-    await onPauseInstance(instanceId);
-    await onLoadRentedInstances();
   }
 
   async function handleDestroy(instanceId: number) {
@@ -565,11 +603,9 @@ export function DashboardScreen({
                       instanceActionRunning={instanceActionRunning}
                       blockingAction={blockingAction}
                       onProvisioning={handleResumeProvisioning}
-                      onPlay={handlePlayEmbedded}
-                      onPair={handlePair}
-                      onReconnect={handleReconnect}
+                      onOpenLaunchLibrary={handleOpenLaunchLibrary}
+                      onDisplay={handleDisplay}
                       onReboot={handleReboot}
-                      onPause={handlePause}
                       onDestroy={handleDestroy}
                       onSaveStorage={handleSaveStorage}
                       onSyncStorage={handleSyncStorage}
@@ -846,6 +882,32 @@ export function DashboardScreen({
         </ModalFrame>
       ) : null}
 
+      {launchLibraryInstance ? (
+        <LaunchLibraryModal
+          instanceId={launchLibraryInstance.instanceId}
+          instanceLabel={launchLibraryInstance.label}
+          library={launchLibrary}
+          loading={launchLibraryLoading}
+          job={launchSoftwareJob}
+          launchingAppId={launchingSoftwareAppId}
+          artwork={softwareArtwork}
+          artworkLoading={softwareArtworkLoading}
+          onLoadLibrary={onLoadInstanceLaunchLibrary}
+          onLaunchPc={handlePlayEmbedded}
+          onLaunchSoftware={onLaunchInstanceSoftware}
+          onPollJob={onPollLaunchSoftwareJob}
+          onLoadArtwork={onLoadSoftwareArtwork}
+          onClose={handleCloseLaunchLibrary}
+        />
+      ) : null}
+
+      {displayInstance ? (
+        <InstanceDisplayModal
+          instance={displayInstance}
+          onClose={() => setDisplayInstanceId(null)}
+        />
+      ) : null}
+
       <SharedStorageSyncModal
         open={syncInstanceId !== null}
         busy={busy || instanceActionRunning}
@@ -862,6 +924,7 @@ export function DashboardScreen({
         onClose={() => setExportInstanceId(null)}
         onLoadObjects={onListExportableStorageObjects}
         onConfirmExport={handleExportSelection}
+        onRefreshIndexing={onRefreshIndexing}
       />
 
       {connectionInfoModalType && (

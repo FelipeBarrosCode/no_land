@@ -1,0 +1,25 @@
+#!/usr/bin/expect -f
+set timeout 10
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai root@184.144.255.144 "python3 -c \"
+import os
+path = '/home/user/.local/share/applications/sklauncher.desktop'
+text = open(path).read()
+in_desktop = False
+for line in text.splitlines():
+    line = line.strip()
+    if line.startswith('['):
+        in_desktop = (line.lower() == '[desktop entry]')
+        print(f'Header {line} -> {in_desktop}')
+        continue
+    if not in_desktop or not line or line.startswith('#'): continue
+    if '=' in line:
+        k, v = line.split('=', 1)
+        print(f'Found: {k.strip()} = {v.strip()}')
+\""
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

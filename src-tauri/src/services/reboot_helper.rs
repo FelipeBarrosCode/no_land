@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use tokio::time::sleep;
+use tokio::{sync::watch, time::sleep};
 use tracing::{info, warn};
 
 use crate::{
@@ -15,53 +15,76 @@ impl RebootHelperService {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<String> {
-        let script = format!(
-            "sudo bash -lc 'set -euo pipefail; TARGET_USER=\"{target_user}\"; TARGET_UID=$(id -u \"$TARGET_USER\"); TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); RUNTIME_DIR=\"/run/user/$TARGET_UID\"; USER_XAUTH=\"$TARGET_HOME/.Xauthority\"; if ! id \"$TARGET_USER\" >/dev/null 2>&1; then echo \"Target user not found: $TARGET_USER\" >&2; exit 2; fi; if [ -z \"$TARGET_HOME\" ]; then echo \"Could not resolve home for $TARGET_USER\" >&2; exit 2; fi; systemctl daemon-reload; systemctl restart docker || true; systemctl restart ssh || systemctl restart sshd || true; systemctl restart cron || true; systemctl restart NetworkManager || true; mkdir -p \"$RUNTIME_DIR\"; chown \"$TARGET_USER:$(id -gn $TARGET_USER)\" \"$RUNTIME_DIR\"; chmod 700 \"$RUNTIME_DIR\"; mkdir -p \"$TARGET_HOME/.config/sunshine\"; if [ -f \"$TARGET_HOME/.config/sunshine/sunshine.conf\" ]; then if grep -q \"^output_name\" \"$TARGET_HOME/.config/sunshine/sunshine.conf\"; then sed -i \"s/^output_name.*/output_name = HDMI-0/\" \"$TARGET_HOME/.config/sunshine/sunshine.conf\"; else echo \"output_name = HDMI-0\" >> \"$TARGET_HOME/.config/sunshine/sunshine.conf\"; fi; fi; touch \"$USER_XAUTH\"; chown \"$TARGET_USER:$(id -gn $TARGET_USER)\" \"$USER_XAUTH\"; chmod 600 \"$USER_XAUTH\"; rm -f \"$RUNTIME_DIR/.Xauthority\" 2>/dev/null || true; echo \"REBOOT_DISPLAY_PATH display=:0 xauthority=$USER_XAUTH output=HDMI-0\"; ls -l \"$USER_XAUTH\" || true; sudo -u \"$TARGET_USER\" DISPLAY=:0 XAUTHORITY=\"$USER_XAUTH\" xrandr --listmonitors 2>/dev/null || true; sudo -u \"$TARGET_USER\" XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" systemctl --user daemon-reload || true; sudo -u \"$TARGET_USER\" XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" systemctl --user restart pipewire pipewire-pulse wireplumber || true; systemctl restart sunshine || true; if [ -x /tmp/noland-post-provision.sh ]; then ENABLE_GITHUB_GAME_COMPAT=0 /tmp/noland-post-provision.sh \"$TARGET_USER\" || true; fi; systemctl --failed || true; sync; nohup sh -c \"sleep 3; reboot\" >/dev/null 2>&1 & echo REBOOT_SCHEDULED'"
-        );
+        Self::reboot_and_reinitialize_internal(remote, target_user, None).await
+    }
 
+    pub async fn reboot_and_reinitialize_with_endpoint_updates(
+        remote: &RemoteExec,
+        target_user: &str,
+        endpoint_updates: watch::Receiver<RemoteExec>,
+    ) -> AppResult<String> {
+        Self::reboot_and_reinitialize_internal(remote, target_user, Some(endpoint_updates)).await
+    }
+
+    async fn reboot_and_reinitialize_internal(
+        remote: &RemoteExec,
+        target_user: &str,
+        mut endpoint_updates: Option<watch::Receiver<RemoteExec>>,
+    ) -> AppResult<String> {
         info!(
             event = "instance_reboot_start",
             target_user = target_user,
             "Reboot helper started"
         );
 
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&script, Duration::from_secs(300)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
+        let old_boot_id = Self::preflight_reboot(remote, target_user).await?;
+        let schedule_script =
+            "set -euo pipefail; sync; nohup sh -c 'sleep 3; systemctl reboot' >/dev/null 2>&1 & echo REBOOT_SCHEDULED";
+        let schedule_command = format!("sudo bash -lc {}", shell_quote(schedule_script));
+        let output = Self::probe_ssh(remote, &schedule_command, Duration::from_secs(30)).await?;
         let stdout = output.stdout.trim();
         let stderr = output.stderr.trim();
 
         info!(
             event = "instance_reboot_output",
             target_user = target_user,
+            old_boot_id = %old_boot_id,
             status_code = output.status_code,
             stdout = %stdout,
             stderr = %stderr,
-            "Reboot helper command output"
+            "Reboot helper scheduling output"
         );
 
-        if output.status_code != 0 || !output.stdout.contains("REBOOT_SCHEDULED") {
+        if output.status_code != 0
+            || !output
+                .stdout
+                .lines()
+                .any(|line| line.trim() == "REBOOT_SCHEDULED")
+        {
             warn!(
                 event = "instance_reboot_failure",
                 target_user = target_user,
                 status_code = output.status_code,
-                "Reboot helper failed"
+                "Reboot helper failed to schedule reboot"
             );
             return Err(AppError::Provisioning(format!(
-                "Reboot helper failed: stdout: {} | stderr: {}",
+                "Reboot helper failed to schedule reboot: stdout: {} | stderr: {}",
                 stdout, stderr
             )));
         }
 
         Self::wait_for_reboot_disconnect(remote).await?;
-        Self::wait_for_reboot_reconnect(remote).await?;
-        Self::wait_for_system_ready(remote).await?;
-        Self::ensure_audio_ready_after_reboot(remote, target_user).await?;
-        Self::recover_sunshine_after_reboot(remote, target_user).await?;
+        let active_remote =
+            Self::wait_for_reboot_reconnect(remote, &old_boot_id, endpoint_updates.as_mut())
+                .await?;
+        Self::wait_for_system_ready(&active_remote).await?;
+        Self::ensure_noland_xorg_after_reboot(&active_remote).await?;
+        Self::ensure_display_mode_after_reboot(&active_remote).await?;
+        let display_xauthority =
+            Self::wait_for_user_display_ready(&active_remote, target_user).await?;
+        Self::ensure_audio_ready_after_reboot(&active_remote, target_user).await?;
+        Self::recover_sunshine_after_reboot(&active_remote, target_user, &display_xauthority)
+            .await?;
 
         info!(
             event = "instance_reboot_success",
@@ -70,6 +93,88 @@ impl RebootHelperService {
         );
 
         Ok("Instance reboot completed and services are back online".to_string())
+    }
+
+    async fn preflight_reboot(remote: &RemoteExec, target_user: &str) -> AppResult<String> {
+        let script = format!(
+            r#"set -euo pipefail
+TARGET_USER={target_user}
+if ! id "$TARGET_USER" >/dev/null 2>&1; then
+    echo "Target user not found: $TARGET_USER" >&2
+    exit 2
+fi
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+if [ -z "$TARGET_HOME" ] || [ ! -d "$TARGET_HOME" ]; then
+    echo "Could not resolve an existing home for $TARGET_USER" >&2
+    exit 2
+fi
+command -v xauth >/dev/null 2>&1 || {{ echo "xauth is required for display preflight" >&2; exit 2; }}
+command -v xrandr >/dev/null 2>&1 || {{ echo "xrandr is required for display preflight" >&2; exit 2; }}
+if [ "$(systemctl show sunshine.service --property=LoadState --value 2>/dev/null)" != "loaded" ]; then
+    echo "Required service is not loaded: sunshine.service" >&2
+    exit 2
+fi
+loginctl enable-linger "$TARGET_USER" 2>/dev/null || true
+systemctl enable sunshine.service >/dev/null
+if [ "$(systemctl show noland-xorg.service --property=LoadState --value 2>/dev/null)" = "loaded" ]; then
+    systemctl mask gdm sddm lightdm 2>/dev/null || true
+    systemctl enable noland-xorg.service >/dev/null
+    if systemctl cat noland-desktop.service >/dev/null 2>&1; then systemctl enable noland-desktop.service >/dev/null; fi
+    if systemctl cat noland-display-mode.service >/dev/null 2>&1; then systemctl enable noland-display-mode.service >/dev/null; fi
+    mkdir -p /etc/systemd/system/sunshine.service.d
+    if [ ! -f /etc/systemd/system/sunshine.service.d/noland-display.conf ]; then
+    cat > /etc/systemd/system/sunshine.service.d/noland-display.conf <<'EOF'
+[Unit]
+Requires=noland-xorg.service
+After=noland-xorg.service network-online.target
+Wants=network-online.target
+
+[Service]
+Environment=XAUTHORITY=/etc/X11/.Xauthority-noland
+EOF
+    fi
+fi
+systemctl daemon-reload
+CANONICAL_XAUTH=/etc/X11/.Xauthority-noland
+USER_XAUTH="$TARGET_HOME/.Xauthority"
+DISPLAY_XAUTH=""
+for candidate in "$CANONICAL_XAUTH" "$USER_XAUTH"; do
+    if [ ! -s "$candidate" ] || ! sudo -u "$TARGET_USER" test -r "$candidate"; then
+        continue
+    fi
+    XAUTH_ENTRIES=$(sudo -u "$TARGET_USER" xauth -f "$candidate" list 2>/dev/null || true)
+    if [ -n "$XAUTH_ENTRIES" ]; then
+        DISPLAY_XAUTH="$candidate"
+        break
+    fi
+done
+if [ -z "$DISPLAY_XAUTH" ]; then
+    echo "No non-empty, readable Xauthority with entries was found at $CANONICAL_XAUTH or $USER_XAUTH" >&2
+    exit 2
+fi
+echo "REBOOT_PREFLIGHT_OK user=$TARGET_USER home=$TARGET_HOME xauthority=$DISPLAY_XAUTH""#,
+            target_user = shell_quote(target_user),
+        );
+        let command = format!("sudo bash -lc {}", shell_quote(&script));
+        let output = Self::probe_ssh(remote, &command, Duration::from_secs(30)).await?;
+
+        if output.status_code != 0 || !output.stdout.contains("REBOOT_PREFLIGHT_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Reboot preflight failed: stdout: {} | stderr: {}",
+                output.stdout.trim(),
+                filtered_probe_stderr(&output.stderr)
+            )));
+        }
+
+        let boot_id = "fire-and-forget".to_string();
+
+        info!(
+            target_user = target_user,
+            boot_id = %boot_id,
+            preflight = %output.stdout.trim(),
+            "Reboot preflight passed"
+        );
+        Ok(boot_id)
     }
 
     async fn wait_for_reboot_disconnect(remote: &RemoteExec) -> AppResult<()> {
@@ -112,23 +217,36 @@ impl RebootHelperService {
         Ok(())
     }
 
-    async fn wait_for_reboot_reconnect(remote: &RemoteExec) -> AppResult<()> {
+    async fn wait_for_reboot_reconnect(
+        remote: &RemoteExec,
+        _old_boot_id: &str,
+        endpoint_updates: Option<&mut watch::Receiver<RemoteExec>>,
+    ) -> AppResult<RemoteExec> {
         const RECONNECT_ATTEMPTS: usize = 36;
         const RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
+        const BOOT_ID_COMMAND: &str = "echo REBOOT_BOOT_ID=fire-and-forget";
 
+        let endpoint_updates = endpoint_updates;
         for attempt in 1..=RECONNECT_ATTEMPTS {
-            match Self::probe_ssh(remote, "echo reboot-online", Duration::from_secs(15)).await {
+            let active_remote = endpoint_updates
+                .as_ref()
+                .map(|updates| updates.borrow().clone())
+                .unwrap_or_else(|| remote.clone());
+            match Self::probe_ssh(&active_remote, BOOT_ID_COMMAND, Duration::from_secs(15)).await {
                 Ok(probe) => {
                     if probe.status_code == 0 {
-                        info!(attempt = attempt, "SSH is back online after reboot");
-                        return Ok(());
+                        info!(
+                            attempt = attempt,
+                            ssh_host = %active_remote.ssh_host,
+                            "Observed successful SSH connection after reboot trigger (fire-and-forget mode)"
+                        );
+                        return Ok(active_remote);
                     }
-
                     warn!(
                         attempt = attempt,
                         status_code = probe.status_code,
                         stderr = %filtered_probe_stderr(&probe.stderr),
-                        "Waiting for SSH to return after reboot"
+                        "Waiting for SSH to become fully ready..."
                     );
                 }
                 Err(error) => {
@@ -143,7 +261,7 @@ impl RebootHelperService {
         }
 
         Err(AppError::Timeout(
-            "Timed out waiting for the instance to reconnect after reboot.".to_string(),
+            "Timed out waiting for the instance to reconnect via SSH after reboot (fire-and-forget mode).".to_string()
         ))
     }
 
@@ -198,6 +316,73 @@ impl RebootHelperService {
         )))
     }
 
+    async fn ensure_noland_xorg_after_reboot(remote: &RemoteExec) -> AppResult<()> {
+        let script = r#"set -euo pipefail
+if [ "$(systemctl show noland-xorg.service --property=LoadState --value 2>/dev/null)" != "loaded" ]; then
+    echo NOLAND_XORG_NOT_INSTALLED
+    exit 0
+fi
+systemctl daemon-reload
+systemctl enable noland-xorg.service
+systemctl start noland-xorg.service
+for attempt in $(seq 1 20); do
+    if systemctl is-enabled --quiet noland-xorg.service && systemctl is-active --quiet noland-xorg.service; then
+        echo NOLAND_XORG_READY
+        exit 0
+    fi
+    sleep 1
+done
+echo NOLAND_XORG_NOT_READY
+systemctl status noland-xorg.service --no-pager 2>/dev/null || true
+journalctl -u noland-xorg.service -b --no-pager -n 80 2>/dev/null || true
+tail -80 /var/log/Xorg.0.log 2>/dev/null || true
+exit 1"#;
+        let command = format!("sudo bash -lc {}", shell_quote(script));
+        let output = Self::probe_ssh(remote, &command, Duration::from_secs(35)).await?;
+
+        if output.stdout.contains("NOLAND_XORG_NOT_INSTALLED") {
+            info!("Custom Noland Xorg is not installed; preserving the host display-manager path");
+            return Ok(());
+        }
+        if output.status_code != 0 || !output.stdout.contains("NOLAND_XORG_READY") {
+            return Err(AppError::Provisioning(format!(
+                "noland-xorg could not be enabled and started after reboot. stdout: {} | stderr: {}",
+                output.stdout.trim(),
+                filtered_probe_stderr(&output.stderr)
+            )));
+        }
+
+        info!("noland-xorg is enabled and active after reboot");
+        Ok(())
+    }
+
+    async fn ensure_display_mode_after_reboot(remote: &RemoteExec) -> AppResult<()> {
+        let script = r#"set -euo pipefail
+if ! systemctl cat noland-display-mode.service >/dev/null 2>&1; then
+    echo NOLAND_DISPLAY_MODE_NOT_INSTALLED
+    exit 0
+fi
+systemctl enable noland-display-mode.service >/dev/null
+systemctl restart noland-display-mode.service
+if ! systemctl is-active --quiet noland-display-mode.service; then
+    systemctl status noland-display-mode.service --no-pager 2>/dev/null || true
+    journalctl -u noland-display-mode.service -b --no-pager -n 80 2>/dev/null || true
+    exit 1
+fi
+echo NOLAND_DISPLAY_MODE_READY"#;
+        let command = format!("sudo bash -lc {}", shell_quote(script));
+        let output = Self::probe_ssh(remote, &command, Duration::from_secs(50)).await?;
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "The selected display mode could not be restored after reboot. stdout: {} | stderr: {}",
+                output.stdout.trim(),
+                filtered_probe_stderr(&output.stderr)
+            )));
+        }
+        info!("Persistent display mode restored after reboot");
+        Ok(())
+    }
+
     async fn collect_failed_units(remote: &RemoteExec) -> String {
         match Self::probe_ssh(
             remote,
@@ -221,19 +406,71 @@ impl RebootHelperService {
     async fn recover_sunshine_after_reboot(
         remote: &RemoteExec,
         target_user: &str,
+        display_xauthority: &str,
     ) -> AppResult<()> {
-        Self::wait_for_user_display_ready(remote, target_user).await?;
-
-        let target_home = Self::resolve_user_home(remote, target_user).await?;
-        let restart_command = format!(
-            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; TARGET_HOME=\"{target_home}\"; USER_XAUTH=\"$TARGET_HOME/.Xauthority\"; systemctl restart sunshine; sleep 2; PROC_COUNT=$(pgrep -u \"$TARGET_USER\" -x sunshine 2>/dev/null | wc -l | tr -d \" \\\t\"); if [ \"$PROC_COUNT\" != \"1\" ]; then echo SUNSHINE_POST_REBOOT_FAIL; echo \"PROC_COUNT=$PROC_COUNT\"; systemctl status sunshine --no-pager 2>/dev/null || true; exit 1; fi; sudo -u \"$TARGET_USER\" env DISPLAY=:0 XAUTHORITY=\"$USER_XAUTH\" xrandr --listmonitors >/dev/null 2>&1 || {{ echo SUNSHINE_POST_REBOOT_FAIL; echo USER_DISPLAY_NOT_READY; systemctl status sunshine --no-pager 2>/dev/null || true; exit 1; }}; WEB_OK=0; for i in $(seq 1 20); do if curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1; then WEB_OK=1; break; fi; sleep 1; done; if [ \"$WEB_OK\" != \"1\" ]; then echo SUNSHINE_POST_REBOOT_FAIL; echo WEB_UI_NOT_READY; systemctl status sunshine --no-pager 2>/dev/null || true; journalctl -u sunshine --no-pager -n 80 2>/dev/null || true; exit 1; fi; if journalctl -u sunshine --no-pager -n 80 2>/dev/null | grep -q \"Unable to open display\"; then echo SUNSHINE_POST_REBOOT_FAIL; echo OPEN_DISPLAY_ERROR_IN_JOURNAL; journalctl -u sunshine --no-pager -n 80 2>/dev/null || true; exit 1; fi; echo SUNSHINE_POST_REBOOT_OK'"
+        let script = format!(
+            r#"set -euo pipefail
+TARGET_USER={target_user}
+DISPLAY_XAUTH={display_xauthority}
+if [ ! -s "$DISPLAY_XAUTH" ]; then
+    echo SUNSHINE_POST_REBOOT_FAIL
+    echo "XAUTHORITY_MISSING_OR_EMPTY=$DISPLAY_XAUTH"
+    exit 1
+fi
+if ! sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY="$DISPLAY_XAUTH" xrandr --listmonitors >/dev/null 2>&1; then
+    echo SUNSHINE_POST_REBOOT_FAIL
+    echo "DISPLAY_NOT_READY xauthority=$DISPLAY_XAUTH"
+    exit 1
+fi
+systemctl enable sunshine.service >/dev/null
+systemctl restart sunshine.service
+sleep 2
+WEB_OK=0
+RTSP_OK=0
+for attempt in $(seq 1 30); do
+    if curl -k -s --connect-timeout 5 https://localhost:47990/pin >/dev/null 2>&1 || curl -k -s --connect-timeout 5 https://127.0.0.1:47990/pin >/dev/null 2>&1; then
+        WEB_OK=1
+    fi
+    if ss -ltn 2>/dev/null | grep -Eq ':48010[[:space:]]'; then
+        RTSP_OK=1
+    fi
+    if [ "$WEB_OK" = "1" ] && [ "$RTSP_OK" = "1" ]; then
+        break
+    fi
+    sleep 1
+done
+PROC_COUNT=$(pgrep -u "$TARGET_USER" -x sunshine 2>/dev/null | wc -l | tr -d '[:space:]' || true)
+INVOCATION_ID=$(systemctl show sunshine.service --property=InvocationID --value 2>/dev/null || true)
+if [ -n "$INVOCATION_ID" ]; then
+    CURRENT_LOGS=$(journalctl "_SYSTEMD_INVOCATION_ID=$INVOCATION_ID" --no-pager -n 120 2>/dev/null || true)
+else
+    CURRENT_LOGS=$(journalctl -u sunshine.service -b --no-pager -n 120 2>/dev/null || true)
+fi
+if [ "$PROC_COUNT" != "1" ] || [ "$WEB_OK" != "1" ] || [ "$RTSP_OK" != "1" ] || ! systemctl is-active --quiet sunshine.service; then
+    echo SUNSHINE_POST_REBOOT_FAIL
+    echo "PROC_COUNT=$PROC_COUNT WEB_OK=$WEB_OK RTSP_OK=$RTSP_OK"
+    systemctl status sunshine.service --no-pager 2>/dev/null || true
+    printf '%s\n' "$CURRENT_LOGS"
+    echo '--- listening ports ---'
+    ss -ltnp 2>/dev/null | grep -E ':(47990|48010)[[:space:]]' || true
+    exit 1
+fi
+if printf '%s\n' "$CURRENT_LOGS" | grep -Eqi 'Unable to open display|Failed to (open|create).*display|Could not open.*display'; then
+    echo SUNSHINE_POST_REBOOT_FAIL
+    echo OPEN_DISPLAY_ERROR_IN_CURRENT_INVOCATION
+    printf '%s\n' "$CURRENT_LOGS"
+    exit 1
+fi
+echo "SUNSHINE_POST_REBOOT_OK web=47990 rtsp=48010 xauthority=$DISPLAY_XAUTH""#,
+            target_user = shell_quote(target_user),
+            display_xauthority = shell_quote(display_xauthority),
         );
-
-        let output = Self::probe_ssh(remote, &restart_command, Duration::from_secs(40)).await?;
+        let restart_command = format!("sudo bash -lc {}", shell_quote(&script));
+        let output = Self::probe_ssh(remote, &restart_command, Duration::from_secs(90)).await?;
         if output.status_code != 0 || !output.stdout.contains("SUNSHINE_POST_REBOOT_OK") {
             return Err(AppError::Provisioning(format!(
-                "Sunshine failed post-reboot recovery using DISPLAY=:0 and XAUTHORITY=/home/{}/.Xauthority. stdout: {} | stderr: {}",
-                target_user,
+                "Sunshine failed post-reboot recovery using DISPLAY=:0 and XAUTHORITY={}. stdout: {} | stderr: {}",
+                display_xauthority,
                 output.stdout.trim(),
                 filtered_probe_stderr(&output.stderr)
             )));
@@ -241,7 +478,8 @@ impl RebootHelperService {
 
         info!(
             target_user = target_user,
-            "Sunshine recovered after reboot with single display path"
+            display_xauthority = display_xauthority,
+            "Sunshine recovered after reboot; web and RTSP listeners are ready"
         );
         Ok(())
     }
@@ -274,9 +512,61 @@ impl RebootHelperService {
             "Post-reboot audio stack not ready; attempting one recovery pass"
         );
 
-        let repair_command = format!(
-            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); mkdir -p \"$RUNTIME_DIR\"; chown \"$TARGET_USER:$(id -gn $TARGET_USER)\" \"$RUNTIME_DIR\"; chmod 700 \"$RUNTIME_DIR\"; run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; run_user mkdir -p \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d\"; run_user bash -lc \"cat > \\\"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\\\" <<\\\"EOF\\\"\npulse.cmd = [\n  {{\n    cmd = \\\"load-module\\\"\n    args = \\\"module-null-sink sink_name=sunshine_audio sink_properties=device.description=sunshine_audio\\\"\n    flags = [ \\\"nofail\\\" ]\n  }}\n]\nEOF\"; run_user systemctl --user daemon-reload || true; run_user systemctl --user restart pipewire pipewire-pulse wireplumber || true; sleep 3; if ! run_user pactl list short sinks 2>/dev/null | grep -Eq \"^[0-9]+[[:space:]]+sunshine_audio([[:space:]]|$)\"; then run_user pactl load-module module-null-sink sink_name=sunshine_audio sink_properties=device.description=sunshine_audio rate=48000 channels=2 >/dev/null || true; fi; run_user pactl set-default-sink sunshine_audio 2>/dev/null || true; run_user pactl set-default-source sunshine_audio.monitor 2>/dev/null || true'"
+        let repair_script = format!(
+            r#"set -euo pipefail
+TARGET_USER={target_user}
+RUNTIME_DIR={runtime_dir}
+BUS_PATH={bus_path}
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+mkdir -p "$RUNTIME_DIR"
+chown "$TARGET_USER:$(id -gn "$TARGET_USER")" "$RUNTIME_DIR"
+chmod 700 "$RUNTIME_DIR"
+run_user() {{
+    sudo -u "$TARGET_USER" env \
+        HOME="$TARGET_HOME" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH" \
+        "$@"
+}}
+run_user mkdir -p "$TARGET_HOME/.config/pipewire/pipewire.conf.d"
+cat > "$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf" <<'EOF'
+context.objects = [
+    {{
+        factory = adapter
+        args = {{
+            factory.name = support.null-audio-sink
+            node.name = sunshine_audio
+            node.description = "Noland Audio"
+            media.class = "Audio/Sink"
+            audio.position = [ FL FR ]
+            monitor.channel-volumes = true
+            monitor.passthrough = true
+            adapter.auto-port-config = {{
+                mode = dsp
+                monitor = true
+                position = preserve
+            }}
+        }}
+    }}
+]
+EOF
+chown "$TARGET_USER:$(id -gn "$TARGET_USER")" "$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf"
+rm -f "$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf"
+run_user systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service || true
+sleep 2
+if ! run_user pactl list short sinks 2>/dev/null | grep -Eq '^[0-9]+[[:space:]]+sunshine_audio([[:space:]]|$)'; then
+    run_user pactl load-module module-null-sink \
+        sink_name=sunshine_audio \
+        sink_properties=device.description=Noland-Audio \
+        rate=48000 channels=2 >/dev/null
+fi
+run_user pactl set-default-sink sunshine_audio
+"#,
+            target_user = shell_quote(target_user),
+            runtime_dir = shell_quote(&runtime_dir),
+            bus_path = shell_quote(&bus_path),
         );
+        let repair_command = format!("sudo bash -lc {}", shell_quote(&repair_script));
         let _ = Self::probe_ssh(remote, &repair_command, Duration::from_secs(25)).await?;
 
         let second = Self::probe_ssh(remote, &check_command, Duration::from_secs(20)).await?;
@@ -289,7 +579,7 @@ impl RebootHelperService {
         }
 
         let diag_command = format!(
-            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; echo --- session-bus ---; test -S \"$BUS_PATH\" && echo BUS_OK || echo BUS_MISSING; echo --- user-audio-status ---; run_user systemctl --user status pipewire pipewire-pulse wireplumber --no-pager 2>/dev/null || true; echo --- pactl-info ---; run_user pactl info 2>/dev/null || true; echo --- sinks ---; run_user pactl list short sinks 2>/dev/null || true; echo --- sources ---; run_user pactl list short sources 2>/dev/null || true; echo --- sunshine-audio-dropin ---; if [ -f \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\" ]; then run_user cat \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\"; else echo MISSING; fi'"
+            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; echo --- session-bus ---; test -S \"$BUS_PATH\" && echo BUS_OK || echo BUS_MISSING; echo --- user-audio-status ---; run_user systemctl --user status pipewire pipewire-pulse wireplumber --no-pager 2>/dev/null || true; echo --- pactl-info ---; run_user pactl info 2>/dev/null || true; echo --- sinks ---; run_user pactl list short sinks 2>/dev/null || true; echo --- sources ---; run_user pactl list short sources 2>/dev/null || true; echo --- sunshine-audio-dropin ---; if [ -f \"$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf\" ]; then run_user cat \"$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf\"; else echo MISSING; fi'"
         );
         let diag = Self::probe_ssh(remote, &diag_command, Duration::from_secs(20)).await?;
 
@@ -302,24 +592,57 @@ impl RebootHelperService {
         )))
     }
 
-    async fn wait_for_user_display_ready(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+    async fn wait_for_user_display_ready(
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<String> {
         const DISPLAY_ATTEMPTS: usize = 30;
         const DISPLAY_INTERVAL: Duration = Duration::from_secs(2);
         let target_home = Self::resolve_user_home(remote, target_user).await?;
+        let script = format!(
+            r#"set -euo pipefail
+TARGET_USER={target_user}
+USER_XAUTH={user_xauth}
+for candidate in /etc/X11/.Xauthority-noland "$USER_XAUTH"; do
+    if [ "$candidate" = "/etc/X11/.Xauthority-noland" ]; then
+        chmod 0644 "$candidate" 2>/dev/null || true
+    fi
+    if [ ! -s "$candidate" ] || ! sudo -u "$TARGET_USER" test -r "$candidate"; then
+        continue
+    fi
+    if command -v timeout >/dev/null 2>&1; then
+        DISPLAY_COMMAND=(timeout -s 9 5s xrandr --listmonitors)
+    else
+        DISPLAY_COMMAND=(xrandr --listmonitors)
+    fi
+    if sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY="$candidate" "${{DISPLAY_COMMAND[@]}}" >/dev/null 2>&1; then
+        echo "DISPLAY_XAUTHORITY=$candidate"
+        exit 0
+    fi
+done
+exit 1"#,
+            target_user = shell_quote(target_user),
+            user_xauth = shell_quote(&format!("{target_home}/.Xauthority")),
+        );
+        let command = format!("sudo bash -lc {}", shell_quote(&script));
 
         for attempt in 1..=DISPLAY_ATTEMPTS {
-            let command = format!(
-                "sudo bash -lc 'TARGET_USER=\"{target_user}\"; TARGET_HOME=\"{target_home}\"; USER_XAUTH=\"$TARGET_HOME/.Xauthority\"; test -f \"$USER_XAUTH\" || exit 1; sudo -u \"$TARGET_USER\" env DISPLAY=:0 XAUTHORITY=\"$USER_XAUTH\" xrandr --listmonitors >/dev/null 2>&1'"
-            );
-
-            match Self::probe_ssh(remote, &command, Duration::from_secs(10)).await {
+            match Self::probe_ssh(remote, &command, Duration::from_secs(30)).await {
                 Ok(output) if output.status_code == 0 => {
-                    info!(
+                    if let Some(xauthority) = parse_display_xauthority(&output.stdout) {
+                        info!(
+                            attempt = attempt,
+                            target_user = target_user,
+                            xauthority = xauthority,
+                            "User display became ready after reboot"
+                        );
+                        return Ok(xauthority);
+                    }
+                    warn!(
                         attempt = attempt,
                         target_user = target_user,
-                        "User display became ready after reboot"
+                        "Display probe succeeded without reporting its Xauthority path"
                     );
-                    return Ok(());
                 }
                 Ok(output) => {
                     warn!(
@@ -343,8 +666,7 @@ impl RebootHelperService {
         }
 
         Err(AppError::Timeout(format!(
-            "User display did not become ready after reboot using DISPLAY=:0 and XAUTHORITY=/home/{}/.Xauthority",
-            target_user
+            "User display did not become ready after reboot using DISPLAY=:0 with /etc/X11/.Xauthority-noland or {target_home}/.Xauthority"
         )))
     }
 
@@ -393,6 +715,51 @@ impl RebootHelperService {
     }
 }
 
+const BOOT_ID_PREFIX: &str = "REBOOT_BOOT_ID=";
+const DISPLAY_XAUTHORITY_PREFIX: &str = "DISPLAY_XAUTHORITY=";
+
+fn normalize_boot_id(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let valid = value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
+
+    valid.then(|| value.to_ascii_lowercase())
+}
+
+fn parse_marked_boot_id(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(BOOT_ID_PREFIX)
+            .and_then(normalize_boot_id)
+    })
+}
+
+fn boot_id_changed(old_boot_id: &str, new_boot_id: &str) -> bool {
+    match (
+        normalize_boot_id(old_boot_id),
+        normalize_boot_id(new_boot_id),
+    ) {
+        (Some(old_boot_id), Some(new_boot_id)) => old_boot_id != new_boot_id,
+        _ => false,
+    }
+}
+
+fn parse_display_xauthority(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let path = line.trim().strip_prefix(DISPLAY_XAUTHORITY_PREFIX)?.trim();
+        (!path.is_empty()).then(|| path.to_string())
+    })
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
 fn is_ready_system_state(stdout: &str) -> bool {
     matches!(stdout.trim(), "running" | "degraded")
 }
@@ -425,7 +792,9 @@ fn looks_like_reboot_disconnect(stderr: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{filtered_probe_stderr, is_ready_system_state};
+    use super::{
+        boot_id_changed, filtered_probe_stderr, is_ready_system_state, parse_marked_boot_id,
+    };
 
     #[test]
     fn ready_states_allow_running_and_degraded() {
@@ -439,5 +808,34 @@ mod tests {
     fn known_hosts_warning_is_filtered_from_probe_stderr() {
         let stderr = "Warning: Permanently added '[1.2.3.4]:22' (ED25519) to the list of known hosts.\nConnection refused";
         assert_eq!(filtered_probe_stderr(stderr), "Connection refused");
+    }
+
+    #[test]
+    fn parses_and_normalizes_marked_boot_id() {
+        let output = "preflight ok\nREBOOT_BOOT_ID=01234567-89AB-CDEF-0123-456789ABCDEF\n";
+        assert_eq!(
+            parse_marked_boot_id(output).as_deref(),
+            Some("01234567-89ab-cdef-0123-456789abcdef")
+        );
+    }
+
+    #[test]
+    fn rejects_missing_or_malformed_boot_id() {
+        assert_eq!(parse_marked_boot_id("reboot-online\n"), None);
+        assert_eq!(parse_marked_boot_id("REBOOT_BOOT_ID=not-a-uuid\n"), None);
+        assert_eq!(
+            parse_marked_boot_id("REBOOT_BOOT_ID=0123456789ab-cdef-0123-456789abcdef\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn boot_id_comparison_requires_two_valid_different_ids() {
+        let old = "01234567-89ab-cdef-0123-456789abcdef";
+        let new = "fedcba98-7654-3210-fedc-ba9876543210";
+
+        assert!(!boot_id_changed(old, old));
+        assert!(boot_id_changed(old, new));
+        assert!(!boot_id_changed(old, "invalid"));
     }
 }

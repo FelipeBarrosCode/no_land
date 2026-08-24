@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 10
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai root@184.144.255.144 "sqlite3 /var/lib/noland/state/state.db \"INSERT INTO apps (app_id, display_name, canonical_executable, desktop_entry_id, identity_confidence, aliases_json) VALUES ('desktop:sklauncher', 'SKlauncher', 'java', 'sklauncher', 0.85, '\[\]');\""
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

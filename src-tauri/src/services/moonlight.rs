@@ -21,6 +21,31 @@ pub(crate) fn detect_client_display_for_provisioning() -> Option<(u32, u32, u32)
     Some((detected.width, detected.height, detected.refresh_rate_hz))
 }
 
+pub(crate) fn detect_hardware_display_for_provisioning() -> Option<(u32, u32, u32)> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(output) = Command::new("system_profiler")
+            .arg("SPDisplaysDataType")
+            .output()
+            .ok()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if let Some(rest) = line.trim().strip_prefix("Resolution:") {
+                    let numbers = rest
+                        .split(|ch: char| !ch.is_ascii_digit())
+                        .filter_map(|part| part.parse::<u32>().ok())
+                        .collect::<Vec<_>>();
+                    if numbers.len() >= 2 {
+                        return Some((numbers[0], numbers[1], 60));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn detect_display() -> Option<DisplayDetection> {
     #[cfg(target_os = "macos")]
     {

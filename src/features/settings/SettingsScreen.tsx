@@ -11,6 +11,7 @@ import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettings
 import type {
   MoonlightPreferences,
   PlatformCredentialsUpdate,
+  IgdbCredentialsUpdate,
   PersistedAppState,
   ProfileReference,
   ProviderDefinition,
@@ -84,6 +85,7 @@ interface Props {
   onSavePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
+  onSaveIgdbCredentials: (payload: IgdbCredentialsUpdate) => Promise<void>;
   onSaveServerPreferences: (
     payload: Partial<ServerPreferencesUpdate>,
   ) => Promise<void>;
@@ -206,6 +208,7 @@ export function SettingsScreen({
   onCompleteOauthFlow,
   onSaveApiKey,
   onSavePlatformCredentials,
+  onSaveIgdbCredentials,
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
@@ -222,10 +225,16 @@ export function SettingsScreen({
   const [sshUsername, setSshUsername] = useState(
     appState.ssh.sshUsername || appState.credentials.appUsername,
   );
+  const [twitchClientId, setTwitchClientId] = useState(
+    appState.credentials.twitchClientId,
+  );
+  const [twitchClientSecret, setTwitchClientSecret] = useState(
+    appState.credentials.twitchClientSecret,
+  );
   const [sshPassword, setSshPassword] = useState(
     appState.ssh.sshPassword || appState.credentials.appPassword,
   );
-  const [edidMode, setEdidMode] = useState<"auto_detect" | "manual">(
+  const [edidMode, setEdidMode] = useState<"auto_detect" | "mac_hardware" | "manual">(
     appState.sunshine.edidMode,
   );
   const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
@@ -270,6 +279,8 @@ export function SettingsScreen({
     setSshUsername(
       appState.ssh.sshUsername || appState.credentials.appUsername,
     );
+    setTwitchClientId(appState.credentials.twitchClientId);
+    setTwitchClientSecret(appState.credentials.twitchClientSecret);
     setSshPassword(
       appState.ssh.sshPassword || appState.credentials.appPassword,
     );
@@ -387,6 +398,70 @@ export function SettingsScreen({
           </Button>
         </div>
       </div>
+      <div className="mt-4 border-t border-[#3b4067] pt-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          IGDB Artwork (Twitch Auth)
+        </h3>
+        <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
+          Add your Twitch app credentials so Noland can fetch IGDB artwork for software cards.
+        </p>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <InputField
+            label="Twitch Client ID"
+            value={twitchClientId}
+            onChange={(event) => setTwitchClientId(event.target.value)}
+            placeholder="Paste your Twitch app client ID"
+          />
+          <InputField
+            label="Twitch Client Secret"
+            type="password"
+            value={twitchClientSecret}
+            onChange={(event) => setTwitchClientSecret(event.target.value)}
+            placeholder="Paste your Twitch app client secret"
+          />
+        </div>
+        <div className="mt-3 flex flex-wrap gap-3">
+          <Button
+            disabled={
+              busy ||
+              (twitchClientId.trim().length === 0) !==
+                (twitchClientSecret.trim().length === 0)
+            }
+            onClick={() =>
+              onSaveIgdbCredentials({
+                twitchClientId: twitchClientId.trim(),
+                twitchClientSecret: twitchClientSecret.trim(),
+              })
+            }
+          >
+            Save IGDB Credentials
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy}
+            onClick={() =>
+              onSaveIgdbCredentials({
+                twitchClientId: "",
+                twitchClientSecret: "",
+              })
+            }
+          >
+            Clear
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={busy}
+            onClick={() => void openExternalUrl("https://dev.twitch.tv/console/apps")}
+          >
+            Open Twitch Dev Console
+          </Button>
+        </div>
+        <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
+          <p>Use the Twitch app Client ID and Client Secret. IGDB itself is free to query through Twitch auth.</p>
+          <p>After saving, reopen the launch library or refresh artwork requests to fetch banners.</p>
+        </div>
+      </div>
+
       <div className="mt-4 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.05rem] text-[#b4d7f4]">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
           Vast.ai Links
@@ -547,21 +622,22 @@ export function SettingsScreen({
 
       <SettingsSubsection
         title="Headless EDID"
-        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}`}
+        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}. The app refreshes the native profile at startup; apply it to a running VM from its Display action.`}
       >
         <div className="grid gap-3 md:grid-cols-2">
           <SelectField
             label="EDID Mode"
             value={edidMode}
             options={[
-              { value: "auto_detect", label: "Auto detect" },
+              { value: "auto_detect", label: "Auto detect (Scaling matched)" },
+              { value: "mac_hardware", label: "Native Hardware (2560x1664 Panel)" },
               {
                 value: "manual",
                 label: "Manual (use Moonlight width and height)",
               },
             ]}
             onChange={(value) =>
-              setEdidMode(value as "auto_detect" | "manual")
+              setEdidMode(value as "auto_detect" | "mac_hardware" | "manual")
             }
           />
           <div>
@@ -571,8 +647,9 @@ export function SettingsScreen({
               onChange={(event) => setEdidRefreshRateHz(event.target.value)}
             />
             <SettingHelp>
-              Set this to match your local display refresh rate so games report
-              the correct frame cap.
+              Set this to match your local display refresh rate. If that timing
+              cannot fit the current EDID format, the app uses a safe 60 Hz
+              native-resolution profile.
             </SettingHelp>
           </div>
         </div>
@@ -605,7 +682,7 @@ export function SettingsScreen({
               })
             }
           >
-            Regenerate EDID
+            Refresh EDID Profile
           </Button>
         </div>
       </SettingsSubsection>

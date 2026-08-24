@@ -292,7 +292,7 @@ impl InstanceLifecycleService {
     }
 
     /// Acquire a lifecycle action lock for an instance.
-    async fn acquire_lock(instance_id: u64, action: &str) -> AppResult<()> {
+    pub(crate) async fn acquire_lock(instance_id: u64, action: &str) -> AppResult<()> {
         let mut actions = get_lifecycle_actions().write().await;
         if let Some(running) = actions.get(&instance_id) {
             return Err(AppError::Provisioning(format!(
@@ -304,7 +304,7 @@ impl InstanceLifecycleService {
         Ok(())
     }
 
-    async fn release_lock(instance_id: u64) {
+    pub(crate) async fn release_lock(instance_id: u64) {
         let mut actions = get_lifecycle_actions().write().await;
         actions.remove(&instance_id);
     }
@@ -467,9 +467,10 @@ impl InstanceLifecycleService {
                 .trim()
                 .is_empty();
         let api_key = state.credentials.vast_api_key.clone();
+        let has_profile = !state.shared_storage_profiles.is_empty();
         drop(state);
 
-        if !ss_enabled || !has_credentials {
+        if !has_profile && (!ss_enabled || !has_credentials) {
             info!(
                 instance_id = instance_id,
                 "Shared storage not configured, skipping pre-action backup"
@@ -497,8 +498,14 @@ impl InstanceLifecycleService {
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
-        SharedStorageManager::trigger_manual_backup(context, &remote, instance_id, &target_user)
-            .await?;
+        SharedStorageManager::start_agent_seal(
+            context,
+            &remote,
+            &target_user,
+            "personal_state",
+            None,
+        )
+        .await?;
 
         info!(
             instance_id = instance_id,
@@ -621,10 +628,30 @@ impl InstanceLifecycleService {
         instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
         let _ = (context, instance_id);
-        Err(AppError::InvalidInput(
-            "Shared storage now only saves files you explicitly select in the interface. Use Export Selected instead of full backup."
-                .to_string(),
-        ))
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".into()));
+        }
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        SharedStorageManager::trigger_backup(
+            context,
+            &remote,
+            instance_id,
+            &target_user,
+            &["*".to_string()],
+            "manual",
+        )
+        .await?;
+        SharedStorageManager::get_backup_status(context).await
     }
 
     pub async fn sync_instance_from_shared_storage(
@@ -782,7 +809,7 @@ impl InstanceLifecycleService {
     }
 }
 
-async fn build_remote_exec_for_instance(
+pub async fn build_remote_exec_for_instance(
     context: &AppContext,
     vast: &VastApiClient,
     instance_id: u64,

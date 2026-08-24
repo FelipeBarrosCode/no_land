@@ -42,18 +42,39 @@ function RootRoute() {
     (state) => state.resumeProvisioningExisting,
   );
   const startPlayExisting = useAppStore((state) => state.startPlayExisting);
+  const launchLibrary = useAppStore((state) => state.launchLibrary);
+  const launchLibraryLoading = useAppStore((state) => state.launchLibraryLoading);
+  const launchSoftwareJob = useAppStore((state) => state.launchSoftwareJob);
+  const launchingSoftwareAppId = useAppStore(
+    (state) => state.launchingSoftwareAppId,
+  );
+  const softwareArtwork = useAppStore((state) => state.softwareArtwork);
+  const softwareArtworkLoading = useAppStore(
+    (state) => state.softwareArtworkLoading,
+  );
+  const loadInstanceLaunchLibrary = useAppStore(
+    (state) => state.loadInstanceLaunchLibrary,
+  );
+  const launchInstanceSoftware = useAppStore(
+    (state) => state.launchInstanceSoftware,
+  );
+  const pollLaunchSoftwareJob = useAppStore(
+    (state) => state.pollLaunchSoftwareJob,
+  );
+  const loadSoftwareArtwork = useAppStore(
+    (state) => state.loadSoftwareArtwork,
+  );
+  const clearLaunchLibrary = useAppStore((state) => state.clearLaunchLibrary);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
+  const generateBundleIndex = useAppStore((state) => state.generateBundleIndex);
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
     (state) => state.setEmbeddedMoonlightPipelineEnabled,
   );
   const loadEmbeddedMoonlightStatus = useAppStore(
     (state) => state.loadEmbeddedMoonlightStatus,
-  );
-  const rerunEmbeddedMoonlightPairing = useAppStore(
-    (state) => state.rerunEmbeddedMoonlightPairing,
   );
 
   useEffect(() => {
@@ -71,11 +92,9 @@ function RootRoute() {
   }, [embeddedMoonlightStatus?.enabled, embeddedMoonlightStatus?.instanceId, loadEmbeddedMoonlightStatus]);
 
 
-  const reconnectWireguard = useAppStore((state) => state.reconnectWireguard);
   const rebootInstanceServices = useAppStore(
     (state) => state.rebootInstanceServices,
   );
-  const pauseInstance = useAppStore((state) => state.pauseInstance);
   const destroyInstance = useAppStore((state) => state.destroyInstance);
   const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
   const listSyncableStorageObjects = useAppStore(
@@ -119,20 +138,38 @@ function RootRoute() {
       onRefreshVastWalletSummary={refreshVastWalletSummary}
       onResumeProvisioningExisting={resumeProvisioningExisting}
       onStartPlayExisting={startPlayExisting}
+      launchLibrary={launchLibrary}
+      launchLibraryLoading={launchLibraryLoading}
+      launchSoftwareJob={launchSoftwareJob}
+      launchingSoftwareAppId={launchingSoftwareAppId}
+      softwareArtwork={softwareArtwork}
+      softwareArtworkLoading={softwareArtworkLoading}
+      onLoadInstanceLaunchLibrary={loadInstanceLaunchLibrary}
+      onLaunchInstanceSoftware={launchInstanceSoftware}
+      onPollLaunchSoftwareJob={pollLaunchSoftwareJob}
+      onLoadSoftwareArtwork={loadSoftwareArtwork}
+      onClearLaunchLibrary={clearLaunchLibrary}
       onSelectOffer={chooseOffer}
       onStartPlay={startPlay}
       onSaveServerPreferences={saveServerPreferences}
       onSetEmbeddedMoonlightPipelineEnabled={setEmbeddedMoonlightPipelineEnabled}
       onLoadEmbeddedMoonlightStatus={loadEmbeddedMoonlightStatus}
-      onRerunEmbeddedMoonlightPairing={rerunEmbeddedMoonlightPairing}
-      onReconnectWireguard={reconnectWireguard}
       onRebootInstanceServices={rebootInstanceServices}
-      onPauseInstance={pauseInstance}
       onDestroyInstance={destroyInstance}
       onSaveInstanceStorageSelected={saveInstanceStorageSelected}
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
+      onRefreshIndexing={async (instanceId?: number) => {
+        if (instanceId) {
+          try {
+            await import("../lib/backend").then(m => m.forceUpdateStateAgent(instanceId));
+          } catch (e) {
+            console.error("Failed to force update state agent", e);
+          }
+        }
+        await generateBundleIndex();
+      }}
     />
   );
 }
@@ -255,6 +292,7 @@ export function App() {
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
   );
+  const saveIgdbCredentials = useAppStore((state) => state.saveIgdbCredentials);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
@@ -349,9 +387,9 @@ export function App() {
       {error && (
         <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
           <div className="flex items-start justify-between gap-3">
-            <p>{error}</p>
+            <p className="break-words break-all">{error}</p>
             <button
-              className="font-display text-[10px] uppercase tracking-[0.12em]"
+              className="font-display text-[10px] uppercase tracking-[0.12em] shrink-0"
               onClick={clearError}
               type="button"
             >
@@ -390,6 +428,7 @@ export function App() {
                   onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
+                  onSaveIgdbCredentials={saveIgdbCredentials}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}

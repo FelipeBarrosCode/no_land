@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::Engine;
 use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
@@ -13,6 +14,7 @@ use crate::models::application_bundle::{
 
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
+use super::agent_handoff::AgentCatalogAppRecord;
 use super::bundle_indexer::BundleIndexer;
 use super::object_storage::StorageCredential;
 use super::provider_profiles::shared_profile_manager;
@@ -71,70 +73,8 @@ impl SharedStorageManager {
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        let _active_profile = Self::resolve_active_profile(context).await?;
-
-        Self::ensure_rclone_installed(remote).await?;
-        Self::write_filter_rules(remote, target_user).await?;
-
-        let filter_path = format!("/home/{}/rules.txt", target_user);
-        let list_cmd = format!(
-            "sudo rclone lsf / --files-only --recursive --filter-from {filter} --checksum",
-            filter = shell_escape(&filter_path),
-        );
-
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&list_cmd))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        if output.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Failed listing local files for export: {}",
-                format!("{}\n{}", output.stdout.trim(), output.stderr.trim())
-            )));
-        }
-
-        let mut entries = Vec::new();
-        let mut directory_paths = HashSet::new();
-        for line in output.stdout.lines() {
-            let normalized = line.trim().trim_start_matches('/').trim_end_matches('/');
-            if normalized.is_empty() {
-                continue;
-            }
-
-            let path = format!("/{}", normalized);
-            let (parent_path, name) = split_parent_and_name(&path);
-            entries.push(crate::models::app_state::SharedStorageObjectEntry {
-                path: path.to_string(),
-                name,
-                parent_path,
-                is_dir: false,
-            });
-
-            let mut cursor = parent_dir(normalized);
-            while !cursor.is_empty() && cursor != "/" {
-                directory_paths.insert(cursor.clone());
-                cursor = parent_dir(&cursor);
-            }
-        }
-
-        for dir_path in directory_paths {
-            let (parent_path, name) = split_parent_and_name(&dir_path);
-            entries.push(crate::models::app_state::SharedStorageObjectEntry {
-                path: dir_path,
-                name,
-                parent_path,
-                is_dir: true,
-            });
-        }
-
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        entries.dedup_by(|a, b| a.path == b.path && a.is_dir == b.is_dir);
-        Ok(entries)
+        Self::list_agent_apps(context, remote, target_user).await
     }
-
     pub async fn backup_selected_paths(
         context: &AppContext,
         remote: &RemoteExec,
@@ -142,210 +82,22 @@ impl SharedStorageManager {
         target_user: &str,
         selected_paths: &[String],
     ) -> AppResult<String> {
-        if selected_paths.is_empty() {
-            return Err(AppError::InvalidInput(
-                "Select at least one file or folder to export.".to_string(),
-            ));
-        }
-
-        let active_profile = Self::resolve_active_profile(context).await?;
-
-        Self::ensure_rclone_installed(remote).await?;
-        Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
-
-        let dest = Self::build_profile_storage_source(&active_profile);
-        let rclone_config_path = format!("/home/{}/.config/rclone/rclone.conf", target_user);
-
-        let mut include_lines = String::new();
-        for path in selected_paths {
-            let normalized = normalize_selection_path(path)?;
-            include_lines.push_str(&format!("+ {normalized}\n"));
-            include_lines.push_str(&format!("+ {normalized}/**\n"));
-        }
-        include_lines.push_str("- **\n");
-
-        let filter_path = format!("/home/{}/noland-export-selection.filter", target_user);
-        let write_filter_cmd = format!(
-            r#"sudo -u {user} bash -lc 'cat > {path} <<'"'"'EOF'"'"'
-{content}EOF
-chmod 600 {path}'"#,
-            user = target_user,
-            path = filter_path,
-            content = include_lines,
-        );
-
-        {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&write_filter_cmd, Duration::from_secs(60))
-            })
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
-        }
-
-        let backup_cmd = format!(
-            "sudo rclone copy / {dest} --config {config} --filter-from {filter} --checksum",
-            dest = shell_escape(&dest),
-            config = shell_escape(&rclone_config_path),
-            filter = shell_escape(&filter_path),
-        );
-
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&backup_cmd))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        let app_ids = selected_app_ids(selected_paths);
+        let ids: Vec<String> = if app_ids.is_empty() {
+            vec!["*".to_string()]
+        } else {
+            app_ids
         };
-
-        if output.status_code != 0 {
-            let combined = redact_profile_secrets(
-                &format!("{}\n{}", output.stdout, output.stderr),
-                &active_profile,
-            );
-            let actionable = extract_actionable_rclone_error(&combined)
-                .unwrap_or_else(|| combined.trim().to_string());
-            return Err(AppError::Provisioning(format!(
-                "Selective export failed (exit {}): {}",
-                output.status_code, actionable
-            )));
-        }
-
-        info!(
-            instance_id = instance_id,
-            count = selected_paths.len(),
-            "Selective shared storage export completed"
-        );
-        Ok(format!(
-            "Exported {} selected items to shared storage",
-            selected_paths.len()
-        ))
+        Self::trigger_backup(context, remote, instance_id, target_user, &ids, "manual").await?;
+        Ok("Application-state backup completed".to_string())
     }
-
     pub async fn list_remote_objects(
         context: &AppContext,
         remote: &RemoteExec,
         target_user: &str,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        info!(
-            target_user = target_user,
-            "shared-storage list_remote_objects start"
-        );
-        let total_started = Instant::now();
-        let active_profile = Self::resolve_active_profile(context).await?;
-
-        let cache_key = listing_cache_key(remote, target_user, &active_profile);
-        let cached_ready = {
-            let cache = get_listing_ready_cache().read().await;
-            cache.contains(&cache_key)
-        };
-
-        if !cached_ready {
-            let setup_started = Instant::now();
-            Self::ensure_rclone_installed(remote).await?;
-            Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
-            {
-                let mut cache = get_listing_ready_cache().write().await;
-                cache.insert(cache_key.clone());
-            }
-            info!(
-                elapsed_ms = setup_started.elapsed().as_millis() as u64,
-                "shared-storage list setup complete"
-            );
-        } else {
-            info!("shared-storage list setup cache hit");
-        }
-
-        let source = Self::build_profile_storage_source(&active_profile);
-        info!(source = source, "shared-storage list source resolved");
-
-        let list_cmd = format!(
-            "sudo -u {user} rclone lsf {src} --recursive --files-only --fast-list",
-            user = target_user,
-            src = shell_escape(&source),
-        );
-
-        let listing_started = Instant::now();
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&list_cmd))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        info!(
-            status_code = output.status_code,
-            stdout_len = output.stdout.len(),
-            stderr_len = output.stderr.len(),
-            elapsed_ms = listing_started.elapsed().as_millis() as u64,
-            "shared-storage list_remote_objects command finished"
-        );
-
-        if output.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Failed listing remote objects for {}: {}",
-                active_profile.profile.provider.label(),
-                redact_profile_secrets(
-                    &format!("{}\n{}", output.stdout, output.stderr),
-                    &active_profile
-                )
-                .trim()
-            )));
-        }
-
-        let parsing_started = Instant::now();
-        let mut entries = Vec::new();
-        let mut directory_paths = HashSet::new();
-
-        for raw_line in output.stdout.lines() {
-            let line = raw_line.trim();
-            if line.is_empty() {
-                continue;
-            }
-
-            let is_dir = false;
-            let normalized = line.trim_end_matches('/').trim();
-            if normalized.is_empty() {
-                continue;
-            }
-
-            let path = format!("/{}", normalized);
-            let (parent_path, name) = split_parent_and_name(&path);
-
-            entries.push(crate::models::app_state::SharedStorageObjectEntry {
-                path,
-                name,
-                parent_path,
-                is_dir,
-            });
-
-            let mut cursor = parent_dir(normalized);
-            while !cursor.is_empty() && cursor != "/" {
-                directory_paths.insert(cursor.clone());
-                cursor = parent_dir(&cursor);
-            }
-        }
-
-        for dir_path in directory_paths {
-            let (parent_path, name) = split_parent_and_name(&dir_path);
-            entries.push(crate::models::app_state::SharedStorageObjectEntry {
-                path: dir_path,
-                name,
-                parent_path,
-                is_dir: true,
-            });
-        }
-
-        entries.sort_by(|a, b| a.path.cmp(&b.path));
-        entries.dedup_by(|a, b| a.path == b.path && a.is_dir == b.is_dir);
-        info!(
-            count = entries.len(),
-            parse_elapsed_ms = parsing_started.elapsed().as_millis() as u64,
-            total_elapsed_ms = total_started.elapsed().as_millis() as u64,
-            "shared-storage list_remote_objects complete"
-        );
-        Ok(entries)
+        Self::catalog_to_entries(context, remote, target_user).await
     }
-
     pub async fn restore_selected_paths(
         context: &AppContext,
         remote: &RemoteExec,
@@ -353,99 +105,40 @@ chmod 600 {path}'"#,
         target_user: &str,
         selected_paths: &[String],
     ) -> AppResult<String> {
-        info!(
-            instance_id = instance_id,
-            selected_count = selected_paths.len(),
-            "shared-storage restore_selected_paths start"
-        );
+        let _ = instance_id;
         if selected_paths.is_empty() {
             return Err(AppError::InvalidInput(
-                "Select at least one file or folder to sync.".to_string(),
+                "Select at least one application bundle to restore.".into(),
             ));
         }
+        let selections = selected_paths
+            .iter()
+            .map(|path| parse_catalog_selection(path))
+            .collect::<AppResult<Vec<_>>>()?;
+        let catalog = Self::list_agent_catalog_records(context, remote, target_user).await?;
+        let catalog_by_app_id = catalog
+            .into_iter()
+            .map(|app| (app.app_id.clone(), app))
+            .collect::<HashMap<_, _>>();
 
-        let active_profile = Self::resolve_active_profile(context).await?;
-
-        Self::ensure_rclone_installed(remote).await?;
-        Self::write_filter_rules(remote, target_user).await?;
-        Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
-
-        let source = Self::build_profile_storage_source(&active_profile);
-
-        let mut include_lines = String::new();
-        for path in selected_paths {
-            let normalized = normalize_selection_path(path)?;
-            info!(path = normalized, "shared-storage selected path");
-            include_lines.push_str(&format!("+ {normalized}\n"));
-            include_lines.push_str(&format!("+ {normalized}/**\n"));
+        let mut last = String::new();
+        for (app_id, bundle_id) in selections {
+            let result = Self::start_agent_restore(
+                context,
+                remote,
+                target_user,
+                &app_id,
+                &bundle_id,
+                "personal_state",
+            )
+            .await?;
+            if let Some(app) = catalog_by_app_id.get(&app_id) {
+                ensure_restored_steam_manifest(remote, target_user, app).await?;
+            }
+            last = result.to_string();
         }
-        include_lines.push_str("- **\n");
-
-        let filter_path = format!("/home/{}/noland-sync-selection.filter", target_user);
-        let write_filter_cmd = format!(
-            r#"sudo -u {user} bash -lc 'cat > {path} <<'"'"'EOF'"'"'
-{content}EOF
-chmod 600 {path}'"#,
-            user = target_user,
-            path = filter_path,
-            content = include_lines,
-        );
-
-        {
-            let remote = remote.clone();
-            let write = tokio::task::spawn_blocking(move || {
-                remote.ssh(&write_filter_cmd, Duration::from_secs(60))
-            })
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
-            info!(
-                status_code = write.status_code,
-                "shared-storage selection filter file written"
-            );
-        }
-
-        let restore_cmd = format!(
-            "sudo -u {user} rclone copy {src} / --filter-from {filter} --checksum --update 2>&1",
-            user = target_user,
-            src = shell_escape(&source),
-            filter = shell_escape(&filter_path),
-        );
-
-        let restore = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh_until_complete(&restore_cmd))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        info!(
-            status_code = restore.status_code,
-            stdout_len = restore.stdout.len(),
-            stderr_len = restore.stderr.len(),
-            "shared-storage selective restore command finished"
-        );
-
-        if restore.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Selective sync failed (exit {}): {}",
-                restore.status_code,
-                redact_profile_secrets(&restore.stderr, &active_profile).trim()
-            )));
-        }
-
-        info!(
-            instance_id = instance_id,
-            count = selected_paths.len(),
-            "Selective shared storage sync completed"
-        );
-        Ok(format!(
-            "Synced {} selected items from {}",
-            selected_paths.len(),
-            active_profile.profile.provider.label()
-        ))
+        Ok(format!("Application-state restore completed: {last}"))
     }
-
-    /// Save shared storage settings into persisted app state.
     pub async fn save_settings(
         context: &AppContext,
         payload: crate::models::app_state::SharedStorageSettingsUpdate,
@@ -717,27 +410,28 @@ chmod 600 {path}'"#,
 
     /// Legacy whole-instance backup entrypoint.
     ///
-    /// The app now only supports explicit selected-path exports via
-    /// `backup_selected_paths`, so this path is intentionally disabled.
     pub async fn trigger_manual_backup(
-        _context: &AppContext,
-        _remote: &RemoteExec,
-        _instance_id: u64,
-        _target_user: &str,
-    ) -> AppResult<()> {
-        Err(AppError::InvalidInput(
-            "Whole-instance shared-storage backup has been removed. Export selected files or folders instead."
-                .to_string(),
-        ))
-    }
-
-    /// Internal backup trigger with concurrency guard.
-    #[allow(dead_code)]
-    async fn trigger_backup(
         context: &AppContext,
         remote: &RemoteExec,
         instance_id: u64,
         target_user: &str,
+    ) -> AppResult<()> {
+        Self::trigger_backup(
+            context,
+            remote,
+            instance_id,
+            target_user,
+            &["*".to_string()],
+            "manual",
+        )
+        .await
+    }
+    pub(crate) async fn trigger_backup(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+        app_ids: &[String],
         trigger: &str,
     ) -> AppResult<()> {
         info!(
@@ -757,8 +451,6 @@ chmod 600 {path}'"#,
             }
         }
 
-        let active_profile = Self::resolve_active_profile(context).await?;
-
         // Mark backup as running
         let started_at = chrono::Local::now().to_rfc3339();
         {
@@ -776,7 +468,34 @@ chmod 600 {path}'"#,
             })
             .await?;
 
-        let result = Self::run_backup(remote, target_user, &active_profile, trigger).await;
+        // Route the actual work through the live state-agent RPC path. An empty
+        // list or "*" backs up every discovered app; otherwise each selected
+        // app is backed up in turn. Errors are captured (not propagated with `?`)
+        // so the running-job guard and state update below always run.
+        let run_all = app_ids.is_empty() || app_ids.iter().any(|id| id == "*");
+        let result: AppResult<()> = if run_all {
+            Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None)
+                .await
+                .map(|_| ())
+        } else {
+            let mut outcome: AppResult<()> = Ok(());
+            for app_id in app_ids {
+                if let Err(err) = Self::start_agent_backup(
+                    context,
+                    remote,
+                    target_user,
+                    app_id,
+                    "personal_state",
+                    None,
+                )
+                .await
+                {
+                    outcome = Err(err);
+                    break;
+                }
+            }
+            outcome
+        };
 
         // Mark backup as no longer running
         {
@@ -1024,6 +743,10 @@ chmod 600 {path}'"#,
             ))
         })?;
         let provider_fields = manager.retrieve_provider_fields(context, &profile).await?;
+        // Proactively refresh OAuth access tokens that are missing or about to
+        // expire so downstream rclone sessions always start with a live token.
+        let credentials =
+            Self::refresh_oauth_if_needed(context, &profile, credentials, &provider_fields).await?;
         let remote_name = format!("noland_{}", profile.id.replace('-', ""));
 
         Ok(ActiveSharedStorageProfile {
@@ -1032,6 +755,117 @@ chmod 600 {path}'"#,
             provider_fields,
             remote_name,
         })
+    }
+
+    /// Refresh an OAuth2 access token proactively when it is missing or about
+    /// to expire, persisting the rotated tokens back to the profile. Returns
+    /// the (possibly refreshed) credentials so callers always mint sessions
+    /// with a live token. Non-OAuth credentials are returned unchanged.
+    async fn refresh_oauth_if_needed(
+        context: &AppContext,
+        profile: &SharedStorageProfile,
+        credentials: StorageCredential,
+        provider_fields: &HashMap<String, String>,
+    ) -> AppResult<StorageCredential> {
+        let StorageCredential::OAuth2 {
+            access_token,
+            refresh_token,
+            expires_at,
+        } = &credentials
+        else {
+            return Ok(credentials);
+        };
+
+        // Refresh when the access token is empty, the expiry is unset, or the
+        // token is within the refresh skew of expiring.
+        const REFRESH_SKEW_SECS: i64 = 60;
+        let now = chrono::Utc::now().timestamp();
+        let needs_refresh = access_token.trim().is_empty()
+            || *expires_at <= 0
+            || *expires_at - now < REFRESH_SKEW_SECS;
+
+        let Some(refresh) = refresh_token.as_ref().filter(|v| !v.trim().is_empty()) else {
+            if needs_refresh {
+                warn!(
+                    "OAuth token for '{}' is expired but no refresh token is stored; re-authentication required",
+                    profile.display_name
+                );
+            }
+            return Ok(credentials);
+        };
+
+        if !needs_refresh {
+            return Ok(credentials);
+        }
+
+        let client_id = provider_fields
+            .get("client_id")
+            .map(String::as_str)
+            .unwrap_or("");
+        let client_secret = provider_fields.get("client_secret").map(String::as_str);
+        let Some(oauth_config) =
+            super::oauth_flow::get_oauth_config(&profile.provider, client_id, client_secret)
+        else {
+            warn!(
+                "OAuth token for '{}' expired but no OAuth config is available for provider {:?}; re-authentication required",
+                profile.display_name, profile.provider
+            );
+            return Ok(credentials);
+        };
+
+        info!(
+            "Refreshing OAuth access token for '{}' (provider {:?})",
+            profile.display_name, profile.provider
+        );
+        match super::oauth_flow::refresh_token(&oauth_config, refresh).await {
+            Ok(token) => {
+                let new_expires_at = now + token.expires_in.unwrap_or(3600);
+                // Some providers rotate the refresh token; keep the new one
+                // when present and fall back to the existing token otherwise.
+                let new_refresh = token
+                    .refresh_token
+                    .clone()
+                    .filter(|v| !v.trim().is_empty())
+                    .or_else(|| refresh_token.clone());
+
+                let refreshed = StorageCredential::OAuth2 {
+                    access_token: token.access_token.clone(),
+                    refresh_token: new_refresh,
+                    expires_at: new_expires_at,
+                };
+
+                let profile_id = profile.id.clone();
+                let persisted = refreshed.clone();
+                context
+                    .update_state(move |state| {
+                        if let Some(stored) = state
+                            .shared_storage_credentials
+                            .profiles
+                            .get_mut(&profile_id)
+                        {
+                            stored.credentials = persisted.clone();
+                        }
+                    })
+                    .await?;
+
+                info!(
+                    "OAuth token refreshed for '{}' ({}), new expiry in {}s",
+                    profile.display_name,
+                    profile.id,
+                    new_expires_at - now
+                );
+                Ok(refreshed)
+            }
+            Err(e) => {
+                warn!(
+                    "OAuth token refresh failed for '{}': {e}. Re-authentication may be required.",
+                    profile.display_name
+                );
+                // Return the stale credential so rclone can attempt the call
+                // and surface the provider's specific auth error.
+                Ok(credentials)
+            }
+        }
     }
 
     pub(crate) async fn configure_rclone_remote_for_profile(
@@ -1080,349 +914,48 @@ chmod 600 {path}'"#,
     fn build_rclone_config_content(
         active_profile: &ActiveSharedStorageProfile,
     ) -> AppResult<String> {
-        let provider = &active_profile.profile.provider;
-        let name = &active_profile.remote_name;
-        let fields = &active_profile.provider_fields;
-        let mut lines = vec![format!("[{}]", name)];
-
-        match (provider, &active_profile.credentials) {
-            (
-                StorageProvider::BackblazeB2,
-                StorageCredential::BackblazeB2 {
-                    key_id,
-                    application_key,
-                },
-            ) => {
-                lines.push("type = b2".to_string());
-                lines.push(format!("account = {}", key_id));
-                lines.push(format!("key = {}", application_key));
-            }
-            (
-                StorageProvider::AmazonS3,
-                StorageCredential::S3 {
-                    access_key_id,
-                    secret_access_key,
-                    session_token,
-                },
-            ) => {
-                lines.push("type = s3".to_string());
-                lines.push("provider = AWS".to_string());
-                lines.push(format!("access_key_id = {}", access_key_id));
-                lines.push(format!("secret_access_key = {}", secret_access_key));
-                lines.push(format!(
-                    "region = {}",
-                    fields
-                        .get("region")
-                        .cloned()
-                        .unwrap_or_else(|| "us-east-1".to_string())
-                ));
-                if let Some(token) = session_token.as_ref().filter(|v: &&String| !v.is_empty()) {
-                    lines.push(format!("session_token = {}", token));
-                }
-            }
-            (
-                StorageProvider::CloudflareR2,
-                StorageCredential::S3 {
-                    access_key_id,
-                    secret_access_key,
-                    ..
-                },
-            ) => {
-                let account_id = fields.get("account_id").cloned().ok_or_else(|| {
-                    AppError::InvalidInput("Cloudflare R2 account_id is missing.".to_string())
-                })?;
-                lines.push("type = s3".to_string());
-                lines.push("provider = Cloudflare".to_string());
-                lines.push(format!("access_key_id = {}", access_key_id));
-                lines.push(format!("secret_access_key = {}", secret_access_key));
-                lines.push("region = auto".to_string());
-                lines.push(format!(
-                    "endpoint = https://{}.r2.cloudflarestorage.com",
-                    account_id
-                ));
-            }
-            (
-                StorageProvider::Wasabi,
-                StorageCredential::S3 {
-                    access_key_id,
-                    secret_access_key,
-                    ..
-                },
-            ) => {
-                lines.push("type = s3".to_string());
-                lines.push("provider = Wasabi".to_string());
-                lines.push(format!("access_key_id = {}", access_key_id));
-                lines.push(format!("secret_access_key = {}", secret_access_key));
-                lines.push(format!(
-                    "region = {}",
-                    fields
-                        .get("region")
-                        .cloned()
-                        .unwrap_or_else(|| "us-east-1".to_string())
-                ));
-                if let Some(endpoint) = fields.get("endpoint").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("endpoint = {}", endpoint));
-                }
-            }
-            (
-                StorageProvider::DigitalOceanSpaces,
-                StorageCredential::S3 {
-                    access_key_id,
-                    secret_access_key,
-                    ..
-                },
-            ) => {
-                let region = fields.get("region").cloned().ok_or_else(|| {
-                    AppError::InvalidInput("DigitalOcean Spaces region is missing.".to_string())
-                })?;
-                lines.push("type = s3".to_string());
-                lines.push("provider = DigitalOcean".to_string());
-                lines.push(format!("access_key_id = {}", access_key_id));
-                lines.push(format!("secret_access_key = {}", secret_access_key));
-                lines.push(format!("region = {}", region));
-                lines.push(format!("endpoint = {}.digitaloceanspaces.com", region));
-            }
-            (
-                StorageProvider::GenericS3,
-                StorageCredential::S3 {
-                    access_key_id,
-                    secret_access_key,
-                    ..
-                },
-            ) => {
-                lines.push("type = s3".to_string());
-                lines.push("provider = Other".to_string());
-                lines.push(format!("access_key_id = {}", access_key_id));
-                lines.push(format!("secret_access_key = {}", secret_access_key));
-                if let Some(endpoint) = fields.get("endpoint") {
-                    lines.push(format!("endpoint = {}", endpoint));
-                }
-                lines.push(format!(
-                    "region = {}",
-                    fields
-                        .get("region")
-                        .cloned()
-                        .unwrap_or_else(|| "auto".to_string())
-                ));
-                if let Some(v) = fields.get("force_path_style") {
-                    lines.push(format!(
-                        "force_path_style = {}",
-                        if v == "true" || v == "1" {
-                            "true"
-                        } else {
-                            "false"
-                        }
-                    ));
-                }
-            }
-            (
-                StorageProvider::GoogleDrive,
-                StorageCredential::OAuth2 {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                },
-            ) => {
-                lines.push("type = drive".to_string());
-                if let Some(client_id) = fields.get("client_id").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("client_id = {}", client_id));
-                }
-                if let Some(client_secret) =
-                    fields.get("client_secret").filter(|v| !v.trim().is_empty())
-                {
-                    lines.push(format!("client_secret = {}", client_secret));
-                }
-                lines.push(format!(
-                    "token = {}",
-                    oauth_token_json(access_token, refresh_token.as_deref(), *expires_at)
-                ));
-            }
-            (
-                StorageProvider::MicrosoftOneDrive,
-                StorageCredential::OAuth2 {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                },
-            ) => {
-                lines.push("type = onedrive".to_string());
-                if let Some(client_id) = fields.get("client_id").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("client_id = {}", client_id));
-                }
-                if let Some(client_secret) =
-                    fields.get("client_secret").filter(|v| !v.trim().is_empty())
-                {
-                    lines.push(format!("client_secret = {}", client_secret));
-                }
-                lines.push(format!(
-                    "token = {}",
-                    oauth_token_json(access_token, refresh_token.as_deref(), *expires_at)
-                ));
-            }
-            (
-                StorageProvider::Dropbox,
-                StorageCredential::OAuth2 {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                },
-            ) => {
-                lines.push("type = dropbox".to_string());
-                if let Some(client_id) = fields.get("client_id").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("client_id = {}", client_id));
-                }
-                if let Some(client_secret) =
-                    fields.get("client_secret").filter(|v| !v.trim().is_empty())
-                {
-                    lines.push(format!("client_secret = {}", client_secret));
-                }
-                lines.push(format!(
-                    "token = {}",
-                    oauth_token_json(access_token, refresh_token.as_deref(), *expires_at)
-                ));
-            }
-            (
-                StorageProvider::Box,
-                StorageCredential::OAuth2 {
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                },
-            ) => {
-                lines.push("type = box".to_string());
-                if let Some(client_id) = fields.get("client_id").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("client_id = {}", client_id));
-                }
-                if let Some(client_secret) =
-                    fields.get("client_secret").filter(|v| !v.trim().is_empty())
-                {
-                    lines.push(format!("client_secret = {}", client_secret));
-                }
-                lines.push(format!(
-                    "token = {}",
-                    oauth_token_json(access_token, refresh_token.as_deref(), *expires_at)
-                ));
-            }
-            (StorageProvider::GoogleCloudStorage, StorageCredential::ServiceAccount { json }) => {
-                lines.push("type = google cloud storage".to_string());
-                lines.push(format!("service_account_credentials = {}", json));
-            }
-            (
-                StorageProvider::AzureBlob,
-                StorageCredential::UsernamePassword { username, password },
-            ) => {
-                lines.push("type = azureblob".to_string());
-                lines.push(format!("account = {}", username));
-                lines.push(format!("key = {}", password));
-            }
-            (StorageProvider::Sftp, StorageCredential::UsernamePassword { username, password }) => {
-                lines.push("type = sftp".to_string());
-                lines.push(format!(
-                    "host = {}",
-                    fields
-                        .get("host")
-                        .cloned()
-                        .ok_or_else(|| AppError::InvalidInput(
-                            "SFTP host is missing.".to_string()
-                        ))?
-                ));
-                lines.push(format!("user = {}", username));
-                lines.push(format!("pass = {}", password));
-                if let Some(port) = fields.get("port").filter(|v| !v.trim().is_empty()) {
-                    lines.push(format!("port = {}", port));
-                }
-            }
-            (
-                StorageProvider::Webdav,
-                StorageCredential::UsernamePassword { username, password },
-            ) => {
-                lines.push("type = webdav".to_string());
-                lines.push(format!(
-                    "url = {}",
-                    fields
-                        .get("url")
-                        .cloned()
-                        .ok_or_else(|| AppError::InvalidInput(
-                            "WebDAV URL is missing.".to_string()
-                        ))?
-                ));
-                lines.push(format!(
-                    "vendor = {}",
-                    fields
-                        .get("vendor")
-                        .cloned()
-                        .unwrap_or_else(|| "other".to_string())
-                ));
-                lines.push(format!("user = {}", username));
-                lines.push(format!("pass = {}", password));
-            }
-            _ => {
-                return Err(AppError::InvalidInput(format!(
-                    "Provider {} is not compatible with the stored credential format yet.",
-                    provider.label()
-                )));
-            }
-        }
-
-        Ok(lines.join("\n"))
+        super::rclone_adapter::mint_config_ini(
+            &active_profile.profile.provider,
+            &active_profile.credentials,
+            &active_profile.provider_fields,
+            active_profile.profile.bucket.as_deref(),
+            active_profile.profile.prefix.as_deref(),
+            &active_profile.remote_name,
+            noland_rclone_adapter::TokenMode::Durable,
+        )
     }
 
     pub(crate) fn build_profile_storage_source(
         active_profile: &ActiveSharedStorageProfile,
     ) -> String {
-        match &active_profile.profile.provider {
-            StorageProvider::BackblazeB2
-            | StorageProvider::AmazonS3
-            | StorageProvider::CloudflareR2
-            | StorageProvider::Wasabi
-            | StorageProvider::DigitalOceanSpaces
-            | StorageProvider::GenericS3
-            | StorageProvider::GoogleCloudStorage
-            | StorageProvider::AzureBlob => {
-                let bucket = active_profile.profile.bucket.clone().unwrap_or_else(|| {
-                    active_profile
-                        .provider_fields
-                        .get("bucket")
-                        .cloned()
-                        .or_else(|| active_profile.provider_fields.get("space_name").cloned())
-                        .or_else(|| active_profile.provider_fields.get("container").cloned())
-                        .unwrap_or_else(|| "noland".to_string())
-                });
-                let prefix = active_profile.profile.prefix.clone().unwrap_or_default();
-                if prefix.trim().is_empty() {
-                    format!("{}:{}", active_profile.remote_name, bucket)
-                } else {
-                    format!(
-                        "{}:{}/{}",
-                        active_profile.remote_name,
-                        bucket,
-                        prefix.trim_matches('/')
-                    )
-                }
-            }
-            _ => {
-                let prefix = active_profile
-                    .profile
-                    .prefix
-                    .clone()
-                    .or_else(|| active_profile.provider_fields.get("folder").cloned())
-                    .or_else(|| active_profile.provider_fields.get("remote_path").cloned())
-                    .unwrap_or_else(|| "noland".to_string());
-                if prefix.trim().is_empty() {
-                    format!("{}:", active_profile.remote_name)
-                } else {
-                    format!(
-                        "{}:{}",
-                        active_profile.remote_name,
-                        prefix.trim_matches('/')
-                    )
-                }
-            }
-        }
+        super::rclone_adapter::storage_source(
+            &active_profile.profile.provider,
+            &active_profile.credentials,
+            &active_profile.provider_fields,
+            active_profile.profile.bucket.as_deref(),
+            active_profile.profile.prefix.as_deref(),
+            &active_profile.remote_name,
+        )
+        .unwrap_or_else(|_| format!("{}:", active_profile.remote_name))
+    }
+
+    pub fn mint_ephemeral_rclone_session(
+        active_profile: &ActiveSharedStorageProfile,
+        operation_id: &str,
+    ) -> AppResult<noland_rclone_adapter::EphemeralRcloneSession> {
+        super::rclone_adapter::mint_ephemeral_session(
+            &active_profile.profile.provider,
+            &active_profile.credentials,
+            &active_profile.provider_fields,
+            active_profile.profile.bucket.as_deref(),
+            active_profile.profile.prefix.as_deref(),
+            &active_profile.remote_name,
+            operation_id,
+        )
     }
 
     /// Ensure rclone is installed on the VM.
-    async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
+    pub(crate) async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
         let check = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
@@ -1690,6 +1223,203 @@ chmod 600 {path}'"#,
 }
 
 /// Simple shell escaping for single-quoted strings.
+
+fn selected_app_ids(paths: &[String]) -> Vec<String> {
+    let mut ids = Vec::new();
+    for path in paths {
+        if let Some(rest) = path.strip_prefix("/apps/") {
+            let id = rest.trim_matches('/');
+            if !id.is_empty() && id != "Applications" {
+                ids.push(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn parse_catalog_selection(path: &str) -> crate::errors::AppResult<(String, String)> {
+    let rest = path.strip_prefix("/catalog/").ok_or_else(|| {
+        crate::errors::AppError::InvalidInput(format!(
+            "Restore selection '{path}' is not a catalog application bundle. Expand an application and choose a specific backup bundle."
+        ))
+    })?;
+    let mut parts = rest.split('/');
+    let app_id = parts.next().unwrap_or_default();
+    let bundle_id = parts.next().filter(|value| !value.is_empty()).ok_or_else(|| {
+        crate::errors::AppError::InvalidInput(
+            "An application folder cannot be restored directly. Expand it and choose a specific backup bundle."
+                .into(),
+        )
+    })?;
+
+    if app_id.is_empty() {
+        return Err(crate::errors::AppError::InvalidInput(
+            "Catalog application ID is missing. Reload the Sync catalog and try again.".into(),
+        ));
+    }
+    if parts.next().is_some() {
+        return Err(crate::errors::AppError::InvalidInput(format!(
+            "Restore selection '{path}' contains an unexpected nested path. Reload the Sync catalog and choose a bundle."
+        )));
+    }
+    uuid::Uuid::parse_str(bundle_id).map_err(|_| {
+        crate::errors::AppError::InvalidInput(format!(
+            "Backup bundle '{bundle_id}' has an invalid ID. Reload the Sync catalog or create a new backup."
+        ))
+    })?;
+
+    Ok((app_id.to_string(), bundle_id.to_string()))
+}
+
+async fn ensure_restored_steam_manifest(
+    remote: &RemoteExec,
+    target_user: &str,
+    app: &AgentCatalogAppRecord,
+) -> AppResult<()> {
+    let Some(steam_app_id) = infer_steam_app_id_from_catalog(app) else {
+        return Ok(());
+    };
+    let payload = serde_json::json!({
+        "app_id": steam_app_id,
+        "display_name": non_empty_or(&app.display_name, &app.app_id),
+        "aliases": app.aliases,
+    });
+    let payload = serde_json::to_string(&payload).map_err(|error| {
+        AppError::Serialization(format!(
+            "steam sync manifest payload serialization failed: {error}"
+        ))
+    })?;
+    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(payload.as_bytes());
+    let script_b64 =
+        base64::engine::general_purpose::STANDARD.encode(STEAM_SYNC_MANIFEST_SCRIPT.as_bytes());
+    let command = format!(
+        "tmp_root=/tmp/noland-steam-manifest-sync && sudo rm -rf \"$tmp_root\" && sudo mkdir -p \"$tmp_root\" && printf %s '{script_b64}' | base64 -d | sudo tee \"$tmp_root/script.py\" >/dev/null && printf %s '{payload_b64}' | sudo tee \"$tmp_root/payload.b64\" >/dev/null && sudo chmod 644 \"$tmp_root/script.py\" \"$tmp_root/payload.b64\" && sudo -i -u '{user}' python3 \"$tmp_root/script.py\" \"$tmp_root/payload.b64\"; status=$?; sudo rm -rf \"$tmp_root\"; exit $status",
+        payload_b64 = shell_escape(&payload_b64),
+        script_b64 = shell_escape(&script_b64),
+        user = shell_escape(target_user),
+    );
+    let output = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+    };
+    if output.status_code == 0 {
+        return Ok(());
+    }
+    let details = [output.stderr.trim(), output.stdout.trim()]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or("remote Steam manifest sync repair returned no details");
+    Err(AppError::Command(format!(
+        "Could not prepare Steam manifest for restored app {}: {}",
+        app.display_name, details
+    )))
+}
+
+fn infer_steam_app_id_from_catalog(app: &AgentCatalogAppRecord) -> Option<u32> {
+    app.steam_app_id.or_else(|| {
+        app.app_id
+            .trim()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+            .or_else(|| {
+                app.launcher
+                    .as_deref()
+                    .filter(|value| value.trim().eq_ignore_ascii_case("steam"))
+                    .and_then(|_| app.app_id.trim().parse::<u32>().ok())
+            })
+    })
+}
+
+fn non_empty_or(value: &str, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+const STEAM_SYNC_MANIFEST_SCRIPT: &str = r#"import base64, json, os, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as handle:
+    payload = json.loads(base64.b64decode(handle.read()).decode('utf-8'))
+app_id = int(payload['app_id'])
+display_name = (payload.get('display_name') or '').strip() or f'Steam {app_id}'
+aliases = [str(value).strip() for value in payload.get('aliases') or [] if str(value).strip()]
+
+def normalize(value):
+    return ''.join(ch.lower() for ch in value if ch.isalnum())
+
+steam_roots = [
+    '/home/user/.steam/steam',
+    '/home/user/.steam/debian-installation',
+    '/home/user/.local/share/Steam',
+    '/home/user/.var/app/com.valvesoftware.Steam/data/Steam',
+]
+steamapps_dirs = []
+for root in steam_roots:
+    import os
+    base = os.path.join(root, 'steamapps')
+    if os.path.isdir(base):
+        steamapps_dirs.append(base)
+    vdf = os.path.join(base, 'libraryfolders.vdf')
+    if os.path.isfile(vdf):
+        try:
+            text = open(vdf, 'r', encoding='utf-8', errors='ignore').read()
+        except OSError:
+            text = ''
+        current_id = None
+        for line in text.splitlines():
+            toks = [tok for tok in line.split('"') if tok.strip()]
+            if len(toks) == 1 and toks[0].isdigit():
+                current_id = toks[0]
+            elif len(toks) >= 2 and toks[0] == 'path':
+                candidate = os.path.join(toks[1], 'steamapps')
+                if os.path.isdir(candidate):
+                    steamapps_dirs.append(candidate)
+seen = []
+for path in steamapps_dirs:
+    if path not in seen:
+        seen.append(path)
+steamapps_dirs = seen
+
+def install_dir_hint():
+    candidates = [display_name] + aliases
+    normalized_candidates = {normalize(value) for value in candidates if normalize(value)}
+    for steamapps in steamapps_dirs:
+        common = os.path.join(steamapps, 'common')
+        if not os.path.isdir(common):
+            continue
+        for name in os.listdir(common):
+            full = os.path.join(common, name)
+            if not os.path.isdir(full):
+                continue
+            if normalize(name) in normalized_candidates:
+                return name
+    sanitized = ''.join(ch if ch.isalnum() or ch in ' ._-' else '_' for ch in display_name)
+    compact = ' '.join(sanitized.split()).strip(' .')
+    if compact:
+        return compact.replace('.', '') if normalize(compact.replace('.', '')) == normalize(display_name) else compact
+    return f'Steam-{app_id}'
+
+for steamapps in steamapps_dirs:
+    manifest = os.path.join(steamapps, f'appmanifest_{app_id}.acf')
+    if os.path.isfile(manifest) and os.path.getsize(manifest) > 0:
+        sys.exit(0)
+
+target = steamapps_dirs[0] if steamapps_dirs else '/home/user/.local/share/Steam/steamapps'
+os.makedirs(os.path.join(target, 'common'), exist_ok=True)
+manifest = os.path.join(target, f'appmanifest_{app_id}.acf')
+with open(manifest, 'w', encoding='utf-8') as handle:
+    handle.write('"AppState"\n{\n')
+    handle.write(f'\t"appid"\t\t"{app_id}"\n')
+    handle.write(f'\t"name"\t\t"{display_name.replace(chr(34), chr(39))}"\n')
+    handle.write('\t"StateFlags"\t\t"4"\n')
+    handle.write(f'\t"installdir"\t\t"{install_dir_hint().replace(chr(34), chr(39))}"\n')
+    handle.write('}\n')
+"#;
+
 fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
 }
@@ -1916,4 +1646,76 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{infer_steam_app_id_from_catalog, parse_catalog_selection, AgentCatalogAppRecord};
+
+    #[test]
+    fn parses_specific_catalog_bundle_selection() {
+        let bundle_id = "15c739e7-6fd8-4bd8-b8b6-beb335156c76";
+        let parsed = parse_catalog_selection(&format!("/catalog/steam:480/{bundle_id}"))
+            .expect("specific bundle selection should be valid");
+
+        assert_eq!(parsed, ("steam:480".to_string(), bundle_id.to_string()));
+    }
+
+    #[test]
+    fn rejects_catalog_application_folder_selection() {
+        let error = parse_catalog_selection("/catalog/steam:480")
+            .expect_err("application folder should not be accepted as a bundle");
+
+        assert!(error.to_string().contains("application folder"));
+    }
+
+    #[test]
+    fn rejects_non_uuid_catalog_bundle_selection() {
+        let error = parse_catalog_selection("/catalog/steam:480/latest")
+            .expect_err("non-UUID bundle IDs should be rejected");
+
+        assert!(error.to_string().contains("invalid ID"));
+    }
+
+    #[test]
+    fn infers_steam_app_id_from_catalog_metadata_or_app_id() {
+        let explicit = AgentCatalogAppRecord {
+            app_id: "desktop:repo".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: Some(3_241_660),
+            launcher: None,
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&explicit), Some(3_241_660));
+
+        let prefixed = AgentCatalogAppRecord {
+            app_id: "steam:3241660".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: None,
+            launcher: None,
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&prefixed), Some(3_241_660));
+
+        let numeric = AgentCatalogAppRecord {
+            app_id: "3241660".to_string(),
+            display_name: "R.E.P.O.".to_string(),
+            aliases: vec![],
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: None,
+            launcher: Some("steam".to_string()),
+            icon_path: None,
+            latest_bundle_id: None,
+        };
+        assert_eq!(infer_steam_app_id_from_catalog(&numeric), Some(3_241_660));
+    }
 }
