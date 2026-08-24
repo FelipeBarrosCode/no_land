@@ -16,9 +16,6 @@ pub const MAX_RTP_PAYLOAD_BYTES: u32 = 1_200;
 const OPUS_COMPLEXITY: i32 = 5;
 const APP_QUEUE_BUFFERS: u64 = 6;
 const APP_QUEUE_TIME_NS: u64 = 60_000_000;
-const STARTUP_PREBUFFER_MS: u32 = 30;
-const UNDERRUN_GRACE_MS: u64 = 8;
-const WAIT_SLICE_MS: u64 = 1;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -455,7 +452,6 @@ fn feed_appsrc(
     let mut frame = Vec::<i16>::new();
     let mut clock = TimestampClock::default();
     let mut next_deadline = Instant::now();
-    let mut primed = false;
 
     while !stop.load(Ordering::Acquire) {
         let current = input.load_full();
@@ -464,38 +460,14 @@ fn feed_appsrc(
             set_appsrc_caps(&appsrc, current.sample_rate);
             frame.resize(frame_samples(current.sample_rate, frame_ms), 0);
             next_deadline = Instant::now();
-            primed = false;
         }
         frame.fill(0);
 
         let is_muted = muted.load(Ordering::Acquire);
-        if !is_muted && !primed {
-            let startup_target =
-                frame_samples(current.sample_rate, STARTUP_PREBUFFER_MS).max(frame.len());
-            if !wait_for_ring_samples(
-                &current,
-                startup_target,
-                &stop,
-                Duration::from_millis(u64::from(STARTUP_PREBUFFER_MS)),
-            ) {
-                thread::sleep(Duration::from_millis(WAIT_SLICE_MS));
-                continue;
-            }
-            primed = true;
-            next_deadline = Instant::now();
-        }
-
         let consumed = if is_muted {
             current.ring.clear();
-            primed = false;
             0
         } else {
-            let _ = wait_for_ring_samples(
-                &current,
-                frame.len(),
-                &stop,
-                Duration::from_millis(UNDERRUN_GRACE_MS),
-            );
             current.ring.pop_slice(&mut frame)
         };
         let silence = frame.len().saturating_sub(consumed);
@@ -530,30 +502,6 @@ fn feed_appsrc(
             next_deadline = Instant::now();
         }
     }
-}
-
-fn wait_for_ring_samples(
-    input: &crate::capture::AudioInput,
-    minimum_samples: usize,
-    stop: &AtomicBool,
-    timeout: Duration,
-) -> bool {
-    if input.ring.len() >= minimum_samples {
-        return true;
-    }
-    let deadline = Instant::now() + timeout;
-    while !stop.load(Ordering::Acquire) {
-        if input.ring.len() >= minimum_samples {
-            return true;
-        }
-        let now = Instant::now();
-        if now >= deadline {
-            return false;
-        }
-        let remaining = deadline.saturating_duration_since(now);
-        thread::sleep(remaining.min(Duration::from_millis(WAIT_SLICE_MS)));
-    }
-    false
 }
 
 #[cfg(test)]

@@ -843,7 +843,7 @@ mod tests {
     fn frame_sizes_match_common_rates() {
         assert_eq!(frame_samples(48_000, 10), 480);
         assert_eq!(frame_samples(44_100, 10), 441);
-        assert_eq!(ring_capacity(48_000), 1_920);
+        assert_eq!(ring_capacity(48_000), 5_760);
     }
 
     #[cfg(target_os = "macos")]

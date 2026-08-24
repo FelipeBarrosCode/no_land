@@ -174,11 +174,9 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
             "caps=\"application/x-rtp,media=(string)audio,clock-rate=(int)48000,encoding-name=(string)OPUS,payload=(int){payload}\" ",
             "! rtp_session.recv_rtp_sink_0 ",
             "rtp_session. ! rtpopusdepay ! opusdec plc=true use-inband-fec=true ",
-            "! queue max-size-time=120000000 max-size-buffers=0 max-size-bytes=0 ",
-            "! audiorate skip-to-first=true tolerance=40000000 ",
             "! audioconvert ! audioresample ",
             "! audio/x-raw,format=(string)S16LE,layout=(string)interleaved,rate=(int)48000,channels=(int)1 ",
-            "! queue max-size-time=120000000 max-size-buffers=0 max-size-bytes=0 ",
+            "! queue max-size-time=120000000 max-size-buffers=0 max-size-bytes=0 leaky=downstream ",
             "! identity name=decoded_probe ",
             "udpsrc name=rtcp_source address={bind_address} port={rtcp_port} buffer-size={recv_buffer} ",
             "caps=\"application/x-rtcp\" ! rtp_session.recv_rtcp_sink_0 "
@@ -217,7 +215,9 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
     for property in target_properties {
         sink.set_property(*property, &config.audio.pipewire_sink_name);
     }
-    sink.set_property("sync", true);
+    // PipeWire clocks consumption from the virtual sink. Waiting on RTP-derived
+    // timestamps here can block the whole receiver after its initial buffers.
+    sink.set_property("sync", false);
     sink.set_property("async", false);
     info!(
         properties = ?target_properties,

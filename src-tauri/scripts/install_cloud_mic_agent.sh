@@ -750,7 +750,7 @@ fi
 # Written only after the unit, PipeWire topology, listeners, and status writer
 # have all passed verification. The client uses this to force safe upgrades of
 # older remote helpers before allocating a media session.
-echo "5" > "$CONFIG_DIR/microphone-agent.version"
+echo "6" > "$CONFIG_DIR/microphone-agent.version"
 chmod 0644 "$CONFIG_DIR/microphone-agent.version"
 
 echo
