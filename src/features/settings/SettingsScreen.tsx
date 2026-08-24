@@ -92,7 +92,7 @@ interface Props {
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
   onRegenerateEdid: (payload: {
-    mode: "auto_detect" | "manual";
+    mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
 }
