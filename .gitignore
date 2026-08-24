@@ -11,7 +11,7 @@ src-tauri/native/build/
 # Packaging staging area recreated by prepare-mic-sidecar.mjs
 src-tauri/binaries/
 
-# Sidecar build outputs
+# Sidecar and agent build outputs
 .tmp-sidecar-isolated/
 mic-sidecar/target/
 vm-cloud-mic-agent/target/
