@@ -1,5 +1,9 @@
 mod capture;
 mod metrics;
+#[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
+mod pipeline;
+#[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+#[path = "pipeline_stub.rs"]
 mod pipeline;
 mod protocol;
 mod ring;
