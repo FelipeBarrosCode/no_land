@@ -19,6 +19,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const sidecarPath = process.argv[2] ? resolve(repoRoot, process.argv[2]) : null;
 const frameworkDir = resolve(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework');
+const sidecarEntitlements = resolve(repoRoot, 'mic-sidecar', 'noland-mic-sender.entitlements');
 const frameworkRoot = join(frameworkDir, 'Versions', 'Current');
 const frameworkLibDir = join(frameworkRoot, 'lib');
 const frameworkLibexecDir = join(frameworkRoot, 'libexec');
@@ -54,7 +55,26 @@ const allowedGStreamerPlugins = new Set([
   'libgstudp.dylib',
   'libgsttypefindfunctions.dylib',
   'libgstvolume.dylib',
+  'libgstwebrtcdsp.dylib',
 ]);
+const requiredFrameworkFiles = [
+  'lib/libgstreamer-1.0.0.dylib',
+  'lib/libgstapp-1.0.0.dylib',
+  'lib/libgstbase-1.0.0.dylib',
+  'lib/libgstaudio-1.0.0.dylib',
+  'lib/libgstrtp-1.0.0.dylib',
+  'lib/libgstnet-1.0.0.dylib',
+  'lib/libgstpbutils-1.0.0.dylib',
+  'lib/libgsttag-1.0.0.dylib',
+  'lib/libgobject-2.0.0.dylib',
+  'lib/libglib-2.0.0.dylib',
+  'lib/libgio-2.0.0.dylib',
+  'lib/libintl.8.dylib',
+  'lib/libopus.0.dylib',
+  'lib/libgstbadaudio-1.0.0.dylib',
+  'lib/libwebrtc-audio-processing-1.3.dylib',
+  ...Array.from(allowedGStreamerPlugins, (plugin) => `lib/gstreamer-1.0/${plugin}`),
+];
 
 if (process.platform !== 'darwin') {
   process.exit(0);
@@ -95,30 +115,53 @@ for (const file of [...frameworkFiles, ...libexecFiles]) {
 for (const file of externalLibs.values()) {
   setInstallId(file, file);
 }
+ensureRpath(sidecarPath, frameworkLibDir);
 
 adhocSign([sidecarPath, ...frameworkFiles, ...libexecFiles, ...externalLibs.values()]);
 console.log(`Patched macOS dev sidecar runtime: ${sidecarPath}`);
 
 function prepareBundledFramework() {
-  if (hasFrameworkRuntime(frameworkDir)) {
-    restoreAllowedPlugins();
-    pruneBundledPlugins();
-    return;
+  if (!hasFrameworkRuntime(frameworkDir)) {
+    const sourceFramework = resolveFrameworkSource();
+    if (!sourceFramework) {
+      console.error('Unable to locate a complete macOS GStreamer microphone runtime. Run node scripts/bootstrap-native-deps.mjs --target <triple> before local development builds.');
+      process.exit(1);
+    }
+
+    if (resolve(sourceFramework) !== resolve(frameworkDir)) {
+      console.warn(`[fix-macos-dev-sidecar] Restaging incomplete GStreamer framework from ${sourceFramework}`);
+      removeIfExists(frameworkDir);
+      copyDirResolved(sourceFramework, frameworkDir);
+    }
   }
 
-  const sourceFramework = resolveFrameworkSource();
-  if (!sourceFramework) {
-    console.error('Unable to locate a staged macOS GStreamer runtime. Run node scripts/bootstrap-native-deps.mjs --target <triple> before local development builds.');
-    process.exit(1);
-  }
-
-  if (resolve(sourceFramework) !== resolve(frameworkDir)) {
-    removeIfExists(frameworkDir);
-    copyDirResolved(sourceFramework, frameworkDir);
-  }
-
+  restoreRequiredFrameworkFiles();
   restoreAllowedPlugins();
   pruneBundledPlugins();
+
+  if (!hasFrameworkRuntime(frameworkDir)) {
+    console.error('Bundled GStreamer framework is missing required microphone/Opus/RTP runtime files after repair.');
+    process.exit(1);
+  }
+}
+
+function restoreRequiredFrameworkFiles() {
+  const sourceFramework = resolveFrameworkSource();
+  if (!sourceFramework || resolve(sourceFramework) === resolve(frameworkDir)) return;
+
+  const sourceRoot = frameworkVersionRoot(sourceFramework);
+  const destinationRoot = frameworkVersionRoot(frameworkDir);
+  if (!sourceRoot || !destinationRoot) return;
+
+  for (const relativePath of requiredFrameworkFiles) {
+    const source = join(sourceRoot, relativePath);
+    const destination = join(destinationRoot, relativePath);
+    if (!isUsableFile(destination) && isUsableFile(source)) {
+      mkdirSync(dirname(destination), { recursive: true });
+      copyFileSync(source, destination);
+      chmodSync(destination, statSync(source).mode);
+    }
+  }
 }
 
 function restoreAllowedPlugins() {
@@ -136,8 +179,9 @@ function restoreAllowedPlugins() {
   for (const plugin of allowedGStreamerPlugins) {
     const destination = join(frameworkPluginDir, plugin);
     const source = join(sourcePluginDir, plugin);
-    if (!existsSync(destination) && existsSync(source)) {
+    if (!isUsableFile(destination) && isUsableFile(source)) {
       copyFileSync(source, destination);
+      chmodSync(destination, statSync(source).mode);
     }
   }
 }
@@ -153,11 +197,28 @@ function resolveFrameworkSource() {
   return null;
 }
 
+function frameworkVersionRoot(path) {
+  for (const candidate of [
+    join(path, 'Versions', 'Current'),
+    join(path, 'Versions', '1.0'),
+    path,
+  ]) {
+    if (existsSync(join(candidate, 'lib'))) return candidate;
+  }
+  return null;
+}
+
+function isUsableFile(path) {
+  try {
+    return statSync(path).isFile() && statSync(path).size > 0;
+  } catch {
+    return false;
+  }
+}
+
 function hasFrameworkRuntime(path) {
-  return existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.0.dylib'))
-    || existsSync(join(path, 'Versions', 'Current', 'lib', 'libgstreamer-1.0.dylib'))
-    || existsSync(join(path, 'lib', 'libgstreamer-1.0.0.dylib'))
-    || existsSync(join(path, 'lib', 'libgstreamer-1.0.dylib'));
+  const root = frameworkVersionRoot(path);
+  return Boolean(root) && requiredFrameworkFiles.every((relativePath) => isUsableFile(join(root, relativePath)));
 }
 
 function pruneBundledPlugins() {
@@ -275,6 +336,32 @@ function setInstallId(file, id) {
   run('install_name_tool', ['-id', id, file], { allowFailure: true });
 }
 
+function listRpaths(file) {
+  const output = run('otool', ['-l', file], { allowFailure: true });
+  if (output.status !== 0) return [];
+  const lines = output.stdout.split(/\r?\n/u);
+  const rpaths = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index].includes('LC_RPATH')) continue;
+    for (let offset = index + 1; offset < Math.min(index + 5, lines.length); offset += 1) {
+      const match = lines[offset].match(/^\s+path\s+(.+?)\s+\(offset/u);
+      if (match) {
+        rpaths.push(match[1].trim());
+        break;
+      }
+    }
+  }
+  return rpaths;
+}
+
+function ensureRpath(file, rpath) {
+  if (listRpaths(file).includes(rpath)) return;
+  run('install_name_tool', ['-add_rpath', rpath, file], { allowFailure: false });
+  if (!listRpaths(file).includes(rpath)) {
+    throw new Error(`Failed to add required runtime search path ${rpath} to ${file}`);
+  }
+}
+
 function isManagedNativeDependency(dep) {
   if (!nativePrefix) {
     return false;
@@ -300,7 +387,12 @@ function adhocSign(files) {
   run('xattr', ['-cr', sidecarPath], { allowFailure: true });
   run('xattr', ['-cr', frameworkDir], { allowFailure: true });
   for (const file of uniqueFiles.sort((a, b) => b.length - a.length)) {
-    run('codesign', ['--force', '--sign', '-', '--timestamp=none', file], { allowFailure: true });
+    const args = ['--force', '--sign', '-', '--timestamp=none'];
+    if (safeRealpath(file) === safeRealpath(sidecarPath) && existsSync(sidecarEntitlements)) {
+      args.push('--entitlements', sidecarEntitlements);
+    }
+    args.push(file);
+    run('codesign', args, { allowFailure: false });
   }
 }
 

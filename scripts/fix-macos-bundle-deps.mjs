@@ -36,6 +36,7 @@ const frameworksDir = join(contentsDir, 'Frameworks');
 const resourcesDir = join(contentsDir, 'Resources');
 const resourcesBinariesDir = join(resourcesDir, 'binaries');
 const microphoneUsageDescription = 'Noland Connect needs microphone access to forward your local mic into your cloud gaming session.';
+const micSidecarEntitlements = join(repoRoot, 'mic-sidecar', 'noland-mic-sender.entitlements');
 const frameworkBundleSource = join(frameworksDir, 'GStreamer.framework');
 const frameworkBundleDir = join(resourcesDir, 'gstreamer', 'macos', 'GStreamer.framework');
 const bundledFrameworkBuildLibDir = toPosix(join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework', 'Versions', 'Current', 'lib'));
@@ -78,6 +79,7 @@ const allowedGStreamerPlugins = new Set([
   'libgstudp.dylib',
   'libgsttypefindfunctions.dylib',
   'libgstvolume.dylib',
+  'libgstwebrtcdsp.dylib',
 ]);
 
 if (existsSync(frameworkBinDir)) {
@@ -319,6 +321,11 @@ function rewriteBuildTreeGStreamerDeps(file) {
 // Strategy: if the dep name matches a file in the framework's own lib/ dir,
 // repoint it there with a @loader_path relative to the consumer.
 function rewriteStaleLoaderPathFrameworkDeps(file) {
+  // Root app binaries legitimately load project-native libopus/SDL from
+  // Contents/Frameworks. Only consumers inside the relocated GStreamer
+  // framework can contain stale references to the framework's old location.
+  if (!resolve(file).startsWith(resolve(frameworkBundleDir))) return;
+
   for (const dep of listDependencies(file)) {
     if (!dep.startsWith('@loader_path/')) continue;
     // Only handle deps that ultimately reference Contents/Frameworks/ by
@@ -419,9 +426,8 @@ function resolveFrameworkSignTarget(frameworkDir) {
 // DYLD_FRAMEWORK_PATH / DYLD_FALLBACK_LIBRARY_PATH env vars that the Rust
 // host process sets, so the sidecar crashes at startup before writing any log.
 //
-// We add two rpaths:
-//   1. The absolute in-bundle path (used when launched from the installed app).
-//   2. An @executable_path-relative path (portable across install locations).
+// Add only the portable @executable_path-relative path. Absolute build-machine
+// rpaths make the signed app non-relocatable and can hide missing bundle files.
 function injectMicSidecarGStreamerRpath(appMacosDir, gstreamerLibDir) {
   if (!existsSync(gstreamerLibDir)) {
     console.warn(`[fix-macos-bundle-deps] GStreamer lib dir not found; skipping rpath injection: ${gstreamerLibDir}`);
@@ -434,15 +440,13 @@ function injectMicSidecarGStreamerRpath(appMacosDir, gstreamerLibDir) {
     // @executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib
     // This resolves correctly regardless of where the .app is installed.
     const relativeRpath = '@executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib';
-    const absoluteRpath = gstreamerLibDir;
     const existingRpaths = getMachORpaths(sidecar);
-    for (const rpath of [relativeRpath, absoluteRpath]) {
-      if (existingRpaths.includes(rpath)) {
-        console.log(`[fix-macos-bundle-deps] rpath already present in ${name}: ${rpath}`);
-        continue;
-      }
-      console.log(`[fix-macos-bundle-deps] Injecting rpath into ${name}: ${rpath}`);
-      run('install_name_tool', ['-add_rpath', rpath, sidecar], { allowFailure: true });
+    if (!existingRpaths.includes(relativeRpath)) {
+      console.log(`[fix-macos-bundle-deps] Injecting rpath into ${name}: ${relativeRpath}`);
+      run('install_name_tool', ['-add_rpath', relativeRpath, sidecar], { allowFailure: false });
+    }
+    if (!getMachORpaths(sidecar).includes(relativeRpath)) {
+      throw new Error(`Required GStreamer rpath was not added to ${sidecar}`);
     }
   }
 }
@@ -485,14 +489,18 @@ function resignBundle(app, nestedFiles) {
 function signCodeObject(path, { runtime }) {
   console.log(`[fix-macos-bundle-deps] Signing ${relative(appPath, path) || '.'}${runtime ? ' (runtime)' : ''}`);
   const args = ['--force'];
+  const isMicSidecar = basename(path).startsWith('noland-mic-sender');
   if (appleSigningIdentity) {
     args.push('--sign', appleSigningIdentity, '--timestamp');
     if (runtime) {
       args.push('--options', 'runtime');
-      args.push('--preserve-metadata=identifier,entitlements,flags,runtime,requirements');
+      args.push(`--preserve-metadata=${isMicSidecar ? 'identifier,flags,runtime,requirements' : 'identifier,entitlements,flags,runtime,requirements'}`);
     }
   } else {
     args.push('--sign', '-', '--timestamp=none');
+  }
+  if (isMicSidecar && existsSync(micSidecarEntitlements)) {
+    args.push('--entitlements', micSidecarEntitlements);
   }
   args.push(path);
   run('codesign', args, { allowFailure: false });

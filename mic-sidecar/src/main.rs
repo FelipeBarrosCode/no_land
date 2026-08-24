@@ -391,7 +391,12 @@ impl Daemon {
         );
         self.pipeline = Some(pipeline);
         self.session_config = Some(config.clone());
-        self.restart_capture(&config);
+        if let Err(error) = self.restart_capture(&config) {
+            self.stop_session();
+            self.state.failed(error.clone());
+            self.emit_state();
+            return Err(format!("microphone capture failed to start: {error}"));
+        }
         Ok(())
     }
 
@@ -434,7 +439,7 @@ impl Daemon {
         );
         if let Some(config) = self.session_config.clone() {
             if config.source == SourceKind::Microphone {
-                self.restart_capture(&config);
+                self.restart_capture(&config)?;
             }
         }
         Ok(())
@@ -453,7 +458,7 @@ impl Daemon {
         Ok(())
     }
 
-    fn restart_capture(&mut self, config: &SessionConfig) {
+    fn restart_capture(&mut self, config: &SessionConfig) -> Result<(), String> {
         eprintln!(
             "[mic-sidecar] restart_capture: selected_device_id={:?}",
             self.selected_device_id
@@ -495,6 +500,7 @@ impl Daemon {
                     self.state.healthy();
                 }
                 self.emit_state();
+                Ok(())
             }
             Err(error) => {
                 self.capture.stop();
@@ -506,6 +512,7 @@ impl Daemon {
                 self.retry_at = Instant::now() + CAPTURE_RETRY_INTERVAL;
                 self.emit_event("captureRecovery", json!({ "error": error }));
                 self.emit_state();
+                Err(error)
             }
         }
     }
@@ -541,7 +548,7 @@ impl Daemon {
         let now = Instant::now();
         self.update_capture_health(now);
         if self.capture.active_device_id().is_none() && now >= self.retry_at {
-            self.restart_capture(&config);
+            let _ = self.restart_capture(&config);
             return;
         }
         if now < self.next_device_poll {
@@ -574,7 +581,7 @@ impl Daemon {
                 "deviceChangeDetected",
                 json!({ "selectedDeviceId": self.selected_device_id }),
             );
-            self.restart_capture(&config);
+            let _ = self.restart_capture(&config);
         }
     }
 

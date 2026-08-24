@@ -14,7 +14,10 @@ use crate::{
     services::{
         app_config::IgdbConfig,
         app_context::AppContext,
-        launch_library::{launch_remote_software, load_launch_library, LaunchLibraryEntry},
+        launch_library::{
+            launch_remote_software, load_launch_library, repair_entry_before_launch,
+            LaunchLibraryEntry,
+        },
         shared_storage::shared_storage_manager::SharedStorageManager,
         software_artwork::SoftwareArtworkService,
     },
@@ -224,6 +227,9 @@ async fn run_launch(
         }
     }
 
+    repair_entry_before_launch(&mut entry)
+        .await
+        .map_err(|error| error.to_string())?;
     if !entry.item.launchable {
         return Err(format!(
             "{} has no supported launch metadata. Open Launch PC and start it from the desktop, or reinstall it so Steam/a desktop entry/an executable can be discovered.",

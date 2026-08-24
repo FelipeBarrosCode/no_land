@@ -21,7 +21,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub const TARGET_SAMPLE_RATE: u32 = 48_000;
-pub const RING_MILLIS: usize = 40;
+pub const RING_MILLIS: usize = 120;
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

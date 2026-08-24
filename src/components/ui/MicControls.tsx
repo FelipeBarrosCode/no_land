@@ -23,6 +23,23 @@ interface MicControlsProps {
   compact?: boolean;
 }
 
+function micErrorMessage(error: unknown): string {
+  if (typeof error === "string") {
+    return error;
+  }
+  if (typeof error === "object" && error !== null) {
+    const details = Reflect.get(error, "details");
+    if (typeof details === "string" && details.trim()) {
+      return details;
+    }
+    const message = Reflect.get(error, "message");
+    if (typeof message === "string" && message.trim()) {
+      return message;
+    }
+  }
+  return "Microphone operation failed. Check the pipeline status and try again.";
+}
+
 export function MicControls({ instanceId, compact = false }: MicControlsProps) {
   const [config, setConfig] = useState<InstanceMicConfig | null>(null);
   const [status, setStatus] = useState<InstanceMicRuntimeStatus | null>(null);
@@ -72,7 +89,8 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         const nextStatus = await getInstanceMicStatus(instanceId);
         setStatus(nextStatus);
         return nextStatus;
-      } catch {
+      } catch (error) {
+        setError(micErrorMessage(error));
         return null;
       } finally {
         statusPollInFlightRef.current = false;
@@ -94,7 +112,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         setStatus(null);
       }
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       initialLoadInFlightRef.current = false;
     }
@@ -151,7 +169,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         await loadStatus(true);
       }
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -165,7 +183,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await loadConfig();
       await loadStatus(true);
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -179,7 +197,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await loadConfig();
       await loadStatus(true);
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -192,7 +210,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await loadDevices(true);
       await loadConfig();
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -205,7 +223,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await updateInstanceMicSettings(instanceId, { autoConnect });
       await loadConfig();
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -222,7 +240,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       }
       await loadStatus(true);
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -236,7 +254,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await loadConfig();
       await loadStatus(true);
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -249,7 +267,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
       await recreateInstanceMicDevice(instanceId);
       await loadStatus(true);
     } catch (e) {
-      setError(String(e));
+      setError(micErrorMessage(e));
     } finally {
       setLoading(false);
     }
@@ -507,9 +525,9 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         </div>
       )}
 
-      {error && (
+      {(error || status?.error) && (
         <p className="text-red-400 text-xs bg-red-900/30 rounded px-2 py-1">
-          {error}
+          {error ?? status?.error}
         </p>
       )}
     </div>

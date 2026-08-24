@@ -228,19 +228,106 @@ impl SharedStorageManager {
 }
 
 fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>> {
-    serde_json::from_value(value.clone()).map_err(|error| {
-        AppError::State(format!("state-agent ListApps payload is invalid: {error}"))
-    })
+    serde_json::from_value::<Vec<AgentAppRecord>>(value.clone())
+        .map(|apps| apps.into_iter().map(AgentAppRecord::normalize).collect())
+        .map_err(|error| {
+            AppError::State(format!("state-agent ListApps payload is invalid: {error}"))
+        })
 }
 
 fn parse_agent_catalog(value: &serde_json::Value) -> AppResult<Vec<AgentCatalogAppRecord>> {
     serde_json::from_value::<AgentCatalogDocument>(value.clone())
-        .map(|catalog| catalog.apps)
+        .map(|catalog| {
+            catalog
+                .apps
+                .into_iter()
+                .map(AgentCatalogAppRecord::normalize)
+                .collect()
+        })
         .map_err(|error| {
             AppError::State(format!(
                 "state-agent ListCloudCatalog payload is invalid: {error}"
             ))
         })
+}
+
+impl AgentAppRecord {
+    fn normalize(mut self) -> Self {
+        self.display_name = self.display_name.trim().to_string();
+        self.canonical_executable = normalized_optional_string(self.canonical_executable.take());
+        self.desktop_entry_id = normalized_optional_string(self.desktop_entry_id.take());
+        self.launcher = normalized_launcher(self.launcher.take());
+        self.steam_app_id = self
+            .steam_app_id
+            .or_else(|| infer_steam_app_id(&self.app_id, self.launcher.as_deref()));
+        if self.launcher.is_none() && steam_like_app_id(&self.app_id, self.steam_app_id) {
+            self.launcher = Some("steam".to_string());
+        }
+        self.aliases = normalized_aliases(self.aliases, &self.display_name);
+        self.icon_path = normalized_optional_string(self.icon_path.take());
+        self
+    }
+}
+
+impl AgentCatalogAppRecord {
+    fn normalize(mut self) -> Self {
+        self.display_name = self.display_name.trim().to_string();
+        self.canonical_executable = normalized_optional_string(self.canonical_executable.take());
+        self.desktop_entry_id = normalized_optional_string(self.desktop_entry_id.take());
+        self.launcher = normalized_launcher(self.launcher.take());
+        self.steam_app_id = self
+            .steam_app_id
+            .or_else(|| infer_steam_app_id(&self.app_id, self.launcher.as_deref()));
+        if self.launcher.is_none() && steam_like_app_id(&self.app_id, self.steam_app_id) {
+            self.launcher = Some("steam".to_string());
+        }
+        self.aliases = normalized_aliases(self.aliases, &self.display_name);
+        self.icon_path = normalized_optional_string(self.icon_path.take());
+        self.latest_bundle_id = normalized_optional_string(self.latest_bundle_id.take());
+        self
+    }
+}
+
+fn normalized_optional_string(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn normalized_launcher(value: Option<String>) -> Option<String> {
+    normalized_optional_string(value).map(|value| value.to_ascii_lowercase())
+}
+
+fn normalized_aliases(aliases: Vec<String>, display_name: &str) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for alias in aliases {
+        let trimmed = alias.trim();
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case(display_name)
+            || normalized
+                .iter()
+                .any(|existing: &String| existing.eq_ignore_ascii_case(trimmed))
+        {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+    normalized
+}
+
+fn infer_steam_app_id(app_id: &str, launcher: Option<&str>) -> Option<u32> {
+    let app_id = app_id.trim();
+    if let Some(value) = app_id.strip_prefix("steam:") {
+        return value.parse().ok();
+    }
+    launcher
+        .filter(|value| value.trim().eq_ignore_ascii_case("steam"))
+        .and_then(|_| app_id.parse().ok())
+}
+
+fn steam_like_app_id(app_id: &str, steam_app_id: Option<u32>) -> bool {
+    steam_app_id.is_some() || app_id.trim().starts_with("steam:")
 }
 
 fn looks_like_image_utility(id: &str, name: &str) -> bool {
@@ -500,5 +587,36 @@ mod tests {
             apps[0].latest_bundle_id.as_deref(),
             Some("f30a42a8-3dc9-4aea-a71c-f57f4b66bbef")
         );
+    }
+
+    #[test]
+    fn infers_missing_steam_metadata_from_sparse_agent_payloads() {
+        let apps = parse_agent_apps(&json!([{
+            "app_id": "steam:3241660",
+            "display_name": "R.E.P.O.",
+            "launcher": "  ",
+            "aliases": ["REPO", " repo ", "R.E.P.O."]
+        }]))
+        .expect("valid app payload");
+
+        assert_eq!(apps[0].steam_app_id, Some(3_241_660));
+        assert_eq!(apps[0].launcher.as_deref(), Some("steam"));
+        assert_eq!(apps[0].aliases, vec!["REPO".to_string()]);
+    }
+
+    #[test]
+    fn infers_numeric_steam_app_ids_from_catalog_when_launcher_is_steam() {
+        let apps = parse_agent_catalog(&json!({
+            "apps": [{
+                "appId": "3241660",
+                "displayName": "R.E.P.O.",
+                "launcher": "Steam",
+                "latestBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef"
+            }]
+        }))
+        .expect("valid catalog payload");
+
+        assert_eq!(apps[0].steam_app_id, Some(3_241_660));
+        assert_eq!(apps[0].launcher.as_deref(), Some("steam"));
     }
 }

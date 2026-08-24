@@ -4,5 +4,7 @@
 <dict>
   <key>NSPrefersDisplaySafeAreaCompatibilityMode</key>
   <false/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Noland Connect needs microphone access to forward your local mic into your cloud gaming session.</string>
 </dict>
 </plist>

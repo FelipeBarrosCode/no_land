@@ -93,6 +93,9 @@ pub(crate) async fn launch_remote_software(
     };
 
     if let Some(plan) = plan {
+        if let LaunchPlan::Steam(app_id) = &plan {
+            ensure_remote_steam_appmanifest(remote, target_user, entry, *app_id).await?;
+        }
         let output = run_launch_plan(remote, target_user, &plan).await?;
         if output.status_code == 0 {
             return Ok(());
@@ -165,36 +168,28 @@ fn merge_launch_library(
 ) -> Vec<LaunchLibraryEntry> {
     let mut merged = BTreeMap::<String, LaunchLibraryEntry>::new();
     for app in local {
-        let method = launch_method(
-            &app.app_id,
-            app.steam_app_id,
-            app.desktop_entry_id.as_deref(),
-            app.canonical_executable.as_deref(),
-            app.launcher.as_deref(),
-        );
         let display_name = non_empty_or(&app.display_name, &app.app_id);
-        merged.insert(
-            app.app_id.clone(),
-            LaunchLibraryEntry {
-                item: LaunchLibraryItem {
-                    app_id: app.app_id,
-                    display_name: display_name.clone(),
-                    aliases: unique_aliases(app.aliases, &display_name),
-                    installed: true,
-                    in_shared_storage: false,
-                    latest_bundle_id: None,
-                    source_labels: vec!["Installed".to_string()],
-                    launchable: method.is_some(),
-                    launch_method: method.unwrap_or_default(),
-                    restore_required: false,
-                    artwork_key: display_name.clone(),
-                },
-                canonical_executable: app.canonical_executable,
-                desktop_entry_id: app.desktop_entry_id,
-                steam_app_id: app.steam_app_id,
-                launcher: app.launcher,
+        let mut entry = LaunchLibraryEntry {
+            item: LaunchLibraryItem {
+                app_id: app.app_id,
+                display_name: display_name.clone(),
+                aliases: unique_aliases(app.aliases, &display_name),
+                installed: true,
+                in_shared_storage: false,
+                latest_bundle_id: None,
+                source_labels: vec!["Installed".to_string()],
+                launchable: false,
+                launch_method: String::new(),
+                restore_required: false,
+                artwork_key: display_name.clone(),
             },
-        );
+            canonical_executable: app.canonical_executable,
+            desktop_entry_id: app.desktop_entry_id,
+            steam_app_id: app.steam_app_id,
+            launcher: app.launcher,
+        };
+        refresh_launchability(&mut entry);
+        merged.insert(entry.item.app_id.clone(), entry);
     }
 
     for app in catalog {
@@ -232,49 +227,34 @@ fn merge_launch_library(
             if existing.launcher.is_none() {
                 existing.launcher = app.launcher;
             }
-            let method = launch_method(
-                &existing.item.app_id,
-                existing.steam_app_id,
-                existing.desktop_entry_id.as_deref(),
-                existing.canonical_executable.as_deref(),
-                existing.launcher.as_deref(),
-            );
-            existing.item.launchable = method.is_some();
-            existing.item.launch_method = method.unwrap_or_default();
+            refresh_launchability(existing);
             continue;
         }
 
         let display_name = non_empty_or(&app.display_name, &app.app_id);
-        let method = launch_method(
-            &app.app_id,
-            app.steam_app_id,
-            app.desktop_entry_id.as_deref(),
-            app.canonical_executable.as_deref(),
-            app.launcher.as_deref(),
-        );
         let restore_required = app.latest_bundle_id.is_some();
-        merged.insert(
-            app.app_id.clone(),
-            LaunchLibraryEntry {
-                item: LaunchLibraryItem {
-                    app_id: app.app_id,
-                    display_name: display_name.clone(),
-                    aliases: unique_aliases(app.aliases, &display_name),
-                    installed: false,
-                    in_shared_storage: true,
-                    latest_bundle_id: app.latest_bundle_id,
-                    source_labels: vec!["Shared storage".to_string()],
-                    launchable: restore_required && method.is_some(),
-                    launch_method: method.unwrap_or_default(),
-                    restore_required,
-                    artwork_key: display_name.clone(),
-                },
-                canonical_executable: app.canonical_executable,
-                desktop_entry_id: app.desktop_entry_id,
-                steam_app_id: app.steam_app_id,
-                launcher: app.launcher,
+        let mut entry = LaunchLibraryEntry {
+            item: LaunchLibraryItem {
+                app_id: app.app_id,
+                display_name: display_name.clone(),
+                aliases: unique_aliases(app.aliases, &display_name),
+                installed: false,
+                in_shared_storage: true,
+                latest_bundle_id: app.latest_bundle_id,
+                source_labels: vec!["Shared storage".to_string()],
+                launchable: false,
+                launch_method: String::new(),
+                restore_required,
+                artwork_key: display_name.clone(),
             },
-        );
+            canonical_executable: app.canonical_executable,
+            desktop_entry_id: app.desktop_entry_id,
+            steam_app_id: app.steam_app_id,
+            launcher: app.launcher,
+        };
+        refresh_launchability(&mut entry);
+        entry.item.launchable = restore_required && entry.item.launchable;
+        merged.insert(entry.item.app_id.clone(), entry);
     }
 
     let mut entries = merged.into_values().collect::<Vec<_>>();
@@ -286,6 +266,44 @@ fn merge_launch_library(
             .then_with(|| left.item.app_id.cmp(&right.item.app_id))
     });
     entries
+}
+
+fn refresh_launchability(entry: &mut LaunchLibraryEntry) {
+    repair_entry_launch_metadata(entry);
+    let method = launch_method_for_entry(entry);
+    entry.item.launchable = if entry.item.installed {
+        method.is_some()
+    } else {
+        entry.item.restore_required && method.is_some()
+    };
+    entry.item.launch_method = method.unwrap_or_default();
+}
+
+fn repair_entry_launch_metadata(entry: &mut LaunchLibraryEntry) {
+    entry.canonical_executable = normalized_non_empty(entry.canonical_executable.take());
+    entry.desktop_entry_id = normalized_non_empty(entry.desktop_entry_id.take());
+    entry.launcher = normalized_launcher(entry.launcher.take());
+    entry.steam_app_id = entry
+        .steam_app_id
+        .or_else(|| parse_steam_app_id(&entry.item.app_id, entry.launcher.as_deref()));
+    if entry.launcher.is_none() && steamish_entry(entry) {
+        entry.launcher = Some("steam".to_string());
+    }
+}
+
+pub(crate) async fn repair_entry_before_launch(entry: &mut LaunchLibraryEntry) -> AppResult<()> {
+    refresh_launchability(entry);
+    if entry.item.launchable || !needs_steam_title_lookup(entry) {
+        return Ok(());
+    }
+    if let Some(app_id) = resolve_steam_app_id_by_title(entry).await? {
+        entry.steam_app_id = Some(app_id);
+        if entry.launcher.is_none() {
+            entry.launcher = Some("steam".to_string());
+        }
+        refresh_launchability(entry);
+    }
+    Ok(())
 }
 
 fn launch_plan(entry: &LaunchLibraryEntry) -> Option<LaunchPlan> {
@@ -316,33 +334,8 @@ fn launch_plan(entry: &LaunchLibraryEntry) -> Option<LaunchPlan> {
         .map(|value| LaunchPlan::Executable(value.to_string()))
 }
 
-fn launch_method(
-    app_id: &str,
-    steam_app_id: Option<u32>,
-    desktop_entry_id: Option<&str>,
-    canonical_executable: Option<&str>,
-    launcher: Option<&str>,
-) -> Option<String> {
-    let entry = LaunchLibraryEntry {
-        item: LaunchLibraryItem {
-            app_id: app_id.to_string(),
-            display_name: String::new(),
-            aliases: Vec::new(),
-            installed: false,
-            in_shared_storage: false,
-            latest_bundle_id: None,
-            source_labels: Vec::new(),
-            launchable: false,
-            launch_method: String::new(),
-            restore_required: false,
-            artwork_key: String::new(),
-        },
-        canonical_executable: canonical_executable.map(ToOwned::to_owned),
-        desktop_entry_id: desktop_entry_id.map(ToOwned::to_owned),
-        steam_app_id,
-        launcher: launcher.map(ToOwned::to_owned),
-    };
-    launch_plan(&entry)
+fn launch_method_for_entry(entry: &LaunchLibraryEntry) -> Option<String> {
+    launch_plan(entry)
         .map(|plan| {
             match plan {
                 LaunchPlan::Steam(_) => "steam",
@@ -351,7 +344,7 @@ fn launch_method(
             }
             .to_string()
         })
-        .or_else(|| needs_steam_title_lookup(&entry).then(|| "steam_lookup".to_string()))
+        .or_else(|| needs_steam_title_lookup(entry).then(|| "steam_lookup".to_string()))
 }
 
 async fn run_launch_plan(
@@ -360,6 +353,23 @@ async fn run_launch_plan(
     plan: &LaunchPlan,
 ) -> AppResult<crate::services::remote_exec::ExecOutput> {
     let script = launch_script(plan)?;
+    run_remote_user_script(
+        remote,
+        target_user,
+        &script,
+        Duration::from_secs(30),
+        "software launch task failed",
+    )
+    .await
+}
+
+async fn run_remote_user_script(
+    remote: &RemoteExec,
+    target_user: &str,
+    script: &str,
+    timeout: Duration,
+    task_label: &str,
+) -> AppResult<crate::services::remote_exec::ExecOutput> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(script.as_bytes());
     let remote_command = format!(
         "printf %s {payload} | base64 -d | sudo -i -u {user} sh",
@@ -367,9 +377,9 @@ async fn run_launch_plan(
         user = shell_quote(target_user),
     );
     let remote = remote.clone();
-    tokio::task::spawn_blocking(move || remote.ssh(&remote_command, Duration::from_secs(30)))
+    tokio::task::spawn_blocking(move || remote.ssh(&remote_command, timeout))
         .await
-        .map_err(|error| AppError::Command(format!("software launch task failed: {error}")))?
+        .map_err(|error| AppError::Command(format!("{task_label}: {error}")))?
 }
 
 async fn search_remote_executable(
@@ -703,6 +713,120 @@ fn launch_script(plan: &LaunchPlan) -> AppResult<String> {
     Ok(script)
 }
 
+async fn ensure_remote_steam_appmanifest(
+    remote: &RemoteExec,
+    target_user: &str,
+    entry: &LaunchLibraryEntry,
+    app_id: u32,
+) -> AppResult<()> {
+    let payload = serde_json::json!({
+        "app_id": app_id,
+        "name": non_empty_or(&entry.item.display_name, &format!("Steam {app_id}")),
+        "installdir": steam_install_dir_hint(entry, app_id),
+    });
+    let payload = serde_json::to_string(&payload).map_err(|error| {
+        AppError::Serialization(format!(
+            "steam manifest payload serialization failed: {error}"
+        ))
+    })?;
+    let script = format!(
+        r#"python3 - <<'PY'
+import json
+import pathlib
+import time
+
+payload = json.loads({payload})
+app_id = int(payload["app_id"])
+name = payload["name"]
+installdir = payload["installdir"]
+steamapps_dirs = [
+    pathlib.Path.home() / ".steam/steam/steamapps",
+    pathlib.Path.home() / ".steam/debian-installation/steamapps",
+    pathlib.Path.home() / ".local/share/Steam/steamapps",
+    pathlib.Path.home() / ".var/app/com.valvesoftware.Steam/data/Steam/steamapps",
+]
+for steamapps in steamapps_dirs:
+    manifest = steamapps / f"appmanifest_{{app_id}}.acf"
+    if manifest.is_file() and manifest.stat().st_size > 0:
+        raise SystemExit(0)
+
+target = next((path for path in steamapps_dirs if path.is_dir()), steamapps_dirs[2])
+target.mkdir(parents=True, exist_ok=True)
+(target / "common").mkdir(parents=True, exist_ok=True)
+manifest = target / f"appmanifest_{{app_id}}.acf"
+manifest.write_text(
+    '"AppState"\n' +
+    '{{\n' +
+    f'\t"appid"\t\t"{{app_id}}"\n' +
+    f'\t"name"\t\t"{{name}}"\n' +
+    '\t"StateFlags"\t\t"4"\n' +
+    f'\t"installdir"\t\t"{{installdir}}"\n' +
+    f'\t"LastUpdated"\t\t"{{int(time.time())}}"\n' +
+    '}}\n',
+    encoding='utf-8'
+)
+PY"#,
+        payload = shell_quote(&payload),
+    );
+    let output = run_remote_user_script(
+        remote,
+        target_user,
+        &script,
+        Duration::from_secs(20),
+        "steam manifest repair failed",
+    )
+    .await?;
+    if output.status_code == 0 {
+        return Ok(());
+    }
+    let details = [output.stderr.trim(), output.stdout.trim()]
+        .into_iter()
+        .find(|value| !value.is_empty())
+        .unwrap_or("remote Steam manifest repair returned no details");
+    Err(AppError::Command(format!(
+        "Could not prepare Steam metadata for {}: {}",
+        entry.item.display_name, details
+    )))
+}
+
+fn steam_install_dir_hint(entry: &LaunchLibraryEntry, app_id: u32) -> String {
+    let candidate = non_empty_or(&entry.item.display_name, &format!("Steam {app_id}"));
+    let sanitized = candidate
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = sanitized.trim_matches([' ', '.']);
+    if trimmed.is_empty() {
+        format!("Steam-{app_id}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalized_non_empty(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let trimmed = value.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
+}
+
+fn normalized_launcher(value: Option<String>) -> Option<String> {
+    normalized_non_empty(value).map(|value| value.to_ascii_lowercase())
+}
+
+fn steamish_entry(entry: &LaunchLibraryEntry) -> bool {
+    entry.steam_app_id.is_some() || entry.item.app_id.trim().starts_with("steam:")
+}
+
 fn parse_steam_app_id(app_id: &str, launcher: Option<&str>) -> Option<u32> {
     let app_id = app_id.trim();
     if let Some(value) = app_id.strip_prefix("steam:") {
@@ -849,8 +973,9 @@ fn shell_quote(value: &str) -> String {
 mod tests {
     use super::{
         executable_search_terms, launch_plan, launch_script, merge_launch_library,
-        select_steam_app_id, AgentAppRecord, AgentCatalogAppRecord, LaunchLibraryEntry, LaunchPlan,
-        SteamStoreSearchItem, SteamStoreSearchResponse,
+        repair_entry_launch_metadata, select_steam_app_id, steam_install_dir_hint, AgentAppRecord,
+        AgentCatalogAppRecord, LaunchLibraryEntry, LaunchPlan, SteamStoreSearchItem,
+        SteamStoreSearchResponse,
     };
 
     #[test]
@@ -1132,6 +1257,61 @@ mod tests {
         let exe = launch_script(&LaunchPlan::Executable("/apps/example.exe".to_string())).unwrap();
         assert!(exe.contains("nohup wine \"$executable\""));
         assert!(exe.contains("Wine is required to launch this Windows application."));
+    }
+
+    #[test]
+    fn repair_entry_metadata_infers_missing_steam_fields() {
+        let mut entry = LaunchLibraryEntry {
+            item: crate::models::launch_library::LaunchLibraryItem {
+                app_id: "steam:3241660".to_string(),
+                display_name: "R.E.P.O.".to_string(),
+                aliases: vec![],
+                installed: true,
+                in_shared_storage: false,
+                latest_bundle_id: None,
+                source_labels: vec![],
+                launchable: false,
+                launch_method: String::new(),
+                restore_required: false,
+                artwork_key: "R.E.P.O.".to_string(),
+            },
+            canonical_executable: None,
+            desktop_entry_id: Some("  ".to_string()),
+            steam_app_id: None,
+            launcher: Some("  ".to_string()),
+        };
+
+        repair_entry_launch_metadata(&mut entry);
+
+        assert_eq!(entry.steam_app_id, Some(3_241_660));
+        assert_eq!(entry.launcher.as_deref(), Some("steam"));
+        assert_eq!(entry.desktop_entry_id, None);
+        assert_eq!(launch_plan(&entry), Some(LaunchPlan::Steam(3_241_660)));
+    }
+
+    #[test]
+    fn steam_install_dir_hint_sanitizes_hostile_titles() {
+        let entry = LaunchLibraryEntry {
+            item: crate::models::launch_library::LaunchLibraryItem {
+                app_id: "steam:42".to_string(),
+                display_name: "O'Brien: The / Test".to_string(),
+                aliases: vec![],
+                installed: true,
+                in_shared_storage: false,
+                latest_bundle_id: None,
+                source_labels: vec![],
+                launchable: true,
+                launch_method: "steam".to_string(),
+                restore_required: false,
+                artwork_key: "O'Brien: The / Test".to_string(),
+            },
+            canonical_executable: None,
+            desktop_entry_id: None,
+            steam_app_id: Some(42),
+            launcher: Some("steam".to_string()),
+        };
+
+        assert_eq!(steam_install_dir_hint(&entry, 42), "O_Brien_ The _ Test");
     }
 
     #[test]
