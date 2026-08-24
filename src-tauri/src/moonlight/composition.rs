@@ -36,6 +36,9 @@ pub struct MoonlightManager {
     pub runtime: MoonlightRuntimeHandle,
     pub input: Arc<InputManager>,
     pub active_session_preferences: Arc<Mutex<Option<StreamPreferences>>>,
+    /// Instance whose independent microphone path should be stopped when the
+    /// current game stream ends.
+    pub active_stream_instance_id: Arc<Mutex<Option<u64>>>,
 }
 
 impl MoonlightManager {
@@ -52,6 +55,7 @@ impl MoonlightManager {
             runtime,
             input,
             active_session_preferences: Arc::new(Mutex::new(None)),
+            active_stream_instance_id: Arc::new(Mutex::new(None)),
         }
     }
 }

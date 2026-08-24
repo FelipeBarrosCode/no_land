@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Build and start noland-state-agent on a disposable Linux instance.
+set -euo pipefail
+
+SRC="${1:-/opt/noland/state-agent}"
+BIN="${2:-/usr/local/bin/noland-state-agent}"
+TARGET_USER="${3:-}"
+
+export NOLAND_STATE_ROOT="${NOLAND_STATE_ROOT:-/var/lib/noland/state}"
+export NOLAND_RUN_ROOT="${NOLAND_RUN_ROOT:-/run/noland}"
+
+mkdir -p "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
+
+if [[ ! -x "$BIN" ]]; then
+  if ! command -v cargo >/dev/null 2>&1; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    # shellcheck disable=SC1091
+    source "$HOME/.cargo/env"
+  fi
+  cd "$SRC"
+  cargo build --release -p noland-state-agent
+  install -m 0755 "$SRC/target/release/noland-state-agent" "$BIN"
+fi
+
+if [[ -f /etc/systemd/system/noland-state-agent.service ]] || command -v systemctl >/dev/null 2>&1; then
+  if [[ -f "$SRC/systemd/noland-state-agent.service" ]]; then
+    if [[ -n "$TARGET_USER" ]]; then
+      TARGET_GROUP="$(id -gn "$TARGET_USER")"
+      sed \
+        -e "s|^ExecStart=|User=$TARGET_USER\nGroup=$TARGET_GROUP\nExecStart=|" \
+        -e "s|Environment=NOLAND_HOME=/home/user|Environment=NOLAND_HOME=/home/$TARGET_USER|" \
+        "$SRC/systemd/noland-state-agent.service" > /etc/systemd/system/noland-state-agent.service
+    else
+      cp "$SRC/systemd/noland-state-agent.service" /etc/systemd/system/noland-state-agent.service
+    fi
+    systemctl daemon-reload || true
+    systemctl enable --now noland-state-agent.service || true
+  fi
+fi
+
+if ! ss -xl 2>/dev/null | grep -q "$NOLAND_RUN_ROOT/state-agent.sock"; then
+  if ! systemctl is-active --quiet noland-state-agent.service 2>/dev/null; then
+    if [[ -n "$TARGET_USER" ]]; then
+      nohup sudo -u "$TARGET_USER" "$BIN" >/var/log/noland-state-agent.log 2>&1 &
+    else
+      nohup "$BIN" >/var/log/noland-state-agent.log 2>&1 &
+    fi
+    sleep 1
+  fi
+fi
+
+echo "STATE_AGENT_READY"

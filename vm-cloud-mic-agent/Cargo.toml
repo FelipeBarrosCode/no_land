@@ -14,7 +14,7 @@ serde_json = "1.0"
 toml = "0.8"
 clap = { version = "4.5", features = ["derive"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
 thiserror = "2.0"
 signal-hook = "0.3"
 gstreamer = "0.23"

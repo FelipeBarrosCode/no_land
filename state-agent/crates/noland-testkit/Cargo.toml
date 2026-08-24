@@ -1,0 +1,28 @@
+[package]
+name = "noland-testkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes.workspace = true
+chrono.workspace = true
+noland-attribution.workspace = true
+noland-cas.workspace = true
+noland-classifier.workspace = true
+noland-crypto.workspace = true
+noland-discovery.workspace = true
+noland-observer.workspace = true
+noland-rclone-adapter.workspace = true
+noland-restore.workspace = true
+noland-snapshot.workspace = true
+noland-state-agent.workspace = true
+noland-state-core.workspace = true
+noland-state-db.workspace = true
+noland-storage.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

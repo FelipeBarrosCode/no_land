@@ -23,6 +23,7 @@ import {
   setupMoonlightSunshine,
   retrySetupStage,
   updatePlatformCredentials,
+  updateIgdbCredentials,
   updateMoonlightPreferences,
   regenerateEdid,
   updateServerPreferences,
@@ -37,9 +38,7 @@ import {
   getInstanceSunshineSettings,
   updateInstanceSunshineSettings,
   resetInstanceSunshineSettings,
-  reconnectInstanceWireguard,
   rebootInstanceServices,
-  pauseInstance,
   destroyInstance,
   generateBundleIndex,
   getInstanceRestoreBundles,
@@ -72,6 +71,10 @@ import {
   disconnectSharedStorageProfile,
   beginOauthAuthorization,
   completeOauthAuthorization,
+  getInstanceLaunchLibrary,
+  launchInstanceSoftware as launchInstanceSoftwareCommand,
+  getLaunchInstanceSoftwareJob,
+  getSoftwareArtwork,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -81,6 +84,7 @@ import type {
   OfferCandidate,
   OnboardingPayload,
   PlatformCredentialsUpdate,
+  IgdbCredentialsUpdate,
   PersistedAppState,
   ProvisioningEvent,
   RentedInstanceSummary,
@@ -114,6 +118,9 @@ import type {
   ProfileReference,
   SharedStorageProfile,
   SharedStorageTestResult,
+  LaunchLibraryResponse,
+  LaunchSoftwareJob,
+  SoftwareArtworkResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -148,19 +155,36 @@ interface AppStore {
   startPlay: () => Promise<void>;
   resumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
   startPlayExisting: (instanceId: number) => Promise<string | null>;
+  launchLibrary: LaunchLibraryResponse | null;
+  launchLibraryLoading: boolean;
+  launchSoftwareJob: LaunchSoftwareJob | null;
+  launchingSoftwareAppId: string | null;
+  softwareArtwork: Record<string, SoftwareArtworkResult>;
+  softwareArtworkLoading: Record<string, boolean>;
+  loadInstanceLaunchLibrary: (
+    instanceId: number,
+  ) => Promise<LaunchLibraryResponse | null>;
+  launchInstanceSoftware: (
+    instanceId: number,
+    appId: string,
+  ) => Promise<LaunchSoftwareJob | null>;
+  pollLaunchSoftwareJob: (jobId: string) => Promise<LaunchSoftwareJob | null>;
+  loadSoftwareArtwork: (name: string) => Promise<SoftwareArtworkResult | null>;
+  clearLaunchLibrary: () => void;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
   refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
   savePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
+  saveIgdbCredentials: (payload: IgdbCredentialsUpdate) => Promise<void>;
   saveServerPreferences: (
     payload: Partial<ServerPreferencesUpdate>,
   ) => Promise<void>;
   saveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   saveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
   regenerateEdid: (payload: {
-    mode: "auto_detect" | "manual";
+    mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
   submitPin: (pin: string) => Promise<void>;
@@ -261,17 +285,12 @@ interface AppStore {
     instanceId: number,
     sessionId: string,
   ) => Promise<boolean>;
-  rerunEmbeddedMoonlightPairing: (
-    instanceId: number,
-  ) => Promise<MoonlightPairingSessionResponse | null>;
   resetSunshineSettings: (
     instanceId: number,
     sunshineUsername: string,
     sunshinePassword: string,
   ) => Promise<void>;
-  reconnectWireguard: (instanceId: number) => Promise<string | null>;
   rebootInstanceServices: (instanceId: number) => Promise<string | null>;
-  pauseInstance: (instanceId: number) => Promise<void>;
   destroyInstance: (instanceId: number) => Promise<void>;
   bundleIndex: BundleIndex | null;
   restoreJob: RestoreJob | null;
@@ -786,6 +805,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     embeddedMoonlightStatus: null,
     activeMoonlightPairing: null,
     instanceActionRunning: false,
+    launchLibrary: null,
+    launchLibraryLoading: false,
+    launchSoftwareJob: null,
+    launchingSoftwareAppId: null,
+    softwareArtwork: {},
+    softwareArtworkLoading: {},
     bundleIndex: null,
     restoreJob: null,
     micConfig: null,
@@ -1008,6 +1033,122 @@ export const useAppStore = create<AppStore>((set, get) => {
         endProvisioningBlock();
         set({ error: mapError(error) });
         return null;
+      }
+    },
+
+    loadInstanceLaunchLibrary: async (instanceId) => {
+      set({
+        launchLibrary: null,
+        launchLibraryLoading: true,
+        launchSoftwareJob: null,
+        launchingSoftwareAppId: null,
+        error: null,
+      });
+      try {
+        const launchLibrary = await getInstanceLaunchLibrary(instanceId);
+        set({ launchLibrary, launchLibraryLoading: false });
+        return launchLibrary;
+      } catch (error) {
+        set({ launchLibraryLoading: false, error: mapError(error) });
+        return null;
+      }
+    },
+
+    launchInstanceSoftware: async (instanceId, appId) => {
+      set({
+        launchingSoftwareAppId: appId,
+        launchSoftwareJob: null,
+        error: null,
+      });
+      try {
+        const launchSoftwareJob = await launchInstanceSoftwareCommand(
+          instanceId,
+          appId,
+        );
+        set({ launchSoftwareJob, launchingSoftwareAppId: null });
+        return launchSoftwareJob;
+      } catch (error) {
+        set({ launchingSoftwareAppId: null, error: mapError(error) });
+        return null;
+      }
+    },
+
+    pollLaunchSoftwareJob: async (jobId) => {
+      try {
+        const launchSoftwareJob = await getLaunchInstanceSoftwareJob(jobId);
+        set({ launchSoftwareJob });
+        return launchSoftwareJob;
+      } catch (error) {
+        set({ error: mapError(error) });
+        return null;
+      }
+    },
+
+    loadSoftwareArtwork: async (name) => {
+      const artworkName = name.trim();
+      if (!artworkName) {
+        return null;
+      }
+
+      const existing = get().softwareArtwork[artworkName];
+      if (existing) {
+        return existing;
+      }
+      if (get().softwareArtworkLoading[artworkName]) {
+        return null;
+      }
+
+      set((state) => ({
+        softwareArtworkLoading: {
+          ...state.softwareArtworkLoading,
+          [artworkName]: true,
+        },
+      }));
+      try {
+        const result = await getSoftwareArtwork(artworkName);
+        set((state) => ({
+          softwareArtwork: {
+            ...state.softwareArtwork,
+            [artworkName]: result,
+          },
+          softwareArtworkLoading: {
+            ...state.softwareArtworkLoading,
+            [artworkName]: false,
+          },
+        }));
+        return result;
+      } catch {
+        set((state) => ({
+          softwareArtworkLoading: {
+            ...state.softwareArtworkLoading,
+            [artworkName]: false,
+          },
+        }));
+        return null;
+      }
+    },
+
+    clearLaunchLibrary: () => {
+      set({
+        launchLibrary: null,
+        launchLibraryLoading: false,
+        launchSoftwareJob: null,
+        launchingSoftwareAppId: null,
+      });
+    },
+
+    saveIgdbCredentials: async (payload) => {
+      set({ busy: true, error: null });
+      try {
+        const appState = await updateIgdbCredentials(payload);
+        set({
+          appState,
+          busy: false,
+          softwareArtwork: {},
+          softwareArtworkLoading: {},
+        });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
       }
     },
 
@@ -1545,14 +1686,27 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           const result = await completeOauthAuthorization(sessionId);
-          set({ oauthSessionId: null });
+          set({ oauthSessionId: null, error: null });
           await get().loadSharedStorageProfiles();
           return result;
         },
         null as never,
       );
-      if (get().error) {
-        set({ oauthSessionId: null });
+      // If the task failed, check whether it was a transient "still in
+      // progress" error (the token exchange hasn't finished yet).  In that
+      // case keep the session alive so the user can click "Complete
+      // Authorization" again instead of being silently bounced back to the
+      // start.
+      const currentError = get().error;
+      if (currentError) {
+        const isStillInProgress = currentError
+          .toLowerCase()
+          .includes("still in progress");
+        if (isStillInProgress) {
+          // Keep oauthSessionId so the user can retry.
+        } else {
+          set({ oauthSessionId: null });
+        }
       }
     },
 
@@ -1595,9 +1749,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.sync",
-          label: "Syncing files from shared storage",
+          label: "Restoring application state",
           detail:
-            "Copying the selected files and folders to the remote instance.",
+            "Downloading, verifying, and applying selected app bundles on the instance.",
           blocking: true,
         },
         async () => {
@@ -1648,8 +1802,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
-          label: "Exporting files to shared storage",
-          detail: "Saving the selected instance files back to cloud storage.",
+          label: "Backing up application state",
+          detail: "The state agent is packing, encrypting, and committing selected apps.",
           blocking: true,
         },
         async () =>
@@ -1896,68 +2050,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    rerunEmbeddedMoonlightPairing: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "instance.moonlight.pipeline",
-          label: "Enabling embedded Moonlight",
-          detail: "Turning on the built-in Moonlight pipeline for this instance.",
-        },
-        async () => {
-          const appState = await setInstanceMoonlightPipelineEnabled(instanceId, true);
-          const rentedInstances = await getRentedInstances();
-          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
-          set({ appState, rentedInstances, embeddedMoonlightStatus });
-        },
-        undefined,
-      );
-
-      return await runInstanceTask(
-        {
-          key: "instance.moonlight.pair.begin",
-          label: "Starting embedded Moonlight pairing",
-          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
-          blocking: true,
-        },
-        async () => {
-          const session = await prepareInstanceMoonlightPairing(instanceId);
-          const appState = await getAppState();
-          const rentedInstances = await getRentedInstances();
-          const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
-          set({
-            activeMoonlightPairing: session,
-            appState,
-            rentedInstances,
-            embeddedMoonlightStatus,
-          });
-          return session;
-        },
-        null,
-      );
-    },
-
-    reconnectWireguard: async (instanceId) => {
-      return await runInstanceTask(
-        {
-          key: "instance.wireguard.reconnect",
-          label: "Syncing connection",
-          detail:
-            "Refreshing Vast.ai endpoint details, reprovisioning the managed tunnel if needed, and checking Sunshine.",
-          blocking: true,
-        },
-        async () => {
-          const result = await reconnectInstanceWireguard(instanceId);
-          const [appState, rentedInstances, embeddedMoonlightStatus] = await Promise.all([
-            getAppState(),
-            getRentedInstances().catch(() => get().rentedInstances),
-            getInstanceMoonlightPipelineStatus(instanceId).catch(() => null),
-          ]);
-          set({ appState, rentedInstances, embeddedMoonlightStatus });
-          return result;
-        },
-        null,
-      );
-    },
 
     rebootInstanceServices: async (instanceId) => {
       return await runInstanceTask(
@@ -1973,27 +2065,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    pauseInstance: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "instance.pause",
-          label: "Pausing instance",
-          detail: "Suspending the rented machine until you resume it.",
-          blocking: true,
-        },
-        async () => {
-          await pauseInstance(instanceId);
-          set((state) => ({
-            embeddedMoonlightStatus:
-              state.embeddedMoonlightStatus?.instanceId === instanceId
-                ? null
-                : state.embeddedMoonlightStatus,
-            activeMoonlightPairing: null,
-          }));
-        },
-        undefined,
-      );
-    },
 
     destroyInstance: async (instanceId) => {
       await runInstanceTask(

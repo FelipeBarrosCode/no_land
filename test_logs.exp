@@ -1,0 +1,18 @@
+#!/usr/bin/expect -f
+set timeout 300
+spawn scp -o StrictHostKeyChecking=no -P 61761 -i ~/vastai agent.tar.gz root@142.170.96.180:/tmp/noland-state-agent.tar.gz
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180 "mkdir -p /opt/noland/state-agent && tar -xzf /tmp/noland-state-agent.tar.gz -C /opt/noland/state-agent && sed -i 's|let _ = agent.discover();|tracing::error!(\\\"DISCOVER RESULT: {:?}\\\", agent.discover());|g' /opt/noland/state-agent/crates/noland-state-agent/src/rpc_handler.rs && chmod +x /tmp/bootstrap-remote.sh && /tmp/bootstrap-remote.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent user && systemctl restart noland-state-agent"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

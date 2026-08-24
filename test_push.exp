@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180 "sudo mkdir -p /run/noland/storage/test && sudo chmod 700 /run/noland/storage/test && printf %s 'eyJvcGVyYXRpb25faWQiOiJmZGNmNzY4Zi04NzYxLTRiNGYtYTNlYi02M2E0ZmUzMWRhMDkiLCJwcm92aWRlciI6Imdvb2dsZV9kcml2ZSIsImJhY2tlbmRfdHlwZSI6ImRyaXZlIiwicmVtb3RlX25hbWUiOiJub2xhbmRfZjA0ZTk4NzJhNjhiNGE0ZTlkNmViNTk3MTczMmUyMDMiLCJyb290IjoiTm9sYW5kIiwiY29uZmlnX2luaSI6Iltub2xhbmRfZjA0ZTk4NzJhNjhiNGE0ZTlkNmViNTk3MTczMmUyMDNdXG50eXBlID0gZHJpdmVcbmNsaWVudF9pZCA9IDEyM1xuY2xpZW50X3NlY3JldCA9IDQ1NlxudG9rZW4gPSB7fVxuIiwiZXhwaXJlc19hdF91bml4IjoxNzg3MDU3NzU5fQ==' | base64 -d | sudo tee /run/noland/storage/test/session.json >/dev/null && sudo python3 -c \"import json; s=json.load(open('/run/noland/storage/test/session.json')); open('/run/noland/storage/test/rclone.conf','w').write(s.get('config_ini',''))\" && sudo chmod 600 /run/noland/storage/test/rclone.conf /run/noland/storage/test/session.json && sudo chown 'user':'user' /run/noland/storage/test/rclone.conf /run/noland/storage/test/session.json"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

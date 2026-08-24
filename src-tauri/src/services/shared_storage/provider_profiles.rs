@@ -156,10 +156,37 @@ impl SharedStorageProfileManager {
     ) -> AppResult<()> {
         context
             .update_state(|state| {
-                state
-                    .shared_storage_credentials
-                    .profiles
-                    .remove(&profile.id);
+                if let Some(stored) = state.shared_storage_credentials.profiles.get_mut(&profile.id) {
+                    // Overwrite the credentials with blank ones, but keep the repository_key_hex
+                    match &mut stored.credentials {
+                        crate::models::application_bundle::StorageCredential::OAuth2 { access_token, refresh_token, expires_at } => {
+                            *access_token = String::new();
+                            *refresh_token = None;
+                            *expires_at = 0;
+                        }
+                        crate::models::application_bundle::StorageCredential::S3 { access_key_id, secret_access_key, session_token } => {
+                            *access_key_id = String::new();
+                            *secret_access_key = String::new();
+                            *session_token = None;
+                        }
+                        crate::models::application_bundle::StorageCredential::BackblazeB2 { key_id, application_key } => {
+                            *key_id = String::new();
+                            *application_key = String::new();
+                        }
+                        crate::models::application_bundle::StorageCredential::UsernamePassword { username, password } => {
+                            *username = String::new();
+                            *password = String::new();
+                        }
+                        crate::models::application_bundle::StorageCredential::SshKey { username, private_key, passphrase } => {
+                            *username = String::new();
+                            *private_key = String::new();
+                            *passphrase = None;
+                        }
+                        crate::models::application_bundle::StorageCredential::ServiceAccount { json } => {
+                            *json = String::new();
+                        }
+                    }
+                }
             })
             .await?;
         Ok(())

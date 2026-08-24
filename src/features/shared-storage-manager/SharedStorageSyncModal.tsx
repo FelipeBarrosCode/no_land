@@ -57,7 +57,7 @@ export function SharedStorageSyncModal({
     setPendingAction({
       key: "sync-modal.load",
       label: "Loading shared storage tree",
-      detail: "Fetching the available cloud files and folders.",
+      detail: "Reading the application catalog from Shared Storage.",
       mode: "indeterminate",
       progress: null,
       startedAt: Date.now()
@@ -70,7 +70,7 @@ export function SharedStorageSyncModal({
         setLoadError("Loading is taking too long. Please retry.");
         setLoading(false);
       }
-    }, 25000);
+    }, 600000);
 
     void onLoadObjects(instanceId)
       .then((result) => {
@@ -135,12 +135,17 @@ export function SharedStorageSyncModal({
             <span className="w-5 text-[#7ab6ff]">•</span>
           )}
 
-          <input
-            type="checkbox"
-            checked={isChecked}
-            onChange={() => toggleSelected(entry.path)}
-            className="h-4 w-4"
-          />
+          {entry.isDir ? (
+            <span className="h-4 w-4" aria-hidden="true" />
+          ) : (
+            <input
+              type="checkbox"
+              checked={isChecked}
+              onChange={() => toggleSelected(entry.path)}
+              className="h-4 w-4"
+              aria-label={`Select ${entry.name}`}
+            />
+          )}
 
           <span className="truncate text-[1.15rem] text-[#d7e8ff]">
             {entry.name}
@@ -160,7 +165,7 @@ export function SharedStorageSyncModal({
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
             <h2 className="font-display text-base text-white">Sync From Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Choose folders or files to sync to the remote machine.</p>
+            <p className="text-[1.2rem] text-[#b4c8de]">Expand an application and choose a specific backup bundle to restore.</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
             Close
@@ -183,7 +188,7 @@ export function SharedStorageSyncModal({
         </ModalBody>
 
         <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
-          <p className="text-[1.1rem] text-[#9ec0e4]">Selected: {selectedPaths.length}</p>
+          <p className="text-[1.1rem] text-[#9ec0e4]">Selected bundles: {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
               Cancel

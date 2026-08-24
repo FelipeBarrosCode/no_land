@@ -106,6 +106,17 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `restore_bundle`
 - `get_restore_job`
 
+## Launch library
+
+- `get_instance_launch_library`
+- `launch_instance_software`
+- `get_launch_instance_software_job`
+- `get_software_artwork`
+
+`start_play_existing_instance` remains the full-PC launch path used by the Launch PC card. Software launches restore the latest cloud bundle when necessary, start the same embedded desktop stream, and then launch the tracked application over SSH.
+
+IGDB artwork lookup uses the free IGDB API and prefers wide artwork or screenshots up to the 1080p image size, with cover fallback. Configure `NOLAND_TWITCH_CLIENT_ID` and `NOLAND_TWITCH_CLIENT_SECRET`; without them the UI uses placeholder artwork. The launch library shows user-facing IGDB attribution.
+
 ## Microphone passthrough
 
 - `get_instance_mic_config`
@@ -113,8 +124,14 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `enable_instance_mic`
 - `disable_instance_mic`
 - `reconnect_instance_mic`
+- `mute_instance_mic`
+- `unmute_instance_mic`
+- `get_instance_mic_metrics`
 - `recreate_instance_mic_device`
 - `get_instance_mic_status`
+- `list_microphones` — enumerates devices through the same `noland-mic-sender` sidecar that performs capture; `default` follows the operating system default input and explicit selections use sidecar device IDs
+
+The legacy in-process CPAL + `gst-launch-1.0` command path has been removed. All product microphone operations use `MicPassthroughService` and the managed sender sidecar.
 
 ## Notes
 

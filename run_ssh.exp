@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 10
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai user@184.144.255.144 "sudo rm -f /usr/local/bin/noland-state-agent && sudo systemctl stop noland-state-agent.service && sudo rm -rf /run/noland/state-agent.sock"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

@@ -2725,6 +2725,7 @@ dependencies = [
  "hex",
  "keyring",
  "libc",
+ "noland-rclone-adapter",
  "parking_lot",
  "rand_core 0.6.4",
  "raw-window-handle",
@@ -2767,6 +2768,16 @@ dependencies = [
  "sha2",
  "tokio",
  "tun",
+]
+
+[[package]]
+name = "noland-rclone-adapter"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 57906 -i ~/vastai root@184.144.255.144 "NOLAND_HOME=/home/user NOLAND_STATE_ROOT=/var/lib/noland/state NOLAND_RUN_ROOT=/run/noland /usr/local/bin/noland-state-agent"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}

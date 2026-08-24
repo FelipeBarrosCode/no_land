@@ -5,7 +5,11 @@ use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
 
-use super::{app_config::SunshineDefaults, remote_exec::RemoteExec};
+use super::{
+    app_config::SunshineDefaults,
+    display_profile::{common_mode_catalog, DisplayModeSpec},
+    remote_exec::RemoteExec,
+};
 
 const HEADLESS_EDID_TEMPLATE_BASE64: &str =
     "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBtmwAoKCAKWAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QBFTB5TEQAKICAgICAgACs=";
@@ -86,13 +90,21 @@ pub fn generate_headless_edid_base64(
     let pixel_clock_hz = (h_total as u64)
         .saturating_mul(v_total as u64)
         .saturating_mul(refresh_hz as u64);
-    let pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
+    let mut pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
 
-    if pixel_clock_10khz == 0 || pixel_clock_10khz > u16::MAX as u32 {
+    if pixel_clock_10khz == 0 {
         return Err(AppError::InvalidInput(format!(
             "Computed pixel clock is out of EDID DTD range: {} (10 kHz units)",
             pixel_clock_10khz
         )));
+    }
+
+    if pixel_clock_10khz > u16::MAX as u32 {
+        warn!(
+            "Computed pixel clock {} exceeds DTD 16-bit limit. Clamping to 65535. The guest OS will rely on explicit Xrandr cvt modelines for the true refresh rate.",
+            pixel_clock_10khz
+        );
+        pixel_clock_10khz = u16::MAX as u32;
     }
 
     let dtd = 54usize;
@@ -118,6 +130,30 @@ pub fn generate_headless_edid_base64(
 
     // Keep image size / border bytes from template (physical size and border) for compatibility.
     // Preserve descriptor flags byte as-is as well.
+
+    // Advertise well-known compatibility resolutions in this same EDID. The
+    // preferred/native timing remains in the DTD above; lower modes use the
+    // eight EDID standard timing slots when they are exactly representable.
+    for slot in bytes[38..54].chunks_exact_mut(2) {
+        slot.copy_from_slice(&[0x01, 0x01]);
+    }
+    let preferred = DisplayModeSpec::from_hz(width, height, refresh_hz);
+    let mut slot_index = 0usize;
+    for mode in common_mode_catalog(preferred) {
+        if mode == preferred {
+            continue;
+        }
+        let Some(encoded) = encode_standard_timing(mode) else {
+            continue;
+        };
+        let offset = 38 + slot_index * 2;
+        bytes[offset] = encoded[0];
+        bytes[offset + 1] = encoded[1];
+        slot_index += 1;
+        if slot_index == 8 {
+            break;
+        }
+    }
 
     // Update range limits descriptor so requested refresh is within advertised range.
     // Descriptor starts at byte 108: 00 00 00 FD 00 [min_v][max_v][min_h][max_h][max_pclk_10mhz] ...
@@ -159,48 +195,105 @@ pub fn generate_headless_edid_base64(
     Ok(STANDARD.encode(bytes))
 }
 
+pub fn decode_headless_edid_preferred_mode(edid_base64: &str) -> AppResult<(u32, u32, u32)> {
+    let bytes = STANDARD.decode(edid_base64.trim()).map_err(|error| {
+        AppError::InvalidInput(format!("Headless EDID is not valid base64: {error}"))
+    })?;
+    if bytes.len() < 128 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID is shorter than one base block".to_string(),
+        ));
+    }
+
+    let dtd = 54usize;
+    let pixel_clock_10khz = u16::from_le_bytes([bytes[dtd], bytes[dtd + 1]]) as u64;
+    if pixel_clock_10khz == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID has no preferred detailed timing".to_string(),
+        ));
+    }
+    let width = u32::from(bytes[dtd + 2]) | (u32::from(bytes[dtd + 4] & 0xF0) << 4);
+    let h_blanking = u32::from(bytes[dtd + 3]) | (u32::from(bytes[dtd + 4] & 0x0F) << 8);
+    let height = u32::from(bytes[dtd + 5]) | (u32::from(bytes[dtd + 7] & 0xF0) << 4);
+    let v_blanking = u32::from(bytes[dtd + 6]) | (u32::from(bytes[dtd + 7] & 0x0F) << 8);
+    let h_total = width.saturating_add(h_blanking);
+    let v_total = height.saturating_add(v_blanking);
+    if width == 0 || height == 0 || h_total == 0 || v_total == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID preferred timing is invalid".to_string(),
+        ));
+    }
+    let refresh_millihz = pixel_clock_10khz
+        .saturating_mul(10_000)
+        .saturating_mul(1_000)
+        .saturating_add((u64::from(h_total) * u64::from(v_total)) / 2)
+        / (u64::from(h_total) * u64::from(v_total));
+
+    Ok((width, height, refresh_millihz as u32))
+}
+
+fn encode_standard_timing(mode: DisplayModeSpec) -> Option<[u8; 2]> {
+    if mode.width < 256 || mode.width > 2_288 || mode.width % 8 != 0 {
+        return None;
+    }
+    if mode.refresh_millihz % 1_000 != 0 {
+        return None;
+    }
+    let refresh_hz = mode.refresh_millihz / 1_000;
+    if !(60..=123).contains(&refresh_hz) {
+        return None;
+    }
+
+    let aspect = if mode.width.saturating_mul(10) == mode.height.saturating_mul(16) {
+        0b00 // 16:10 in EDID 1.3+
+    } else if mode.width.saturating_mul(3) == mode.height.saturating_mul(4) {
+        0b01 // 4:3
+    } else if mode.width.saturating_mul(4) == mode.height.saturating_mul(5) {
+        0b10 // 5:4
+    } else if mode.width.saturating_mul(9) == mode.height.saturating_mul(16) {
+        0b11 // 16:9
+    } else {
+        return None;
+    };
+
+    Some([
+        (mode.width / 8 - 31) as u8,
+        (aspect << 6) | ((refresh_hz - 60) as u8),
+    ])
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct DisplayProfile {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
-    pub refresh_rate_mode: RefreshRateMode,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RefreshRateMode {
-    Integer60,
-    Ntsc5994,
+    pub refresh_millihz: u32,
 }
 
 impl DisplayProfile {
-    pub fn from_moonlight_prefs(
+    pub fn from_edid_timing(
         width: u32,
         height: u32,
-        fps: u32,
-        refresh_rate_mode: &str,
+        refresh_millihz: u32,
+        target_fps: u32,
     ) -> Self {
-        let width = width.clamp(640, 7680);
-        let height = height.clamp(360, 4320);
-        let fps = fps.clamp(24, 240);
-        let refresh_rate_mode = if refresh_rate_mode == "59.94" {
-            RefreshRateMode::Ntsc5994
-        } else {
-            RefreshRateMode::Integer60
-        };
         Self {
             width,
             height,
-            fps,
-            refresh_rate_mode,
+            fps: target_fps.clamp(24, 240),
+            refresh_millihz,
         }
     }
 
     pub fn virtual_hz_string(&self) -> String {
-        match self.refresh_rate_mode {
-            RefreshRateMode::Integer60 => (self.fps * 2).to_string(),
-            RefreshRateMode::Ntsc5994 if self.fps == 60 => "119.88".to_string(),
-            RefreshRateMode::Ntsc5994 => format!("{:.2}", (self.fps as f32) * 1.998),
+        let whole = self.refresh_millihz / 1_000;
+        let fraction = self.refresh_millihz % 1_000;
+        if fraction == 0 {
+            whole.to_string()
+        } else {
+            format!("{whole}.{fraction:03}")
+                .trim_end_matches('0')
+                .to_string()
         }
     }
 }
@@ -696,11 +789,8 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         let detected_capture = self.detect_capture_backend(remote).await?;
         info!("Detected capture backend: {}", detected_capture);
 
-        let detected_output = "HDMI-0".to_string();
-        info!(
-            "Forcing Sunshine output name for provisioning path: {}",
-            detected_output
-        );
+        let detected_output = self.detect_output_name(remote, target_user).await?;
+        info!("Detected Sunshine RandR output: {}", detected_output);
 
         self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
             .await?;
@@ -767,11 +857,10 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         let display_access = {
             let remote = remote.clone();
             let target_user = target_user.to_string();
-            let target_home = target_home.to_string();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
                     &format!(
-                        "SHARED_XAUTH=\"/etc/X11/.Xauthority-noland\"; if [ -f \"$SHARED_XAUTH\" ]; then cp \"$SHARED_XAUTH\" \"{target_home}/.Xauthority\" && chown {target_user}:$(id -gn {target_user}) \"{target_home}/.Xauthority\" && chmod 666 \"{target_home}/.Xauthority\" && echo 'XAUTH_OK'; else echo 'XAUTH_MISSING' && exit 1; fi"
+                        "SHARED_XAUTH=\"/etc/X11/.Xauthority-noland\"; TARGET_GROUP=$(id -gn {target_user}); if [ -s \"$SHARED_XAUTH\" ]; then chown root:$TARGET_GROUP \"$SHARED_XAUTH\" && chmod 640 \"$SHARED_XAUTH\" && sudo -u {target_user} env DISPLAY=:0 XAUTHORITY=\"$SHARED_XAUTH\" xrandr --listmonitors >/dev/null && echo 'XAUTH_OK'; else echo 'XAUTH_MISSING' && exit 1; fi"
                     ),
                     Duration::from_secs(30),
                 )
@@ -792,13 +881,43 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         let start_desktop = {
             let remote = remote.clone();
             let target_user = target_user.to_string();
-            let target_home = target_home.to_string();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
                     &format!(
-                        "if pgrep -x plasmashell >/dev/null 2>&1 || pgrep -x gnome-shell >/dev/null 2>&1; then echo 'DESKTOP_ALREADY_RUNNING'; else sudo bash -lc 'export DISPLAY=:0; export XAUTHORITY={home}/.Xauthority; export XDG_RUNTIME_DIR=/run/user/$(id -u {user}); mkdir -p $XDG_RUNTIME_DIR; chown {user}:$(id -gn {user}) $XDG_RUNTIME_DIR; chmod 700 $XDG_RUNTIME_DIR; if [ -f /usr/share/xsessions/plasma.desktop ]; then sudo -u {user} env DISPLAY=:0 XAUTHORITY={home}/.Xauthority XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR dbus-launch --exit-with-session startplasma-x11 &>/dev/null & elif [ -f /usr/share/xsessions/gnome.desktop ]; then sudo -u {user} env DISPLAY=:0 XAUTHORITY={home}/.Xauthority XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR dbus-launch --exit-with-session gnome-session &>/dev/null & fi; sleep 5'; echo 'DESKTOP_STARTED'; fi",
-                        user = target_user,
-                        home = target_home
+                        r#"sudo bash -lc 'set -euo pipefail
+loginctl enable-linger {user} 2>/dev/null || true
+DESKTOP_EXEC=""
+if command -v startplasma-x11 >/dev/null 2>&1; then DESKTOP_EXEC=$(command -v startplasma-x11); elif command -v gnome-session >/dev/null 2>&1; then DESKTOP_EXEC=$(command -v gnome-session); fi
+if [ -n "$DESKTOP_EXEC" ]; then
+  TARGET_UID=$(id -u {user})
+  TARGET_GROUP=$(id -gn {user})
+  cat > /etc/systemd/system/noland-desktop.service <<EOF
+[Unit]
+Description=Noland persistent desktop session
+Requires=noland-xorg.service
+After=noland-xorg.service systemd-user-sessions.service
+
+[Service]
+Type=simple
+User={user}
+Group=$TARGET_GROUP
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/etc/X11/.Xauthority-noland
+Environment=XDG_RUNTIME_DIR=/run/user/$TARGET_UID
+ExecStart=/usr/bin/dbus-run-session -- $DESKTOP_EXEC
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now noland-desktop.service
+  echo DESKTOP_SERVICE_READY
+else
+  echo DESKTOP_EXECUTABLE_NOT_FOUND
+fi'"#,
+                        user = target_user
                     ),
                     Duration::from_secs(30),
                 )
@@ -856,17 +975,40 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
             .await?;
 
         // 5. Install and start Sunshine as a systemd system service running as {target_user}
+        let has_noland_xorg = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "systemctl cat noland-xorg.service >/dev/null 2>&1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            .status_code
+                == 0
+        };
+        let display_dependencies = if has_noland_xorg {
+            "Requires=noland-xorg.service\nAfter=noland-xorg.service noland-desktop.service network-online.target\nWants=noland-desktop.service network-online.target"
+        } else {
+            "After=graphical-session.target network-online.target\nWants=network-online.target"
+        };
+        let sunshine_xauthority = if has_noland_xorg {
+            "/etc/X11/.Xauthority-noland".to_string()
+        } else {
+            format!("{target_home}/.Xauthority")
+        };
         let service_content = format!(
             r#"[Unit]
 Description=Sunshine Game Stream Host
-After=graphical-session.target network.target
+{display_dependencies}
 
 [Service]
 Type=simple
 User={target_user}
 Group={target_group}
 Environment="DISPLAY=:0"
-Environment="XAUTHORITY={target_home}/.Xauthority"
+Environment="XAUTHORITY={sunshine_xauthority}"
 Environment="XDG_RUNTIME_DIR=/run/user/{target_uid}"
 Environment="HOME={target_home}"
 WorkingDirectory={target_home}
@@ -878,6 +1020,8 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target"#,
+            display_dependencies = display_dependencies,
+            sunshine_xauthority = sunshine_xauthority,
             target_user = target_user,
             target_group = self.resolve_user_group(remote, target_user).await?,
             target_home = target_home,
@@ -1187,49 +1331,10 @@ Section "Device"
    Driver "nvidia"
    VendorName "NVIDIA Corporation"
    Option "MetaModes" "{w}x{h}"
-   Option "UseDisplayDevice" "DFP"
-   Option "ConnectedMonitor" "DFP"
-   Option "CustomEDID" "DFP-0:/etc/X11/edid.bin"
-   Option "IgnoreEDIDChecksum" "DFP-0"
-   Option "HardDPMS" "false"
-   Option "ModeDebug" "True"
-   Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
-   Option "AllowEmptyInitialConfiguration" "True"
-EndSection
-
-Section "Screen"
-   Identifier "metaScreen"
-   Device "Card0"
-   Monitor "Monitor0"
-   DefaultDepth 24
-   SubSection "Display"
-       Depth 24
-   EndSubSection
-EndSection
-"#,
-            w = width,
-            h = height
-        );
-
-        let xorg_config_without_connected = format!(
-            r#"Section "ServerLayout"
-   Identifier "TwinLayout"
-   Screen 0 "metaScreen" 0 0
-EndSection
-
-Section "Monitor"
-   Identifier "Monitor0"
-   Option "Enable" "true"
-EndSection
-
-Section "Device"
-   Identifier "Card0"
-   Driver "nvidia"
-   VendorName "NVIDIA Corporation"
-   Option "MetaModes" "{w}x{h}"
-   Option "UseDisplayDevice" "DFP"
-   Option "CustomEDID" "DFP-0:/etc/X11/edid.bin"
-   Option "IgnoreEDIDChecksum" "DFP-0"
+   Option "UseDisplayDevice" "{output}"
+   Option "ConnectedMonitor" "{output}"
+   Option "CustomEDID" "{output}:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "{output}"
    Option "HardDPMS" "false"
    Option "ModeDebug" "True"
    Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
@@ -1248,6 +1353,47 @@ EndSection
 "#,
             w = width,
             h = height,
+            output = gpu_output,
+        );
+
+        let xorg_config_without_connected = format!(
+            r#"Section "ServerLayout"
+   Identifier "TwinLayout"
+   Screen 0 "metaScreen" 0 0
+EndSection
+
+Section "Monitor"
+   Identifier "Monitor0"
+   Option "Enable" "true"
+EndSection
+
+Section "Device"
+   Identifier "Card0"
+   Driver "nvidia"
+   VendorName "NVIDIA Corporation"
+   Option "MetaModes" "{w}x{h}"
+   Option "UseDisplayDevice" "{output}"
+   Option "CustomEDID" "{output}:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "{output}"
+   Option "HardDPMS" "false"
+   Option "ModeDebug" "True"
+   Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
+   Option "AllowEmptyInitialConfiguration" "True"
+EndSection
+
+Section "Screen"
+   Identifier "metaScreen"
+   Device "Card0"
+   Monitor "Monitor0"
+   DefaultDepth 24
+   SubSection "Display"
+       Depth 24
+   EndSubSection
+EndSection
+"#,
+            w = width,
+            h = height,
+            output = gpu_output,
         );
 
         let shell_script = format!(
@@ -1313,11 +1459,13 @@ sleep 2
 echo "Creating shared Xauthority..."
 rm -f $SHARED_XAUTH
 touch $SHARED_XAUTH
-chmod 666 $SHARED_XAUTH
+chmod 600 $SHARED_XAUTH
 # Add both cookie forms required by different Xorg builds
 COOKIE_HEX=$(openssl rand -hex 16)
 xauth -f $SHARED_XAUTH add :0 . $COOKIE_HEX
 xauth -f $SHARED_XAUTH add $(hostname)/unix:0 . $COOKIE_HEX
+chown root:$TARGET_GROUP $SHARED_XAUTH
+chmod 640 $SHARED_XAUTH
 echo "Xauthority entries:"
 xauth -f $SHARED_XAUTH list || true
 
@@ -1342,8 +1490,9 @@ WantedBy=multi-user.target
 SYSTEMDEOF
 sudo systemctl daemon-reload
 
-# 6a. Start Xorg via systemd
+# 6a. Enable and start Xorg via systemd so the virtual display survives reboot.
 echo "Starting Xorg with virtual display config..."
+sudo systemctl enable noland-xorg
 sudo systemctl start noland-xorg
 
 # Retry check for up to 20 seconds (some VMs are slow to initialize the NVIDIA driver)
@@ -1389,6 +1538,7 @@ User=root
 WantedBy=multi-user.target
 SYSTEMDEOF
     sudo systemctl daemon-reload
+    sudo systemctl enable noland-xorg
     sudo systemctl start noland-xorg
 
     FALLBACK_READY=false
@@ -1426,10 +1576,7 @@ if [ -f /root/.Xauthority ]; then
 fi
 # Do NOT use xhost +local: - it is a security hole. Rely on Xauthority instead.
 
-# Unmask display managers to avoid permanent host changes
-sudo systemctl unmask gdm 2>/dev/null || true
-sudo systemctl unmask sddm 2>/dev/null || true
-sudo systemctl unmask lightdm 2>/dev/null || true
+# Keep display managers masked: noland-xorg exclusively owns display :0.
 
 # 7. Wait for display to be ready
 echo "Waiting for display..."
@@ -1489,15 +1636,9 @@ if [ -n "$ACTIVE_OUTPUT" ]; then
     fi
 fi
 
-# 8. Set up Xauthority for user (symlink to shared file)
-echo "Setting up Xauthority for user $TARGET_USER..."
-sudo mkdir -p /run/user/$TARGET_UID
-sudo cp $SHARED_XAUTH /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
-sudo cp $SHARED_XAUTH /home/$TARGET_USER/.Xauthority 2>/dev/null || true
-sudo chmod 666 /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
-sudo chmod 666 /home/$TARGET_USER/.Xauthority 2>/dev/null || true
-sudo chown $TARGET_USER:$TARGET_GROUP /run/user/$TARGET_UID/.Xauthority 2>/dev/null || true
-sudo chown $TARGET_USER:$TARGET_GROUP /home/$TARGET_USER/.Xauthority 2>/dev/null || true
+# 8. Keep one canonical Xauthority shared by Xorg, Sunshine, and the desktop.
+sudo chown root:$TARGET_GROUP $SHARED_XAUTH
+sudo chmod 640 $SHARED_XAUTH
 
 # 9. Verify Xorg is running and user can access the display
 echo "=== Verification ==="
@@ -1516,12 +1657,12 @@ else
 fi
 echo "Testing user display access..."
 if command -v timeout >/dev/null 2>&1; then
-    if timeout 8s sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
+    if timeout 8s sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors >/dev/null 2>&1; then
         echo "USER_DISPLAY_ACCESS=OK"
     else
         echo "USER_DISPLAY_ACCESS=FAIL"
     fi
-elif sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=/home/$TARGET_USER/.Xauthority xrandr --listmonitors >/dev/null 2>&1; then
+elif sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors >/dev/null 2>&1; then
     echo "USER_DISPLAY_ACCESS=OK"
 else
     echo "USER_DISPLAY_ACCESS=FAIL"
@@ -1960,6 +2101,7 @@ context.properties = {
     default.clock.quantum = 256,
     default.clock.min-quantum = 128,
     default.clock.max-quantum = 1024,
+    default.clock.quantum-limit = 8192,
 }
 "#;
 
@@ -2060,87 +2202,41 @@ context.properties = {
         Ok("x11".to_string())
     }
 
-    async fn detect_output_name(&self, remote: &RemoteExec) -> AppResult<String> {
-        // First try to get the primary output from xrandr --listmonitors
-        let monitors_check = {
+    async fn detect_output_name(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<String> {
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+        let command = format!(
+            r#"XAUTH=/etc/X11/.Xauthority-noland; if [ ! -s "$XAUTH" ]; then XAUTH={target_home}/.Xauthority; fi; DISPLAY=:0 XAUTHORITY="$XAUTH" xrandr --query 2>/dev/null | sed -n 's/^\([^[:space:]]*\)[[:space:]]\+connected.*/\1/p' | sed -n '1p'"#,
+            target_home = target_home,
+        );
+        let output = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors 2>/dev/null | head -5 || echo ''",
-                    Duration::from_secs(30),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
         };
 
-        info!("Monitor list check: {}", monitors_check.stdout.trim());
-
-        // Try to extract connector name from monitors
-        let output_from_monitors = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    r#"DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors 2>/dev/null | grep -oE '[A-Z]+-[0-9]+' | head -1 || echo "0""#,
-                    Duration::from_secs(15),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if output_from_monitors.status_code == 0 && !output_from_monitors.stdout.trim().is_empty() {
-            let output = output_from_monitors.stdout.trim().to_string();
-            if output != "0" && !output.is_empty() {
-                info!("Detected output from monitors: {}", output);
-                return Ok(output);
-            }
+        let output_name = output.stdout.trim();
+        if output.status_code != 0 || output_name.is_empty() {
+            return Err(AppError::Provisioning(format!(
+                "Could not detect the active RandR output for Sunshine. stdout: {} | stderr: {}",
+                output.stdout.trim(),
+                output.stderr.trim()
+            )));
+        }
+        if !output_name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        }) {
+            return Err(AppError::Provisioning(format!(
+                "Detected an invalid RandR output name: {output_name}"
+            )));
         }
 
-        // Try xrandr directly
-        let output_check = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    r#"DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr 2>/dev/null | grep -E '^\s+[0-9]+x[0-9]+' | head -1 | awk '{print $1}' | grep -oE '[a-zA-Z]+[0-9]+' || echo "0""#,
-                    Duration::from_secs(30),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if output_check.status_code == 0 && !output_check.stdout.trim().is_empty() {
-            let output = output_check.stdout.trim().to_string();
-            if !output.is_empty() && output != "0" {
-                info!("Detected output: {}", output);
-                return Ok(output);
-            }
-        }
-
-        // Check NVIDIA outputs specifically
-        let nvidia_output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    r#"DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland nvidia-settings -q Xinerama -t 2>/dev/null | head -1 || DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr 2>/dev/null | grep -iE 'dfp|hdmi|dp|virtual' | head -1 | awk '{print $1}' || echo "0""#,
-                    Duration::from_secs(30),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if nvidia_output.status_code == 0 && !nvidia_output.stdout.trim().is_empty() {
-            let output = nvidia_output.stdout.trim().to_string();
-            if !output.is_empty() && output != "0" {
-                info!("NVIDIA output detected: {}", output);
-                return Ok(output);
-            }
-        }
-
-        info!("Could not detect output, using default: 0");
-        Ok("0".to_string())
+        info!("Detected active RandR output: {}", output_name);
+        Ok(output_name.to_string())
     }
 
     pub async fn validate(
@@ -2242,7 +2338,7 @@ context.properties = {
             let expected = format!("{}x{}", display.width, display.height);
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    &format!("DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query | grep -q \"{expected}\" && echo ok || (DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query && exit 1)"),
+                    &format!("DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query | grep -Eq '^[[:space:]]+{expected}[[:space:]].*\\*' && echo ok || (DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query && exit 1)"),
                     Duration::from_secs(40),
                 )
             })

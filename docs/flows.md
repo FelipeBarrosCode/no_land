@@ -140,16 +140,30 @@ Capabilities:
 - dry-run restore planning
 - restore job execution and polling
 
-## 11) Microphone passthrough flow
+## 11) Launch library flow
+
+1. The instance-card Play button opens the launch library instead of starting a stream immediately.
+2. The Launch PC card calls the existing `start_play_existing_instance` path unchanged.
+3. `get_instance_launch_library` merges apps currently discovered by the state agent with apps stored in the shared-storage catalog.
+4. Software artwork is requested lazily through `get_software_artwork`; IGDB failures fall back to a placeholder.
+5. Installed software starts the embedded desktop stream and launches through Steam, a desktop entry, or a discovered executable over SSH.
+6. Cloud-only software restores its latest complete-application bundle first, refreshes discovery, starts the stream, and then launches the app.
+7. Launch status is returned as a job and can be refreshed with `get_launch_instance_software_job`.
+
+## 12) Microphone passthrough flow
 
 Service: `MicPassthroughService`
 
-1. check instance and WireGuard prerequisites
-2. create in-memory session token/SSRC
-3. notify VM agent (best effort)
-4. track runtime status and reconnect/disable operations
+1. persist forwarding, auto-connect, device, and quality preferences per instance
+2. when a Moonlight session starts, resolve its Noland instance and schedule mic startup independently
+3. authorize a short-lived host endpoint over SSH, allocate RTP/RTCP ports, and restrict them to the WireGuard peer
+4. enumerate and select devices through `noland-mic-sender`, then capture with CPAL on Windows/Linux or GStreamer CoreAudio on macOS into a bounded stale-dropping ring and GStreamer RTP/Opus pipeline
+5. supervise the sidecar every three seconds and replace a dead, hung, or failed child without recreating the remote PipeWire source
+6. receive/decode into persistent `noland_mic_sink` / `noland_mic_source` topology on the host
+7. on stream close, stop sender/receiver while preserving the user's auto-connect preference and `Noland Microphone`
+8. expose WireGuard, capture, queue, packet-loss, jitter, and PipeWire health independently from Moonlight/Sunshine status
 
-## 12) Progress events and UI updates
+## 13) Progress events and UI updates
 
 Event schema: `ProvisioningEvent`
 
@@ -157,7 +171,7 @@ Event schema: `ProvisioningEvent`
 - consumed by frontend store (`subscribeProvisioningEvents`)
 - used to drive timeline, status text, and recoverable error states
 
-## 13) Local settings and preference updates
+## 14) Local settings and preference updates
 
 Settings commands update persisted state directly and then refresh the frontend snapshot:
 

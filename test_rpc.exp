@@ -1,0 +1,10 @@
+#!/usr/bin/expect -f
+set timeout 15
+spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180 "python3 -c 'import socket,sys,base64; s=socket.socket(socket.AF_UNIX); s.settimeout(10); s.connect(\"/run/noland/state-agent.sock\"); s.sendall(base64.b64decode(\"eyJpZCI6IjEiLCJtZXRob2QiOiJHZXRIZWFsdGgiLCJwYXJhbXMiOnt9fQo=\")); s.shutdown(1); sys.stdout.buffer.write(b\"\".join(iter(lambda:s.recv(65536), b\"\")))'"
+expect {
+    "Enter passphrase for key" {
+        send "Casa8301\r"
+        exp_continue
+    }
+    eof
+}
