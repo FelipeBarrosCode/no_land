@@ -68,6 +68,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos'
+        run: brew install pkg-config
+
       - name: Install Linux dependencies
         if: matrix.platform == 'linux'
         run: |
