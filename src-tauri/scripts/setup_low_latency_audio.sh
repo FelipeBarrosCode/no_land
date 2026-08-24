@@ -142,15 +142,16 @@ sudo -u "$TARGET_USER" mkdir -p "$user_home/.config/pipewire/pipewire-pulse.conf
 sudo -u "$TARGET_USER" mkdir -p "$user_home/.config/wireplumber/wireplumber.conf.d"
 
 log "Writing PipeWire rate/quantum fragment"
-# This drop-in locks PipeWire to 48k and tight graph quantum for streaming.
+# Keep PipeWire at 48 kHz while allowing 1024-frame Sunshine clients to negotiate
+# a stable graph quantum. A 256-frame quantum-limit causes recurring stream xruns.
 cat <<'EOF' | sudo -u "$TARGET_USER" tee "$user_home/.config/pipewire/pipewire.conf.d/99-lowlatency.conf" >/dev/null
 context.properties = {
     default.clock.rate          = 48000
     default.clock.allowed-rates = [ 48000 ]
     default.clock.quantum       = 256
     default.clock.min-quantum   = 128
-    default.clock.max-quantum   = 256
-    default.clock.quantum-limit = 256
+    default.clock.max-quantum   = 1024
+    default.clock.quantum-limit = 8192
 }
 EOF
 

@@ -512,9 +512,61 @@ echo "SUNSHINE_POST_REBOOT_OK web=47990 rtsp=48010 xauthority=$DISPLAY_XAUTH""#,
             "Post-reboot audio stack not ready; attempting one recovery pass"
         );
 
-        let repair_command = format!(
-            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); mkdir -p \"$RUNTIME_DIR\"; chown \"$TARGET_USER:$(id -gn $TARGET_USER)\" \"$RUNTIME_DIR\"; chmod 700 \"$RUNTIME_DIR\"; run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; run_user mkdir -p \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d\"; run_user bash -lc \"cat > \\\"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\\\" <<\\\"EOF\\\"\npulse.cmd = [\n  {{\n    cmd = \\\"load-module\\\"\n    args = \\\"module-null-sink sink_name=sunshine_audio sink_properties=device.description=sunshine_audio\\\"\n    flags = [ \\\"nofail\\\" ]\n  }}\n]\nEOF\"; run_user systemctl --user daemon-reload || true; run_user systemctl --user restart pipewire pipewire-pulse wireplumber || true; sleep 3; if ! run_user pactl list short sinks 2>/dev/null | grep -Eq \"^[0-9]+[[:space:]]+sunshine_audio([[:space:]]|$)\"; then run_user pactl load-module module-null-sink sink_name=sunshine_audio sink_properties=device.description=sunshine_audio rate=48000 channels=2 >/dev/null || true; fi; run_user pactl set-default-sink sunshine_audio 2>/dev/null || true; run_user pactl set-default-source sunshine_audio.monitor 2>/dev/null || true'"
+        let repair_script = format!(
+            r#"set -euo pipefail
+TARGET_USER={target_user}
+RUNTIME_DIR={runtime_dir}
+BUS_PATH={bus_path}
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+mkdir -p "$RUNTIME_DIR"
+chown "$TARGET_USER:$(id -gn "$TARGET_USER")" "$RUNTIME_DIR"
+chmod 700 "$RUNTIME_DIR"
+run_user() {{
+    sudo -u "$TARGET_USER" env \
+        HOME="$TARGET_HOME" \
+        XDG_RUNTIME_DIR="$RUNTIME_DIR" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$BUS_PATH" \
+        "$@"
+}}
+run_user mkdir -p "$TARGET_HOME/.config/pipewire/pipewire.conf.d"
+cat > "$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf" <<'EOF'
+context.objects = [
+    {{
+        factory = adapter
+        args = {{
+            factory.name = support.null-audio-sink
+            node.name = sunshine_audio
+            node.description = "Noland Audio"
+            media.class = "Audio/Sink"
+            audio.position = [ FL FR ]
+            monitor.channel-volumes = true
+            monitor.passthrough = true
+            adapter.auto-port-config = {{
+                mode = dsp
+                monitor = true
+                position = preserve
+            }}
+        }}
+    }}
+]
+EOF
+chown "$TARGET_USER:$(id -gn "$TARGET_USER")" "$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf"
+rm -f "$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf"
+run_user systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service || true
+sleep 2
+if ! run_user pactl list short sinks 2>/dev/null | grep -Eq '^[0-9]+[[:space:]]+sunshine_audio([[:space:]]|$)'; then
+    run_user pactl load-module module-null-sink \
+        sink_name=sunshine_audio \
+        sink_properties=device.description=Noland-Audio \
+        rate=48000 channels=2 >/dev/null
+fi
+run_user pactl set-default-sink sunshine_audio
+"#,
+            target_user = shell_quote(target_user),
+            runtime_dir = shell_quote(&runtime_dir),
+            bus_path = shell_quote(&bus_path),
         );
+        let repair_command = format!("sudo bash -lc {}", shell_quote(&repair_script));
         let _ = Self::probe_ssh(remote, &repair_command, Duration::from_secs(25)).await?;
 
         let second = Self::probe_ssh(remote, &check_command, Duration::from_secs(20)).await?;
@@ -527,7 +579,7 @@ echo "SUNSHINE_POST_REBOOT_OK web=47990 rtsp=48010 xauthority=$DISPLAY_XAUTH""#,
         }
 
         let diag_command = format!(
-            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; echo --- session-bus ---; test -S \"$BUS_PATH\" && echo BUS_OK || echo BUS_MISSING; echo --- user-audio-status ---; run_user systemctl --user status pipewire pipewire-pulse wireplumber --no-pager 2>/dev/null || true; echo --- pactl-info ---; run_user pactl info 2>/dev/null || true; echo --- sinks ---; run_user pactl list short sinks 2>/dev/null || true; echo --- sources ---; run_user pactl list short sources 2>/dev/null || true; echo --- sunshine-audio-dropin ---; if [ -f \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\" ]; then run_user cat \"$TARGET_HOME/.config/pipewire/pipewire-pulse.conf.d/20-sunshine-audio.conf\"; else echo MISSING; fi'"
+            "sudo bash -lc 'TARGET_USER=\"{target_user}\"; RUNTIME_DIR=\"{runtime_dir}\"; BUS_PATH=\"{bus_path}\"; TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); run_user() {{ sudo -u \"$TARGET_USER\" env XDG_RUNTIME_DIR=\"$RUNTIME_DIR\" DBUS_SESSION_BUS_ADDRESS=unix:path=\"$BUS_PATH\" \"$@\"; }}; echo --- session-bus ---; test -S \"$BUS_PATH\" && echo BUS_OK || echo BUS_MISSING; echo --- user-audio-status ---; run_user systemctl --user status pipewire pipewire-pulse wireplumber --no-pager 2>/dev/null || true; echo --- pactl-info ---; run_user pactl info 2>/dev/null || true; echo --- sinks ---; run_user pactl list short sinks 2>/dev/null || true; echo --- sources ---; run_user pactl list short sources 2>/dev/null || true; echo --- sunshine-audio-dropin ---; if [ -f \"$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf\" ]; then run_user cat \"$TARGET_HOME/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf\"; else echo MISSING; fi'"
         );
         let diag = Self::probe_ssh(remote, &diag_command, Duration::from_secs(20)).await?;
 

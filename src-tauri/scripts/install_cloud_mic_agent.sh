@@ -82,7 +82,6 @@ SERVICE_DIR="${home_dir}/.config/systemd/user"
 PULSE_DROPIN_DIR="${home_dir}/.config/pipewire/pipewire-pulse.conf.d"
 PULSE_DROPIN="${PULSE_DROPIN_DIR}/80-noland-microphone-source.conf"
 LEGACY_PIPEWIRE_DROPIN="${home_dir}/.config/pipewire/pipewire.conf.d/80-noland-microphone.conf"
-LEGACY_SUNSHINE_AUDIO_DROPIN="${home_dir}/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf"
 CONFIG_DIR="/etc/noland"
 CONFIG_FILE="${CONFIG_DIR}/microphone.toml"
 RUNTIME_DIR_BASE="/run/noland"
@@ -206,9 +205,9 @@ default_sink_before="$(run_user pactl get-default-sink 2>/dev/null || true)"
 previous_default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
 rm -f "$INSTALL_DIR/noland-mic-source-setup" "$INSTALL_DIR/noland-mic-source-cleanup"
 rm -f /tmp/noland_remote_microphone.pcm /tmp/noland_remote_microphone.module
-# Remove files written by the older sink-based mic installer. Do not restart the
-# main PipeWire graph here: existing playback devices and streams stay untouched.
-rm -f "$LEGACY_PIPEWIRE_DROPIN" "$LEGACY_SUNSHINE_AUDIO_DROPIN"
+# Remove only the legacy microphone loopback. The persistent Sunshine playback
+# sink belongs to output provisioning and must survive microphone upgrades.
+rm -f "$LEGACY_PIPEWIRE_DROPIN"
 
 if [[ -f /tmp/noland-mic-receiver ]]; then
     install -m 0755 -o "$USER_NAME" -g "$group_name" /tmp/noland-mic-receiver "$INSTALL_DIR/noland-mic-receiver"

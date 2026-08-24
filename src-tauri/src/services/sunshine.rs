@@ -2101,6 +2101,7 @@ context.properties = {
     default.clock.quantum = 256,
     default.clock.min-quantum = 128,
     default.clock.max-quantum = 1024,
+    default.clock.quantum-limit = 8192,
 }
 "#;
 
