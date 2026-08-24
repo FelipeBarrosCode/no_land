@@ -182,7 +182,7 @@ function installMacGstreamerRuntimeFramework(runtimePkg, systemFramework) {
     captureOutput: true,
   });
 
-  if (install.status === 0 && hasGstreamerFramework(systemFramework)) {
+  if (install.status === 0 && hasGstreamerFrameworkSource(systemFramework)) {
     return systemFramework;
   }
 
@@ -191,7 +191,7 @@ function installMacGstreamerRuntimeFramework(runtimePkg, systemFramework) {
   if (existsSync(systemFramework)) {
     console.warn(`System framework path exists but did not validate: ${systemFramework}`);
   }
-  return hasGstreamerFramework(systemFramework) ? systemFramework : null;
+  return hasGstreamerFrameworkSource(systemFramework) ? systemFramework : null;
 }
 
 function ensureExtractedMacGstreamerFramework() {
