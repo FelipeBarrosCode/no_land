@@ -448,7 +448,7 @@ def build_parser() -> argparse.ArgumentParser:
         "measure", help="run pw-record/pw-play and report an explicitly approximate latency estimate"
     )
     measure_parser.add_argument("--playback-target", required=True)
-    measure_parser.add_argument("--capture-target", default="noland_mic_source")
+    measure_parser.add_argument("--capture-target", default="noland_remote_microphone")
     measure_parser.add_argument("--output-dir", required=True)
     measure_parser.add_argument("--record-warmup-ms", type=float, default=1500.0)
     measure_parser.add_argument("--record-tail-ms", type=float, default=1000.0)

@@ -106,7 +106,7 @@ fn main() {
         client_rtcp_port = config.session.client_rtcp_port,
         expected_ssrc = config.session.expected_ssrc,
         latency_ms = config.jitter.initial_ms,
-        pipewire_sink = %config.audio.pipewire_sink_name,
+        recording_source_fifo = %config.audio.source_fifo_path,
         "starting receiver"
     );
 

@@ -15,6 +15,7 @@ SESSION_ID="local-loopback-$$"
 OUTPUT_DIR=""
 SKIP_NODE_CHECK=0
 CONFIG_FILE=""
+SOURCE_FIFO="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/noland-mic-source.pcm"
 
 usage() {
     cat <<'EOF'
@@ -22,7 +23,7 @@ Usage: scripts/microphone-loopback.sh [options]
 
 Runs the actual noland-mic-sender synthetic source through RTP/Opus on
 127.0.0.1 into noland-mic-receiver. The receiver must run on Linux with the
-provisioned PipeWire nodes noland_mic_sink and noland_mic_source.
+provisioned recording source noland_remote_microphone and its PCM FIFO.
 
 Options:
   --sender-bin PATH          noland-mic-sender executable
@@ -33,7 +34,7 @@ Options:
   --rtcp-port PORT           receiver RTCP port (default: 48201)
   --rtcp-listen-port PORT    sender RTCP receive port (default: 48202)
   --output-dir DIR           retain logs/results here
-  --skip-pipewire-node-check skip the pw-cli name preflight
+  --skip-pipewire-node-check skip the recording-source preflight
   -h, --help                 show this help
 
 Environment alternatives:
@@ -96,7 +97,7 @@ done
 
 [[ "$(uname -s)" == "Linux" ]] || fail "the receiver/PipeWire loopback currently requires Linux"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
-command -v pw-cli >/dev/null 2>&1 || fail "pw-cli is required (install PipeWire tools)"
+command -v pactl >/dev/null 2>&1 || fail "pactl is required (install pulseaudio-utils)"
 
 SENDER_BIN="$(resolve_binary "${SENDER_BIN}" \
     noland-mic-sender \
@@ -110,11 +111,10 @@ RECEIVER_BIN="$(resolve_binary "${RECEIVER_BIN}" \
     || fail "noland-mic-receiver not found; build it or pass --receiver-bin"
 
 if [[ "${SKIP_NODE_CHECK}" -eq 0 ]]; then
-    PIPEWIRE_NODES="$(pw-cli ls Node 2>/dev/null)" || fail "cannot query PipeWire; ensure the user PipeWire service is running"
-    grep -q 'noland_mic_sink' <<<"${PIPEWIRE_NODES}" \
-        || fail "PipeWire node noland_mic_sink is absent; provision the Noland microphone loopback first"
-    grep -q 'noland_mic_source' <<<"${PIPEWIRE_NODES}" \
-        || fail "PipeWire node noland_mic_source is absent; provision the Noland microphone loopback first"
+    pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx noland_remote_microphone \
+        || fail "recording source noland_remote_microphone is absent; provision the Noland microphone first"
+    [[ -p "${SOURCE_FIFO}" ]] \
+        || fail "recording source FIFO is absent: ${SOURCE_FIFO}"
 fi
 
 python3 - "${RTP_PORT}" "${RTCP_PORT}" "${RTCP_LISTEN_PORT}" <<'PY'
@@ -155,7 +155,7 @@ recv_buffer_bytes = 524288
 sample_rate = 48000
 channels = 1
 frame_duration_ms = 10
-pipewire_sink_name = "noland_mic_sink"
+source_fifo_path = "${SOURCE_FIFO}"
 
 [jitter]
 initial_ms = 20

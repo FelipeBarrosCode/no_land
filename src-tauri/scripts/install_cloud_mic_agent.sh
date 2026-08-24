@@ -79,16 +79,17 @@ fi
 
 INSTALL_DIR="${home_dir}/.local/bin"
 SERVICE_DIR="${home_dir}/.config/systemd/user"
-PIPEWIRE_DROPIN_DIR="${home_dir}/.config/pipewire/pipewire.conf.d"
-SUNSHINE_AUDIO_DROPIN="${PIPEWIRE_DROPIN_DIR}/70-noland-sunshine-audio.conf"
-PIPEWIRE_DROPIN="${PIPEWIRE_DROPIN_DIR}/80-noland-microphone.conf"
-SUNSHINE_CONFIG="${home_dir}/.config/sunshine/sunshine.conf"
+PULSE_DROPIN_DIR="${home_dir}/.config/pipewire/pipewire-pulse.conf.d"
+PULSE_DROPIN="${PULSE_DROPIN_DIR}/80-noland-microphone-source.conf"
+LEGACY_PIPEWIRE_DROPIN="${home_dir}/.config/pipewire/pipewire.conf.d/80-noland-microphone.conf"
+LEGACY_SUNSHINE_AUDIO_DROPIN="${home_dir}/.config/pipewire/pipewire.conf.d/70-noland-sunshine-audio.conf"
 CONFIG_DIR="/etc/noland"
 CONFIG_FILE="${CONFIG_DIR}/microphone.toml"
 RUNTIME_DIR_BASE="/run/noland"
 STATUS_FILE="${RUNTIME_DIR_BASE}/noland_remote_microphone.status.json"
 runtime_dir="/run/user/${uid}"
 bus_path="${runtime_dir}/bus"
+source_fifo="${runtime_dir}/noland-mic-source.pcm"
 
 run_user() {
     sudo -u "$USER_NAME" env \
@@ -167,8 +168,8 @@ SUMMARY
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-# Runtime-only packages used by the pipeline and verification. No libav or
-# plugins-bad are needed for RTP/Opus -> raw PCM -> PipeWire.
+# Runtime-only packages used by the pipeline and verification. The receiver
+# writes raw PCM to a PipeWire-Pulse recording-source FIFO; no playback plugin is used.
 apt-get install -y --no-install-recommends \
     pipewire \
     pipewire-pulse \
@@ -176,18 +177,16 @@ apt-get install -y --no-install-recommends \
     pulseaudio-utils \
     python3 \
     gstreamer1.0-tools \
-    gstreamer1.0-pipewire \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     ufw
 
 install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$INSTALL_DIR"
 install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$SERVICE_DIR"
-install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$PIPEWIRE_DROPIN_DIR"
+install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$PULSE_DROPIN_DIR"
 install -d -m 0755 "$CONFIG_DIR"
 
-# Stop the previously loaded unit before replacing it so an upgrade from the
-# FIFO/module-pipe-source version runs that unit's cleanup exactly once.
+# Stop the receiver before replacing its binary and output transport.
 loginctl enable-linger "$USER_NAME"
 systemctl start "user@${uid}.service"
 for _ in 1 2 3 4 5; do
@@ -198,23 +197,18 @@ if [[ ! -S "$bus_path" ]]; then
     echo "Error: systemd user bus did not become available at ${bus_path}" >&2
     exit 1
 fi
+recording_source_was_present=0
+if run_user pactl list short sources 2>/dev/null | awk '{print $2}' | grep -x noland_remote_microphone >/dev/null; then
+    recording_source_was_present=1
+fi
 run_user_systemctl stop noland-mic-receiver.service >/dev/null 2>&1 || true
-previous_default_sink="$(run_user pactl get-default-sink 2>/dev/null || true)"
+default_sink_before="$(run_user pactl get-default-sink 2>/dev/null || true)"
 previous_default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
-sunshine_audio_sink=""
-if [[ -f "$SUNSHINE_CONFIG" ]]; then
-    sunshine_audio_sink="$(sed -n -E 's/^[[:space:]]*audio_sink[[:space:]]*=[[:space:]]*([^[:space:]#;]+).*$/\1/p' "$SUNSHINE_CONFIG" | tail -n 1)"
-fi
-if [[ -n "$sunshine_audio_sink" && ! "$sunshine_audio_sink" =~ ^[A-Za-z0-9_.-]+$ ]]; then
-    echo "Warning: ignoring unsafe Sunshine audio_sink value '$sunshine_audio_sink'" >&2
-    sunshine_audio_sink=""
-fi
-if [[ "$sunshine_audio_sink" == noland_mic_* ]]; then
-    echo "Warning: refusing to use Noland microphone nodes as Sunshine audio output" >&2
-    sunshine_audio_sink=""
-fi
 rm -f "$INSTALL_DIR/noland-mic-source-setup" "$INSTALL_DIR/noland-mic-source-cleanup"
 rm -f /tmp/noland_remote_microphone.pcm /tmp/noland_remote_microphone.module
+# Remove files written by the older sink-based mic installer. Do not restart the
+# main PipeWire graph here: existing playback devices and streams stay untouched.
+rm -f "$LEGACY_PIPEWIRE_DROPIN" "$LEGACY_SUNSHINE_AUDIO_DROPIN"
 
 if [[ -f /tmp/noland-mic-receiver ]]; then
     install -m 0755 -o "$USER_NAME" -g "$group_name" /tmp/noland-mic-receiver "$INSTALL_DIR/noland-mic-receiver"
@@ -226,70 +220,19 @@ fi
 echo "d ${RUNTIME_DIR_BASE} 0750 ${USER_NAME} ${group_name} -" > /etc/tmpfiles.d/noland-mic.conf
 systemd-tmpfiles --create /etc/tmpfiles.d/noland-mic.conf
 
-# The existing Sunshine audio sink was historically created with a transient
-# pactl module. Persist the configured sink before restarting PipeWire so mic
-# provisioning cannot remove game audio or promote a Noland mic node to default.
-if [[ -n "$sunshine_audio_sink" ]]; then
-    cat > "$SUNSHINE_AUDIO_DROPIN" <<PIPEWIRE
-context.objects = [
+# Publish a real recording device backed by a PCM FIFO. This intentionally uses
+# PipeWire-Pulse's source module and creates no Audio/Sink or monitor device.
+cat > "$PULSE_DROPIN" <<EOF
+pulse.cmd = [
     {
-        factory = adapter
-        args = {
-            factory.name = support.null-audio-sink
-            node.name = "${sunshine_audio_sink}"
-            node.description = "Noland Audio"
-            media.class = "Audio/Sink"
-            audio.position = [ FL FR ]
-            monitor.channel-volumes = true
-            monitor.passthrough = true
-            adapter.auto-port-config = {
-                mode = dsp
-                monitor = true
-                position = preserve
-            }
-        }
+        cmd = "load-module"
+        args = "module-pipe-source source_name=noland_remote_microphone file=${source_fifo} format=s16le rate=48000 channels=1 source_properties=device.description=Noland-Microphone"
+        flags = [ nofail ]
     }
 ]
-PIPEWIRE
-    chown "$USER_NAME:$group_name" "$SUNSHINE_AUDIO_DROPIN"
-    chmod 0644 "$SUNSHINE_AUDIO_DROPIN"
-fi
-
-# This topology belongs to PipeWire, not the receiver. The private Audio/Sink
-# accepts decoded PCM and the loopback publishes the stable Audio/Source.
-cat > "$PIPEWIRE_DROPIN" <<'PIPEWIRE'
-context.modules = [
-    {
-        name = libpipewire-module-loopback
-        args = {
-            audio.position = [ MONO ]
-            capture.props = {
-                node.name = "noland_mic_sink"
-                object.path = "noland_mic_sink"
-                node.description = "Noland Microphone Private Sink"
-                media.class = "Audio/Sink"
-                node.virtual = true
-                node.autoconnect = false
-                priority.session = 1
-                audio.position = [ MONO ]
-            }
-            playback.props = {
-                node.name = "noland_mic_source"
-                node.description = "Noland Microphone"
-                device.description = "Noland Microphone"
-                media.class = "Audio/Source"
-                node.virtual = true
-                node.passive = true
-                node.autoconnect = false
-                priority.session = 1
-                audio.position = [ MONO ]
-            }
-        }
-    }
-]
-PIPEWIRE
-chown "$USER_NAME:$group_name" "$PIPEWIRE_DROPIN"
-chmod 0644 "$PIPEWIRE_DROPIN"
+EOF
+chown "$USER_NAME:$group_name" "$PULSE_DROPIN"
+chmod 0644 "$PULSE_DROPIN"
 
 cat > "$CONFIG_FILE" <<TOML
 [network]
@@ -304,7 +247,7 @@ recv_buffer_bytes = 524288
 sample_rate = 48000
 channels = 1
 frame_duration_ms = 10
-pipewire_sink_name = "noland_mic_sink"
+source_fifo_path = "${source_fifo}"
 
 [jitter]
 initial_ms = ${JITTER_MS}
@@ -466,7 +409,8 @@ def start(args):
 
     run_user_systemctl(args.user, "stop", "noland-mic-receiver.service", check=False)
     rtp_port, rtcp_port = allocate_pair(bind, args.port_min, args.port_max)
-    content = f'''[network]\nbind_address = "{bind}"\nrtp_port = {rtp_port}\nrtcp_port = {rtcp_port}\ninterface = "{args.interface}"\nmaximum_packet_size = 1200\nrecv_buffer_bytes = 524288\n\n[audio]\nsample_rate = 48000\nchannels = 1\nframe_duration_ms = 10\npipewire_sink_name = "noland_mic_sink"\n\n[jitter]\ninitial_ms = {args.jitter_ms}\nminimum_ms = 10\nmaximum_ms = 60\n\n[session]\nsession_id = "{args.session_id}"\nexpected_peer_ip = "{peer}"\nclient_rtcp_port = {args.client_rtcp_port}\nexpected_ssrc = {args.ssrc}\n'''
+    source_fifo = f"/run/user/{account.pw_uid}/noland-mic-source.pcm"
+    content = f'''[network]\nbind_address = "{bind}"\nrtp_port = {rtp_port}\nrtcp_port = {rtcp_port}\ninterface = "{args.interface}"\nmaximum_packet_size = 1200\nrecv_buffer_bytes = 524288\n\n[audio]\nsample_rate = 48000\nchannels = 1\nframe_duration_ms = 10\nsource_fifo_path = "{source_fifo}"\n\n[jitter]\ninitial_ms = {args.jitter_ms}\nminimum_ms = 10\nmaximum_ms = 60\n\n[session]\nsession_id = "{args.session_id}"\nexpected_peer_ip = "{peer}"\nclient_rtcp_port = {args.client_rtcp_port}\nexpected_ssrc = {args.ssrc}\n'''
     atomic_config(content, group_id)
     configure_firewall(args.interface, bind, peer, args.port_min, args.port_max)
     STATUS.unlink(missing_ok=True)
@@ -576,9 +520,9 @@ cat > "$SERVICE_DIR/noland-mic-receiver.service" <<EOF
 [Unit]
 Description=Noland Microphone RTP/Opus Receiver
 Documentation=file://${CONFIG_DIR}/README.control-plane
-Wants=network-online.target pipewire.service wireplumber.service
-After=network-online.target pipewire.service pipewire-pulse.service wireplumber.service
-PartOf=pipewire.service wireplumber.service
+Wants=network-online.target pipewire-pulse.service
+After=network-online.target pipewire-pulse.service
+PartOf=pipewire-pulse.service
 StartLimitIntervalSec=0
 
 [Service]
@@ -613,8 +557,9 @@ restart noland-mic-receiver.service as ${USER_NAME}. RTP packets are PT111 Opus,
 48 kHz mono, and every UDP datagram must be <=1200 bytes. RTCP sender reports go
 to ${RTCP_PORT}; receiver reports are returned to ${WG_CLIENT_IP}:${CLIENT_RTCP_PORT}.
 WireGuard and UFW provide peer authentication; session_id is correlation data,
-not packet authentication. Stopping the receiver never removes the PipeWire
-noland_mic_sink -> noland_mic_source topology.
+not packet authentication. Decoded S16LE PCM is written to ${source_fifo}, which
+backs the PipeWire-Pulse recording device noland_remote_microphone. No playback sink is
+created or modified by microphone provisioning.
 EOF
 chmod 0644 "$CONFIG_DIR/README.control-plane"
 
@@ -631,46 +576,27 @@ if ! ufw status | grep -q '^Status: active$'; then
 fi
 
 run_user_systemctl daemon-reload
-run_user_systemctl enable pipewire.socket pipewire-pulse.socket wireplumber.service noland-mic-receiver.service
-# Loading the drop-in restarts PipeWire once during installation. Subsequent
-# receiver restarts are independent and leave the topology untouched.
-run_user_systemctl restart pipewire.service pipewire-pulse.service wireplumber.service
-sleep 2
-
-set_default_node_by_name() {
-    local node_name="$1"
-    local node_id
-    node_id="$(run_user pw-dump | python3 -c 'import json, sys
-name = sys.argv[1]
-for item in json.load(sys.stdin):
-    if item.get("type") == "PipeWire:Interface:Node" and item.get("info", {}).get("props", {}).get("node.name") == name:
-        print(item["id"])
-        break' "$node_name")"
-    [[ -n "$node_id" ]] || return 1
-    run_user wpctl set-default "$node_id"
-}
-
-restored_default_sink=""
-if [[ -n "$sunshine_audio_sink" ]] && run_user pactl list short sinks | awk '{print $2}' | grep -qx "$sunshine_audio_sink"; then
-    set_default_node_by_name "$sunshine_audio_sink"
-    restored_default_sink="$sunshine_audio_sink"
-elif [[ -n "$previous_default_sink" && "$previous_default_sink" != noland_mic_* ]] && \
-     run_user pactl list short sinks | awk '{print $2}' | grep -qx "$previous_default_sink"; then
-    set_default_node_by_name "$previous_default_sink"
-    restored_default_sink="$previous_default_sink"
+run_user_systemctl enable pipewire-pulse.socket noland-mic-receiver.service
+# Load the recording-source drop-in only when the source is absent. Reusing an
+# existing source avoids disconnecting browsers and disturbing playback defaults.
+if (( recording_source_was_present == 0 )); then
+    run_user_systemctl restart pipewire-pulse.service
+    sleep 2
 else
-    fallback_sink="$(run_user pactl list short sinks | awk '$2 !~ /^noland_mic_/ {print $2; exit}')"
-    if [[ -n "$fallback_sink" ]]; then
-        set_default_node_by_name "$fallback_sink"
-        restored_default_sink="$fallback_sink"
-    fi
+    echo "[OK] Existing noland_remote_microphone source reused without restarting PipeWire-Pulse"
 fi
 
-if [[ -n "$restored_default_sink" ]] && run_user pactl list short sources | awk '{print $2}' | grep -qx "${restored_default_sink}.monitor"; then
-    run_user pactl set-default-source "${restored_default_sink}.monitor"
-elif [[ -n "$previous_default_source" && "$previous_default_source" != noland_mic_* ]] && \
-     run_user pactl list short sources | awk '{print $2}' | grep -qx "$previous_default_source"; then
+if run_user pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx noland_remote_microphone; then
+    run_user pactl set-source-mute noland_remote_microphone 0
+    run_user pactl set-source-volume noland_remote_microphone 100%
+fi
+if [[ -n "$previous_default_source" && "$previous_default_source" != noland_mic_* && \
+      "$previous_default_source" != "noland_remote_microphone" ]] && \
+   run_user pactl list short sources | awk '{print $2}' | grep -qx "$previous_default_source"; then
     run_user pactl set-default-source "$previous_default_source"
+elif run_user pactl list short sources | awk '{print $2}' | grep -qx noland_remote_microphone; then
+    # Replace a legacy Noland recording default with the FIFO-backed source.
+    run_user pactl set-default-source noland_remote_microphone
 fi
 
 run_user_systemctl restart noland-mic-receiver.service
@@ -680,7 +606,7 @@ echo
 echo "=== Verification ==="
 verification_failed=0
 missing_elements=()
-for element in pipewiresink rtpbin rtpopusdepay opusdec; do
+for element in filesink rtpbin rtpopusdepay opusdec; do
     if ! run_user gst-inspect-1.0 "$element" >/dev/null 2>&1; then
         missing_elements+=("$element")
     fi
@@ -691,34 +617,35 @@ else
     echo "[FAIL] Missing GStreamer elements: ${missing_elements[*]}"
     verification_failed=1
 fi
-if run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_sink' || \
-   run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink'; then
-    echo "[OK] Private PipeWire sink noland_mic_sink exists"
+if run_user pactl list short sources 2>/dev/null | awk '{print $2}' | grep -qx noland_remote_microphone && \
+   run_user pactl list sources 2>/dev/null | grep -q 'Description: Noland-Microphone'; then
+    echo "[OK] Recording source noland_remote_microphone is published as Noland-Microphone"
 else
-    echo "[FAIL] Private PipeWire sink noland_mic_sink was not found"
+    echo "[FAIL] PipeWire recording source or friendly description was not found"
     verification_failed=1
 fi
-if { run_user wpctl status --name 2>/dev/null | grep -q 'noland_mic_source' || \
-     run_user pactl list short sources 2>/dev/null | grep -q 'noland_mic_source'; } && \
-   run_user pactl list sources 2>/dev/null | grep -q 'Description: Noland Microphone'; then
-    echo "[OK] PipeWire source noland_mic_source is published as Noland Microphone"
+if [[ -p "$source_fifo" ]]; then
+    echo "[OK] Recording source FIFO exists at ${source_fifo}"
 else
-    echo "[FAIL] PipeWire source or exact friendly description was not found"
+    echo "[FAIL] Recording source FIFO is unavailable"
     verification_failed=1
 fi
-if run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink' && \
-   run_user pactl list short sources 2>/dev/null | grep -q 'noland_mic_source'; then
-    echo "[OK] PipeWire-Pulse exposes both topology endpoints"
+if run_user pactl list short sinks 2>/dev/null | grep -q 'noland_mic_sink'; then
+    echo "[WARN] Legacy noland_mic_sink remains inert until the next normal PipeWire restart"
 else
-    echo "[WARN] pactl did not expose both endpoints; inspect WirePlumber policy/logs"
+    echo "[OK] Microphone provisioning exposes no playback sink"
 fi
-default_sink="$(run_user pactl get-default-sink 2>/dev/null || true)"
-default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
-if [[ -n "$default_sink" && "$default_sink" != noland_mic_* && \
-      -n "$default_source" && "$default_source" != noland_mic_* ]]; then
-    echo "[OK] Existing desktop defaults preserved: sink=${default_sink} source=${default_source}"
+if run_user pactl get-source-mute noland_remote_microphone 2>/dev/null | grep -q 'Mute: no'; then
+    echo "[OK] Noland microphone source is unmuted"
 else
-    echo "[FAIL] Noland microphone topology must never become the desktop default: sink=${default_sink:-missing} source=${default_source:-missing}"
+    echo "[FAIL] Noland microphone source is muted or unavailable"
+    verification_failed=1
+fi
+default_sink_after="$(run_user pactl get-default-sink 2>/dev/null || true)"
+if [[ -n "$default_sink_before" && "$default_sink_after" == "$default_sink_before" ]]; then
+    echo "[OK] Playback default was not changed: ${default_sink_after}"
+else
+    echo "[FAIL] Playback default changed during microphone provisioning: before=${default_sink_before:-missing} after=${default_sink_after:-missing}"
     verification_failed=1
 fi
 if run_user_systemctl is-active noland-mic-receiver.service >/dev/null 2>&1; then
@@ -750,7 +677,7 @@ fi
 # Written only after the unit, PipeWire topology, listeners, and status writer
 # have all passed verification. The client uses this to force safe upgrades of
 # older remote helpers before allocating a media session.
-echo "6" > "$CONFIG_DIR/microphone-agent.version"
+echo "7" > "$CONFIG_DIR/microphone-agent.version"
 chmod 0644 "$CONFIG_DIR/microphone-agent.version"
 
 echo
@@ -758,4 +685,4 @@ echo "Installation complete."
 echo "Manage: systemctl --user {start|stop|restart|status} noland-mic-receiver.service"
 echo "Logs:   journalctl --user -u noland-mic-receiver.service -f"
 echo "Status: ${STATUS_FILE}"
-echo "Mic:    Noland Microphone (node.name=noland_mic_source)"
+echo "Mic:    Noland-Microphone (source_name=noland_remote_microphone)"

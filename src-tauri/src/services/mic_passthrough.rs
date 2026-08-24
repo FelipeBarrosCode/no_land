@@ -465,10 +465,6 @@ impl MicPassthroughService {
                 {
                     warn!(instance_id, %error, "Host microphone session stop failed");
                 }
-                if let Err(error) = Self::ensure_remote_audio_defaults(&remote, &target_user).await
-                {
-                    warn!(instance_id, %error, "Failed restoring remote audio defaults after microphone stop");
-                }
             }
         }
 
@@ -809,7 +805,7 @@ impl MicPassthroughService {
             ))
         })?;
         let cmd = format!(
-            "test \"$(cat /etc/noland/microphone-agent.version 2>/dev/null || true)\" = \"6\" || {{ echo 'Noland microphone agent upgrade required' >&2; exit 42; }}; sudo /usr/local/sbin/noland-mic-session-control start --user {target_user} --session-id {session_id} --peer-ip {peer_ip} --bind-address {vm_wg_ip} --interface wg0 --ssrc {ssrc} --client-rtcp-port {client_rtcp_port} --jitter-ms 20"
+            "test \"$(cat /etc/noland/microphone-agent.version 2>/dev/null || true)\" = \"7\" || {{ echo 'Noland microphone agent upgrade required' >&2; exit 42; }}; sudo /usr/local/sbin/noland-mic-session-control start --user {target_user} --session-id {session_id} --peer-ip {peer_ip} --bind-address {vm_wg_ip} --interface wg0 --ssrc {ssrc} --client-rtcp-port {client_rtcp_port} --jitter-ms 20"
         );
         let output = {
             let remote = remote.clone();
@@ -852,7 +848,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\" >&2; exit 1; fi; current_sink=\"$(run_user pactl get-default-sink 2>/dev/null || true)\"; if [[ -z \"$current_sink\" || \"$current_sink\" == noland_mic_* ]]; then fallback_sink=\"\"; while read -r _ sink _; do if [[ -n \"$sink\" && \"$sink\" != noland_mic_* ]]; then fallback_sink=\"$sink\"; break; fi; done < <(run_user pactl list short sinks 2>/dev/null); if [[ -z \"$fallback_sink\" ]]; then echo \"no safe non-Noland audio sink is available\" >&2; exit 1; fi; run_user pactl set-default-sink \"$fallback_sink\"; fi; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_mic_source([[:space:]]|$)\" || { echo \"Noland microphone source is unavailable\" >&2; exit 1; }; run_user pactl set-default-source noland_mic_source; while read -r source_output _; do if [[ -n \"$source_output\" ]]; then run_user pactl move-source-output \"$source_output\" noland_mic_source >/dev/null 2>&1 || true; fi; done < <(run_user pactl list short source-outputs 2>/dev/null); final_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; if [[ \"$final_source\" != \"noland_mic_source\" ]]; then echo \"failed to activate Noland microphone source\" >&2; exit 1; fi",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\" >&2; exit 1; fi; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\" || { echo \"Noland microphone recording source is unavailable\" >&2; exit 1; }; run_user pactl set-source-mute noland_remote_microphone 0; run_user pactl set-source-volume noland_remote_microphone 100%; run_user pactl set-default-source noland_remote_microphone; final_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; final_mute=\"$(run_user pactl get-source-mute noland_remote_microphone 2>/dev/null || true)\"; if [[ \"$final_source\" != \"noland_remote_microphone\" || \"$final_mute\" != \"Mute: no\" ]]; then echo \"failed to activate Noland microphone recording source\" >&2; exit 1; fi",
         )?;
         let output = {
             let remote = remote.clone();
@@ -863,27 +859,6 @@ impl MicPassthroughService {
         if output.status_code != 0 {
             return Err(AppError::Provisioning(format!(
                 "Failed activating the remote Noland microphone source: {} {}",
-                output.stderr.trim(),
-                output.stdout.trim()
-            )));
-        }
-        Ok(())
-    }
-
-    async fn ensure_remote_audio_defaults(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-        let cmd = remote_user_bus_command(
-            target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\" >&2; exit 1; fi; current_sink=\"$(run_user pactl get-default-sink 2>/dev/null || true)\"; if [[ -z \"$current_sink\" || \"$current_sink\" == noland_mic_* ]]; then fallback_sink=\"\"; while read -r _ sink _; do if [[ -n \"$sink\" && \"$sink\" != noland_mic_* ]]; then fallback_sink=\"$sink\"; break; fi; done < <(run_user pactl list short sinks 2>/dev/null); if [[ -z \"$fallback_sink\" ]]; then echo \"no safe non-Noland audio sink is available\" >&2; exit 1; fi; run_user pactl set-default-sink \"$fallback_sink\"; current_sink=\"$fallback_sink\"; fi; current_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; if [[ -z \"$current_source\" || \"$current_source\" == noland_mic_* ]]; then preferred_source=\"${current_sink}.monitor\"; if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])${preferred_source}([[:space:]]|$)\"; then safe_source=\"$preferred_source\"; else safe_source=\"\"; while read -r _ source _; do if [[ -n \"$source\" && \"$source\" != noland_mic_* ]]; then safe_source=\"$source\"; break; fi; done < <(run_user pactl list short sources 2>/dev/null); fi; if [[ -z \"$safe_source\" ]]; then echo \"no safe non-Noland audio source is available\" >&2; exit 1; fi; run_user pactl set-default-source \"$safe_source\"; while read -r source_output _; do if [[ -n \"$source_output\" ]]; then run_user pactl move-source-output \"$source_output\" \"$safe_source\" >/dev/null 2>&1 || true; fi; done < <(run_user pactl list short source-outputs 2>/dev/null); fi; final_sink=\"$(run_user pactl get-default-sink 2>/dev/null || true)\"; final_source=\"$(run_user pactl get-default-source 2>/dev/null || true)\"; if [[ -z \"$final_sink\" || \"$final_sink\" == noland_mic_* || -z \"$final_source\" || \"$final_source\" == noland_mic_* ]]; then echo \"Noland microphone nodes became desktop defaults\" >&2; exit 1; fi",
-        )?;
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(15)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if output.status_code != 0 {
-            return Err(AppError::Provisioning(format!(
-                "Failed restoring safe remote audio defaults: {} {}",
                 output.stderr.trim(),
                 output.stdout.trim()
             )));
@@ -923,7 +898,7 @@ impl MicPassthroughService {
     ) -> AppResult<()> {
         let cmd = remote_user_bus_command(
             target_user,
-            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; receiver_was_active=false; if run_user systemctl --user is-active --quiet noland-mic-receiver.service; then receiver_was_active=true; fi; run_user systemctl --user restart pipewire.service pipewire-pulse.service wireplumber.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_mic_source([[:space:]]|$)\"; then break; fi; sleep 1; done; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_mic_source([[:space:]]|$)\"; if [[ \"$receiver_was_active\" = true ]]; then run_user systemctl --user restart noland-mic-receiver.service; fi",
+            "if [[ ! -S \"$bus_path\" ]]; then echo \"user systemd bus unavailable\"; exit 1; fi; if ! run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then run_user systemctl --user restart pipewire-pulse.service; for _ in 1 2 3 4 5; do if run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then break; fi; sleep 1; done; fi; run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"",
         )?;
 
         let output = {
@@ -977,7 +952,7 @@ impl MicPassthroughService {
     ) -> AppResult<VmAgentStatus> {
         let cmd = remote_user_bus_command(
             target_user,
-            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_mic_source([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_mic_source\" ]]; then default_source=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$source_present\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json,os; raw=os.environ.get(\\\"STATUS_JSON\\\",\\\"{}\\\"); status=json.loads(raw) if raw.strip() else {}; out={\\\"deviceReady\\\":os.environ.get(\\\"DEVICE_READY\\\",\\\"\\\").lower()==\\\"true\\\",\\\"receivingAudio\\\":bool(status.get(\\\"receivingAudio\\\",False)),\\\"packetLossPercent\\\":float(status.get(\\\"packetLossPercent\\\",0.0) or 0.0),\\\"jitterMs\\\":float(status.get(\\\"jitterMs\\\",0.0) or 0.0),\\\"bufferDepthMs\\\":float(status.get(\\\"bufferDepthMs\\\",0.0) or 0.0),\\\"lastPacketMsAgo\\\":status.get(\\\"lastPacketMsAgo\\\"),\\\"pipewireConnected\\\":os.environ.get(\\\"PIPEWIRE_CONNECTED\\\",\\\"\\\").lower()==\\\"true\\\",\\\"defaultSource\\\":os.environ.get(\\\"DEFAULT_SOURCE\\\",\\\"\\\").lower()==\\\"true\\\"}; print(json.dumps(out,separators=(\\\",\\\",\\\":\\\")))\"",
+            "status_file=/run/noland/noland_remote_microphone.status.json; bus_ready=false; if [[ -S \"$bus_path\" ]]; then bus_ready=true; fi; pipewire_connected=false; if [[ \"$bus_ready\" = true ]] && run_user systemctl --user is-active --quiet pipewire.service && run_user systemctl --user is-active --quiet pipewire-pulse.service && run_user systemctl --user is-active --quiet wireplumber.service; then pipewire_connected=true; fi; source_present=false; if [[ \"$bus_ready\" = true ]] && run_user pactl list short sources 2>/dev/null | grep -Eq \"(^|[[:space:]])noland_remote_microphone([[:space:]]|$)\"; then source_present=true; fi; default_source=false; if [[ \"$bus_ready\" = true ]] && [[ \"$(run_user pactl get-default-source 2>/dev/null || true)\" = \"noland_remote_microphone\" ]]; then default_source=true; fi; if [[ -f \"$status_file\" ]]; then status_json=$(cat \"$status_file\"); else status_json=\"{}\"; fi; DEVICE_READY=\"$source_present\" PIPEWIRE_CONNECTED=\"$pipewire_connected\" DEFAULT_SOURCE=\"$default_source\" STATUS_JSON=\"$status_json\" python3 -c \"import json,os; raw=os.environ.get(\\\"STATUS_JSON\\\",\\\"{}\\\"); status=json.loads(raw) if raw.strip() else {}; out={\\\"deviceReady\\\":os.environ.get(\\\"DEVICE_READY\\\",\\\"\\\").lower()==\\\"true\\\",\\\"receivingAudio\\\":bool(status.get(\\\"receivingAudio\\\",False)),\\\"packetLossPercent\\\":float(status.get(\\\"packetLossPercent\\\",0.0) or 0.0),\\\"jitterMs\\\":float(status.get(\\\"jitterMs\\\",0.0) or 0.0),\\\"bufferDepthMs\\\":float(status.get(\\\"bufferDepthMs\\\",0.0) or 0.0),\\\"lastPacketMsAgo\\\":status.get(\\\"lastPacketMsAgo\\\"),\\\"pipewireConnected\\\":os.environ.get(\\\"PIPEWIRE_CONNECTED\\\",\\\"\\\").lower()==\\\"true\\\",\\\"defaultSource\\\":os.environ.get(\\\"DEFAULT_SOURCE\\\",\\\"\\\").lower()==\\\"true\\\"}; print(json.dumps(out,separators=(\\\",\\\",\\\":\\\")))\"",
         )?;
 
         let output = {

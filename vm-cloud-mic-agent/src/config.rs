@@ -57,8 +57,8 @@ pub struct AudioConfig {
     pub channels: u8,
     #[serde(default = "default_frame_duration_ms")]
     pub frame_duration_ms: u32,
-    #[serde(default = "default_pw_sink_name", alias = "pipewire_node_name")]
-    pub pipewire_sink_name: String,
+    #[serde(default = "default_source_fifo_path")]
+    pub source_fifo_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -110,8 +110,8 @@ fn default_channels() -> u8 {
 fn default_frame_duration_ms() -> u32 {
     10
 }
-fn default_pw_sink_name() -> String {
-    "noland_mic_sink".to_string()
+fn default_source_fifo_path() -> String {
+    "/run/user/1000/noland-mic-source.pcm".to_string()
 }
 fn default_jitter_initial() -> u32 {
     20
@@ -148,7 +148,7 @@ impl Default for AudioConfig {
             sample_rate: default_sample_rate(),
             channels: default_channels(),
             frame_duration_ms: default_frame_duration_ms(),
-            pipewire_sink_name: default_pw_sink_name(),
+            source_fifo_path: default_source_fifo_path(),
         }
     }
 }
@@ -211,8 +211,10 @@ impl ReceiverConfig {
         if !matches!(self.audio.frame_duration_ms, 10 | 20) {
             return validation("audio.frame_duration_ms must be 10 or 20");
         }
-        if self.audio.pipewire_sink_name != "noland_mic_sink" {
-            return validation("audio.pipewire_sink_name must be noland_mic_sink");
+        if !valid_source_fifo_path(&self.audio.source_fifo_path) {
+            return validation(
+                "audio.source_fifo_path must be /run/user/<uid>/noland-mic-source.pcm",
+            );
         }
         if self.jitter.minimum_ms < MIN_JITTER_MS
             || self.jitter.maximum_ms > MAX_JITTER_MS
@@ -243,6 +245,16 @@ impl ReceiverConfig {
         }
         Ok(())
     }
+}
+
+fn valid_source_fifo_path(path: &str) -> bool {
+    let Some(uid) = path
+        .strip_prefix("/run/user/")
+        .and_then(|value| value.strip_suffix("/noland-mic-source.pcm"))
+    else {
+        return false;
+    };
+    !uid.is_empty() && uid.chars().all(|character| character.is_ascii_digit())
 }
 
 fn parse_ip(field: &str, value: &str) -> Result<IpAddr, ConfigError> {
@@ -287,6 +299,16 @@ mod tests {
         config = ReceiverConfig::default();
         config.network.maximum_packet_size = 1_201;
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_unsafe_source_fifo_paths() {
+        let mut config = ReceiverConfig::default();
+        config.audio.source_fifo_path = "/tmp/noland-mic-source.pcm".to_string();
+        assert!(config.validate().is_err());
+
+        config.audio.source_fifo_path = "/run/user/1000/noland-mic-source.pcm".to_string();
+        assert!(config.validate().is_ok());
     }
 
     #[test]

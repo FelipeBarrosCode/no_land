@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -167,6 +169,7 @@ impl Receiver {
 }
 
 fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
+    ensure_recording_fifo(&config.audio.source_fifo_path)?;
     let mut pipeline_description = format!(
         concat!(
             "rtpbin name=rtp_session latency={latency} drop-on-latency=true do-lost=true ",
@@ -178,6 +181,7 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
             "! audio/x-raw,format=(string)S16LE,layout=(string)interleaved,rate=(int)48000,channels=(int)1 ",
             "! queue max-size-time=120000000 max-size-buffers=0 max-size-bytes=0 leaky=downstream ",
             "! identity name=decoded_probe ",
+            "! filesink name=recording_source_fifo location={fifo_path} sync=false async=false ",
             "udpsrc name=rtcp_source address={bind_address} port={rtcp_port} buffer-size={recv_buffer} ",
             "caps=\"application/x-rtcp\" ! rtp_session.recv_rtcp_sink_0 "
         ),
@@ -187,6 +191,7 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
         rtcp_port = config.network.rtcp_port,
         recv_buffer = config.network.recv_buffer_bytes,
         payload = RTP_PAYLOAD_TYPE,
+        fifo_path = config.audio.source_fifo_path,
     );
 
     if let Some(peer_ip) = &config.session.expected_peer_ip {
@@ -198,67 +203,19 @@ fn build_pipeline(config: &ReceiverConfig) -> Result<gst::Pipeline, String> {
 
     let element = gst::parse::launch(&pipeline_description)
         .map_err(|error| format!("failed creating RTP/RTCP pipeline: {error}"))?;
-    let pipeline = element
+    element
         .downcast::<gst::Pipeline>()
-        .map_err(|_| "GStreamer receiver description did not produce a Pipeline".to_string())?;
-
-    let sink = gst::ElementFactory::make("pipewiresink")
-        .name("pipewire_sink")
-        .build()
-        .map_err(|error| {
-            format!("pipewiresink is unavailable; install gstreamer1.0-pipewire: {error}")
-        })?;
-    let target_properties = pipewire_target_properties(
-        sink.find_property("target-object").is_some(),
-        sink.find_property("path").is_some(),
-    )?;
-    for property in target_properties {
-        sink.set_property(*property, &config.audio.pipewire_sink_name);
-    }
-    // PipeWire clocks consumption from the virtual sink. Waiting on RTP-derived
-    // timestamps here can block the whole receiver after its initial buffers.
-    sink.set_property("sync", false);
-    sink.set_property("async", false);
-    info!(
-        properties = ?target_properties,
-        target = %config.audio.pipewire_sink_name,
-        "configured explicit PipeWire sink target"
-    );
-
-    pipeline
-        .add(&sink)
-        .map_err(|error| format!("failed adding pipewiresink to pipeline: {error}"))?;
-    let decoded = pipeline
-        .by_name("decoded_probe")
-        .ok_or_else(|| "receiver pipeline missing decoded_probe".to_string())?;
-    decoded
-        .link(&sink)
-        .map_err(|error| format!("failed linking decoded audio to pipewiresink: {error}"))?;
-
-    Ok(pipeline)
+        .map_err(|_| "GStreamer receiver description did not produce a Pipeline".to_string())
 }
 
-fn pipewire_target_properties(
-    has_target_object: bool,
-    has_path: bool,
-) -> Result<&'static [&'static str], String> {
-    if !has_target_object && !has_path {
-        return Err(
-            "pipewiresink exposes neither target-object nor path; refusing to use the desktop default output"
-                .to_string(),
-        );
+fn ensure_recording_fifo(path: &str) -> Result<(), String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("recording source FIFO is unavailable at {path}: {error}"))?;
+    #[cfg(unix)]
+    if !metadata.file_type().is_fifo() {
+        return Err(format!("recording source path is not a FIFO: {path}"));
     }
-    // Assign every target property the installed pipewiresink exposes. Different
-    // gst-pipewire builds bind by `target-object` (node name/serial) or by the
-    // deprecated `path` (object.path); setting both maximizes the chance the
-    // sink binds to noland_mic_sink instead of falling back to the desktop
-    // default output, which would publish silence to noland_mic_source.
-    Ok(match (has_target_object, has_path) {
-        (true, true) => &["target-object", "path"],
-        (true, false) => &["target-object"],
-        (false, true) => &["path"],
-        _ => unreachable!(),
-    })
+    Ok(())
 }
 
 fn attach_jitterbuffer_observer(
@@ -394,7 +351,7 @@ fn attach_bus_watch(
             );
             {
                 let mut status = lock_status(&shared);
-                if source.contains("pipewire_sink") {
+                if source.contains("recording_source_fifo") {
                     status.pipewire_errors = status.pipewire_errors.saturating_add(1);
                 }
                 status.pipeline_error = Some(detail.clone());
@@ -794,22 +751,6 @@ fn lock_status(shared: &Arc<Mutex<SharedStatus>>) -> std::sync::MutexGuard<'_, S
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn pipewire_target_properties_sets_every_available_binding() {
-        let both = pipewire_target_properties(true, true).unwrap();
-        assert!(both.contains(&"target-object"));
-        assert!(both.contains(&"path"));
-        assert_eq!(
-            pipewire_target_properties(true, false).unwrap().to_vec(),
-            vec!["target-object"]
-        );
-        assert_eq!(
-            pipewire_target_properties(false, true).unwrap().to_vec(),
-            vec!["path"]
-        );
-        assert!(pipewire_target_properties(false, false).is_err());
-    }
 
     #[test]
     fn sequence_tracker_counts_loss_reorder_and_duplicates() {
