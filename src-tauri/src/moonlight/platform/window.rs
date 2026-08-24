@@ -86,14 +86,17 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
     }
 
     app.state::<StreamWindowCloseState>().reset();
-    let window = tauri::window::WindowBuilder::new(app, STREAM_WINDOW_LABEL)
+    let builder = tauri::window::WindowBuilder::new(app, STREAM_WINDOW_LABEL)
         .title(title)
         .inner_size(width as f64, height as f64)
         .resizable(true)
         .decorations(true)
-        .visible(false)
+        .visible(false);
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .title_bar_style(tauri::utils::TitleBarStyle::Overlay)
-        .hidden_title(true)
+        .hidden_title(true);
+    let window = builder
         .build()
         .map_err(|error| MoonlightError::Native(error.to_string()))?;
     Ok(window)
