@@ -6,6 +6,7 @@
       "binaries/ssh-*-pc-windows-msvc.exe",
       "binaries/scp-*-pc-windows-msvc.exe",
       "binaries/ssh-keygen-*-pc-windows-msvc.exe",
+      "binaries/ssh-runtime/**/*",
       "../vm-cloud-mic-agent/Cargo.toml",
       "../vm-cloud-mic-agent/src/**/*",
       "binaries/gstreamer/x86_64-pc-windows-msvc/bin/*.dll",
