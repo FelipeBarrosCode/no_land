@@ -61,6 +61,8 @@ pub struct StreamPreferences {
     pub input: InputPreferences,
     pub window: WindowPreferences,
     pub reconnection: ReconnectionPreferences,
+    #[serde(default)]
+    pub latency: NolandLatencyConfig,
 }
 
 impl Default for StreamPreferences {
@@ -72,6 +74,7 @@ impl Default for StreamPreferences {
             input: InputPreferences::default(),
             window: WindowPreferences::default(),
             reconnection: ReconnectionPreferences::default(),
+            latency: NolandLatencyConfig::default(),
         }
     }
 }
@@ -82,6 +85,8 @@ pub struct VideoPreferences {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    #[serde(default)]
+    pub client_refresh_rate_x100: u32,
     pub bitrate_kbps: u32,
     pub codec_preference: Vec<Codec>,
     pub decoder_preference: DecoderPreference,
@@ -97,6 +102,7 @@ impl Default for VideoPreferences {
             width: 1920,
             height: 1080,
             fps: 60,
+            client_refresh_rate_x100: 0,
             bitrate_kbps: 25_000,
             codec_preference: vec![Codec::Hevc, Codec::H264],
             decoder_preference: DecoderPreference::Hardware,
@@ -203,9 +209,9 @@ impl Default for ReconnectionPreferences {
     fn default() -> Self {
         Self {
             enabled: true,
-            maximum_attempts: 3,
-            initial_delay_ms: 500,
-            maximum_delay_ms: 5_000,
+            maximum_attempts: 1,
+            initial_delay_ms: 0,
+            maximum_delay_ms: 0,
         }
     }
 }
@@ -252,6 +258,68 @@ pub enum AudioConfiguration {
 pub enum StreamingMode {
     Local,
     Remote,
+    Auto,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum PacingMode {
+    Off,
+    Automatic,
+    Software,
+    HardwareMultiple,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FrameBufferMode {
+    Off,
+    OneFrame,
+    TwoFrames,
+    ThreeFrames,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum RemoteStreamMode {
+    Auto,
+    ForceRemote,
+    ForceLocal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NolandLatencyConfig {
+    pub telemetry_enabled: bool,
+    pub adaptive_late_frame_drop_enabled: bool,
+    #[serde(default)]
+    pub adaptive_packet_size_enabled: bool,
+    pub decoder_backpressure_policy_enabled: bool,
+    pub pacing_mode: PacingMode,
+    pub frame_buffer_mode: FrameBufferMode,
+    pub auto_reconnect_on_unexpected_termination: bool,
+    pub remote_stream_mode: RemoteStreamMode,
+    pub remote_packet_size: u16,
+    pub late_frame_tolerance_us: u32,
+    pub vsync_enabled: bool,
+}
+
+impl Default for NolandLatencyConfig {
+    fn default() -> Self {
+        Self {
+            telemetry_enabled: cfg!(debug_assertions),
+            adaptive_late_frame_drop_enabled: false,
+            adaptive_packet_size_enabled: false,
+            decoder_backpressure_policy_enabled: false,
+            pacing_mode: PacingMode::Off,
+            frame_buffer_mode: FrameBufferMode::Off,
+            auto_reconnect_on_unexpected_termination: true,
+            remote_stream_mode: RemoteStreamMode::Auto,
+            remote_packet_size: 1024,
+            late_frame_tolerance_us: 0,
+            vsync_enabled: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -286,6 +354,7 @@ pub struct StreamPreferencesPatch {
     pub input: Option<InputPreferencesPatch>,
     pub window: Option<WindowPreferencesPatch>,
     pub reconnection: Option<ReconnectionPreferencesPatch>,
+    pub latency: Option<NolandLatencyConfigPatch>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -294,6 +363,7 @@ pub struct VideoPreferencesPatch {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub fps: Option<u32>,
+    pub client_refresh_rate_x100: Option<u32>,
     pub bitrate_kbps: Option<u32>,
     pub codec_preference: Option<Vec<Codec>>,
     pub decoder_preference: Option<DecoderPreference>,
@@ -347,6 +417,22 @@ pub struct ReconnectionPreferencesPatch {
     pub maximum_attempts: Option<u32>,
     pub initial_delay_ms: Option<u32>,
     pub maximum_delay_ms: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NolandLatencyConfigPatch {
+    pub telemetry_enabled: Option<bool>,
+    pub adaptive_late_frame_drop_enabled: Option<bool>,
+    pub adaptive_packet_size_enabled: Option<bool>,
+    pub decoder_backpressure_policy_enabled: Option<bool>,
+    pub pacing_mode: Option<PacingMode>,
+    pub frame_buffer_mode: Option<FrameBufferMode>,
+    pub auto_reconnect_on_unexpected_termination: Option<bool>,
+    pub remote_stream_mode: Option<RemoteStreamMode>,
+    pub remote_packet_size: Option<u16>,
+    pub late_frame_tolerance_us: Option<u32>,
+    pub vsync_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,6 +503,9 @@ fn apply_preferences_patch(target: &mut StreamPreferences, patch: &StreamPrefere
     if let Some(reconnection) = &patch.reconnection {
         apply_reconnection_patch(&mut target.reconnection, reconnection);
     }
+    if let Some(latency) = &patch.latency {
+        apply_latency_patch(&mut target.latency, latency);
+    }
 }
 
 fn apply_video_patch(target: &mut VideoPreferences, patch: &VideoPreferencesPatch) {
@@ -428,6 +517,9 @@ fn apply_video_patch(target: &mut VideoPreferences, patch: &VideoPreferencesPatc
     }
     if let Some(value) = patch.fps {
         target.fps = value;
+    }
+    if let Some(value) = patch.client_refresh_rate_x100 {
+        target.client_refresh_rate_x100 = value;
     }
     if let Some(value) = patch.bitrate_kbps {
         target.bitrate_kbps = value;
@@ -533,6 +625,42 @@ fn apply_reconnection_patch(
     }
 }
 
+fn apply_latency_patch(target: &mut NolandLatencyConfig, patch: &NolandLatencyConfigPatch) {
+    if let Some(value) = patch.telemetry_enabled {
+        target.telemetry_enabled = value;
+    }
+    if let Some(value) = patch.adaptive_late_frame_drop_enabled {
+        target.adaptive_late_frame_drop_enabled = value;
+    }
+    if let Some(value) = patch.adaptive_packet_size_enabled {
+        target.adaptive_packet_size_enabled = value;
+    }
+    if let Some(value) = patch.decoder_backpressure_policy_enabled {
+        target.decoder_backpressure_policy_enabled = value;
+    }
+    if let Some(value) = patch.pacing_mode {
+        target.pacing_mode = value;
+    }
+    if let Some(value) = patch.frame_buffer_mode {
+        target.frame_buffer_mode = value;
+    }
+    if let Some(value) = patch.auto_reconnect_on_unexpected_termination {
+        target.auto_reconnect_on_unexpected_termination = value;
+    }
+    if let Some(value) = patch.remote_stream_mode {
+        target.remote_stream_mode = value;
+    }
+    if let Some(value) = patch.remote_packet_size {
+        target.remote_packet_size = value;
+    }
+    if let Some(value) = patch.late_frame_tolerance_us {
+        target.late_frame_tolerance_us = value;
+    }
+    if let Some(value) = patch.vsync_enabled {
+        target.vsync_enabled = value;
+    }
+}
+
 pub fn validate_preferences(
     preferences: &StreamPreferences,
     capabilities: Option<&ClientVideoCapabilities>,
@@ -550,9 +678,16 @@ pub fn validate_preferences(
             "height must be at least 360".to_string(),
         ));
     }
-    if !matches!(video.fps, 30 | 60 | 90 | 120) {
+    if !matches!(video.fps, 30 | 60 | 90 | 120 | 144 | 240) {
         return Err(MoonlightError::Validation(
-            "fps must be one of 30, 60, 90, or 120".to_string(),
+            "fps must be one of 30, 60, 90, 120, 144, or 240".to_string(),
+        ));
+    }
+    if video.client_refresh_rate_x100 != 0
+        && !(2_400..=100_000).contains(&video.client_refresh_rate_x100)
+    {
+        return Err(MoonlightError::Validation(
+            "client refresh rate must be 0 or between 24.00 and 1000.00 Hz".to_string(),
         ));
     }
     if !(1_000..=150_000).contains(&video.bitrate_kbps) {
@@ -565,9 +700,43 @@ pub fn validate_preferences(
             "packetSize must be between 512 and 1400".to_string(),
         ));
     }
-    if matches!(network.streaming_mode, StreamingMode::Remote) && network.packet_size != 1024 {
+    let resolved_remote_mode = match preferences.latency.remote_stream_mode {
+        RemoteStreamMode::Auto => match network.streaming_mode {
+            StreamingMode::Local => RemoteStreamMode::ForceLocal,
+            StreamingMode::Remote => RemoteStreamMode::ForceRemote,
+            StreamingMode::Auto => RemoteStreamMode::Auto,
+        },
+        explicit => explicit,
+    };
+    if (resolved_remote_mode == RemoteStreamMode::ForceRemote
+        || preferences.latency.adaptive_packet_size_enabled)
+        && (!(960..=1_392).contains(&preferences.latency.remote_packet_size)
+            || preferences.latency.remote_packet_size % 16 != 0)
+    {
         return Err(MoonlightError::Validation(
-            "remote mode must use a 1024-byte packet size by default".to_string(),
+            "remote packet size must be between 960 and 1392 and divisible by 16".to_string(),
+        ));
+    }
+    if preferences.reconnection.enabled
+        && (preferences.reconnection.maximum_attempts != 1
+            || preferences.reconnection.initial_delay_ms != 0
+            || preferences.reconnection.maximum_delay_ms != 0)
+    {
+        return Err(MoonlightError::Validation(
+            "the embedded client currently supports exactly one immediate reconnect attempt"
+                .to_string(),
+        ));
+    }
+    if preferences.latency.frame_buffer_mode != FrameBufferMode::Off
+        && preferences.latency.adaptive_late_frame_drop_enabled
+    {
+        return Err(MoonlightError::Validation(
+            "smoothing reserve and adaptive late-frame dropping are mutually exclusive".to_string(),
+        ));
+    }
+    if !preferences.latency.vsync_enabled && preferences.latency.pacing_mode != PacingMode::Off {
+        return Err(MoonlightError::Validation(
+            "frame pacing must be off when V-Sync is disabled".to_string(),
         ));
     }
 
@@ -749,6 +918,86 @@ mod tests {
         let mut prefs = StreamPreferences::default();
         prefs.network.packet_size = 1500;
         assert!(validate_preferences(&prefs, None).is_err());
+    }
+
+    #[test]
+    fn adaptive_packet_size_is_disabled_by_default() {
+        assert!(!NolandLatencyConfig::default().adaptive_packet_size_enabled);
+    }
+
+    #[test]
+    fn latency_patch_updates_adaptive_packet_size() {
+        let defaults = StreamPreferences::default();
+        let patch = StreamPreferencesPatch {
+            latency: Some(NolandLatencyConfigPatch {
+                adaptive_packet_size_enabled: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let merged = merge_preferences(&defaults, Some(&patch), None);
+        assert!(merged.latency.adaptive_packet_size_enabled);
+    }
+
+    #[test]
+    fn explicit_local_mode_overrides_legacy_remote_classification() {
+        let mut prefs = StreamPreferences::default();
+        prefs.latency.remote_stream_mode = RemoteStreamMode::ForceLocal;
+        prefs.latency.remote_packet_size = 959;
+        assert!(validate_preferences(&prefs, None).is_ok());
+    }
+
+    #[test]
+    fn forced_remote_accepts_safe_packet_sizes() {
+        for packet_size in [960, 1024, 1152, 1280, 1392] {
+            let mut prefs = StreamPreferences::default();
+            prefs.latency.remote_stream_mode = RemoteStreamMode::ForceRemote;
+            prefs.latency.remote_packet_size = packet_size;
+            assert!(
+                validate_preferences(&prefs, None).is_ok(),
+                "expected packet size {packet_size} to be valid"
+            );
+        }
+    }
+
+    #[test]
+    fn forced_remote_rejects_unsafe_packet_sizes() {
+        for packet_size in [959, 1400, 1185] {
+            let mut prefs = StreamPreferences::default();
+            prefs.latency.remote_stream_mode = RemoteStreamMode::ForceRemote;
+            prefs.latency.remote_packet_size = packet_size;
+            assert!(
+                validate_preferences(&prefs, None).is_err(),
+                "expected packet size {packet_size} to be invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn adaptive_packet_size_requires_safe_packet_size() {
+        let mut prefs = StreamPreferences::default();
+        prefs.latency.remote_stream_mode = RemoteStreamMode::ForceLocal;
+        prefs.latency.adaptive_packet_size_enabled = true;
+        prefs.latency.remote_packet_size = 1185;
+        assert!(validate_preferences(&prefs, None).is_err());
+
+        prefs.latency.remote_packet_size = 1152;
+        assert!(validate_preferences(&prefs, None).is_ok());
+    }
+
+    #[test]
+    fn rejects_unsupported_reconnect_retry_or_delay_settings() {
+        let mut prefs = StreamPreferences::default();
+        prefs.reconnection.maximum_attempts = 2;
+        assert!(validate_preferences(&prefs, None).is_err());
+
+        prefs.reconnection.maximum_attempts = 1;
+        prefs.reconnection.initial_delay_ms = 100;
+        assert!(validate_preferences(&prefs, None).is_err());
+
+        prefs.reconnection.enabled = false;
+        assert!(validate_preferences(&prefs, None).is_ok());
     }
 
     #[test]

@@ -1340,6 +1340,7 @@ async fn start_embedded_stream_for_host(
             supported_video_formats: prepared.supported_video_formats,
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
+            session_generation: 0,
         })
         .await
     {
@@ -4397,6 +4398,7 @@ pub async fn moonlight_start_stream(
             supported_video_formats: prepared.supported_video_formats,
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
+            session_generation: 0,
         })
         .await
     {

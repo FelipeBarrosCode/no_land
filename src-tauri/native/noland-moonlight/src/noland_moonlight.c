@@ -42,6 +42,8 @@ typedef struct nl_owned_start_request {
   int32_t encryption_flags;
   int8_t remote_input_aes_key[16];
   int8_t remote_input_aes_iv[16];
+  uint64_t session_generation;
+  nl_latency_config_t latency_config;
 } nl_owned_start_request_t;
 
 struct nl_runtime {
@@ -51,6 +53,7 @@ struct nl_runtime {
   bool has_surface;
   bool worker_running;
   bool stop_requested;
+  bool connection_needs_cleanup;
   nl_event_t events[NL_EVENT_QUEUE_CAPACITY];
   uint32_t event_head;
   uint32_t event_len;
@@ -71,6 +74,11 @@ struct nl_runtime {
   uint64_t keyboard_event_count;
   uint64_t controller_arrival_count;
   uint64_t controller_state_count;
+  uint64_t reconnect_attempt_count;
+  uint64_t reconnect_success_count;
+  uint64_t session_generation;
+  nl_remote_stream_mode_t resolved_remote_stream_mode;
+  uint32_t requested_packet_size;
   nl_video_renderer_t renderer;
   nl_audio_renderer_t audio_renderer;
   nl_controller_manager_t* controller_manager;
@@ -206,6 +214,8 @@ static bool nl_owned_request_copy(nl_owned_start_request_t* output, const nl_sta
   output->encryption_flags = input->encryption_flags;
   memcpy(output->remote_input_aes_key, input->remote_input_aes_key, sizeof(output->remote_input_aes_key));
   memcpy(output->remote_input_aes_iv, input->remote_input_aes_iv, sizeof(output->remote_input_aes_iv));
+  output->session_generation = input->session_generation;
+  output->latency_config = input->latency_config;
   return true;
 }
 
@@ -229,6 +239,7 @@ static void nl_runtime_push_event_locked(nl_runtime_t* runtime, nl_event_kind_t 
     return;
   }
   nl_event_init(&event, kind, runtime->state, code, message);
+  event.session_generation = runtime->session_generation;
 
   if (kind == NL_EVENT_VIDEO_FRAME && runtime->event_len > 0U) {
     uint32_t tail_index = (runtime->event_head + runtime->event_len - 1U) % NL_EVENT_QUEUE_CAPACITY;
@@ -341,6 +352,9 @@ static void nl_connection_started(void) {
   if (runtime == NULL) {
     return;
   }
+  nl_runtime_lock(runtime);
+  runtime->connection_needs_cleanup = true;
+  nl_runtime_unlock(runtime);
   nl_set_state(runtime, NL_STREAM_STATE_STREAMING, NL_EVENT_CONNECTED, 0, "connected");
   if (runtime->controller_manager != NULL) {
     nl_controller_manager_start(runtime->controller_manager, runtime);
@@ -358,10 +372,6 @@ static void nl_connection_terminated(int errorCode) {
   }
   snprintf(message, sizeof(message), "terminated (%d)", errorCode);
   nl_set_state(runtime, NL_STREAM_STATE_IDLE, NL_EVENT_TERMINATED, errorCode, message);
-  nl_clear_active_runtime(runtime);
-  nl_runtime_lock(runtime);
-  nl_owned_request_clear(&runtime->request);
-  nl_runtime_unlock(runtime);
 }
 
 static void nl_connection_log_message(const char* format, ...) {
@@ -485,9 +495,18 @@ static void nl_video_cleanup(void) {
 
 static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit, const nl_video_frame_metadata_t* frame) {
   nl_runtime_t* runtime = (nl_runtime_t*)user_data;
-  char message[256];
   if (runtime != NULL && frame != NULL) {
     int renderer_result;
+    int pending_frames = LiGetPendingVideoFrames();
+    uint16_t decoder_queue_depth = pending_frames > (int)UINT16_MAX
+        ? UINT16_MAX
+        : (pending_frames > 0 ? (uint16_t)pending_frames : 0U);
+
+    nl_latency_telemetry_record_decode_submit(
+        &runtime->renderer.telemetry,
+        frame,
+        LiGetMicroseconds(),
+        decoder_queue_depth);
 
     nl_runtime_lock(runtime);
     runtime->video_frame_count += 1U;
@@ -504,8 +523,7 @@ static int nl_video_frame_processor(void* user_data, const void* raw_decode_unit
     nl_runtime_unlock(runtime);
 
     renderer_result = nl_video_renderer_submit_frame(&runtime->renderer, raw_decode_unit, frame);
-    snprintf(message, sizeof(message), "video frame #%d len=%d", frame->frame_number, frame->full_length);
-    nl_runtime_push_event(runtime, NL_EVENT_VIDEO_FRAME, frame->frame_number, message);
+    nl_runtime_push_event(runtime, NL_EVENT_VIDEO_FRAME, frame->frame_number, NULL);
     return renderer_result;
   }
   return DR_OK;
@@ -604,7 +622,6 @@ static void nl_runtime_finish_worker(nl_runtime_t* runtime, int errorCode) {
       runtime->request.packet_size,
       runtime->request.session_url != NULL ? "yes" : "no");
   nl_runtime_push_event_locked(runtime, NL_EVENT_ERROR, errorCode, message);
-  nl_owned_request_clear(&runtime->request);
   snprintf(message, sizeof(message), "stopped (%d)", errorCode);
   nl_runtime_push_event_locked(runtime, NL_EVENT_STOPPED, errorCode, message);
   nl_runtime_unlock(runtime);
@@ -638,8 +655,26 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   streamConfig.height = runtime->request.height;
   streamConfig.fps = runtime->request.fps;
   streamConfig.bitrate = runtime->request.bitrate_kbps;
-  streamConfig.packetSize = runtime->request.packet_size;
-  streamConfig.streamingRemotely = runtime->request.streaming_remotely;
+  runtime->resolved_remote_stream_mode = runtime->request.latency_config.remote_stream_mode;
+  switch (runtime->resolved_remote_stream_mode) {
+    case NL_REMOTE_STREAM_MODE_FORCE_REMOTE:
+      streamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+      streamConfig.packetSize = runtime->request.latency_config.remote_packet_size != 0U
+          ? runtime->request.latency_config.remote_packet_size
+          : 1024;
+      break;
+    case NL_REMOTE_STREAM_MODE_FORCE_LOCAL:
+      streamConfig.streamingRemotely = STREAM_CFG_LOCAL;
+      streamConfig.packetSize = runtime->request.packet_size;
+      break;
+    case NL_REMOTE_STREAM_MODE_AUTO:
+    default:
+      runtime->resolved_remote_stream_mode = NL_REMOTE_STREAM_MODE_AUTO;
+      streamConfig.streamingRemotely = STREAM_CFG_AUTO;
+      streamConfig.packetSize = runtime->request.packet_size;
+      break;
+  }
+  runtime->requested_packet_size = (uint32_t)streamConfig.packetSize;
   streamConfig.audioConfiguration = runtime->request.audio_configuration;
   runtime->audio_renderer.target_buffer_ms = runtime->request.audio_target_buffer_ms;
   runtime->audio_renderer.maximum_buffer_ms = runtime->request.audio_maximum_buffer_ms;
@@ -650,6 +685,10 @@ static int nl_run_connection(nl_runtime_t* runtime) {
   streamConfig.encryptionFlags = runtime->request.encryption_flags;
   memcpy(streamConfig.remoteInputAesKey, runtime->request.remote_input_aes_key, sizeof(streamConfig.remoteInputAesKey));
   memcpy(streamConfig.remoteInputAesIv, runtime->request.remote_input_aes_iv, sizeof(streamConfig.remoteInputAesIv));
+  nl_video_renderer_set_latency_config(
+      &runtime->renderer,
+      &runtime->request.latency_config,
+      (uint32_t)(streamConfig.clientRefreshRateX100 > 0 ? streamConfig.clientRefreshRateX100 : 0));
   {
     char message[256];
     snprintf(
@@ -663,8 +702,8 @@ static int nl_run_connection(nl_runtime_t* runtime) {
         (runtime->request.audio_configuration >> 8) & 0xFF,
         (unsigned int)runtime->request.audio_target_buffer_ms,
         (unsigned int)runtime->request.audio_maximum_buffer_ms,
-        runtime->request.streaming_remotely,
-        runtime->request.packet_size,
+        streamConfig.streamingRemotely,
+        streamConfig.packetSize,
         runtime->request.session_url != NULL ? "yes" : "no");
     nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, message);
   }
@@ -717,6 +756,24 @@ static void* nl_worker_thread_proc(void* parameter) {
 }
 #endif
 
+static void nl_runtime_join_worker(nl_runtime_t* runtime) {
+  if (runtime == NULL) {
+    return;
+  }
+#if defined(_WIN32)
+  if (runtime->worker_thread != NULL) {
+    WaitForSingleObject(runtime->worker_thread, INFINITE);
+    CloseHandle(runtime->worker_thread);
+    runtime->worker_thread = NULL;
+  }
+#else
+  if (runtime->worker_thread != 0) {
+    pthread_join(runtime->worker_thread, NULL);
+    runtime->worker_thread = 0;
+  }
+#endif
+}
+
 nl_result_t nl_runtime_create(nl_runtime_t** output) {
   nl_runtime_t* runtime;
   if (output == NULL) {
@@ -734,6 +791,7 @@ nl_result_t nl_runtime_create(nl_runtime_t** output) {
   runtime->audio_renderer.maximum_buffer_ms = 80U;
   runtime->controller_manager = nl_controller_manager_create();
   if (runtime->controller_manager == NULL) {
+    nl_video_renderer_destroy(&runtime->renderer);
     free(runtime);
     return NL_RESULT_OUT_OF_MEMORY;
   }
@@ -753,23 +811,14 @@ void nl_runtime_destroy(nl_runtime_t* runtime) {
     return;
   }
   nl_runtime_request_stop(runtime);
-  nl_runtime_lock(runtime);
-  nl_runtime_unlock(runtime);
+  nl_runtime_join_worker(runtime);
 #if defined(_WIN32)
-  if (runtime->worker_thread != NULL) {
-    WaitForSingleObject(runtime->worker_thread, INFINITE);
-    CloseHandle(runtime->worker_thread);
-    runtime->worker_thread = NULL;
-  }
   DeleteCriticalSection(&runtime->mutex);
 #else
-  if (runtime->worker_thread != 0) {
-    pthread_join(runtime->worker_thread, NULL);
-    runtime->worker_thread = 0;
-  }
   pthread_mutex_destroy(&runtime->mutex);
 #endif
   nl_audio_renderer_cleanup(&runtime->audio_renderer);
+  nl_video_renderer_destroy(&runtime->renderer);
   nl_controller_manager_destroy(runtime->controller_manager);
   nl_owned_request_clear(&runtime->request);
   free(runtime);
@@ -787,11 +836,24 @@ int32_t nl_runtime_smoke_test(void) {
   return 7;
 }
 
+size_t nl_sizeof_start_request(void) {
+  return sizeof(nl_start_request_t);
+}
+
+size_t nl_sizeof_event(void) {
+  return sizeof(nl_event_t);
+}
+
+size_t nl_sizeof_stats(void) {
+  return sizeof(nl_stats_t);
+}
+
 nl_result_t nl_runtime_start(nl_runtime_t* runtime, const nl_start_request_t* request) {
   if (runtime == NULL || request == NULL || request->host_id == NULL || request->host_address == NULL || request->server_app_version == NULL) {
     return NL_RESULT_INVALID_ARGUMENT;
   }
 
+  nl_runtime_join_worker(runtime);
   nl_runtime_lock(runtime);
   if (runtime->state != NL_STREAM_STATE_IDLE || runtime->worker_running) {
     nl_runtime_unlock(runtime);
@@ -803,8 +865,10 @@ nl_result_t nl_runtime_start(nl_runtime_t* runtime, const nl_start_request_t* re
     return NL_RESULT_OUT_OF_MEMORY;
   }
   runtime->state = NL_STREAM_STATE_STARTING;
+  runtime->session_generation = request->session_generation;
   runtime->worker_running = true;
   runtime->stop_requested = false;
+  runtime->connection_needs_cleanup = false;
   runtime->start_count += 1U;
   nl_runtime_push_event_locked(runtime, NL_EVENT_STATE_CHANGED, 0, "starting");
   nl_runtime_unlock(runtime);
@@ -841,12 +905,13 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
   }
 
   nl_runtime_lock(runtime);
-  if (runtime->state == NL_STREAM_STATE_IDLE && !runtime->worker_running) {
+  if (runtime->state == NL_STREAM_STATE_IDLE && !runtime->worker_running && !runtime->connection_needs_cleanup) {
     nl_runtime_unlock(runtime);
+    nl_runtime_join_worker(runtime);
     return NL_RESULT_OK;
   }
   should_interrupt = runtime->worker_running || runtime->state == NL_STREAM_STATE_STARTING || runtime->state == NL_STREAM_STATE_STREAMING;
-  should_stop = runtime->state == NL_STREAM_STATE_STARTING || runtime->state == NL_STREAM_STATE_STREAMING || runtime->state == NL_STREAM_STATE_STOPPING;
+  should_stop = runtime->connection_needs_cleanup || runtime->state == NL_STREAM_STATE_STARTING || runtime->state == NL_STREAM_STATE_STREAMING || runtime->state == NL_STREAM_STATE_STOPPING;
   runtime->state = NL_STREAM_STATE_STOPPING;
   runtime->stop_requested = true;
   runtime->stop_count += 1U;
@@ -856,6 +921,7 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
   if (should_interrupt) {
     LiInterruptConnection();
   }
+  nl_runtime_join_worker(runtime);
   if (should_stop) {
     LiStopConnection();
   }
@@ -866,6 +932,7 @@ nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime) {
   nl_clear_active_runtime(runtime);
   nl_runtime_lock(runtime);
   runtime->state = NL_STREAM_STATE_IDLE;
+  runtime->connection_needs_cleanup = false;
   nl_owned_request_clear(&runtime->request);
   nl_runtime_push_event_locked(runtime, NL_EVENT_STOPPED, 0, "stopped (0)");
   nl_runtime_unlock(runtime);
@@ -918,6 +985,7 @@ nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output) {
 
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
   bool connection_streaming;
+  nl_latency_snapshot_t latency_snapshot;
   if (runtime == NULL || output == NULL) {
     return NL_RESULT_INVALID_ARGUMENT;
   }
@@ -944,7 +1012,13 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       output->estimated_rtt_variance_ms = estimated_rtt_variance;
       output->has_estimated_rtt = 1U;
     }
+    nl_latency_telemetry_sample_network(
+        &runtime->renderer.telemetry,
+        LiGetMicroseconds(),
+        LiGetPendingVideoFrames(),
+        LiGetRTPVideoStats());
   }
+  nl_latency_telemetry_snapshot(&runtime->renderer.telemetry, &latency_snapshot);
 
       nl_runtime_lock(runtime);
       output->video_setup_count = runtime->video_setup_count;
@@ -973,9 +1047,62 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       output->last_video_rtp_timestamp = runtime->last_video_rtp_timestamp;
       output->last_video_hdr_active = runtime->last_video_hdr_active;
       output->last_video_colorspace = runtime->last_video_colorspace;
+      output->session_generation = runtime->session_generation;
+      output->video_packets_interval = latency_snapshot.video_packets_interval;
+      output->fec_packets_interval = latency_snapshot.fec_packets_interval;
+      output->fec_recoveries_interval = latency_snapshot.fec_recoveries_interval;
+      output->fec_failures_interval = latency_snapshot.fec_failures_interval;
+      output->out_of_sequence_packets_interval = latency_snapshot.out_of_sequence_interval;
+      output->invalid_packets_interval = latency_snapshot.invalid_packets_interval;
+      output->invalid_fec_packets_interval = latency_snapshot.invalid_fec_packets_interval;
+      output->pending_core_video_frames = latency_snapshot.pending_core_video_frames;
+      output->decoder_queue_depth = latency_snapshot.decoder_queue_depth;
+      output->render_queue_depth = latency_snapshot.render_queue_depth;
+      output->average_decode_pipeline_us = latency_snapshot.average_decode_pipeline_us;
+      output->average_render_queue_dwell_us = latency_snapshot.average_render_queue_dwell_us;
+      output->late_frame_count = latency_snapshot.late_frame_count;
+      output->adaptive_stale_drop_count = latency_snapshot.adaptive_stale_drop_count;
+      output->pacer_backlog_drop_count = latency_snapshot.pacer_backlog_drop_count;
+      output->renderer_error_drop_count = latency_snapshot.renderer_error_drop_count;
+      output->maximum_lateness_us = latency_snapshot.maximum_lateness_us;
+      output->decoder_backpressure_time_us = latency_snapshot.decoder_backpressure_time_us;
+      output->last_drop_lateness_us = latency_snapshot.last_drop_lateness_us;
+      output->rendered_fps_x100 = latency_snapshot.rendered_fps_x100;
+      output->consecutive_late_frames = latency_snapshot.consecutive_late_frames;
+      output->late_tolerance_us = latency_snapshot.late_tolerance_us;
+      output->decoder_backpressured = latency_snapshot.decoder_backpressured;
+      output->smoothing_queue_depth = latency_snapshot.smoothing_queue_depth;
+      output->smoothing_queue_capacity = latency_snapshot.smoothing_queue_capacity;
+      output->max_smoothing_queue_depth = latency_snapshot.max_smoothing_queue_depth;
+      output->smoothing_overflow_drops = latency_snapshot.smoothing_overflow_drops;
+      output->smoothing_underflow_repeats = latency_snapshot.smoothing_underflow_repeats;
+      output->smoothing_reserve_budget_us = latency_snapshot.smoothing_reserve_budget_us;
+      output->frame_timing_ring_count = latency_snapshot.ring_count;
+      output->reconnect_attempt_count = runtime->reconnect_attempt_count;
+      output->reconnect_success_count = runtime->reconnect_success_count;
+      output->resolved_remote_stream_mode = runtime->resolved_remote_stream_mode;
+      output->requested_packet_size = runtime->requested_packet_size;
+      output->stream_fps = runtime->request.fps > 0 ? (uint32_t)runtime->request.fps : 0U;
+      output->client_refresh_rate_x100 = runtime->renderer.client_refresh_rate_x100;
+      output->configured_pacing_mode = latency_snapshot.configured_pacing_mode;
+      output->effective_pacing_mode = latency_snapshot.effective_pacing_mode;
       nl_runtime_unlock(runtime);
 
       return NL_RESULT_OK;
+    }
+
+    void nl_runtime_record_reconnect_result(nl_runtime_t* runtime, bool attempt_started, bool succeeded) {
+      if (runtime == NULL) {
+        return;
+      }
+      nl_runtime_lock(runtime);
+      if (attempt_started) {
+        runtime->reconnect_attempt_count += 1U;
+      }
+      if (succeeded) {
+        runtime->reconnect_success_count += 1U;
+      }
+      nl_runtime_unlock(runtime);
     }
 
     nl_result_t nl_send_relative_mouse(nl_runtime_t* runtime, int16_t delta_x, int16_t delta_y) {

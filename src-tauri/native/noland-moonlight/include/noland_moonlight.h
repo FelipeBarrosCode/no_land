@@ -2,6 +2,7 @@
 #define NOLAND_MOONLIGHT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -49,6 +50,39 @@ typedef enum nl_surface_type {
   NL_SURFACE_WAYLAND_SURFACE = 4
 } nl_surface_type_t;
 
+typedef enum nl_pacing_mode {
+  NL_PACING_MODE_OFF = 0,
+  NL_PACING_MODE_AUTOMATIC = 1,
+  NL_PACING_MODE_SOFTWARE = 2,
+  NL_PACING_MODE_HARDWARE_MULTIPLE = 3
+} nl_pacing_mode_t;
+
+typedef enum nl_frame_buffer_mode {
+  NL_FRAME_BUFFER_MODE_OFF = 0,
+  NL_FRAME_BUFFER_MODE_ONE_FRAME = 1,
+  NL_FRAME_BUFFER_MODE_TWO_FRAMES = 2,
+  NL_FRAME_BUFFER_MODE_THREE_FRAMES = 3
+} nl_frame_buffer_mode_t;
+
+typedef enum nl_remote_stream_mode {
+  NL_REMOTE_STREAM_MODE_AUTO = 0,
+  NL_REMOTE_STREAM_MODE_FORCE_REMOTE = 1,
+  NL_REMOTE_STREAM_MODE_FORCE_LOCAL = 2
+} nl_remote_stream_mode_t;
+
+typedef struct nl_latency_config {
+  uint8_t telemetry_enabled;
+  uint8_t adaptive_late_frame_drop_enabled;
+  uint8_t decoder_backpressure_policy_enabled;
+  uint8_t auto_reconnect_on_unexpected_termination;
+  uint8_t vsync_enabled;
+  nl_pacing_mode_t pacing_mode;
+  nl_frame_buffer_mode_t frame_buffer_mode;
+  nl_remote_stream_mode_t remote_stream_mode;
+  uint32_t remote_packet_size;
+  uint32_t late_frame_tolerance_us;
+} nl_latency_config_t;
+
 typedef struct nl_start_request {
   const char* host_id;
   uint32_t app_id;
@@ -73,6 +107,8 @@ typedef struct nl_start_request {
   int32_t encryption_flags;
   int8_t remote_input_aes_key[16];
   int8_t remote_input_aes_iv[16];
+  uint64_t session_generation;
+  nl_latency_config_t latency_config;
 } nl_start_request_t;
 
 typedef struct nl_surface_descriptor {
@@ -88,6 +124,7 @@ typedef struct nl_event {
   nl_event_kind_t kind;
   nl_stream_state_t state;
   int32_t code;
+  uint64_t session_generation;
   char message[256];
 } nl_event_t;
 
@@ -130,6 +167,45 @@ typedef struct nl_stats {
   uint32_t last_video_rtp_timestamp;
   uint8_t last_video_hdr_active;
   uint8_t last_video_colorspace;
+  uint64_t session_generation;
+  uint32_t video_packets_interval;
+  uint32_t fec_packets_interval;
+  uint32_t fec_recoveries_interval;
+  uint32_t fec_failures_interval;
+  uint32_t out_of_sequence_packets_interval;
+  uint32_t invalid_packets_interval;
+  uint32_t invalid_fec_packets_interval;
+  int32_t pending_core_video_frames;
+  uint16_t decoder_queue_depth;
+  uint16_t render_queue_depth;
+  uint64_t average_decode_pipeline_us;
+  uint64_t average_render_queue_dwell_us;
+  uint64_t late_frame_count;
+  uint64_t adaptive_stale_drop_count;
+  uint64_t pacer_backlog_drop_count;
+  uint64_t renderer_error_drop_count;
+  uint64_t maximum_lateness_us;
+  uint64_t decoder_backpressure_time_us;
+  uint64_t last_drop_lateness_us;
+  uint32_t rendered_fps_x100;
+  uint32_t consecutive_late_frames;
+  uint32_t late_tolerance_us;
+  uint8_t decoder_backpressured;
+  uint8_t smoothing_queue_depth;
+  uint8_t smoothing_queue_capacity;
+  uint8_t max_smoothing_queue_depth;
+  uint64_t smoothing_overflow_drops;
+  uint64_t smoothing_underflow_repeats;
+  uint64_t smoothing_reserve_budget_us;
+  uint32_t frame_timing_ring_count;
+  uint64_t reconnect_attempt_count;
+  uint64_t reconnect_success_count;
+  nl_remote_stream_mode_t resolved_remote_stream_mode;
+  uint32_t requested_packet_size;
+  uint32_t stream_fps;
+  uint32_t client_refresh_rate_x100;
+  nl_pacing_mode_t configured_pacing_mode;
+  nl_pacing_mode_t effective_pacing_mode;
 } nl_stats_t;
 
 nl_result_t nl_runtime_create(nl_runtime_t** output);
@@ -137,6 +213,9 @@ void nl_runtime_destroy(nl_runtime_t* runtime);
 const char* nl_runtime_version_string(void);
 const char* nl_get_launch_query_parameters(void);
 int32_t nl_runtime_smoke_test(void);
+size_t nl_sizeof_start_request(void);
+size_t nl_sizeof_event(void);
+size_t nl_sizeof_stats(void);
 
 nl_result_t nl_runtime_start(nl_runtime_t* runtime, const nl_start_request_t* request);
 nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime);
@@ -144,6 +223,7 @@ nl_result_t nl_runtime_attach_surface(nl_runtime_t* runtime, const nl_surface_de
 nl_result_t nl_runtime_detach_surface(nl_runtime_t* runtime);
 nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output);
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output);
+void nl_runtime_record_reconnect_result(nl_runtime_t* runtime, bool attempt_started, bool succeeded);
 
 int nl_desktop_input_install(const nl_surface_descriptor_t* surface);
 void nl_desktop_input_uninstall(void);

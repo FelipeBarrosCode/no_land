@@ -11,6 +11,8 @@ add_library(noland_moonlight STATIC
   src/noland_moonlight.c
   src/noland_controller_manager.c
   src/noland_video_renderer.c
+  src/noland_latency_telemetry.c
+  src/noland_frame_deadline_policy.c
 )
 
 find_path(SDL2_INCLUDE_ROOT SDL2/SDL.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
@@ -118,4 +120,12 @@ if(BUILD_NOLAND_MOONLIGHT_TESTS)
   add_executable(noland_moonlight_smoke_test tests/smoke_test.c)
   target_link_libraries(noland_moonlight_smoke_test PRIVATE noland_moonlight)
   add_test(NAME noland_moonlight_smoke_test COMMAND noland_moonlight_smoke_test)
+
+  add_executable(noland_latency_policy_test tests/latency_policy_test.c)
+  target_include_directories(noland_latency_policy_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/../moonlight-common-c/src
+  )
+  target_link_libraries(noland_latency_policy_test PRIVATE noland_moonlight)
+  add_test(NAME noland_latency_policy_test COMMAND noland_latency_policy_test)
 endif()

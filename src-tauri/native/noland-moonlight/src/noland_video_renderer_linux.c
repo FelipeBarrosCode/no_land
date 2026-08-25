@@ -46,7 +46,9 @@ typedef struct nl_linux_video_context {
   GstAppSrc* appsrc;
   GstBus* bus;
   GstElement* decoder;
+  GstElement* render_queue;
   GstElement* sink;
+  nl_video_renderer_t* renderer;
   uintptr_t window_handle;
   uintptr_t display_handle;
   nl_surface_type_t surface_type;
@@ -67,6 +69,11 @@ typedef struct nl_linux_video_context {
   bool fatal_error;
   int sink_index;
   uint32_t disabled_sinks;
+  uint8_t smoothing_capacity;
+  uint64_t smoothing_overflow_drops;
+  uint64_t last_decoder_output_pts_us;
+  uint64_t backpressure_started_us;
+  bool backpressure_active;
   char decoder_name[NL_DECODER_NAME_MAX];
   char sink_name[NL_SINK_NAME_MAX];
 } nl_linux_video_context_t;
@@ -127,8 +134,251 @@ static nl_linux_video_context_t* nl_linux_ensure_context(nl_video_renderer_t* re
   }
   context->mutex_initialized = true;
   context->sink_index = NL_SINK_INDEX_NONE;
+  context->renderer = renderer;
   renderer->platform_context = context;
   return context;
+}
+
+static uint8_t nl_linux_smoothing_capacity(const nl_video_renderer_t* renderer) {
+  uint8_t capacity;
+  if (renderer == NULL) return 0U;
+  capacity = (uint8_t)renderer->latency_config.frame_buffer_mode;
+  return capacity > 3U ? 3U : capacity;
+}
+
+static uint16_t nl_linux_u16_depth(guint depth) {
+  return depth > (guint)UINT16_MAX ? UINT16_MAX : (uint16_t)depth;
+}
+
+static uint64_t nl_linux_buffer_pts_us(const GstBuffer* buffer) {
+  GstClockTime pts;
+  if (buffer == NULL) return 0U;
+  pts = GST_BUFFER_PTS(buffer);
+  return GST_CLOCK_TIME_IS_VALID(pts) ? (uint64_t)(pts / 1000U) : 0U;
+}
+
+static void nl_linux_query_render_queue(GstElement* render_queue,
+                                        guint* depth,
+                                        guint* capacity) {
+  guint current_depth = 0U;
+  guint maximum_depth = 0U;
+  if (render_queue != NULL) {
+    g_object_get(render_queue,
+                 "current-level-buffers", &current_depth,
+                 "max-size-buffers", &maximum_depth,
+                 NULL);
+  }
+  if (depth != NULL) *depth = current_depth;
+  if (capacity != NULL) *capacity = maximum_depth;
+}
+
+static void nl_linux_publish_smoothing(nl_linux_video_context_t* context,
+                                       guint render_queue_depth) {
+  nl_video_renderer_t* renderer;
+  uint8_t smoothing_capacity;
+  uint8_t smoothing_depth;
+  uint64_t overflow_drops;
+  uint32_t stream_fps;
+  if (context == NULL) return;
+
+  pthread_mutex_lock(&context->mutex);
+  renderer = context->renderer;
+  smoothing_capacity = context->smoothing_capacity;
+  smoothing_depth = render_queue_depth > 0U
+      ? (uint8_t)(render_queue_depth - 1U)
+      : 0U;
+  if (smoothing_depth > smoothing_capacity) {
+    smoothing_depth = smoothing_capacity;
+  }
+  overflow_drops = context->smoothing_overflow_drops;
+  stream_fps = context->redraw_rate > 0 ? (uint32_t)context->redraw_rate : 0U;
+  pthread_mutex_unlock(&context->mutex);
+
+  if (renderer != NULL) {
+    nl_latency_telemetry_set_smoothing(&renderer->telemetry,
+                                       smoothing_depth,
+                                       smoothing_capacity,
+                                       overflow_drops,
+                                       0U,
+                                       stream_fps);
+  }
+}
+
+static void nl_linux_set_backpressure(nl_linux_video_context_t* context,
+                                      bool active,
+                                      uint64_t now_us) {
+  nl_video_renderer_t* renderer;
+  uint64_t duration_us = 0U;
+  bool changed = false;
+  if (context == NULL) return;
+
+  pthread_mutex_lock(&context->mutex);
+  renderer = context->renderer;
+  if (active && !context->backpressure_active) {
+    context->backpressure_active = true;
+    context->backpressure_started_us = now_us;
+    changed = true;
+  } else if (!active && context->backpressure_active) {
+    if (now_us >= context->backpressure_started_us) {
+      duration_us = now_us - context->backpressure_started_us;
+    }
+    context->backpressure_active = false;
+    context->backpressure_started_us = 0U;
+    changed = true;
+  }
+  pthread_mutex_unlock(&context->mutex);
+
+  if (changed && renderer != NULL) {
+    nl_latency_telemetry_record_backpressure(&renderer->telemetry,
+                                             duration_us,
+                                             active);
+  }
+}
+
+static void nl_linux_reset_latency_state(nl_linux_video_context_t* context) {
+  nl_video_renderer_t* renderer;
+  uint8_t smoothing_capacity;
+  uint32_t stream_fps;
+  if (context == NULL) return;
+
+  pthread_mutex_lock(&context->mutex);
+  renderer = context->renderer;
+  smoothing_capacity = nl_linux_smoothing_capacity(renderer);
+  context->smoothing_capacity = smoothing_capacity;
+  context->smoothing_overflow_drops = 0U;
+  context->last_decoder_output_pts_us = 0U;
+  context->backpressure_started_us = 0U;
+  context->backpressure_active = false;
+  stream_fps = context->redraw_rate > 0 ? (uint32_t)context->redraw_rate : 0U;
+  pthread_mutex_unlock(&context->mutex);
+
+  if (renderer != NULL) {
+    nl_latency_telemetry_reset(&renderer->telemetry,
+                               renderer->latency_config.telemetry_enabled != 0U,
+                               stream_fps,
+                               renderer->latency_config.late_frame_tolerance_us,
+                               smoothing_capacity);
+    nl_latency_telemetry_set_pacing(&renderer->telemetry,
+                                    renderer->latency_config.pacing_mode,
+                                    NL_PACING_MODE_OFF);
+  }
+}
+
+static GstPadProbeReturn nl_linux_post_decoder_probe(GstPad* pad,
+                                                     GstPadProbeInfo* info,
+                                                     gpointer data) {
+  nl_linux_video_context_t* context = (nl_linux_video_context_t*)data;
+  GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+  guint render_queue_depth = 0U;
+  guint render_queue_capacity = 0U;
+  uint64_t presentation_time_us;
+  uint64_t now_us;
+  bool backpressured;
+  (void)pad;
+  if (context == NULL || buffer == NULL) return GST_PAD_PROBE_OK;
+
+  presentation_time_us = nl_linux_buffer_pts_us(buffer);
+  now_us = LiGetMicroseconds();
+  nl_linux_query_render_queue(context->render_queue,
+                              &render_queue_depth,
+                              &render_queue_capacity);
+  backpressured = render_queue_capacity != 0U &&
+                  render_queue_depth >= render_queue_capacity;
+
+  pthread_mutex_lock(&context->mutex);
+  context->last_decoder_output_pts_us = presentation_time_us;
+  pthread_mutex_unlock(&context->mutex);
+
+  nl_latency_telemetry_record_decoder_output(
+      &context->renderer->telemetry,
+      presentation_time_us,
+      now_us,
+      nl_linux_u16_depth(render_queue_depth),
+      backpressured);
+  nl_linux_set_backpressure(context, backpressured, now_us);
+  nl_linux_publish_smoothing(context, render_queue_depth);
+  return GST_PAD_PROBE_OK;
+}
+
+static GstPadProbeReturn nl_linux_pre_sink_probe(GstPad* pad,
+                                                 GstPadProbeInfo* info,
+                                                 gpointer data) {
+  nl_linux_video_context_t* context = (nl_linux_video_context_t*)data;
+  GstBuffer* buffer = GST_PAD_PROBE_INFO_BUFFER(info);
+  guint render_queue_depth = 0U;
+  guint render_queue_capacity = 0U;
+  uint64_t now_us;
+  (void)pad;
+  if (context == NULL || buffer == NULL) return GST_PAD_PROBE_OK;
+
+  now_us = LiGetMicroseconds();
+  nl_linux_query_render_queue(context->render_queue,
+                              &render_queue_depth,
+                              &render_queue_capacity);
+  nl_latency_telemetry_record_render_submit(
+      &context->renderer->telemetry,
+      nl_linux_buffer_pts_us(buffer),
+      now_us);
+  nl_linux_set_backpressure(
+      context,
+      render_queue_capacity != 0U && render_queue_depth >= render_queue_capacity,
+      now_us);
+  nl_linux_publish_smoothing(context, render_queue_depth);
+  return GST_PAD_PROBE_OK;
+}
+
+static void nl_linux_render_queue_overrun(GstElement* render_queue,
+                                          gpointer data) {
+  nl_linux_video_context_t* context = (nl_linux_video_context_t*)data;
+  nl_video_renderer_t* renderer;
+  guint render_queue_depth = 0U;
+  uint8_t smoothing_capacity;
+  uint64_t presentation_time_us;
+  uint64_t now_us;
+  if (context == NULL) return;
+
+  now_us = LiGetMicroseconds();
+  nl_linux_query_render_queue(render_queue, &render_queue_depth, NULL);
+  pthread_mutex_lock(&context->mutex);
+  renderer = context->renderer;
+  smoothing_capacity = context->smoothing_capacity;
+  presentation_time_us = context->last_decoder_output_pts_us;
+  if (smoothing_capacity != 0U) {
+    context->smoothing_overflow_drops += 1U;
+  }
+  pthread_mutex_unlock(&context->mutex);
+
+  nl_linux_set_backpressure(context, true, now_us);
+  if (renderer != NULL) {
+    nl_latency_telemetry_record_drop(
+        &renderer->telemetry,
+        presentation_time_us,
+        0U,
+        smoothing_capacity == 0U
+            ? NL_FRAME_DROP_PACER_BACKLOG
+            : NL_FRAME_DROP_SMOOTHING_OVERFLOW);
+  }
+  nl_linux_publish_smoothing(context, render_queue_depth);
+}
+
+static bool nl_linux_add_buffer_probe(GstElement* element,
+                                      const char* pad_name,
+                                      GstPadProbeCallback callback,
+                                      nl_linux_video_context_t* context) {
+  GstPad* pad;
+  gulong probe_id;
+  if (element == NULL || pad_name == NULL || callback == NULL || context == NULL) {
+    return false;
+  }
+  pad = gst_element_get_static_pad(element, pad_name);
+  if (pad == NULL) return false;
+  probe_id = gst_pad_add_probe(pad,
+                               GST_PAD_PROBE_TYPE_BUFFER,
+                               callback,
+                               context,
+                               NULL);
+  gst_object_unref(pad);
+  return probe_id != 0U;
 }
 
 static bool nl_linux_factory_exists(const char* name) {
@@ -287,9 +537,11 @@ static void nl_linux_destroy_pipeline(nl_linux_video_context_t* context) {
     context->pipeline = NULL;
   }
   context->decoder = NULL;
+  context->render_queue = NULL;
   context->sink = NULL;
   context->decoder_name[0] = '\0';
   context->sink_name[0] = '\0';
+  nl_linux_reset_latency_state(context);
 }
 
 static int nl_linux_sink_count(const nl_linux_video_context_t* context) {
@@ -352,6 +604,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   GstStateChangeReturn state_result;
   nl_linux_sink_description_t sink_description;
   bool elements_owned_by_pipeline = false;
+  uint8_t smoothing_capacity;
 
   if (context == NULL || codec == NULL || decoder_name == NULL ||
       !nl_linux_get_sink_description(context, sink_index, &sink_description)) {
@@ -360,6 +613,10 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   if (!nl_linux_factory_exists(sink_description.name)) return -1;
 
   nl_linux_destroy_pipeline(context);
+  smoothing_capacity = nl_linux_smoothing_capacity(context->renderer);
+  pthread_mutex_lock(&context->mutex);
+  context->smoothing_capacity = smoothing_capacity;
+  pthread_mutex_unlock(&context->mutex);
   pipeline = gst_pipeline_new("noland-video-pipeline");
   appsrc = gst_element_factory_make("appsrc", "noland-source");
   parser = gst_element_factory_make(codec->parser, "noland-parser");
@@ -388,7 +645,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   gst_app_src_set_max_bytes(GST_APP_SRC(appsrc), NL_INPUT_MAX_BYTES);
 
   g_object_set(render_queue,
-               "max-size-buffers", 1U,
+               "max-size-buffers", 1U + (guint)smoothing_capacity,
                "max-size-bytes", 0U,
                "max-size-time", (guint64)0,
                "leaky", 2,
@@ -460,6 +717,24 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
     goto fail;
   }
 
+  if (!nl_linux_add_buffer_probe(decoder,
+                                 "src",
+                                 nl_linux_post_decoder_probe,
+                                 context) ||
+      !nl_linux_add_buffer_probe(sink,
+                                 "sink",
+                                 nl_linux_pre_sink_probe,
+                                 context)) {
+    g_printerr("[noland-video] failed to install latency probes for decoder=%s sink=%s\n",
+               decoder_name,
+               sink_description.name);
+    goto fail;
+  }
+  g_signal_connect(render_queue,
+                   "overrun",
+                   G_CALLBACK(nl_linux_render_queue_overrun),
+                   context);
+
   if (context->surface_type == NL_SURFACE_WAYLAND_SURFACE &&
       context->display_handle != 0) {
     nl_linux_apply_wayland_display_context(pipeline, context->display_handle);
@@ -478,6 +753,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   context->appsrc = GST_APP_SRC(gst_object_ref(appsrc));
   context->bus = bus;
   context->decoder = decoder;
+  context->render_queue = render_queue;
   context->sink = sink;
   context->using_software_decoder = software_decoder;
   context->sink_index = sink_index;
@@ -915,6 +1191,7 @@ void nl_video_renderer_platform_stop(nl_video_renderer_t* renderer) {
     pthread_join(context->frame_thread, NULL);
     context->frame_thread_started = false;
   }
+  nl_linux_reset_latency_state(context);
 }
 
 void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer) {

@@ -44,7 +44,7 @@ pub struct MoonlightManager {
 impl MoonlightManager {
     pub fn new(state_path: PathBuf, app_data_dir: PathBuf) -> Self {
         let identity_dir = app_data_dir.join("moonlight").join("identity");
-        let runtime = spawn_runtime_actor();
+        let runtime = spawn_runtime_actor(app_data_dir.clone());
         let input = InputManager::new(runtime.clone());
         Self {
             state_path: state_path.clone(),
