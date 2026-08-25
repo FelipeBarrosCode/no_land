@@ -33,6 +33,7 @@ import { ServerPickerModal } from "../servers/ServerPickerModal";
 import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorageExportModal";
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { InstanceDisplayModal } from "./InstanceDisplayModal";
+import { InstanceMoonlightOptionsModal } from "./InstanceMoonlightOptionsModal";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
 
@@ -164,6 +165,8 @@ export function DashboardScreen({
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const [displayInstanceId, setDisplayInstanceId] = useState<number | null>(null);
+  const [moonlightOptionsInstanceId, setMoonlightOptionsInstanceId] =
+    useState<number | null>(null);
   const [launchLibraryInstanceId, setLaunchLibraryInstanceId] = useState<number | null>(null);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -177,6 +180,9 @@ export function DashboardScreen({
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
   const displayInstance = rentedInstances.find(
     (instance) => instance.instanceId === displayInstanceId,
+  );
+  const moonlightOptionsInstance = rentedInstances.find(
+    (instance) => instance.instanceId === moonlightOptionsInstanceId,
   );
   const launchLibraryInstance = rentedInstances.find(
     (instance) => instance.instanceId === launchLibraryInstanceId,
@@ -493,13 +499,27 @@ export function DashboardScreen({
                     <h4 className="font-display text-[11px] text-white">
                       {instance.label}
                     </h4>
-                    <StatusPill
-                      state={
-                        instance.status.toLowerCase().includes("run")
-                          ? "Ready"
-                          : "WaitingForInstance"
-                      }
-                    />
+                    <div className="flex items-center gap-2">
+                      <StatusPill
+                        state={
+                          instance.status.toLowerCase().includes("run")
+                            ? "Ready"
+                            : "WaitingForInstance"
+                        }
+                      />
+                      <Button
+                        variant="ghost"
+                        aria-label={`Moonlight options for ${instance.label}`}
+                        title="Moonlight stream options"
+                        className="h-8 w-8 rounded border border-[#3a4068] p-0"
+                        disabled={busy}
+                        onClick={() =>
+                          setMoonlightOptionsInstanceId(instance.instanceId)
+                        }
+                      >
+                        <SpriteIcon icon="settings" className="h-5 w-5" />
+                      </Button>
+                    </div>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
                     <p>ID: {instance.instanceId}</p>
@@ -905,6 +925,13 @@ export function DashboardScreen({
         <InstanceDisplayModal
           instance={displayInstance}
           onClose={() => setDisplayInstanceId(null)}
+        />
+      ) : null}
+
+      {moonlightOptionsInstance ? (
+        <InstanceMoonlightOptionsModal
+          instance={moonlightOptionsInstance}
+          onClose={() => setMoonlightOptionsInstanceId(null)}
         />
       ) : null}
 

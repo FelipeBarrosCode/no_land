@@ -665,6 +665,8 @@ pub fn validate_preferences(
     preferences: &StreamPreferences,
     capabilities: Option<&ClientVideoCapabilities>,
 ) -> Result<(), MoonlightError> {
+    validate_latency_config(preferences)?;
+
     let video = &preferences.video;
     let network = &preferences.network;
 
@@ -700,6 +702,32 @@ pub fn validate_preferences(
             "packetSize must be between 512 and 1400".to_string(),
         ));
     }
+    if preferences.reconnection.enabled
+        && (preferences.reconnection.maximum_attempts != 1
+            || preferences.reconnection.initial_delay_ms != 0
+            || preferences.reconnection.maximum_delay_ms != 0)
+    {
+        return Err(MoonlightError::Validation(
+            "the embedded client currently supports exactly one immediate reconnect attempt"
+                .to_string(),
+        ));
+    }
+
+    if let Some(capabilities) = capabilities {
+        if video.hdr && !(capabilities.supports_hdr10 && capabilities.supports_10bit) {
+            return Err(MoonlightError::Validation(
+                "HDR requires a 10-bit-capable decoder and display".to_string(),
+            ));
+        }
+        // Codec and 4:4:4 preferences are negotiated opportunistically. Unsupported
+        // entries fall through to the next codec/profile instead of rejecting the request.
+    }
+
+    Ok(())
+}
+
+pub fn validate_latency_config(preferences: &StreamPreferences) -> Result<(), MoonlightError> {
+    let network = &preferences.network;
     let resolved_remote_mode = match preferences.latency.remote_stream_mode {
         RemoteStreamMode::Auto => match network.streaming_mode {
             StreamingMode::Local => RemoteStreamMode::ForceLocal,
@@ -717,16 +745,6 @@ pub fn validate_preferences(
             "remote packet size must be between 960 and 1392 and divisible by 16".to_string(),
         ));
     }
-    if preferences.reconnection.enabled
-        && (preferences.reconnection.maximum_attempts != 1
-            || preferences.reconnection.initial_delay_ms != 0
-            || preferences.reconnection.maximum_delay_ms != 0)
-    {
-        return Err(MoonlightError::Validation(
-            "the embedded client currently supports exactly one immediate reconnect attempt"
-                .to_string(),
-        ));
-    }
     if preferences.latency.frame_buffer_mode != FrameBufferMode::Off
         && preferences.latency.adaptive_late_frame_drop_enabled
     {
@@ -739,17 +757,6 @@ pub fn validate_preferences(
             "frame pacing must be off when V-Sync is disabled".to_string(),
         ));
     }
-
-    if let Some(capabilities) = capabilities {
-        if video.hdr && !(capabilities.supports_hdr10 && capabilities.supports_10bit) {
-            return Err(MoonlightError::Validation(
-                "HDR requires a 10-bit-capable decoder and display".to_string(),
-            ));
-        }
-        // Codec and 4:4:4 preferences are negotiated opportunistically. Unsupported
-        // entries fall through to the next codec/profile instead of rejecting the request.
-    }
-
     Ok(())
 }
 

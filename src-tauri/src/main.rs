@@ -467,6 +467,8 @@ fn main() {
             moonlight_send_controller_arrival,
             moonlight_send_controller_state,
             moonlight_update_preferences,
+            moonlight_get_host_latency_preferences,
+            moonlight_update_host_latency_preferences,
             moonlight_forget_host,
             moonlight_get_active_input_mode,
             moonlight_get_input_debug_state,

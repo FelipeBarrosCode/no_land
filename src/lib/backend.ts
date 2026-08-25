@@ -34,6 +34,8 @@ import type {
   MicrophoneDevice,
   MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
+  MoonlightHostLatencyPreferencesResponse,
+  NolandLatencyConfig,
   EmbeddedMoonlightInstanceStatus,
   PostWireGuardSetupState,
   ReachabilityResult,
@@ -431,6 +433,25 @@ export async function moonlightGetSessionState(): Promise<{
   state: string;
 }> {
   return invokeSafe<{ state: string }>("moonlight_get_session_state");
+}
+
+export async function moonlightGetHostLatencyPreferences(
+  hostId: string,
+): Promise<MoonlightHostLatencyPreferencesResponse> {
+  return invokeSafe<MoonlightHostLatencyPreferencesResponse>(
+    "moonlight_get_host_latency_preferences",
+    { hostId },
+  );
+}
+
+export async function moonlightUpdateHostLatencyPreferences(
+  hostId: string,
+  latency: NolandLatencyConfig,
+): Promise<MoonlightHostLatencyPreferencesResponse> {
+  return invokeSafe<MoonlightHostLatencyPreferencesResponse>(
+    "moonlight_update_host_latency_preferences",
+    { hostId, latency },
+  );
 }
 
 export async function regenerateEdid(payload: {
