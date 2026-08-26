@@ -102,6 +102,24 @@ run_user_systemctl() {
     run_user systemctl --user "$@"
 }
 
+stop_user_receiver_for_upgrade() {
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout --signal=TERM --kill-after=2s 8s \
+            sudo -u "$USER_NAME" env \
+                HOME="$home_dir" \
+                XDG_RUNTIME_DIR="$runtime_dir" \
+                DBUS_SESSION_BUS_ADDRESS="unix:path=${bus_path}" \
+                systemctl --user stop noland-mic-receiver.service; then
+            return
+        fi
+    else
+        run_user_systemctl --no-block stop noland-mic-receiver.service >/dev/null 2>&1 || true
+        sleep 1
+    fi
+
+    run_user_systemctl kill --kill-who=all --signal=KILL noland-mic-receiver.service >/dev/null 2>&1 || true
+}
+
 WG_IP="${NOLAND_MIC_WG_IP:-}"
 if [[ -z "$WG_IP" ]] && command -v ip >/dev/null 2>&1; then
     WG_IP="$(ip -o -4 addr show dev "$WG_INTERFACE" 2>/dev/null | awk 'NR == 1 {split($4, address, "/"); print address[1]}' || true)"
@@ -200,7 +218,7 @@ recording_source_was_present=0
 if run_user pactl list short sources 2>/dev/null | awk '{print $2}' | grep -x noland_remote_microphone >/dev/null; then
     recording_source_was_present=1
 fi
-run_user_systemctl stop noland-mic-receiver.service >/dev/null 2>&1 || true
+stop_user_receiver_for_upgrade
 default_sink_before="$(run_user pactl get-default-sink 2>/dev/null || true)"
 previous_default_source="$(run_user pactl get-default-source 2>/dev/null || true)"
 rm -f "$INSTALL_DIR/noland-mic-source-setup" "$INSTALL_DIR/noland-mic-source-cleanup"
@@ -294,7 +312,7 @@ def fail(message):
     raise SystemExit(message)
 
 
-def run_user_systemctl(user, *arguments, check=True):
+def run_user_systemctl(user, *arguments, check=True, timeout_seconds=None):
     import pwd
     uid = pwd.getpwnam(user).pw_uid
     runtime = f"/run/user/{uid}"
@@ -311,7 +329,30 @@ def run_user_systemctl(user, *arguments, check=True):
         check=check,
         text=True,
         capture_output=True,
+        timeout=timeout_seconds,
     )
+
+
+def stop_receiver_service(user):
+    try:
+        return run_user_systemctl(
+            user,
+            "stop",
+            "noland-mic-receiver.service",
+            check=False,
+            timeout_seconds=7,
+        )
+    except subprocess.TimeoutExpired:
+        run_user_systemctl(
+            user,
+            "kill",
+            "--kill-who=all",
+            "--signal=KILL",
+            "noland-mic-receiver.service",
+            check=False,
+            timeout_seconds=3,
+        )
+        return None
 
 
 def current_value(text, key, default=None):
@@ -406,7 +447,7 @@ def start(args):
     if not (0 <= args.ssrc <= 0xFFFFFFFF):
         fail("SSRC must fit in an unsigned 32-bit integer")
 
-    run_user_systemctl(args.user, "stop", "noland-mic-receiver.service", check=False)
+    stop_receiver_service(args.user)
     rtp_port, rtcp_port = allocate_pair(bind, args.port_min, args.port_max)
     source_fifo = f"/run/user/{account.pw_uid}/noland-mic-source.pcm"
     content = f'''[network]\nbind_address = "{bind}"\nrtp_port = {rtp_port}\nrtcp_port = {rtcp_port}\ninterface = "{args.interface}"\nmaximum_packet_size = 1200\nrecv_buffer_bytes = 524288\n\n[audio]\nsample_rate = 48000\nchannels = 1\nframe_duration_ms = 10\nsource_fifo_path = "{source_fifo}"\n\n[jitter]\ninitial_ms = {args.jitter_ms}\nminimum_ms = 10\nmaximum_ms = 60\n\n[session]\nsession_id = "{args.session_id}"\nexpected_peer_ip = "{peer}"\nclient_rtcp_port = {args.client_rtcp_port}\nexpected_ssrc = {args.ssrc}\n'''
@@ -481,7 +522,7 @@ def stop(args):
     active_session = current_value(text, "session_id", "")
     if active_session != args.session_id:
         fail("session id does not own the active receiver")
-    run_user_systemctl(args.user, "stop", "noland-mic-receiver.service", check=False)
+    stop_receiver_service(args.user)
     STATUS.unlink(missing_ok=True)
     print(json.dumps({"sessionId": args.session_id, "stopped": True}, separators=(",", ":")))
 
@@ -529,6 +570,9 @@ Type=simple
 ExecStart=${INSTALL_DIR}/noland-mic-receiver --config ${CONFIG_FILE}
 Restart=on-failure
 RestartSec=2s
+KillMode=control-group
+TimeoutStopSec=5s
+SendSIGKILL=yes
 # Prevent GStreamer from forking a plugin-scanner process on every start.
 # The scanner tries to load libgstwebrtcds which is unavailable in the VM,
 # producing spurious warnings. GST_REGISTRY_FORK=no skips the fork entirely;
@@ -676,7 +720,7 @@ fi
 # Written only after the unit, PipeWire topology, listeners, and status writer
 # have all passed verification. The client uses this to force safe upgrades of
 # older remote helpers before allocating a media session.
-echo "7" > "$CONFIG_DIR/microphone-agent.version"
+echo "8" > "$CONFIG_DIR/microphone-agent.version"
 chmod 0644 "$CONFIG_DIR/microphone-agent.version"
 
 echo

@@ -1,1 +1,2544 @@
-error: manifest path `/Users/felipebarros/Documents/CodingProjects/noland/vm-cloud-mic-agent/Cargo.toml` does not exist
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   1.327270600s  INFO prepare_target{force=false package_id=noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent) target="noland-mic-receiver"}: cargo::core::compiler::fingerprint: fingerprint error for noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent)/Check { test: false }/TargetInner { name: "noland-mic-receiver", doc: true, ..: with_path("C:\\Users\\Felipe\\Documents\\noland\\no_land\\vm-cloud-mic-agent\\src\\main.rs", Edition2021) }
+   1.330253900s  INFO prepare_target{force=false package_id=noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent) target="noland-mic-receiver"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\noland-mic-receiver-908d6cc38aea3982\bin-noland-mic-receiver`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_libgit2_prerelease
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   1.384235400s  INFO prepare_target{force=false package_id=clap v4.6.4 target="clap"}: cargo::core::compiler::fingerprint: fingerprint error for clap v4.6.4/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\clap-4.6.4\\src\\lib.rs", Edition2024) }
+   1.386020500s  INFO prepare_target{force=false package_id=clap v4.6.4 target="clap"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\clap-0882216de17de0da\lib-clap`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.390118200s  INFO prepare_target{force=false package_id=clap_builder v4.6.2 target="clap_builder"}: cargo::core::compiler::fingerprint: fingerprint error for clap_builder v4.6.2/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap_builder", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\clap_builder-4.6.2\\src\\lib.rs", Edition2024) }
+   1.390195100s  INFO prepare_target{force=false package_id=clap_builder v4.6.2 target="clap_builder"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\clap_builder-a4b499ea5e9b0d8f\lib-clap_builder`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.392889800s  INFO prepare_target{force=false package_id=anstream v1.0.0 target="anstream"}: cargo::core::compiler::fingerprint: fingerprint error for anstream v1.0.0/Check { test: false }/TargetInner { ..: lib_target("anstream", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\anstream-1.0.0\\src\\lib.rs", Edition2021) }
+   1.393059100s  INFO prepare_target{force=false package_id=anstream v1.0.0 target="anstream"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\anstream-a6193f189ee548fe\lib-anstream`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.396570500s  INFO prepare_target{force=false package_id=anstyle v1.0.14 target="anstyle"}: cargo::core::compiler::fingerprint: fingerprint error for anstyle v1.0.14/Check { test: false }/TargetInner { ..: lib_target("anstyle", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\anstyle-1.0.14\\src\\lib.rs", Edition2021) }
+   1.396784200s  INFO prepare_target{force=false package_id=anstyle v1.0.14 target="anstyle"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\anstyle-3ae783e02706b03b\lib-anstyle`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.398910700s  INFO prepare_target{force=false package_id=anstyle-parse v1.0.0 target="anstyle_parse"}: cargo::core::compiler::fingerprint: fingerprint error for anstyle-parse v1.0.0/Check { test: false }/TargetInner { ..: lib_target("anstyle_parse", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\anstyle-parse-1.0.0\\src\\lib.rs", Edition2021) }
+   1.399025100s  INFO prepare_target{force=false package_id=anstyle-parse v1.0.0 target="anstyle_parse"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\anstyle-parse-9bf689922ea70bd1\lib-anstyle_parse`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.402776700s  INFO prepare_target{force=false package_id=utf8parse v0.2.2 target="utf8parse"}: cargo::core::compiler::fingerprint: fingerprint error for utf8parse v0.2.2/Check { test: false }/TargetInner { ..: lib_target("utf8parse", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\utf8parse-0.2.2\\src\\lib.rs", Edition2018) }
+   1.402993600s  INFO prepare_target{force=false package_id=utf8parse v0.2.2 target="utf8parse"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\utf8parse-a3c8de26001e5807\lib-utf8parse`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_libgit2_prerelease
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: git_midx_writer_dump
+  22: git_filter_source_repo
+  23: git_midx_writer_dump
+  24: BaseThreadInitThunk
+  25: RtlUserThreadStart
+   1.405149300s  INFO prepare_target{force=false package_id=anstyle-query v1.1.5 target="anstyle_query"}: cargo::core::compiler::fingerprint: fingerprint error for anstyle-query v1.1.5/Check { test: false }/TargetInner { ..: lib_target("anstyle_query", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\anstyle-query-1.1.5\\src\\lib.rs", Edition2021) }
+   1.405346900s  INFO prepare_target{force=false package_id=anstyle-query v1.1.5 target="anstyle_query"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\anstyle-query-5b115a90f3274700\lib-anstyle_query`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.412295400s  INFO prepare_target{force=false package_id=anstyle-wincon v3.0.11 target="anstyle_wincon"}: cargo::core::compiler::fingerprint: fingerprint error for anstyle-wincon v3.0.11/Check { test: false }/TargetInner { ..: lib_target("anstyle_wincon", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\anstyle-wincon-3.0.11\\src\\lib.rs", Edition2021) }
+   1.412347600s  INFO prepare_target{force=false package_id=anstyle-wincon v3.0.11 target="anstyle_wincon"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\anstyle-wincon-0c8ad6a877338aed\lib-anstyle_wincon`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.415346000s  INFO prepare_target{force=false package_id=once_cell_polyfill v1.70.2 target="once_cell_polyfill"}: cargo::core::compiler::fingerprint: fingerprint error for once_cell_polyfill v1.70.2/Check { test: false }/TargetInner { ..: lib_target("once_cell_polyfill", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\once_cell_polyfill-1.70.2\\src\\lib.rs", Edition2021) }
+   1.415535300s  INFO prepare_target{force=false package_id=once_cell_polyfill v1.70.2 target="once_cell_polyfill"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\once_cell_polyfill-932d38dd12791012\lib-once_cell_polyfill`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_libgit2_prerelease
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: git_midx_writer_dump
+  22: git_filter_source_repo
+  23: git_midx_writer_dump
+  24: BaseThreadInitThunk
+  25: RtlUserThreadStart
+   1.418690600s  INFO prepare_target{force=false package_id=colorchoice v1.0.5 target="colorchoice"}: cargo::core::compiler::fingerprint: fingerprint error for colorchoice v1.0.5/Check { test: false }/TargetInner { ..: lib_target("colorchoice", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\colorchoice-1.0.5\\src\\lib.rs", Edition2021) }
+   1.418742500s  INFO prepare_target{force=false package_id=colorchoice v1.0.5 target="colorchoice"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\colorchoice-3d2df1beab2ab296\lib-colorchoice`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.420949200s  INFO prepare_target{force=false package_id=is_terminal_polyfill v1.70.2 target="is_terminal_polyfill"}: cargo::core::compiler::fingerprint: fingerprint error for is_terminal_polyfill v1.70.2/Check { test: false }/TargetInner { ..: lib_target("is_terminal_polyfill", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\is_terminal_polyfill-1.70.2\\src\\lib.rs", Edition2021) }
+   1.421026400s  INFO prepare_target{force=false package_id=is_terminal_polyfill v1.70.2 target="is_terminal_polyfill"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\is_terminal_polyfill-85f59835545da546\lib-is_terminal_polyfill`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.422465600s  INFO prepare_target{force=false package_id=clap_lex v1.1.0 target="clap_lex"}: cargo::core::compiler::fingerprint: fingerprint error for clap_lex v1.1.0/Check { test: false }/TargetInner { benched: false, ..: lib_target("clap_lex", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\clap_lex-1.1.0\\src\\lib.rs", Edition2024) }
+   1.422542500s  INFO prepare_target{force=false package_id=clap_lex v1.1.0 target="clap_lex"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\clap_lex-ae0e8b2327348ec5\lib-clap_lex`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.424451800s  INFO prepare_target{force=false package_id=strsim v0.11.1 target="strsim"}: cargo::core::compiler::fingerprint: fingerprint error for strsim v0.11.1/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("strsim", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\strsim-0.11.1\\src\\lib.rs", Edition2015) }
+   1.424529100s  INFO prepare_target{force=false package_id=strsim v0.11.1 target="strsim"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\strsim-331bee6047451850\lib-strsim`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.443219100s  INFO prepare_target{force=false package_id=gstreamer v0.23.7 target="gstreamer"}: cargo::core::compiler::fingerprint: fingerprint error for gstreamer v0.23.7/Check { test: false }/TargetInner { ..: lib_target("gstreamer", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gstreamer-0.23.7\\src\\lib.rs", Edition2021) }
+   1.443402600s  INFO prepare_target{force=false package_id=gstreamer v0.23.7 target="gstreamer"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gstreamer-c624f0f4d903515c\lib-gstreamer`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.447796300s  INFO prepare_target{force=false package_id=cfg-if v1.0.4 target="cfg_if"}: cargo::core::compiler::fingerprint: fingerprint error for cfg-if v1.0.4/Check { test: false }/TargetInner { ..: lib_target("cfg_if", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\cfg-if-1.0.4\\src\\lib.rs", Edition2018) }
+   1.448055400s  INFO prepare_target{force=false package_id=cfg-if v1.0.4 target="cfg_if"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\cfg-if-38379743a7c2c287\lib-cfg_if`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.449616800s  INFO prepare_target{force=false package_id=futures-channel v0.3.33 target="futures_channel"}: cargo::core::compiler::fingerprint: fingerprint error for futures-channel v0.3.33/Check { test: false }/TargetInner { ..: lib_target("futures_channel", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\futures-channel-0.3.33\\src\\lib.rs", Edition2018) }
+   1.449657800s  INFO prepare_target{force=false package_id=futures-channel v0.3.33 target="futures_channel"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\futures-channel-7a99c10c65f1d051\lib-futures_channel`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.453237900s  INFO prepare_target{force=false package_id=futures-util v0.3.33 target="futures_util"}: cargo::core::compiler::fingerprint: fingerprint error for futures-util v0.3.33/Check { test: false }/TargetInner { ..: lib_target("futures_util", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\futures-util-0.3.33\\src\\lib.rs", Edition2018) }
+   1.453360700s  INFO prepare_target{force=false package_id=futures-util v0.3.33 target="futures_util"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\futures-util-dd4490c60c55e43f\lib-futures_util`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.460066900s  INFO prepare_target{force=false package_id=glib v0.20.12 target="glib"}: cargo::core::compiler::fingerprint: fingerprint error for glib v0.20.12/Check { test: false }/TargetInner { ..: lib_target("glib", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\glib-0.20.12\\src\\lib.rs", Edition2021) }
+   1.460352400s  INFO prepare_target{force=false package_id=glib v0.20.12 target="glib"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\glib-fb896f296eaec3a5\lib-glib`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.466616300s  INFO prepare_target{force=false package_id=bitflags v2.13.1 target="bitflags"}: cargo::core::compiler::fingerprint: fingerprint error for bitflags v2.13.1/Check { test: false }/TargetInner { ..: lib_target("bitflags", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\bitflags-2.13.1\\src\\lib.rs", Edition2021) }
+   1.466756900s  INFO prepare_target{force=false package_id=bitflags v2.13.1 target="bitflags"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\bitflags-a2aaed830ba3b921\lib-bitflags`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.468111900s  INFO prepare_target{force=false package_id=futures-executor v0.3.33 target="futures_executor"}: cargo::core::compiler::fingerprint: fingerprint error for futures-executor v0.3.33/Check { test: false }/TargetInner { ..: lib_target("futures_executor", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\futures-executor-0.3.33\\src\\lib.rs", Edition2018) }
+   1.468166300s  INFO prepare_target{force=false package_id=futures-executor v0.3.33 target="futures_executor"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\futures-executor-7ab46ec0b17d7ca2\lib-futures_executor`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.469929200s  INFO prepare_target{force=false package_id=gio-sys v0.20.10 target="gio_sys"}: cargo::core::compiler::fingerprint: fingerprint error for gio-sys v0.20.10/Check { test: false }/TargetInner { ..: lib_target("gio_sys", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gio-sys-0.20.10\\src\\lib.rs", Edition2021) }
+   1.470146900s  INFO prepare_target{force=false package_id=gio-sys v0.20.10 target="gio_sys"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gio-sys-b6aaf64cd91d9028\lib-gio_sys`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.476234000s  INFO prepare_target{force=false package_id=gio-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint error for gio-sys v0.20.10/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gio-sys-0.20.10\\build.rs", Edition2021) }
+   1.476419900s  INFO prepare_target{force=false package_id=gio-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gio-sys-a60f2111f174c144\run-build-script-build-script-build`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_libgit2_prerelease
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: git_midx_writer_dump
+  22: git_filter_source_repo
+  23: git_midx_writer_dump
+  24: BaseThreadInitThunk
+  25: RtlUserThreadStart
+   1.499361400s  INFO prepare_target{force=false package_id=glib-sys v0.20.10 target="glib_sys"}: cargo::core::compiler::fingerprint: fingerprint error for glib-sys v0.20.10/Check { test: false }/TargetInner { ..: lib_target("glib_sys", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\glib-sys-0.20.10\\src\\lib.rs", Edition2021) }
+   1.499527300s  INFO prepare_target{force=false package_id=glib-sys v0.20.10 target="glib_sys"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\glib-sys-cf54affb4e299b43\lib-glib_sys`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.505888700s  INFO prepare_target{force=false package_id=glib-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint error for glib-sys v0.20.10/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\glib-sys-0.20.10\\build.rs", Edition2021) }
+   1.506053300s  INFO prepare_target{force=false package_id=glib-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\glib-sys-ea0595b6087dbc69\run-build-script-build-script-build`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_filter_source_repo
+  17: git_libgit2_prerelease
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: <unknown>
+  22: git_midx_writer_dump
+  23: git_filter_source_repo
+  24: git_midx_writer_dump
+  25: BaseThreadInitThunk
+  26: RtlUserThreadStart
+   1.514830200s  INFO prepare_target{force=false package_id=gobject-sys v0.20.10 target="gobject_sys"}: cargo::core::compiler::fingerprint: fingerprint error for gobject-sys v0.20.10/Check { test: false }/TargetInner { ..: lib_target("gobject_sys", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gobject-sys-0.20.10\\src\\lib.rs", Edition2021) }
+   1.515027400s  INFO prepare_target{force=false package_id=gobject-sys v0.20.10 target="gobject_sys"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gobject-sys-afb73d8d863a4c56\lib-gobject_sys`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.519257100s  INFO prepare_target{force=false package_id=gobject-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint error for gobject-sys v0.20.10/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gobject-sys-0.20.10\\build.rs", Edition2021) }
+   1.519303300s  INFO prepare_target{force=false package_id=gobject-sys v0.20.10 target="build-script-build"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gobject-sys-4d5c1d3cde35a33e\run-build-script-build-script-build`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_filter_source_repo
+  17: git_libgit2_prerelease
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: <unknown>
+  22: git_midx_writer_dump
+  23: git_filter_source_repo
+  24: git_midx_writer_dump
+  25: BaseThreadInitThunk
+  26: RtlUserThreadStart
+   1.520835000s  INFO prepare_target{force=false package_id=windows-sys v0.52.0 target="windows_sys"}: cargo::core::compiler::fingerprint: fingerprint error for windows-sys v0.52.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("windows_sys", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows-sys-0.52.0\\src\\lib.rs", Edition2021) }
+   1.520996800s  INFO prepare_target{force=false package_id=windows-sys v0.52.0 target="windows_sys"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\windows-sys-8a6dee2eb035c932\lib-windows_sys`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.524031300s  INFO prepare_target{force=false package_id=windows-targets v0.52.6 target="windows_targets"}: cargo::core::compiler::fingerprint: fingerprint error for windows-targets v0.52.6/Check { test: false }/TargetInner { ..: lib_target("windows_targets", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\windows-targets-0.52.6\\src\\lib.rs", Edition2021) }
+   1.524090500s  INFO prepare_target{force=false package_id=windows-targets v0.52.6 target="windows_targets"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\windows-targets-feb0185103ed2597\lib-windows_targets`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_filter_source_repo
+  16: git_libgit2_prerelease
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: <unknown>
+  21: git_midx_writer_dump
+  22: git_filter_source_repo
+  23: git_midx_writer_dump
+  24: BaseThreadInitThunk
+  25: RtlUserThreadStart
+   1.536661000s  INFO prepare_target{force=false package_id=memchr v2.8.3 target="memchr"}: cargo::core::compiler::fingerprint: fingerprint error for memchr v2.8.3/Check { test: false }/TargetInner { benched: false, ..: lib_target("memchr", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\memchr-2.8.3\\src\\lib.rs", Edition2021) }
+   1.536721400s  INFO prepare_target{force=false package_id=memchr v2.8.3 target="memchr"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\memchr-ef44eb582b81da01\lib-memchr`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.538328700s  INFO prepare_target{force=false package_id=smallvec v1.15.2 target="smallvec"}: cargo::core::compiler::fingerprint: fingerprint error for smallvec v1.15.2/Check { test: false }/TargetInner { ..: lib_target("smallvec", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\smallvec-1.15.2\\src\\lib.rs", Edition2018) }
+   1.538486100s  INFO prepare_target{force=false package_id=smallvec v1.15.2 target="smallvec"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\smallvec-f492389b22f58aa1\lib-smallvec`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.540541900s  INFO prepare_target{force=false package_id=gstreamer-sys v0.23.6 target="gstreamer_sys"}: cargo::core::compiler::fingerprint: fingerprint error for gstreamer-sys v0.23.6/Check { test: false }/TargetInner { ..: lib_target("gstreamer_sys", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gstreamer-sys-0.23.6\\src\\lib.rs", Edition2021) }
+   1.540683500s  INFO prepare_target{force=false package_id=gstreamer-sys v0.23.6 target="gstreamer_sys"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gstreamer-sys-0fd77ab8cf1fd18b\lib-gstreamer_sys`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.545433200s  INFO prepare_target{force=false package_id=gstreamer-sys v0.23.6 target="build-script-build"}: cargo::core::compiler::fingerprint: fingerprint error for gstreamer-sys v0.23.6/RunCustomBuild/TargetInner { ..: custom_build_target("build-script-build", "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\gstreamer-sys-0.23.6\\build.rs", Edition2021) }
+   1.545864100s  INFO prepare_target{force=false package_id=gstreamer-sys v0.23.6 target="build-script-build"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\gstreamer-sys-6c0d626ddc39db8e\run-build-script-build-script-build`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.549275200s  INFO prepare_target{force=false package_id=itertools v0.14.0 target="itertools"}: cargo::core::compiler::fingerprint: fingerprint error for itertools v0.14.0/Check { test: false }/TargetInner { tested: false, benched: false, ..: lib_target("itertools", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\itertools-0.14.0\\src\\lib.rs", Edition2018) }
+   1.549539700s  INFO prepare_target{force=false package_id=itertools v0.14.0 target="itertools"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\itertools-41a899fe8ddbeec8\lib-itertools`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.551575400s  INFO prepare_target{force=false package_id=either v1.17.0 target="either"}: cargo::core::compiler::fingerprint: fingerprint error for either v1.17.0/Check { test: false }/TargetInner { ..: lib_target("either", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\either-1.17.0\\src\\lib.rs", Edition2021) }
+   1.551636500s  INFO prepare_target{force=false package_id=either v1.17.0 target="either"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\either-b020507e3c7f94c4\lib-either`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.552815300s  INFO prepare_target{force=false package_id=muldiv v1.0.1 target="muldiv"}: cargo::core::compiler::fingerprint: fingerprint error for muldiv v1.0.1/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("muldiv", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\muldiv-1.0.1\\src\\lib.rs", Edition2018) }
+   1.552856600s  INFO prepare_target{force=false package_id=muldiv v1.0.1 target="muldiv"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\muldiv-c741e8410bd74cc7\lib-muldiv`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.553785000s  INFO prepare_target{force=false package_id=num-integer v0.1.46 target="num_integer"}: cargo::core::compiler::fingerprint: fingerprint error for num-integer v0.1.46/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("num_integer", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\num-integer-0.1.46\\src\\lib.rs", Edition2018) }
+   1.553834600s  INFO prepare_target{force=false package_id=num-integer v0.1.46 target="num_integer"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\num-integer-f3013c49b6fa3ef1\lib-num_integer`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.554746900s  INFO prepare_target{force=false package_id=num-traits v0.2.19 target="num_traits"}: cargo::core::compiler::fingerprint: fingerprint error for num-traits v0.2.19/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("num_traits", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\num-traits-0.2.19\\src\\lib.rs", Edition2021) }
+   1.554798900s  INFO prepare_target{force=false package_id=num-traits v0.2.19 target="num_traits"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\num-traits-eb8e1830efaeaa15\lib-num_traits`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.561293500s  INFO prepare_target{force=false package_id=num-rational v0.4.2 target="num_rational"}: cargo::core::compiler::fingerprint: fingerprint error for num-rational v0.4.2/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("num_rational", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\num-rational-0.4.2\\src\\lib.rs", Edition2021) }
+   1.561465600s  INFO prepare_target{force=false package_id=num-rational v0.4.2 target="num_rational"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\num-rational-fdfc10cc5a5cefe5\lib-num_rational`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.565337200s  INFO prepare_target{force=false package_id=option-operations v0.5.0 target="option_operations"}: cargo::core::compiler::fingerprint: fingerprint error for option-operations v0.5.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("option_operations", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\option-operations-0.5.0\\src\\lib.rs", Edition2018) }
+   1.565423400s  INFO prepare_target{force=false package_id=option-operations v0.5.0 target="option_operations"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\option-operations-2e513d986d4279e3\lib-option_operations`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.572657500s  INFO prepare_target{force=false package_id=thiserror v2.0.19 target="thiserror"}: cargo::core::compiler::fingerprint: fingerprint error for thiserror v2.0.19/Check { test: false }/TargetInner { ..: lib_target("thiserror", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\thiserror-2.0.19\\src\\lib.rs", Edition2021) }
+   1.572847300s  INFO prepare_target{force=false package_id=thiserror v2.0.19 target="thiserror"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\thiserror-941b768876dfe6e6\lib-thiserror`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.582635500s  INFO prepare_target{force=false package_id=serde v1.0.229 target="serde"}: cargo::core::compiler::fingerprint: fingerprint error for serde v1.0.229/Check { test: false }/TargetInner { ..: lib_target("serde", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\serde-1.0.229\\src\\lib.rs", Edition2021) }
+   1.582790200s  INFO prepare_target{force=false package_id=serde v1.0.229 target="serde"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\serde-fa70ac23c117bf1e\lib-serde`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.599225400s  INFO prepare_target{force=false package_id=serde_json v1.0.151 target="serde_json"}: cargo::core::compiler::fingerprint: fingerprint error for serde_json v1.0.151/Check { test: false }/TargetInner { ..: lib_target("serde_json", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\serde_json-1.0.151\\src\\lib.rs", Edition2021) }
+   1.599390100s  INFO prepare_target{force=false package_id=serde_json v1.0.151 target="serde_json"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\serde_json-d025e62c53be748b\lib-serde_json`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.602160300s  INFO prepare_target{force=false package_id=itoa v1.0.18 target="itoa"}: cargo::core::compiler::fingerprint: fingerprint error for itoa v1.0.18/Check { test: false }/TargetInner { ..: lib_target("itoa", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\itoa-1.0.18\\src\\lib.rs", Edition2021) }
+   1.602279200s  INFO prepare_target{force=false package_id=itoa v1.0.18 target="itoa"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\itoa-14018c84296d4b84\lib-itoa`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.607541100s  INFO prepare_target{force=false package_id=zmij v1.0.23 target="zmij"}: cargo::core::compiler::fingerprint: fingerprint error for zmij v1.0.23/Check { test: false }/TargetInner { ..: lib_target("zmij", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\zmij-1.0.23\\src\\lib.rs", Edition2021) }
+   1.607669700s  INFO prepare_target{force=false package_id=zmij v1.0.23 target="zmij"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\zmij-7695cd89b4250926\lib-zmij`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.617232800s  INFO prepare_target{force=false package_id=signal-hook v0.3.18 target="signal_hook"}: cargo::core::compiler::fingerprint: fingerprint error for signal-hook v0.3.18/Check { test: false }/TargetInner { ..: lib_target("signal_hook", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\signal-hook-0.3.18\\src\\lib.rs", Edition2018) }
+   1.617528600s  INFO prepare_target{force=false package_id=signal-hook v0.3.18 target="signal_hook"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\signal-hook-6ba1d766133cce1c\lib-signal_hook`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.626187900s  INFO prepare_target{force=false package_id=signal-hook-registry v1.4.8 target="signal_hook_registry"}: cargo::core::compiler::fingerprint: fingerprint error for signal-hook-registry v1.4.8/Check { test: false }/TargetInner { ..: lib_target("signal_hook_registry", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\signal-hook-registry-1.4.8\\src\\lib.rs", Edition2015) }
+   1.626351700s  INFO prepare_target{force=false package_id=signal-hook-registry v1.4.8 target="signal_hook_registry"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\signal-hook-registry-36fccec68e95671a\lib-signal_hook_registry`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.628538900s  INFO prepare_target{force=false package_id=errno v0.3.14 target="errno"}: cargo::core::compiler::fingerprint: fingerprint error for errno v0.3.14/Check { test: false }/TargetInner { ..: lib_target("errno", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\errno-0.3.14\\src\\lib.rs", Edition2018) }
+   1.628615500s  INFO prepare_target{force=false package_id=errno v0.3.14 target="errno"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\errno-13b79315dd429f2c\lib-errno`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.630332000s  INFO prepare_target{force=false package_id=toml v0.8.23 target="toml"}: cargo::core::compiler::fingerprint: fingerprint error for toml v0.8.23/Check { test: false }/TargetInner { ..: lib_target("toml", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\toml-0.8.23\\src\\lib.rs", Edition2021) }
+   1.630412500s  INFO prepare_target{force=false package_id=toml v0.8.23 target="toml"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\toml-7fb3b6d65b6aa568\lib-toml`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.632083200s  INFO prepare_target{force=false package_id=serde_spanned v0.6.9 target="serde_spanned"}: cargo::core::compiler::fingerprint: fingerprint error for serde_spanned v0.6.9/Check { test: false }/TargetInner { ..: lib_target("serde_spanned", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\serde_spanned-0.6.9\\src\\lib.rs", Edition2021) }
+   1.632133000s  INFO prepare_target{force=false package_id=serde_spanned v0.6.9 target="serde_spanned"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\serde_spanned-e25cacae61ae2801\lib-serde_spanned`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.635089900s  INFO prepare_target{force=false package_id=toml_datetime v0.6.11 target="toml_datetime"}: cargo::core::compiler::fingerprint: fingerprint error for toml_datetime v0.6.11/Check { test: false }/TargetInner { ..: lib_target("toml_datetime", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\toml_datetime-0.6.11\\src\\lib.rs", Edition2021) }
+   1.635176500s  INFO prepare_target{force=false package_id=toml_datetime v0.6.11 target="toml_datetime"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\toml_datetime-ea5d4b16b48db600\lib-toml_datetime`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.637172200s  INFO prepare_target{force=false package_id=toml_edit v0.22.27 target="toml_edit"}: cargo::core::compiler::fingerprint: fingerprint error for toml_edit v0.22.27/Check { test: false }/TargetInner { ..: lib_target("toml_edit", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\toml_edit-0.22.27\\src\\lib.rs", Edition2021) }
+   1.637251000s  INFO prepare_target{force=false package_id=toml_edit v0.22.27 target="toml_edit"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\toml_edit-ab1135cbe7ed6e26\lib-toml_edit`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.639382500s  INFO prepare_target{force=false package_id=indexmap v2.14.0 target="indexmap"}: cargo::core::compiler::fingerprint: fingerprint error for indexmap v2.14.0/Check { test: false }/TargetInner { benched: false, ..: lib_target("indexmap", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\indexmap-2.14.0\\src\\lib.rs", Edition2024) }
+   1.639427800s  INFO prepare_target{force=false package_id=indexmap v2.14.0 target="indexmap"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\indexmap-6d4d8ecc6c7a953a\lib-indexmap`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.641033200s  INFO prepare_target{force=false package_id=equivalent v1.0.2 target="equivalent"}: cargo::core::compiler::fingerprint: fingerprint error for equivalent v1.0.2/Check { test: false }/TargetInner { ..: lib_target("equivalent", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\equivalent-1.0.2\\src\\lib.rs", Edition2015) }
+   1.641218700s  INFO prepare_target{force=false package_id=equivalent v1.0.2 target="equivalent"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\equivalent-388c529534c59c75\lib-equivalent`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.643538800s  INFO prepare_target{force=false package_id=hashbrown v0.17.1 target="hashbrown"}: cargo::core::compiler::fingerprint: fingerprint error for hashbrown v0.17.1/Check { test: false }/TargetInner { ..: lib_target("hashbrown", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\hashbrown-0.17.1\\src\\lib.rs", Edition2024) }
+   1.643780700s  INFO prepare_target{force=false package_id=hashbrown v0.17.1 target="hashbrown"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\hashbrown-f080cf5c035e22d8\lib-hashbrown`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.646423600s  INFO prepare_target{force=false package_id=toml_write v0.1.2 target="toml_write"}: cargo::core::compiler::fingerprint: fingerprint error for toml_write v0.1.2/Check { test: false }/TargetInner { ..: lib_target("toml_write", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\toml_write-0.1.2\\src\\lib.rs", Edition2021) }
+   1.646497200s  INFO prepare_target{force=false package_id=toml_write v0.1.2 target="toml_write"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\toml_write-d2b35bd5bc614e8d\lib-toml_write`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.649289100s  INFO prepare_target{force=false package_id=winnow v0.7.15 target="winnow"}: cargo::core::compiler::fingerprint: fingerprint error for winnow v0.7.15/Check { test: false }/TargetInner { ..: lib_target("winnow", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\winnow-0.7.15\\src\\lib.rs", Edition2021) }
+   1.649569700s  INFO prepare_target{force=false package_id=winnow v0.7.15 target="winnow"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\winnow-d9840204435986d3\lib-winnow`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.652737900s  INFO prepare_target{force=false package_id=tracing v0.1.44 target="tracing"}: cargo::core::compiler::fingerprint: fingerprint error for tracing v0.1.44/Check { test: false }/TargetInner { ..: lib_target("tracing", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\tracing-0.1.44\\src\\lib.rs", Edition2018) }
+   1.652858500s  INFO prepare_target{force=false package_id=tracing v0.1.44 target="tracing"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\tracing-6ca5b4fb82a2130b\lib-tracing`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.658553800s  INFO prepare_target{force=false package_id=tracing-subscriber v0.3.23 target="tracing_subscriber"}: cargo::core::compiler::fingerprint: fingerprint error for tracing-subscriber v0.3.23/Check { test: false }/TargetInner { ..: lib_target("tracing_subscriber", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\tracing-subscriber-0.3.23\\src\\lib.rs", Edition2018) }
+   1.658771600s  INFO prepare_target{force=false package_id=tracing-subscriber v0.3.23 target="tracing_subscriber"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\tracing-subscriber-559d2e47bab9b740\lib-tracing_subscriber`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_libgit2_prerelease
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: git_midx_writer_dump
+  18: git_filter_source_repo
+  19: git_midx_writer_dump
+  20: BaseThreadInitThunk
+  21: RtlUserThreadStart
+   1.662893800s  INFO prepare_target{force=false package_id=matchers v0.2.0 target="matchers"}: cargo::core::compiler::fingerprint: fingerprint error for matchers v0.2.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("matchers", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\matchers-0.2.0\\src\\lib.rs", Edition2018) }
+   1.662960700s  INFO prepare_target{force=false package_id=matchers v0.2.0 target="matchers"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\matchers-5e8d774b52291d02\lib-matchers`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.664651800s  INFO prepare_target{force=false package_id=regex-automata v0.4.16 target="regex_automata"}: cargo::core::compiler::fingerprint: fingerprint error for regex-automata v0.4.16/Check { test: false }/TargetInner { benched: false, ..: lib_target("regex_automata", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\regex-automata-0.4.16\\src\\lib.rs", Edition2021) }
+   1.664722300s  INFO prepare_target{force=false package_id=regex-automata v0.4.16 target="regex_automata"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\regex-automata-ca9a7aea98defb27\lib-regex_automata`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.666492800s  INFO prepare_target{force=false package_id=regex-syntax v0.8.11 target="regex_syntax"}: cargo::core::compiler::fingerprint: fingerprint error for regex-syntax v0.8.11/Check { test: false }/TargetInner { ..: lib_target("regex_syntax", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\regex-syntax-0.8.11\\src\\lib.rs", Edition2021) }
+   1.666543100s  INFO prepare_target{force=false package_id=regex-syntax v0.8.11 target="regex_syntax"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\regex-syntax-818e6c0bc54bf332\lib-regex_syntax`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_filter_source_repo
+  15: git_libgit2_prerelease
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: <unknown>
+  20: git_midx_writer_dump
+  21: git_filter_source_repo
+  22: git_midx_writer_dump
+  23: BaseThreadInitThunk
+  24: RtlUserThreadStart
+   1.667842200s  INFO prepare_target{force=false package_id=nu-ansi-term v0.50.3 target="nu_ansi_term"}: cargo::core::compiler::fingerprint: fingerprint error for nu-ansi-term v0.50.3/Check { test: false }/TargetInner { ..: lib_target("nu_ansi_term", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\nu-ansi-term-0.50.3\\src\\lib.rs", Edition2021) }
+   1.667889600s  INFO prepare_target{force=false package_id=nu-ansi-term v0.50.3 target="nu_ansi_term"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\nu-ansi-term-08820eb2159c4f93\lib-nu_ansi_term`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.669163100s  INFO prepare_target{force=false package_id=sharded-slab v0.1.7 target="sharded_slab"}: cargo::core::compiler::fingerprint: fingerprint error for sharded-slab v0.1.7/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("sharded_slab", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\sharded-slab-0.1.7\\src\\lib.rs", Edition2018) }
+   1.669218100s  INFO prepare_target{force=false package_id=sharded-slab v0.1.7 target="sharded_slab"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\sharded-slab-5dcccd06759ce879\lib-sharded_slab`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.670216300s  INFO prepare_target{force=false package_id=lazy_static v1.5.0 target="lazy_static"}: cargo::core::compiler::fingerprint: fingerprint error for lazy_static v1.5.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("lazy_static", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\lazy_static-1.5.0\\src\\lib.rs", Edition2015) }
+   1.670253300s  INFO prepare_target{force=false package_id=lazy_static v1.5.0 target="lazy_static"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\lazy_static-38837c81b0533351\lib-lazy_static`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.671248200s  INFO prepare_target{force=false package_id=thread_local v1.1.10 target="thread_local"}: cargo::core::compiler::fingerprint: fingerprint error for thread_local v1.1.10/Check { test: false }/TargetInner { ..: lib_target("thread_local", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\thread_local-1.1.10\\src\\lib.rs", Edition2021) }
+   1.671283100s  INFO prepare_target{force=false package_id=thread_local v1.1.10 target="thread_local"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\thread_local-836ac2f5e6ad2bda\lib-thread_local`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.672279900s  INFO prepare_target{force=false package_id=time v0.3.54 target="time"}: cargo::core::compiler::fingerprint: fingerprint error for time v0.3.54/Check { test: false }/TargetInner { benched: false, ..: lib_target("time", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\time-0.3.54\\src\\lib.rs", Edition2024) }
+   1.672307800s  INFO prepare_target{force=false package_id=time v0.3.54 target="time"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\time-dc85ee3367864480\lib-time`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.673444900s  INFO prepare_target{force=false package_id=deranged v0.5.8 target="deranged"}: cargo::core::compiler::fingerprint: fingerprint error for deranged v0.5.8/Check { test: false }/TargetInner { ..: lib_target("deranged", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\deranged-0.5.8\\src\\lib.rs", Edition2021) }
+   1.673488900s  INFO prepare_target{force=false package_id=deranged v0.5.8 target="deranged"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\deranged-57dc2faa27c8a72f\lib-deranged`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.675459500s  INFO prepare_target{force=false package_id=num-conv v0.2.2 target="num_conv"}: cargo::core::compiler::fingerprint: fingerprint error for num-conv v0.2.2/Check { test: false }/TargetInner { ..: lib_target("num_conv", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\num-conv-0.2.2\\src\\lib.rs", Edition2021) }
+   1.675641300s  INFO prepare_target{force=false package_id=num-conv v0.2.2 target="num_conv"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\num-conv-f0a4dc1ea1e06461\lib-num_conv`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.677715100s  INFO prepare_target{force=false package_id=powerfmt v0.2.0 target="powerfmt"}: cargo::core::compiler::fingerprint: fingerprint error for powerfmt v0.2.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("powerfmt", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\powerfmt-0.2.0\\src\\lib.rs", Edition2021) }
+   1.677843300s  INFO prepare_target{force=false package_id=powerfmt v0.2.0 target="powerfmt"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\powerfmt-6df4206ac487d031\lib-powerfmt`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.679670600s  INFO prepare_target{force=false package_id=time-core v0.1.9 target="time_core"}: cargo::core::compiler::fingerprint: fingerprint error for time-core v0.1.9/Check { test: false }/TargetInner { ..: lib_target("time_core", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\time-core-0.1.9\\src\\lib.rs", Edition2024) }
+   1.679737400s  INFO prepare_target{force=false package_id=time-core v0.1.9 target="time_core"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\time-core-36d44d94f4dcc572\lib-time_core`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.682286400s  INFO prepare_target{force=false package_id=tracing-log v0.2.0 target="tracing_log"}: cargo::core::compiler::fingerprint: fingerprint error for tracing-log v0.2.0/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("tracing_log", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\tracing-log-0.2.0\\src\\lib.rs", Edition2018) }
+   1.682537100s  INFO prepare_target{force=false package_id=tracing-log v0.2.0 target="tracing_log"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\tracing-log-b6ce0b112c06f9ab\lib-tracing_log`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.685366100s  INFO prepare_target{force=false package_id=log v0.4.33 target="log"}: cargo::core::compiler::fingerprint: fingerprint error for log v0.4.33/Check { test: false }/TargetInner { ..: lib_target("log", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\log-0.4.33\\src\\lib.rs", Edition2021) }
+   1.685425500s  INFO prepare_target{force=false package_id=log v0.4.33 target="log"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\log-cc8817d5f1f9e223\lib-log`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_filter_source_repo
+  14: git_libgit2_prerelease
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: <unknown>
+  19: git_midx_writer_dump
+  20: git_filter_source_repo
+  21: git_midx_writer_dump
+  22: BaseThreadInitThunk
+  23: RtlUserThreadStart
+   1.688257500s  INFO prepare_target{force=false package_id=tracing-serde v0.2.0 target="tracing_serde"}: cargo::core::compiler::fingerprint: fingerprint error for tracing-serde v0.2.0/Check { test: false }/TargetInner { ..: lib_target("tracing_serde", ["lib"], "C:\\Users\\Felipe\\.cargo\\registry\\src\\index.crates.io-1949cf8c6b5b557f\\tracing-serde-0.2.0\\src\\lib.rs", Edition2018) }
+   1.688428600s  INFO prepare_target{force=false package_id=tracing-serde v0.2.0 target="tracing_serde"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\tracing-serde-14666ac1a0ff1e2c\lib-tracing_serde`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_filter_source_repo
+  13: git_libgit2_prerelease
+  14: <unknown>
+  15: <unknown>
+  16: <unknown>
+  17: <unknown>
+  18: git_midx_writer_dump
+  19: git_filter_source_repo
+  20: git_midx_writer_dump
+  21: BaseThreadInitThunk
+  22: RtlUserThreadStart
+   1.693132300s  INFO prepare_target{force=false package_id=noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent) target="noland-mic-receiver"}: cargo::core::compiler::fingerprint: fingerprint error for noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent)/Check { test: true }/TargetInner { name: "noland-mic-receiver", doc: true, ..: with_path("C:\\Users\\Felipe\\Documents\\noland\\no_land\\vm-cloud-mic-agent\\src\\main.rs", Edition2021) }
+   1.693326100s  INFO prepare_target{force=false package_id=noland-mic-receiver v0.1.0 (C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent) target="noland-mic-receiver"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\.fingerprint\noland-mic-receiver-f413dfbbd012d995\test-bin-noland-mic-receiver`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_libgit2_prerelease
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+    Checking memchr v2.8.3
+    Checking utf8parse v0.2.2
+    Checking once_cell_polyfill v1.70.2
+    Checking windows-targets v0.52.6
+    Checking anstyle v1.0.14
+    Checking serde v1.0.229
+    Checking futures-util v0.3.33
+   Compiling glib-sys v0.20.10
+   Compiling gobject-sys v0.20.10
+   Compiling gio-sys v0.20.10
+    Checking num-traits v0.2.19
+    Checking anstyle-query v1.1.5
+    Checking windows-sys v0.52.0
+warning: gobject-sys@0.20.10: 
+error: failed to run custom build command for `gobject-sys v0.20.10`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\build\gobject-sys-84ce0a8d9a3f047f\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-changed=C:\Users\Felipe\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gobject-sys-0.20.10\Cargo.toml
+  cargo:rerun-if-env-changed=GOBJECT_2.0_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:warning=
+  pkg-config exited with status code 1
+  > PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --libs --cflags gobject-2.0 'gobject-2.0 >= 2.56'
+
+  pkg-config output:
+    Package gobject-2.0 was not found in the pkg-config search path.
+    Perhaps you should add the directory containing `gobject-2.0.pc'
+    to the PKG_CONFIG_PATH environment variable
+    Package 'gobject-2.0', required by 'virtual:world', not found
+    Package 'gobject-2.0', required by 'virtual:world', not found
+
+  The system library `gobject-2.0` required by crate `gobject-sys` was not found.
+  The file `gobject-2.0.pc` needs to be installed and the PKG_CONFIG_PATH environment variable must contain its parent directory.
+  The PKG_CONFIG_PATH environment variable is not set.
+
+  HINT: if you have installed the library, try setting PKG_CONFIG_PATH to the directory containing `gobject-2.0.pc`.
+
+warning: build failed, waiting for other jobs to finish...
+    Checking colorchoice v1.0.5
+    Checking equivalent v1.0.2
+    Checking anstyle-parse v1.0.0
+    Checking cfg-if v1.0.4
+warning: gio-sys@0.20.10: 
+error: failed to run custom build command for `gio-sys v0.20.10`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\build\gio-sys-39a8bf3db9b6dd8a\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-changed=C:\Users\Felipe\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gio-sys-0.20.10\Cargo.toml
+  cargo:rerun-if-env-changed=GIO_2.0_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:warning=
+  pkg-config exited with status code 1
+  > PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --libs --cflags gio-2.0 'gio-2.0 >= 2.56'
+
+  pkg-config output:
+    Package gio-2.0 was not found in the pkg-config search path.
+    Perhaps you should add the directory containing `gio-2.0.pc'
+    to the PKG_CONFIG_PATH environment variable
+    Package 'gio-2.0', required by 'virtual:world', not found
+    Package 'gio-2.0', required by 'virtual:world', not found
+
+  The system library `gio-2.0` required by crate `gio-sys` was not found.
+  The file `gio-2.0.pc` needs to be installed and the PKG_CONFIG_PATH environment variable must contain its parent directory.
+  The PKG_CONFIG_PATH environment variable is not set.
+
+  HINT: if you have installed the library, try setting PKG_CONFIG_PATH to the directory containing `gio-2.0.pc`.
+
+    Checking smallvec v1.15.2
+warning: glib-sys@0.20.10: 
+error: failed to run custom build command for `glib-sys v0.20.10`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\build\glib-sys-579fbbeac0680ede\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-changed=C:\Users\Felipe\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\glib-sys-0.20.10\Cargo.toml
+  cargo:rerun-if-env-changed=GLIB_2.0_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:warning=
+  pkg-config exited with status code 1
+  > PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --libs --cflags glib-2.0 'glib-2.0 >= 2.56'
+
+  pkg-config output:
+    Package glib-2.0 was not found in the pkg-config search path.
+    Perhaps you should add the directory containing `glib-2.0.pc'
+    to the PKG_CONFIG_PATH environment variable
+    Package 'glib-2.0', required by 'virtual:world', not found
+    Package 'glib-2.0', required by 'virtual:world', not found
+
+  The system library `glib-2.0` required by crate `glib-sys` was not found.
+  The file `glib-2.0.pc` needs to be installed and the PKG_CONFIG_PATH environment variable must contain its parent directory.
+  The PKG_CONFIG_PATH environment variable is not set.
+
+  HINT: if you have installed the library, try setting PKG_CONFIG_PATH to the directory containing `glib-2.0.pc`.
+
+    Checking regex-syntax v0.8.11
+    Checking is_terminal_polyfill v1.70.2
+    Checking anstyle-wincon v3.0.11
+    Checking hashbrown v0.17.1
+    Checking zmij v1.0.23
+   Compiling gstreamer-sys v0.23.6
+    Checking futures-channel v0.3.33
+    Checking errno v0.3.14
+    Checking anstream v1.0.0
+    Checking log v0.4.33
+warning: gstreamer-sys@0.23.6: 
+error: failed to run custom build command for `gstreamer-sys v0.23.6`
+note: To improve backtraces for build dependencies, set the CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG=true environment variable to enable debug information generation.
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Felipe\Documents\noland\no_land\vm-cloud-mic-agent\target\debug\build\gstreamer-sys-663a76391cf38f68\build-script-build` (exit code: 1)
+  --- stdout
+  cargo:rerun-if-changed=C:\Users\Felipe\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\gstreamer-sys-0.23.6\Cargo.toml
+  cargo:rerun-if-env-changed=GSTREAMER_1.0_NO_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_PATH
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_LIBDIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64-pc-windows-msvc
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR_x86_64_pc_windows_msvc
+  cargo:rerun-if-env-changed=HOST_PKG_CONFIG_SYSROOT_DIR
+  cargo:rerun-if-env-changed=PKG_CONFIG_SYSROOT_DIR
+  cargo:warning=
+  pkg-config exited with status code 1
+  > PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --libs --cflags gstreamer-1.0 'gstreamer-1.0 >= 1.14'
+
+  pkg-config output:
+    Package gstreamer-1.0 was not found in the pkg-config search path.
+    Perhaps you should add the directory containing `gstreamer-1.0.pc'
+    to the PKG_CONFIG_PATH environment variable
+    Package 'gstreamer-1.0', required by 'virtual:world', not found
+    Package 'gstreamer-1.0', required by 'virtual:world', not found
+
+  The system library `gstreamer-1.0` required by crate `gstreamer-sys` was not found.
+  The file `gstreamer-1.0.pc` needs to be installed and the PKG_CONFIG_PATH environment variable must contain its parent directory.
+  The PKG_CONFIG_PATH environment variable is not set.
+
+  HINT: if you have installed the library, try setting PKG_CONFIG_PATH to the directory containing `gstreamer-1.0.pc`.
+
+    Checking either v1.17.0
+    Checking itoa v1.0.18
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking num-conv v0.2.2
+    Checking num-integer v0.1.46
+    Checking strsim v0.11.1
+    Checking lazy_static v1.5.0
+    Checking bitflags v2.13.1
+    Checking winnow v0.7.15
+    Checking clap_lex v1.1.0
+    Checking deranged v0.5.8
+    Checking powerfmt v0.2.0
+    Checking time-core v0.1.9
+    Checking toml_write v0.1.2
+    Checking num-rational v0.4.2
+    Checking sharded-slab v0.1.7
+    Checking clap_builder v4.6.2
+    Checking tracing-log v0.2.0
+    Checking itertools v0.14.0
+    Checking indexmap v2.14.0
+    Checking serde_json v1.0.151
+    Checking signal-hook-registry v1.4.8
+    Checking tracing-serde v0.2.0
+    Checking tracing v0.1.44
+    Checking thiserror v2.0.19
+    Checking regex-automata v0.4.16
+    Checking option-operations v0.5.0
+    Checking thread_local v1.1.10
+    Checking futures-executor v0.3.33
+    Checking nu-ansi-term v0.50.3
+    Checking muldiv v1.0.1
+    Checking signal-hook v0.3.18
+    Checking toml_edit v0.22.27
+    Checking time v0.3.54
+    Checking matchers v0.2.0
+    Checking clap v4.6.4
+    Checking toml v0.8.23
+    Checking tracing-subscriber v0.3.23

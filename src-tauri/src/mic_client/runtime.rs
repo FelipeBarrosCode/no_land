@@ -397,6 +397,11 @@ fn configure_macos_gstreamer_command(command: &mut Command, current_exe: &Path) 
 }
 
 fn configure_windows_gstreamer_command(command: &mut Command, current_exe: &Path) {
+    // The external Windows plugin scanner can deadlock during gst::init(),
+    // leaving the sidecar alive but unable to answer startSession. Scanning
+    // the small managed plugin set in-process avoids that child-process hang.
+    command.env("GST_REGISTRY_FORK", "no");
+
     if let Some(cache_dir) = dirs::cache_dir() {
         let registry_dir = cache_dir.join("noland-connect").join("gstreamer");
         let _ = std::fs::create_dir_all(&registry_dir);
