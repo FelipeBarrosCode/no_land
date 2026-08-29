@@ -1119,7 +1119,19 @@ fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| anyhow!("status path has no parent: {}", path.display()))?;
+    // The helper runs elevated on macOS, while this directory belongs to the desktop user.
+    // Recreating a removed parent hierarchy here would make the app data directory root-owned
+    // and prevent the desktop app from loading or saving its state on the next launch.
+    #[cfg(not(target_os = "macos"))]
     fs::create_dir_all(parent)?;
+    #[cfg(target_os = "macos")]
+    if !parent.is_dir() {
+        bail!(
+            "status directory disappeared while the elevated helper was running: {}",
+            parent.display()
+        );
+    }
+
     let serialized = serde_json::to_vec_pretty(status)?;
 
     #[cfg(target_os = "windows")]

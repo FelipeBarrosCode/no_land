@@ -1712,32 +1712,51 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     )
     .await;
 
-    let install_output = provision_microphone_receiver(&remote, &target_user).await?;
-    mark_server_step_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::MicReceiverInstalled,
-        OrchestrationState::ConfiguringWireGuard,
-        &instance.status,
-        &instance.ssh_host,
-        instance.ssh_port,
-        Some(offer.id),
-    )
-    .await?;
+    match provision_microphone_receiver(&remote, &target_user).await {
+        Ok(install_output) => {
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::MicReceiverInstalled,
+                OrchestrationState::ConfiguringWireGuard,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                Some(offer.id),
+            )
+            .await?;
 
-    emit_transition(
-        &app,
-        &context,
-        OrchestrationState::ConfiguringWireGuard,
-        if microphone_provisioning_enabled {
-            "Remote microphone receiver ready"
-        } else {
-            "Remote microphone receiver skipped"
-        },
-        Some(install_output),
-        false,
-    )
-    .await;
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringWireGuard,
+                if microphone_provisioning_enabled {
+                    "Remote microphone receiver ready"
+                } else {
+                    "Remote microphone receiver skipped"
+                },
+                Some(install_output),
+                false,
+            )
+            .await;
+        }
+        Err(error) => {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Remote microphone receiver setup failed; continuing core provisioning"
+            );
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringWireGuard,
+                "Remote microphone receiver unavailable; continuing provisioning",
+                Some(format!("Microphone setup can be retried later: {error}")),
+                false,
+            )
+            .await;
+        }
+    }
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {
@@ -2611,32 +2630,51 @@ async fn run_existing_instance_orchestration(
     )
     .await;
 
-    let install_output = provision_microphone_receiver(&remote, &target_user).await?;
-    mark_server_step_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::MicReceiverInstalled,
-        OrchestrationState::ConfiguringWireGuard,
-        &instance.status,
-        &instance.ssh_host,
-        instance.ssh_port,
-        offer_id,
-    )
-    .await?;
+    match provision_microphone_receiver(&remote, &target_user).await {
+        Ok(install_output) => {
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::MicReceiverInstalled,
+                OrchestrationState::ConfiguringWireGuard,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                offer_id,
+            )
+            .await?;
 
-    emit_transition(
-        &app,
-        &context,
-        OrchestrationState::ConfiguringWireGuard,
-        if microphone_provisioning_enabled {
-            "Remote microphone receiver ready"
-        } else {
-            "Remote microphone receiver skipped"
-        },
-        Some(install_output),
-        false,
-    )
-    .await;
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringWireGuard,
+                if microphone_provisioning_enabled {
+                    "Remote microphone receiver ready"
+                } else {
+                    "Remote microphone receiver skipped"
+                },
+                Some(install_output),
+                false,
+            )
+            .await;
+        }
+        Err(error) => {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Remote microphone receiver setup failed; continuing core provisioning"
+            );
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringWireGuard,
+                "Remote microphone receiver unavailable; continuing provisioning",
+                Some(format!("Microphone setup can be retried later: {error}")),
+                false,
+            )
+            .await;
+        }
+    }
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {

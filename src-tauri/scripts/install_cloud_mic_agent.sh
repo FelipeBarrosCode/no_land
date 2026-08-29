@@ -695,7 +695,9 @@ if run_user_systemctl is-active noland-mic-receiver.service >/dev/null 2>&1; the
     echo "[OK] noland-mic-receiver is running"
 else
     echo "[FAIL] noland-mic-receiver failed to start"
-    run_user_systemctl --no-pager status noland-mic-receiver.service || true
+    run_user_systemctl --no-pager --full status noland-mic-receiver.service || true
+    echo "--- Recent noland-mic-receiver journal ---"
+    run_user journalctl --user --no-pager -n 80 -u noland-mic-receiver.service || true
     verification_failed=1
 fi
 if ss -uln | grep -q ":${RTP_PORT} " && ss -uln | grep -q ":${RTCP_PORT} "; then
