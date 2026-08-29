@@ -310,6 +310,47 @@ export interface MoonlightPreferences {
   showInputDebugHud: number;
 }
 
+export type MoonlightPacingMode =
+  | "off"
+  | "automatic"
+  | "software"
+  | "hardwareMultiple";
+
+export type MoonlightFrameBufferMode =
+  | "off"
+  | "oneFrame"
+  | "twoFrames"
+  | "threeFrames";
+
+export type MoonlightRemoteStreamMode =
+  | "auto"
+  | "forceRemote"
+  | "forceLocal";
+
+export interface NolandLatencyConfig {
+  telemetryEnabled: boolean;
+  adaptiveLateFrameDropEnabled: boolean;
+  adaptivePacketSizeEnabled: boolean;
+  decoderBackpressurePolicyEnabled: boolean;
+  pacingMode: MoonlightPacingMode;
+  frameBufferMode: MoonlightFrameBufferMode;
+  autoReconnectOnUnexpectedTermination: boolean;
+  remoteStreamMode: MoonlightRemoteStreamMode;
+  remotePacketSize: number;
+  lateFrameToleranceUs: number;
+  vsyncEnabled: boolean;
+}
+
+export interface MoonlightHostLatencyPreferencesResponse {
+  hostId: string;
+  effective: {
+    latency: NolandLatencyConfig;
+  };
+  overrides: {
+    latency?: Partial<NolandLatencyConfig> | null;
+  } | null;
+}
+
 export interface RentedInstanceSummary {
   instanceId: number;
   label: string;

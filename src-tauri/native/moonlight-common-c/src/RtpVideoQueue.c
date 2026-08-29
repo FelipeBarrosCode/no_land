@@ -163,6 +163,7 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
         if (outOfSequence) {
             // This packet was received after a higher sequence number packet, so note that we
             // received an out of order packet to disable our speculative RFI recovery logic.
+            queue->stats.packetCountOOS++;
             queue->lastOosFramePresentationTimestamp = newEntry->presentationTimeUs;
             if (!queue->receivedOosData) {
                 Limelog("Leaving speculative RFI mode after OOS video data at frame %u\n",
@@ -184,6 +185,7 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
 
 #define PACKET_RECOVERY_FAILURE()                     \
     ret = -1;                                         \
+    queue->stats.packetCountFecInvalid++;             \
     Limelog("FEC recovery returned corrupt packet %d" \
             " (frame %d)", rtpPacket->sequenceNumber, \
             queue->currentFrameNumber);               \
@@ -194,6 +196,7 @@ static bool queuePacket(PRTP_VIDEO_QUEUE queue, PRTPV_QUEUE_ENTRY newEntry, PRTP
 static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
     unsigned int totalPackets = queue->bufferDataPackets + queue->bufferParityPackets;
     unsigned int neededPackets = queue->bufferDataPackets;
+    unsigned int missingDataPackets = queue->bufferDataPackets - queue->receivedDataPackets;
     int ret;
 
     LC_ASSERT(totalPackets == U16(queue->bufferHighestSequenceNumber - queue->bufferLowestSequenceNumber) + 1U);
@@ -335,10 +338,10 @@ static int reconstructFrame(PRTP_VIDEO_QUEUE queue) {
     // If this fails, something is probably wrong with our FEC state.
     LC_ASSERT(ret == 0);
 
-    if (queue->bufferDataPackets != queue->receivedDataPackets) {
+    if (ret == 0 && missingDataPackets != 0) {
 #ifdef FEC_VERBOSE
         Limelog("Recovered %d video data shards from frame %d\n",
-                queue->bufferDataPackets - queue->receivedDataPackets,
+                missingDataPackets,
                 queue->currentFrameNumber);
 #endif
 
@@ -451,6 +454,10 @@ cleanup_packets:
         }
     }
 
+    if (ret == 0) {
+        queue->stats.packetCountFecRecovered += missingDataPackets;
+    }
+
 cleanup:
     reed_solomon_release(rs);
 
@@ -542,21 +549,35 @@ uint32_t RtpvGetCurrentFrameNumber(PRTP_VIDEO_QUEUE queue) {
 }
 
 int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_QUEUE_ENTRY packetEntry) {
-    if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
-        // Reject packets behind our current buffer window
+    if (queue == NULL || packet == NULL || packetEntry == NULL || length < (int)sizeof(*packet)) {
+        if (queue != NULL) {
+            queue->stats.packetCountInvalid++;
+        }
         return RTPF_RET_REJECTED;
     }
 
-    // FLAG_EXTENSION is required for all supported versions of GFE.
-    LC_ASSERT_VT(packet->header & FLAG_EXTENSION);
+    // FLAG_EXTENSION is required for all supported versions of GFE. Preserve the
+    // existing release behavior while counting the invalid packet for diagnostics.
+    if (!(packet->header & FLAG_EXTENSION)) {
+        queue->stats.packetCountInvalid++;
+        Limelog("RTP video packet missing required extension header\n");
+        LC_ASSERT_VT(false);
+    }
 
     int dataOffset = sizeof(*packet);
     if (packet->header & FLAG_EXTENSION) {
         dataOffset += 4; // 2 additional fields
     }
-
     if (length < dataOffset + (int)sizeof(NV_VIDEO_PACKET)) {
         // Reject packets that are too small to fit a NV_VIDEO_PACKET header
+        queue->stats.packetCountInvalid++;
+        Limelog("RTP video packet too small: %d\n", length);
+        LC_ASSERT_VT(false);
+        return RTPF_RET_REJECTED;
+    }
+
+    if (isBefore16(packet->sequenceNumber, queue->nextContiguousSequenceNumber)) {
+        // Reject packets behind our current buffer window
         return RTPF_RET_REJECTED;
     }
 
@@ -582,7 +603,19 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
 #endif
 
     uint32_t fecIndex = (nvPacket->fecInfo & 0x3FF000) >> 12;
+    uint32_t dataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
+    uint32_t fecPercentage = (nvPacket->fecInfo & 0xFF0) >> 4;
+    uint32_t parityPackets = (dataPackets * fecPercentage + 99) / 100;
+    uint32_t totalPackets = dataPackets + parityPackets;
     uint8_t fecCurrentBlockNumber = (nvPacket->multiFecBlocks >> 4) & 0x3;
+    uint8_t fecLastBlockNumber = (nvPacket->multiFecBlocks >> 6) & 0x3;
+
+    if (dataPackets == 0 || fecIndex >= totalPackets || fecCurrentBlockNumber > fecLastBlockNumber ||
+            (!(nvPacket->flags & FLAG_EOF) && length - dataOffset != StreamConfig.packetSize)) {
+        queue->stats.packetCountInvalid++;
+        Limelog("Malformed RTP video packet for frame %u\n", nvPacket->frameIndex);
+        LC_ASSERT_VT(false);
+    }
 
     if (nvPacket->frameIndex == queue->currentFrameNumber && fecCurrentBlockNumber < queue->multiFecCurrentBlockNumber) {
         // Reject FEC blocks behind our current block number
@@ -594,6 +627,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
     if (queue->pendingFecBlockList.count == 0 || queue->currentFrameNumber != nvPacket->frameIndex ||
             queue->multiFecCurrentBlockNumber != fecCurrentBlockNumber) {
         if (queue->pendingFecBlockList.count != 0) {
+            // This incomplete block is now definitively unrecoverable.
+            queue->stats.packetCountFecFailed++;
+
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
 
@@ -638,6 +674,9 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         // or block 0 of a new frame.
         uint8_t expectedFecBlockNumber = (queue->currentFrameNumber == nvPacket->frameIndex ? queue->multiFecCurrentBlockNumber : 0);
         if (fecCurrentBlockNumber != expectedFecBlockNumber) {
+            // The missing block range is one definitive unrecoverable event.
+            queue->stats.packetCountFecFailed++;
+
             // Report the final status of the FEC queue before dropping this frame
             reportFinalFrameFecStatus(queue);
 
@@ -701,36 +740,31 @@ int RtpvAddPacket(PRTP_VIDEO_QUEUE queue, PRTP_PACKET packet, int length, PRTPV_
         queue->missingPackets = 0;
         queue->useFastQueuePath = true;
         queue->reportedLostFrame = false;
-        queue->bufferDataPackets = (nvPacket->fecInfo & 0xFFC00000) >> 22;
-        queue->fecPercentage = (nvPacket->fecInfo & 0xFF0) >> 4;
-        queue->bufferParityPackets = (queue->bufferDataPackets * queue->fecPercentage + 99) / 100;
+        queue->bufferDataPackets = dataPackets;
+        queue->fecPercentage = fecPercentage;
+        queue->bufferParityPackets = parityPackets;
         queue->bufferFirstParitySequenceNumber = U16(queue->bufferLowestSequenceNumber + queue->bufferDataPackets);
         queue->bufferHighestSequenceNumber = U16(queue->bufferFirstParitySequenceNumber + queue->bufferParityPackets - 1);
         queue->multiFecCurrentBlockNumber = fecCurrentBlockNumber;
-        queue->multiFecLastBlockNumber = (nvPacket->multiFecBlocks >> 6) & 0x3;
+        queue->multiFecLastBlockNumber = fecLastBlockNumber;
 
         queue->stats.packetCountVideo += queue->bufferDataPackets;
         queue->stats.packetCountFec += queue->bufferParityPackets;
+    }
+
+    if ((queue->fecPercentage != 0 && U16(packet->sequenceNumber - fecIndex) != queue->bufferLowestSequenceNumber) ||
+            fecPercentage != queue->fecPercentage || dataPackets != queue->bufferDataPackets ||
+            (!queue->multiFecCapable && (fecCurrentBlockNumber != 0 || queue->multiFecLastBlockNumber != 0)) ||
+            fecCurrentBlockNumber != queue->multiFecCurrentBlockNumber || fecLastBlockNumber != queue->multiFecLastBlockNumber) {
+        queue->stats.packetCountInvalid++;
+        Limelog("Inconsistent RTP video FEC metadata for frame %u\n", nvPacket->frameIndex);
+        LC_ASSERT_VT(false);
     }
 
     // Reject packets above our FEC queue valid sequence number range
     if (isBefore16(queue->bufferHighestSequenceNumber, packet->sequenceNumber)) {
         return RTPF_RET_REJECTED;
     }
-
-    LC_ASSERT_VT(!queue->fecPercentage || U16(packet->sequenceNumber - fecIndex) == queue->bufferLowestSequenceNumber);
-    LC_ASSERT_VT((nvPacket->fecInfo & 0xFF0) >> 4 == queue->fecPercentage);
-    LC_ASSERT_VT((nvPacket->fecInfo & 0xFFC00000) >> 22 == queue->bufferDataPackets);
-
-    // Verify that the legacy non-multi-FEC compatibility code works
-    LC_ASSERT_VT(queue->multiFecCapable || fecCurrentBlockNumber == 0);
-    LC_ASSERT_VT(queue->multiFecCapable || queue->multiFecLastBlockNumber == 0);
-
-    // Multi-block FEC details must remain the same within a single frame
-    LC_ASSERT_VT(fecCurrentBlockNumber == queue->multiFecCurrentBlockNumber);
-    LC_ASSERT_VT(((nvPacket->multiFecBlocks >> 6) & 0x3) == queue->multiFecLastBlockNumber);
-
-    LC_ASSERT_VT((nvPacket->flags & FLAG_EOF) || length - dataOffset == StreamConfig.packetSize);
     if (!queuePacket(queue, packetEntry, packet, length, !isBefore16(packet->sequenceNumber, queue->bufferFirstParitySequenceNumber), false)) {
         return RTPF_RET_REJECTED;
     }

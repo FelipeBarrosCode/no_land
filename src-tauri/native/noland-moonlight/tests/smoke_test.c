@@ -26,6 +26,7 @@ int main(void) {
   start_request.session_url = "rtsp://example/session";
   start_request.host_address = "10.77.0.1";
   start_request.server_app_version = "7.1.431.-1";
+  start_request.server_codec_mode_support = 1;
   start_request.width = 1920;
   start_request.height = 1080;
   start_request.fps = 60;

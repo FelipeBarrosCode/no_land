@@ -50,8 +50,9 @@ use crate::{
         },
         composition::MoonlightManager,
         domain::{
-            AddressType, HostAddresses, HostPorts, MoonlightConfiguration, PairingStatus,
-            SessionState, StreamPreferences, StreamPreferencesPatch,
+            validate_latency_config, AddressType, HostAddresses, HostPorts, MoonlightConfiguration,
+            NolandLatencyConfigPatch, PairingStatus, SessionState, StreamPreferences,
+            StreamPreferencesPatch,
         },
         infrastructure::gamestream::ReqwestGameStreamHttpClient,
         platform::{
@@ -1340,6 +1341,7 @@ async fn start_embedded_stream_for_host(
             supported_video_formats: prepared.supported_video_formats,
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
+            session_generation: 0,
         })
         .await
     {
@@ -4397,6 +4399,7 @@ pub async fn moonlight_start_stream(
             supported_video_formats: prepared.supported_video_formats,
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
+            session_generation: 0,
         })
         .await
     {
@@ -4699,6 +4702,94 @@ pub async fn moonlight_update_preferences(
         },
     )
     .map_err(moonlight_frontend_error)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoonlightHostLatencyPreferencesResponse {
+    pub host_id: String,
+    pub effective: StreamPreferences,
+    pub overrides: Option<StreamPreferencesPatch>,
+}
+
+#[tauri::command]
+pub async fn moonlight_get_host_latency_preferences(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+) -> Result<MoonlightHostLatencyPreferencesResponse, FrontendError> {
+    let configuration =
+        crate::moonlight::infrastructure::persistence::MoonlightStateRepository::snapshot(
+            moonlight.repository.as_ref(),
+        )
+        .map_err(moonlight_frontend_error)?;
+
+    let host = configuration
+        .hosts
+        .get(&host_id)
+        .ok_or_else(|| {
+            crate::moonlight::domain::MoonlightError::Validation(format!(
+                "host {host_id} not found"
+            ))
+        })
+        .map_err(moonlight_frontend_error)?;
+
+    let effective = crate::moonlight::domain::merge_preferences(
+        &configuration.defaults,
+        host.preferences_override.as_ref(),
+        None,
+    );
+
+    Ok(MoonlightHostLatencyPreferencesResponse {
+        host_id,
+        effective,
+        overrides: host.preferences_override.clone(),
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_update_host_latency_preferences(
+    moonlight: State<'_, MoonlightManager>,
+    host_id: String,
+    latency: Option<NolandLatencyConfigPatch>,
+) -> Result<MoonlightHostLatencyPreferencesResponse, FrontendError> {
+    let host = crate::moonlight::infrastructure::persistence::MoonlightStateRepository::update(
+        moonlight.repository.as_ref(),
+        |configuration| {
+            let host = configuration.hosts.get_mut(&host_id).ok_or_else(|| {
+                crate::moonlight::domain::MoonlightError::Validation(format!(
+                    "host {host_id} not found"
+                ))
+            })?;
+
+            if let Some(latency_patch) = latency {
+                let mut overrides = host.preferences_override.clone().unwrap_or_default();
+                overrides.latency = Some(latency_patch);
+                host.preferences_override = Some(overrides);
+            } else {
+                host.preferences_override = None;
+            }
+            Ok(host.clone())
+        },
+    )
+    .map_err(moonlight_frontend_error)?;
+
+    let configuration =
+        crate::moonlight::infrastructure::persistence::MoonlightStateRepository::snapshot(
+            moonlight.repository.as_ref(),
+        )
+        .map_err(moonlight_frontend_error)?;
+    let effective = crate::moonlight::domain::merge_preferences(
+        &configuration.defaults,
+        host.preferences_override.as_ref(),
+        None,
+    );
+    validate_latency_config(&effective).map_err(moonlight_frontend_error)?;
+
+    Ok(MoonlightHostLatencyPreferencesResponse {
+        host_id,
+        effective,
+        overrides: host.preferences_override,
+    })
 }
 
 #[tauri::command]
