@@ -155,7 +155,10 @@ impl Receiver {
 
         self.main_loop.run();
 
-        let _ = self.pipeline.send_event(gst::event::Eos::new());
+        // Do not send EOS through the live RTP-to-FIFO pipeline during shutdown.
+        // A blocked FIFO sink can make EOS propagation wait indefinitely and in
+        // turn keep `systemctl stop` stuck. Moving directly to Null flushes and
+        // tears down the live pipeline without draining it.
         let _ = self.pipeline.set_state(gst::State::Null);
         info!("receiver pipeline stopped");
 

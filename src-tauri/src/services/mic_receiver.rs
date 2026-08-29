@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use base64::{engine::general_purpose::STANDARD, Engine};
 use flate2::{write::GzEncoder, Compression};
 use tracing::{info, warn};
 
@@ -21,10 +20,9 @@ pub struct MicReceiverProvisioner;
 impl MicReceiverProvisioner {
     /// Install and start the Noland microphone receiver on the remote VM.
     pub async fn install(remote: &RemoteExec, target_user: &str) -> AppResult<String> {
-        let normalized_script = INSTALL_SCRIPT.replace("\r\n", "\n").replace('\r', "\n");
-        let encoded = STANDARD.encode(normalized_script.as_bytes());
         let safe_user = sanitize_username(target_user)?;
         let source_bundle_path = create_receiver_source_bundle().await?;
+        let install_script_path = create_receiver_install_script()?;
 
         info!(
             target_user = safe_user,
@@ -51,6 +49,27 @@ impl MicReceiverProvisioner {
                 "Failed uploading mic receiver source bundle to VM: {} {}",
                 upload_output.stderr.trim(),
                 upload_output.stdout.trim()
+            )));
+        }
+
+        let installer_upload_output = {
+            let r = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                r.scp(
+                    &install_script_path,
+                    "/tmp/noland-mic-install.sh",
+                    Duration::from_secs(60),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if installer_upload_output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed uploading mic receiver installer to VM: {} {}",
+                installer_upload_output.stderr.trim(),
+                installer_upload_output.stdout.trim()
             )));
         }
 
@@ -109,8 +128,8 @@ chmod +x /tmp/noland-mic-receiver'"#;
         }
 
         let command = format!(
-            "sudo bash -lc 'set -euo pipefail; base64 -d > /tmp/noland-mic-install.sh <<\"EOF\"\n{}\nEOF\nchmod +x /tmp/noland-mic-install.sh\n/tmp/noland-mic-install.sh \"{}\"\nrm -f /tmp/noland-mic-install.sh'",
-            encoded, safe_user,
+            "sudo bash -lc 'set -euo pipefail; bash /tmp/noland-mic-install.sh \"{}\"; rm -f /tmp/noland-mic-install.sh'",
+            safe_user,
         );
 
         let output = {
@@ -340,6 +359,18 @@ async fn create_receiver_source_bundle() -> AppResult<PathBuf> {
     }
 
     Ok(archive_path)
+}
+
+fn create_receiver_install_script() -> AppResult<PathBuf> {
+    let path = env::temp_dir().join("noland-mic-install.sh");
+    let script = INSTALL_SCRIPT.replace("\r\n", "\n").replace('\r', "\n");
+    fs::write(&path, script).map_err(|error| {
+        AppError::Command(format!(
+            "Failed creating mic receiver installer {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(path)
 }
 
 fn append_source_tree<W: std::io::Write>(

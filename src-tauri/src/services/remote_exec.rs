@@ -174,6 +174,7 @@ impl RemoteExec {
         ensure_command_available("scp")?;
         let os = OsDetection::new();
         let scp_binary = resolve_ssh_binary("scp")?;
+        let ssh_binary = resolve_ssh_binary("ssh")?;
         let mut command = Command::new(&scp_binary);
         configure_bundled_linux_runtime(
             &mut command,
@@ -182,6 +183,8 @@ impl RemoteExec {
             os.managed_binary_target_triple(),
         );
         command
+            .arg("-S")
+            .arg(&ssh_binary)
             .arg("-i")
             .arg(&self.private_key_path)
             .arg("-P")
