@@ -236,6 +236,15 @@ jobs:
           ZIP_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${PRODUCT_NAME}_${VERSION}_${{ matrix.arch }}.app.zip"
           ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
 
+          # Validate the exact downloadable archive, not only the build-tree app.
+          EXTRACT_DIR=$(mktemp -d)
+          trap 'rm -rf "$EXTRACT_DIR"' EXIT
+          ditto -x -k "$ZIP_PATH" "$EXTRACT_DIR"
+          ARCHIVED_APP="$EXTRACT_DIR/${PRODUCT_NAME}.app"
+          codesign --verify --deep --strict --verbose=2 "$ARCHIVED_APP"
+          xcrun stapler validate -v "$ARCHIVED_APP"
+          spctl -a -vvv -t exec "$ARCHIVED_APP"
+
       - name: Verify bundled sidecars and runtime
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
