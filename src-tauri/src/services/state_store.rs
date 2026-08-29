@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::fs;
+use tracing::warn;
 
 use crate::{
     errors::{AppError, AppResult},
@@ -61,6 +62,25 @@ impl JsonStateStore {
         Ok(migrated)
     }
 
+    async fn recover_invalid_state(&self, error: &AppError) -> AppResult<PersistedAppState> {
+        let backup_path = self.state_path.with_extension(format!(
+            "invalid-{}.json",
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+        ));
+
+        fs::rename(&self.state_path, &backup_path).await?;
+        warn!(
+            state_path = %self.state_path.display(),
+            backup_path = %backup_path.display(),
+            %error,
+            "Recovered an invalid persisted state file"
+        );
+
+        let state = PersistedAppState::default();
+        self.save_state(&state).await?;
+        Ok(state)
+    }
+
     async fn load_existing_root_map(&self) -> AppResult<Map<String, Value>> {
         if !self.state_path.exists() {
             return Ok(Map::new());
@@ -96,14 +116,24 @@ impl StateStore for JsonStateStore {
         }
 
         let contents = fs::read_to_string(&self.state_path).await?;
-        let raw_value: Value = serde_json::from_str(&contents).map_err(|error| {
-            AppError::Serialization(format!(
-                "Failed to parse state file at {}: {error}",
-                self.state_path.display()
-            ))
-        })?;
+        let raw_value: Value = match serde_json::from_str(&contents) {
+            Ok(value) => value,
+            Err(error) => {
+                let error = AppError::Serialization(format!(
+                    "Failed to parse state file at {}: {error}",
+                    self.state_path.display()
+                ));
+                return self.recover_invalid_state(&error).await;
+            }
+        };
 
-        let migrated = self.migrate_value(raw_value)?;
+        let migrated = match self.migrate_value(raw_value) {
+            Ok(state) => state,
+            Err(error @ AppError::Serialization(_)) => {
+                return self.recover_invalid_state(&error).await;
+            }
+            Err(error) => return Err(error),
+        };
         self.save_state(&migrated).await?;
         Ok(migrated)
     }
@@ -215,6 +245,56 @@ mod tests {
         assert_eq!(
             migrated.orchestration_state,
             OrchestrationState::WireGuardConnected
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_state_is_backed_up_and_replaced() {
+        let path = temp_state_path("recover-invalid");
+        fs::write(&path, b"{ truncated").await.unwrap();
+
+        let store = JsonStateStore::new(path.clone(), 3);
+        let recovered = store.load_state().await.unwrap();
+
+        assert_eq!(recovered.version, PersistedAppState::default().version);
+        let persisted: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        assert!(persisted.is_object());
+
+        let backup_count = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("state.invalid-")
+            })
+            .count();
+        assert_eq!(backup_count, 1);
+    }
+
+    #[tokio::test]
+    async fn incompatible_state_is_backed_up_and_replaced() {
+        let path = temp_state_path("recover-incompatible");
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({ "moonlightPreferences": { "width": "invalid" } })).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let store = JsonStateStore::new(path.clone(), 3);
+        let recovered = store.load_state().await.unwrap();
+
+        assert_eq!(
+            recovered.moonlight_preferences.width,
+            PersistedAppState::default().moonlight_preferences.width
+        );
+        assert!(
+            serde_json::from_slice::<serde_json::Value>(&fs::read(path).await.unwrap())
+                .unwrap()
+                .is_object()
         );
     }
 
