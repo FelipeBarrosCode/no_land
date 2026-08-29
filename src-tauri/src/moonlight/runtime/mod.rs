@@ -1,5 +1,6 @@
 use std::{
     ffi::{CStr, CString},
+    path::PathBuf,
     ptr,
     time::{Duration, Instant},
 };
@@ -9,9 +10,11 @@ use tauri::{AppHandle, Emitter, Runtime};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use crate::moonlight::{
+    adaptive_packet_size::{AdaptivePacketSizeController, PacketSizeObservation},
     domain::{
-        transition, AudioConfiguration, ColorRange, ColorSpace, EncryptionMode, MoonlightError,
-        SessionSignal, SessionState, StreamPreferences, StreamingMode,
+        transition, AudioConfiguration, ColorRange, ColorSpace, EncryptionMode, FrameBufferMode,
+        MoonlightError, PacingMode, RemoteStreamMode, SessionSignal, SessionState,
+        StreamPreferences, StreamingMode,
     },
     native,
     platform::NativeSurfaceDescriptor,
@@ -30,6 +33,7 @@ pub struct NativeStartRequest {
     pub supported_video_formats: u32,
     pub remote_input_key: [u8; 16],
     pub remote_input_iv: [u8; 16],
+    pub session_generation: u64,
 }
 
 #[derive(Debug)]
@@ -101,6 +105,12 @@ pub enum RuntimeCommand {
         right_stick_y: i16,
         response: oneshot::Sender<Result<(), MoonlightError>>,
     },
+    RestartWithPacketSize {
+        source_generation: u64,
+        target: u16,
+        score: u8,
+        reason: String,
+    },
     GetState {
         response: oneshot::Sender<SessionState>,
     },
@@ -147,6 +157,54 @@ pub struct RuntimeStatistics {
     pub last_video_rtp_timestamp: u32,
     pub last_video_hdr_active: bool,
     pub last_video_colorspace: u8,
+    pub session_generation: u64,
+    pub video_packets_interval: u32,
+    pub fec_packets_interval: u32,
+    pub fec_recoveries_interval: u32,
+    pub fec_failures_interval: u32,
+    pub out_of_sequence_packets_interval: u32,
+    pub invalid_packets_interval: u32,
+    pub invalid_fec_packets_interval: u32,
+    pub pending_core_video_frames: i32,
+    pub decoder_queue_depth: u16,
+    pub render_queue_depth: u16,
+    pub average_decode_pipeline_us: u64,
+    pub average_render_queue_dwell_us: u64,
+    pub late_frame_count: u64,
+    pub adaptive_stale_drop_count: u64,
+    pub pacer_backlog_drop_count: u64,
+    pub renderer_error_drop_count: u64,
+    pub maximum_lateness_us: u64,
+    pub decoder_backpressure_time_us: u64,
+    pub last_drop_lateness_us: u64,
+    pub rendered_fps_x100: u32,
+    pub consecutive_late_frames: u32,
+    pub late_tolerance_us: u32,
+    pub decoder_backpressured: bool,
+    pub smoothing_queue_depth: u8,
+    pub smoothing_queue_capacity: u8,
+    pub max_smoothing_queue_depth: u8,
+    pub smoothing_overflow_drops: u64,
+    pub smoothing_underflow_repeats: u64,
+    pub smoothing_reserve_budget_us: u64,
+    pub frame_timing_ring_count: u32,
+    pub reconnect_attempt_count: u64,
+    pub reconnect_success_count: u64,
+    pub resolved_remote_stream_mode: String,
+    pub requested_packet_size: u32,
+    pub stream_fps: u32,
+    pub client_refresh_rate_x100: u32,
+    pub configured_pacing_mode: String,
+    pub effective_pacing_mode: String,
+    pub adaptive_packet_size_enabled: bool,
+    pub packet_size_controller_state: String,
+    pub packet_path_label: String,
+    pub packet_path_mtu_hint: Option<u32>,
+    pub packet_size_last_good: Option<u16>,
+    pub packet_size_bad_window_count: u8,
+    pub packet_size_confidence: f32,
+    pub packet_path_fingerprint: String,
+    pub adaptive_packet_reconnect_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +212,7 @@ pub struct RuntimeStatistics {
 pub struct RuntimeEventMessage {
     pub kind: String,
     pub code: i32,
+    pub session_generation: u64,
     pub message: String,
 }
 
@@ -511,6 +570,7 @@ impl NativeRuntime {
     fn start(&mut self, request: &NativeStartRequest) -> Result<(), MoonlightError> {
         let audio_configuration =
             audio_configuration_native(request.preferences.audio.configuration);
+        let resolved_remote = resolve_remote_stream_config(&request.preferences);
         tracing::info!(
             host_id = %request.host_id,
             app_id = request.app_id,
@@ -521,9 +581,10 @@ impl NativeRuntime {
             width = request.preferences.video.width,
             height = request.preferences.video.height,
             fps = request.preferences.video.fps,
+            client_refresh_rate_x100 = client_refresh_rate_x100(&request.preferences),
             bitrate_kbps = request.preferences.video.bitrate_kbps,
-            packet_size = request.preferences.network.packet_size,
-            streaming_mode = ?request.preferences.network.streaming_mode,
+            packet_size = resolved_remote.packet_size,
+            streaming_mode = ?resolved_remote.mode,
             audio_configuration = ?request.preferences.audio.configuration,
             audio_configuration_native = format!("0x{audio_configuration:08X}"),
             audio_target_buffer_ms = request.preferences.audio.target_buffer_ms,
@@ -567,18 +628,45 @@ impl NativeRuntime {
             height: request.preferences.video.height as i32,
             fps: request.preferences.video.fps as i32,
             bitrate_kbps: request.preferences.video.bitrate_kbps as i32,
-            packet_size: request.preferences.network.packet_size as i32,
-            streaming_remotely: streaming_mode_native(request.preferences.network.streaming_mode),
+            packet_size: resolved_remote.packet_size as i32,
+            streaming_remotely: resolved_remote.streaming_remotely,
             audio_configuration,
             audio_target_buffer_ms: request.preferences.audio.target_buffer_ms,
             audio_maximum_buffer_ms: request.preferences.audio.maximum_buffer_ms,
             supported_video_formats: request.supported_video_formats as i32,
-            client_refresh_rate_x100: (request.preferences.video.fps * 100) as i32,
+            client_refresh_rate_x100: client_refresh_rate_x100(&request.preferences) as i32,
             color_space: color_space_native(request.preferences.video.color_space),
             color_range: color_range_native(request.preferences.video.color_range),
             encryption_flags: encryption_mode_native(request.preferences.network.encryption),
             remote_input_aes_key: request.remote_input_key.map(|value| value as i8),
             remote_input_aes_iv: request.remote_input_iv.map(|value| value as i8),
+            session_generation: request.session_generation,
+            latency_config: native::nl_latency_config_t {
+                telemetry_enabled: u8::from(request.preferences.latency.telemetry_enabled),
+                adaptive_late_frame_drop_enabled: u8::from(
+                    request.preferences.latency.adaptive_late_frame_drop_enabled,
+                ),
+                decoder_backpressure_policy_enabled: u8::from(
+                    request
+                        .preferences
+                        .latency
+                        .decoder_backpressure_policy_enabled,
+                ),
+                auto_reconnect_on_unexpected_termination: u8::from(
+                    request
+                        .preferences
+                        .latency
+                        .auto_reconnect_on_unexpected_termination,
+                ),
+                vsync_enabled: u8::from(request.preferences.latency.vsync_enabled),
+                pacing_mode: pacing_mode_native(request.preferences.latency.pacing_mode),
+                frame_buffer_mode: frame_buffer_mode_native(
+                    request.preferences.latency.frame_buffer_mode,
+                ),
+                remote_stream_mode: remote_stream_mode_native(resolved_remote.mode),
+                remote_packet_size: resolved_remote.packet_size as u32,
+                late_frame_tolerance_us: request.preferences.latency.late_frame_tolerance_us,
+            },
         };
         let result = unsafe { native::nl_runtime_start(self.raw, &mut native_request) };
         map_native_result(result, "nl_runtime_start")
@@ -587,6 +675,10 @@ impl NativeRuntime {
     fn stop(&mut self) -> Result<(), MoonlightError> {
         let result = unsafe { native::nl_runtime_request_stop(self.raw) };
         map_native_result(result, "nl_runtime_request_stop")
+    }
+
+    fn record_reconnect_result(&mut self, attempt_started: bool, succeeded: bool) {
+        unsafe { native::nl_runtime_record_reconnect_result(self.raw, attempt_started, succeeded) };
     }
 
     fn attach_surface(&mut self, surface: &NativeSurfaceDescriptor) -> Result<(), MoonlightError> {
@@ -743,6 +835,45 @@ impl NativeRuntime {
             last_video_rtp_timestamp: 0,
             last_video_hdr_active: 0,
             last_video_colorspace: 0,
+            session_generation: 0,
+            video_packets_interval: 0,
+            fec_packets_interval: 0,
+            fec_recoveries_interval: 0,
+            fec_failures_interval: 0,
+            out_of_sequence_packets_interval: 0,
+            invalid_packets_interval: 0,
+            invalid_fec_packets_interval: 0,
+            pending_core_video_frames: -1,
+            decoder_queue_depth: 0,
+            render_queue_depth: 0,
+            average_decode_pipeline_us: 0,
+            average_render_queue_dwell_us: 0,
+            late_frame_count: 0,
+            adaptive_stale_drop_count: 0,
+            pacer_backlog_drop_count: 0,
+            renderer_error_drop_count: 0,
+            maximum_lateness_us: 0,
+            decoder_backpressure_time_us: 0,
+            last_drop_lateness_us: 0,
+            rendered_fps_x100: 0,
+            consecutive_late_frames: 0,
+            late_tolerance_us: 0,
+            decoder_backpressured: 0,
+            smoothing_queue_depth: 0,
+            smoothing_queue_capacity: 0,
+            max_smoothing_queue_depth: 0,
+            smoothing_overflow_drops: 0,
+            smoothing_underflow_repeats: 0,
+            smoothing_reserve_budget_us: 0,
+            frame_timing_ring_count: 0,
+            reconnect_attempt_count: 0,
+            reconnect_success_count: 0,
+            resolved_remote_stream_mode: native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_AUTO,
+            requested_packet_size: 0,
+            stream_fps: 0,
+            client_refresh_rate_x100: 0,
+            configured_pacing_mode: native::nl_pacing_mode_NL_PACING_MODE_OFF,
+            effective_pacing_mode: native::nl_pacing_mode_NL_PACING_MODE_OFF,
         };
         let result = unsafe { native::nl_runtime_read_stats(self.raw, &mut output) };
         map_native_result(result, "nl_runtime_read_stats")?;
@@ -785,6 +916,45 @@ impl NativeRuntime {
             last_video_rtp_timestamp: output.last_video_rtp_timestamp,
             last_video_hdr_active: output.last_video_hdr_active != 0,
             last_video_colorspace: output.last_video_colorspace,
+            session_generation: output.session_generation,
+            video_packets_interval: output.video_packets_interval,
+            fec_packets_interval: output.fec_packets_interval,
+            fec_recoveries_interval: output.fec_recoveries_interval,
+            fec_failures_interval: output.fec_failures_interval,
+            out_of_sequence_packets_interval: output.out_of_sequence_packets_interval,
+            invalid_packets_interval: output.invalid_packets_interval,
+            invalid_fec_packets_interval: output.invalid_fec_packets_interval,
+            pending_core_video_frames: output.pending_core_video_frames,
+            decoder_queue_depth: output.decoder_queue_depth,
+            render_queue_depth: output.render_queue_depth,
+            average_decode_pipeline_us: output.average_decode_pipeline_us,
+            average_render_queue_dwell_us: output.average_render_queue_dwell_us,
+            late_frame_count: output.late_frame_count,
+            adaptive_stale_drop_count: output.adaptive_stale_drop_count,
+            pacer_backlog_drop_count: output.pacer_backlog_drop_count,
+            renderer_error_drop_count: output.renderer_error_drop_count,
+            maximum_lateness_us: output.maximum_lateness_us,
+            decoder_backpressure_time_us: output.decoder_backpressure_time_us,
+            last_drop_lateness_us: output.last_drop_lateness_us,
+            rendered_fps_x100: output.rendered_fps_x100,
+            consecutive_late_frames: output.consecutive_late_frames,
+            late_tolerance_us: output.late_tolerance_us,
+            decoder_backpressured: output.decoder_backpressured != 0,
+            smoothing_queue_depth: output.smoothing_queue_depth,
+            smoothing_queue_capacity: output.smoothing_queue_capacity,
+            max_smoothing_queue_depth: output.max_smoothing_queue_depth,
+            smoothing_overflow_drops: output.smoothing_overflow_drops,
+            smoothing_underflow_repeats: output.smoothing_underflow_repeats,
+            smoothing_reserve_budget_us: output.smoothing_reserve_budget_us,
+            frame_timing_ring_count: output.frame_timing_ring_count,
+            reconnect_attempt_count: output.reconnect_attempt_count,
+            reconnect_success_count: output.reconnect_success_count,
+            resolved_remote_stream_mode: output.resolved_remote_stream_mode,
+            requested_packet_size: output.requested_packet_size,
+            stream_fps: output.stream_fps,
+            client_refresh_rate_x100: output.client_refresh_rate_x100,
+            configured_pacing_mode: output.configured_pacing_mode,
+            effective_pacing_mode: output.effective_pacing_mode,
         })
     }
 
@@ -795,6 +965,7 @@ impl NativeRuntime {
                 kind: native::nl_event_kind_NL_EVENT_NONE,
                 state: native::nl_stream_state_NL_STREAM_STATE_IDLE,
                 code: 0,
+                session_generation: 0,
                 message: [0; 256],
             };
             let result = unsafe { native::nl_runtime_poll_event(self.raw, &mut output) };
@@ -817,6 +988,7 @@ impl NativeRuntime {
             events.push(NativeEvent {
                 kind: output.kind,
                 code: output.code,
+                session_generation: output.session_generation,
                 message,
             });
         }
@@ -872,13 +1044,67 @@ struct NativeStats {
     last_video_rtp_timestamp: u32,
     last_video_hdr_active: bool,
     last_video_colorspace: u8,
+    session_generation: u64,
+    video_packets_interval: u32,
+    fec_packets_interval: u32,
+    fec_recoveries_interval: u32,
+    fec_failures_interval: u32,
+    out_of_sequence_packets_interval: u32,
+    invalid_packets_interval: u32,
+    invalid_fec_packets_interval: u32,
+    pending_core_video_frames: i32,
+    decoder_queue_depth: u16,
+    render_queue_depth: u16,
+    average_decode_pipeline_us: u64,
+    average_render_queue_dwell_us: u64,
+    late_frame_count: u64,
+    adaptive_stale_drop_count: u64,
+    pacer_backlog_drop_count: u64,
+    renderer_error_drop_count: u64,
+    maximum_lateness_us: u64,
+    decoder_backpressure_time_us: u64,
+    last_drop_lateness_us: u64,
+    rendered_fps_x100: u32,
+    consecutive_late_frames: u32,
+    late_tolerance_us: u32,
+    decoder_backpressured: bool,
+    smoothing_queue_depth: u8,
+    smoothing_queue_capacity: u8,
+    max_smoothing_queue_depth: u8,
+    smoothing_overflow_drops: u64,
+    smoothing_underflow_repeats: u64,
+    smoothing_reserve_budget_us: u64,
+    frame_timing_ring_count: u32,
+    reconnect_attempt_count: u64,
+    reconnect_success_count: u64,
+    resolved_remote_stream_mode: native::nl_remote_stream_mode_t,
+    requested_packet_size: u32,
+    stream_fps: u32,
+    client_refresh_rate_x100: u32,
+    configured_pacing_mode: native::nl_pacing_mode_t,
+    effective_pacing_mode: native::nl_pacing_mode_t,
 }
 
 #[derive(Debug, Clone)]
 struct NativeEvent {
     kind: native::nl_event_kind_t,
     code: i32,
+    session_generation: u64,
     message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReconnectCause {
+    UnexpectedFailure,
+    PacketSize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingPacketReconnect {
+    source_generation: u64,
+    target: u16,
+    score: u8,
+    reason: String,
 }
 
 fn audio_configuration_native(configuration: AudioConfiguration) -> i32 {
@@ -889,10 +1115,157 @@ fn audio_configuration_native(configuration: AudioConfiguration) -> i32 {
     }
 }
 
-fn streaming_mode_native(mode: StreamingMode) -> i32 {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ResolvedRemoteStreamConfig {
+    mode: RemoteStreamMode,
+    streaming_remotely: i32,
+    packet_size: u16,
+}
+
+fn client_refresh_rate_x100(preferences: &StreamPreferences) -> u32 {
+    if preferences.video.client_refresh_rate_x100 == 0 {
+        preferences.video.fps.saturating_mul(100)
+    } else {
+        preferences.video.client_refresh_rate_x100
+    }
+}
+
+fn resolve_remote_stream_config(preferences: &StreamPreferences) -> ResolvedRemoteStreamConfig {
+    let mode = match preferences.latency.remote_stream_mode {
+        RemoteStreamMode::Auto => match preferences.network.streaming_mode {
+            StreamingMode::Local => RemoteStreamMode::ForceLocal,
+            StreamingMode::Remote => RemoteStreamMode::ForceRemote,
+            StreamingMode::Auto => RemoteStreamMode::Auto,
+        },
+        explicit => explicit,
+    };
+    let packet_size = match mode {
+        RemoteStreamMode::ForceRemote => preferences.latency.remote_packet_size,
+        RemoteStreamMode::Auto | RemoteStreamMode::ForceLocal => preferences.network.packet_size,
+    };
+    let streaming_remotely = match mode {
+        RemoteStreamMode::ForceLocal => 0,
+        RemoteStreamMode::ForceRemote => 1,
+        RemoteStreamMode::Auto => 2,
+    };
+    ResolvedRemoteStreamConfig {
+        mode,
+        streaming_remotely,
+        packet_size,
+    }
+}
+
+fn apply_packet_size(request: &mut NativeStartRequest, mode: RemoteStreamMode, packet_size: u16) {
+    request.preferences.latency.remote_stream_mode = mode;
     match mode {
-        StreamingMode::Local => 0,
-        StreamingMode::Remote => 1,
+        RemoteStreamMode::ForceRemote => {
+            request.preferences.latency.remote_packet_size = packet_size;
+        }
+        RemoteStreamMode::Auto | RemoteStreamMode::ForceLocal => {
+            request.preferences.network.packet_size = packet_size;
+        }
+    }
+}
+
+fn prepare_packet_size_controller(
+    app_data_dir: &std::path::Path,
+    request: &mut NativeStartRequest,
+) -> AdaptivePacketSizeController {
+    let configured = resolve_remote_stream_config(&request.preferences);
+    let controller = AdaptivePacketSizeController::prepare(
+        app_data_dir,
+        &request.host_id,
+        &request.host_address,
+        configured.mode,
+        configured.packet_size,
+        request.preferences.latency.adaptive_packet_size_enabled,
+    );
+    if controller.snapshot().enabled {
+        apply_packet_size(
+            request,
+            controller.resolved_remote_mode(),
+            controller.selected_packet_size(),
+        );
+    }
+    controller
+}
+
+fn packet_size_observation(stats: &NativeStats) -> PacketSizeObservation {
+    PacketSizeObservation {
+        generation: stats.session_generation,
+        video_packets: u64::from(stats.video_packets_interval),
+        fec_packets: u64::from(stats.fec_packets_interval),
+        fec_recoveries: u64::from(stats.fec_recoveries_interval),
+        fec_failures: u64::from(stats.fec_failures_interval),
+        out_of_sequence: u64::from(stats.out_of_sequence_packets_interval),
+        invalid_packets: u64::from(stats.invalid_packets_interval),
+        invalid_fec_packets: u64::from(stats.invalid_fec_packets_interval),
+        estimated_rtt_ms: stats.estimated_rtt_ms,
+        estimated_rtt_variance_ms: stats.estimated_rtt_variance_ms,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn should_evaluate_packet_size_policy(
+    state: &SessionState,
+    desired_running: bool,
+    active_generation: u64,
+    stats_generation: u64,
+    video_session_active: bool,
+    renderer_ready: bool,
+    failure_reconnect_requested: bool,
+    reconnect_in_flight: Option<ReconnectCause>,
+    packet_reconnect_pending: bool,
+) -> bool {
+    *state == SessionState::Streaming
+        && desired_running
+        && active_generation != 0
+        && stats_generation == active_generation
+        && video_session_active
+        && renderer_ready
+        && !failure_reconnect_requested
+        && reconnect_in_flight != Some(ReconnectCause::UnexpectedFailure)
+        && reconnect_in_flight != Some(ReconnectCause::PacketSize)
+        && !packet_reconnect_pending
+}
+
+fn next_external_generation(
+    state: &SessionState,
+    active_generation: u64,
+) -> Result<(SessionState, u64), MoonlightError> {
+    let next_state = transition(state, SessionSignal::StartRequested)?;
+    Ok((next_state, active_generation.wrapping_add(1).max(1)))
+}
+
+fn pacing_mode_native(mode: PacingMode) -> native::nl_pacing_mode_t {
+    match mode {
+        PacingMode::Off => native::nl_pacing_mode_NL_PACING_MODE_OFF,
+        PacingMode::Automatic => native::nl_pacing_mode_NL_PACING_MODE_AUTOMATIC,
+        PacingMode::Software => native::nl_pacing_mode_NL_PACING_MODE_SOFTWARE,
+        PacingMode::HardwareMultiple => native::nl_pacing_mode_NL_PACING_MODE_HARDWARE_MULTIPLE,
+    }
+}
+
+fn frame_buffer_mode_native(mode: FrameBufferMode) -> native::nl_frame_buffer_mode_t {
+    match mode {
+        FrameBufferMode::Off => native::nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_OFF,
+        FrameBufferMode::OneFrame => native::nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_ONE_FRAME,
+        FrameBufferMode::TwoFrames => native::nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_TWO_FRAMES,
+        FrameBufferMode::ThreeFrames => {
+            native::nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_THREE_FRAMES
+        }
+    }
+}
+
+fn remote_stream_mode_native(mode: RemoteStreamMode) -> native::nl_remote_stream_mode_t {
+    match mode {
+        RemoteStreamMode::Auto => native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_AUTO,
+        RemoteStreamMode::ForceRemote => {
+            native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_REMOTE
+        }
+        RemoteStreamMode::ForceLocal => {
+            native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_LOCAL
+        }
     }
 }
 
@@ -932,6 +1305,31 @@ fn session_state_label(state: &SessionState) -> String {
     .to_string()
 }
 
+fn pacing_mode_label(mode: native::nl_pacing_mode_t) -> String {
+    match mode {
+        value if value == native::nl_pacing_mode_NL_PACING_MODE_AUTOMATIC => "automatic",
+        value if value == native::nl_pacing_mode_NL_PACING_MODE_SOFTWARE => "software",
+        value if value == native::nl_pacing_mode_NL_PACING_MODE_HARDWARE_MULTIPLE => {
+            "hardwareMultiple"
+        }
+        _ => "off",
+    }
+    .to_string()
+}
+
+fn remote_stream_mode_label(mode: native::nl_remote_stream_mode_t) -> String {
+    match mode {
+        value if value == native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_REMOTE => {
+            "forceRemote"
+        }
+        value if value == native::nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_LOCAL => {
+            "forceLocal"
+        }
+        _ => "auto",
+    }
+    .to_string()
+}
+
 fn native_event_kind_label(kind: native::nl_event_kind_t) -> String {
     match kind {
         value if value == native::nl_event_kind_NL_EVENT_CONNECTED => "connected",
@@ -949,8 +1347,14 @@ fn native_event_kind_label(kind: native::nl_event_kind_t) -> String {
     .to_string()
 }
 
-fn runtime_statistics_from_native(state: &SessionState, stats: &NativeStats) -> RuntimeStatistics {
+fn runtime_statistics_from_native(
+    state: &SessionState,
+    stats: &NativeStats,
+    packet_size_controller: Option<&AdaptivePacketSizeController>,
+    adaptive_packet_reconnect_count: u64,
+) -> RuntimeStatistics {
     let _ = stats.state;
+    let controller_snapshot = packet_size_controller.map(AdaptivePacketSizeController::snapshot);
     RuntimeStatistics {
         state: session_state_label(state),
         start_count: stats.start_count,
@@ -989,7 +1393,103 @@ fn runtime_statistics_from_native(state: &SessionState, stats: &NativeStats) -> 
         last_video_rtp_timestamp: stats.last_video_rtp_timestamp,
         last_video_hdr_active: stats.last_video_hdr_active,
         last_video_colorspace: stats.last_video_colorspace,
+        session_generation: stats.session_generation,
+        video_packets_interval: stats.video_packets_interval,
+        fec_packets_interval: stats.fec_packets_interval,
+        fec_recoveries_interval: stats.fec_recoveries_interval,
+        fec_failures_interval: stats.fec_failures_interval,
+        out_of_sequence_packets_interval: stats.out_of_sequence_packets_interval,
+        invalid_packets_interval: stats.invalid_packets_interval,
+        invalid_fec_packets_interval: stats.invalid_fec_packets_interval,
+        pending_core_video_frames: stats.pending_core_video_frames,
+        decoder_queue_depth: stats.decoder_queue_depth,
+        render_queue_depth: stats.render_queue_depth,
+        average_decode_pipeline_us: stats.average_decode_pipeline_us,
+        average_render_queue_dwell_us: stats.average_render_queue_dwell_us,
+        late_frame_count: stats.late_frame_count,
+        adaptive_stale_drop_count: stats.adaptive_stale_drop_count,
+        pacer_backlog_drop_count: stats.pacer_backlog_drop_count,
+        renderer_error_drop_count: stats.renderer_error_drop_count,
+        maximum_lateness_us: stats.maximum_lateness_us,
+        decoder_backpressure_time_us: stats.decoder_backpressure_time_us,
+        last_drop_lateness_us: stats.last_drop_lateness_us,
+        rendered_fps_x100: stats.rendered_fps_x100,
+        consecutive_late_frames: stats.consecutive_late_frames,
+        late_tolerance_us: stats.late_tolerance_us,
+        decoder_backpressured: stats.decoder_backpressured,
+        smoothing_queue_depth: stats.smoothing_queue_depth,
+        smoothing_queue_capacity: stats.smoothing_queue_capacity,
+        max_smoothing_queue_depth: stats.max_smoothing_queue_depth,
+        smoothing_overflow_drops: stats.smoothing_overflow_drops,
+        smoothing_underflow_repeats: stats.smoothing_underflow_repeats,
+        smoothing_reserve_budget_us: stats.smoothing_reserve_budget_us,
+        frame_timing_ring_count: stats.frame_timing_ring_count,
+        reconnect_attempt_count: stats.reconnect_attempt_count,
+        reconnect_success_count: stats.reconnect_success_count,
+        resolved_remote_stream_mode: remote_stream_mode_label(stats.resolved_remote_stream_mode),
+        requested_packet_size: stats.requested_packet_size,
+        stream_fps: stats.stream_fps,
+        client_refresh_rate_x100: stats.client_refresh_rate_x100,
+        configured_pacing_mode: pacing_mode_label(stats.configured_pacing_mode),
+        effective_pacing_mode: pacing_mode_label(stats.effective_pacing_mode),
+        adaptive_packet_size_enabled: controller_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.enabled),
+        packet_size_controller_state: controller_snapshot
+            .as_ref()
+            .map_or_else(String::new, |snapshot| snapshot.state_label.clone()),
+        packet_path_label: controller_snapshot
+            .as_ref()
+            .map_or_else(String::new, |snapshot| snapshot.path_label.clone()),
+        packet_path_mtu_hint: controller_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.mtu_hint),
+        packet_size_last_good: controller_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.last_good),
+        packet_size_bad_window_count: controller_snapshot
+            .as_ref()
+            .map_or(0, |snapshot| snapshot.bad_window_count),
+        packet_size_confidence: controller_snapshot
+            .as_ref()
+            .map_or(0.0, |snapshot| snapshot.confidence),
+        packet_path_fingerprint: controller_snapshot
+            .as_ref()
+            .map_or_else(String::new, |snapshot| snapshot.fingerprint.clone()),
+        adaptive_packet_reconnect_count,
     }
+}
+
+fn should_reset_unexpected_reconnect_budget(
+    state: &SessionState,
+    reconnect_attempted: bool,
+    stable_since: Option<Instant>,
+    now: Instant,
+) -> bool {
+    *state == SessionState::Streaming
+        && reconnect_attempted
+        && stable_since.is_some_and(|since| now.duration_since(since) >= Duration::from_secs(30))
+}
+
+fn should_auto_reconnect(
+    state: &SessionState,
+    event: &NativeEvent,
+    desired_running: bool,
+    active_request: Option<&NativeStartRequest>,
+    reconnect_attempted: bool,
+) -> bool {
+    *state == SessionState::Streaming
+        && event.kind == native::nl_event_kind_NL_EVENT_TERMINATED
+        && event.code != 0
+        && desired_running
+        && !reconnect_attempted
+        && active_request.is_some_and(|request| {
+            request.preferences.reconnection.enabled
+                && request
+                    .preferences
+                    .latency
+                    .auto_reconnect_on_unexpected_termination
+        })
 }
 
 fn process_native_event(
@@ -1003,6 +1503,14 @@ fn process_native_event(
 
     if event.kind == native::nl_event_kind_NL_EVENT_CONNECTED {
         if let Ok(next) = transition(state, SessionSignal::ConnectionEstablished) {
+            *state = next;
+            let _ = state_tx.send(state.clone());
+        }
+    } else if event.kind == native::nl_event_kind_NL_EVENT_TERMINATED
+        && event.code != 0
+        && *state == SessionState::Streaming
+    {
+        if let Ok(next) = transition(state, SessionSignal::ConnectionLost) {
             *state = next;
             let _ = state_tx.send(state.clone());
         }
@@ -1027,6 +1535,7 @@ fn process_native_event(
     let payload = RuntimeEventMessage {
         kind: native_event_kind_label(event.kind),
         code: event.code,
+        session_generation: event.session_generation,
         message: event.message,
     };
 
@@ -1122,7 +1631,7 @@ fn enrich_native_start_error(
     }
 }
 
-pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
+pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<RuntimeCommand>(32);
     let (state_tx, state_rx) = watch::channel(SessionState::Idle);
     let (stats_tx, stats_rx) = watch::channel(RuntimeStatistics {
@@ -1163,11 +1672,59 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
         last_video_rtp_timestamp: 0,
         last_video_hdr_active: false,
         last_video_colorspace: 0,
+        session_generation: 0,
+        video_packets_interval: 0,
+        fec_packets_interval: 0,
+        fec_recoveries_interval: 0,
+        fec_failures_interval: 0,
+        out_of_sequence_packets_interval: 0,
+        invalid_packets_interval: 0,
+        invalid_fec_packets_interval: 0,
+        pending_core_video_frames: -1,
+        decoder_queue_depth: 0,
+        render_queue_depth: 0,
+        average_decode_pipeline_us: 0,
+        average_render_queue_dwell_us: 0,
+        late_frame_count: 0,
+        adaptive_stale_drop_count: 0,
+        pacer_backlog_drop_count: 0,
+        renderer_error_drop_count: 0,
+        maximum_lateness_us: 0,
+        decoder_backpressure_time_us: 0,
+        last_drop_lateness_us: 0,
+        rendered_fps_x100: 0,
+        consecutive_late_frames: 0,
+        late_tolerance_us: 0,
+        decoder_backpressured: false,
+        smoothing_queue_depth: 0,
+        smoothing_queue_capacity: 0,
+        max_smoothing_queue_depth: 0,
+        smoothing_overflow_drops: 0,
+        smoothing_underflow_repeats: 0,
+        smoothing_reserve_budget_us: 0,
+        frame_timing_ring_count: 0,
+        reconnect_attempt_count: 0,
+        reconnect_success_count: 0,
+        resolved_remote_stream_mode: "auto".to_string(),
+        requested_packet_size: 0,
+        stream_fps: 0,
+        client_refresh_rate_x100: 0,
+        configured_pacing_mode: "off".to_string(),
+        effective_pacing_mode: "off".to_string(),
+        adaptive_packet_size_enabled: false,
+        packet_size_controller_state: String::new(),
+        packet_path_label: String::new(),
+        packet_path_mtu_hint: None,
+        packet_size_last_good: None,
+        packet_size_bad_window_count: 0,
+        packet_size_confidence: 0.0,
+        packet_path_fingerprint: String::new(),
+        adaptive_packet_reconnect_count: 0,
     });
     let (latest_event_tx, latest_event_rx) = watch::channel::<Option<RuntimeEventMessage>>(None);
     let (event_tx, _) = broadcast::channel::<RuntimeEventMessage>(128);
     let handle = MoonlightRuntimeHandle {
-        commands: command_tx,
+        commands: command_tx.clone(),
         state: state_rx,
         statistics: stats_rx,
         latest_event: latest_event_rx,
@@ -1192,13 +1749,159 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
         let mut tick = tokio::time::interval(Duration::from_millis(250));
         let mut last_video_frame_count = 0_u64;
         let mut last_video_progress_at = Instant::now();
+        let mut active_request: Option<NativeStartRequest> = None;
+        let mut desired_running = false;
+        let mut active_generation = 0_u64;
+        let mut unexpected_reconnect_attempted = false;
+        let mut unexpected_reconnect_stable_since: Option<Instant> = None;
+        let mut reconnect_in_flight: Option<ReconnectCause> = None;
+        let mut packet_reconnect_pending: Option<PendingPacketReconnect> = None;
+        let mut packet_size_controller: Option<AdaptivePacketSizeController> = None;
+        let mut adaptive_packet_reconnect_count = 0_u64;
 
         loop {
             tokio::select! {
                 _ = tick.tick() => {
+                    let mut failure_reconnect_requested = false;
+                    let mut terminal_cleanup_requested = false;
                     if let Ok(native_events) = native_runtime.drain_events() {
                         for event in native_events {
-                            process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
+                            if event.session_generation != 0
+                                && event.session_generation != active_generation
+                            {
+                                tracing::debug!(
+                                    event_generation = event.session_generation,
+                                    active_generation,
+                                    "ignoring stale moonlight native event"
+                                );
+                                continue;
+                            }
+
+                            let connected = event.kind == native::nl_event_kind_NL_EVENT_CONNECTED;
+                            let terminal = event.kind == native::nl_event_kind_NL_EVENT_STAGE_FAILED
+                                || event.kind == native::nl_event_kind_NL_EVENT_STOPPED
+                                || event.kind == native::nl_event_kind_NL_EVENT_TERMINATED;
+                            let reconnect_teardown = terminal
+                                && state == SessionState::Reconnecting
+                                && (packet_reconnect_pending.is_some()
+                                    || failure_reconnect_requested);
+                            if reconnect_teardown {
+                                tracing::debug!(
+                                    kind = event.kind,
+                                    generation = event.session_generation,
+                                    "drained reconnect teardown event"
+                                );
+                                continue;
+                            }
+
+                            let should_reconnect = should_auto_reconnect(
+                                &state,
+                                &event,
+                                desired_running,
+                                active_request.as_ref(),
+                                unexpected_reconnect_attempted,
+                            );
+                            failure_reconnect_requested |= should_reconnect;
+                            terminal_cleanup_requested |= terminal && !should_reconnect;
+                            let matching_connected = connected
+                                && event.session_generation == active_generation;
+                            process_native_event(
+                                &mut state,
+                                &state_tx,
+                                &latest_event_tx,
+                                &event_tx,
+                                event,
+                            );
+
+                            if matching_connected {
+                                let now = Instant::now();
+                                let completed_reconnect = reconnect_in_flight.take();
+                                if completed_reconnect.is_some() {
+                                    native_runtime.record_reconnect_result(false, true);
+                                }
+                                match completed_reconnect {
+                                    Some(ReconnectCause::UnexpectedFailure) => {
+                                        unexpected_reconnect_stable_since = Some(now);
+                                    }
+                                    Some(ReconnectCause::PacketSize) if unexpected_reconnect_attempted => {
+                                        unexpected_reconnect_stable_since = Some(now);
+                                    }
+                                    None => {
+                                        unexpected_reconnect_attempted = false;
+                                        unexpected_reconnect_stable_since = None;
+                                    }
+                                    _ => {}
+                                }
+                                if let Some(controller) = packet_size_controller.as_mut() {
+                                    controller.on_connected(active_generation, now);
+                                }
+                            }
+                        }
+                    }
+
+                    if should_reset_unexpected_reconnect_budget(
+                        &state,
+                        unexpected_reconnect_attempted,
+                        unexpected_reconnect_stable_since,
+                        Instant::now(),
+                    ) {
+                        unexpected_reconnect_attempted = false;
+                        unexpected_reconnect_stable_since = None;
+                    }
+
+                    if failure_reconnect_requested {
+                        unexpected_reconnect_attempted = true;
+                        unexpected_reconnect_stable_since = None;
+                        if let Some(mut request) = active_request.clone() {
+                            let _ = native_runtime.stop();
+                            let _ = native_runtime.drain_events();
+                            active_generation = active_generation.wrapping_add(1).max(1);
+                            request.session_generation = active_generation;
+                            active_request = Some(request.clone());
+                            if let Ok(next) = transition(&state, SessionSignal::ReconnectRequested) {
+                                state = next;
+                                let _ = state_tx.send(state.clone());
+                            }
+                            native_runtime.record_reconnect_result(true, false);
+                            match native_runtime.start(&request) {
+                                Ok(()) => {
+                                    reconnect_in_flight = Some(ReconnectCause::UnexpectedFailure);
+                                    last_video_frame_count = 0;
+                                    last_video_progress_at = Instant::now();
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "one-shot moonlight reconnect failed");
+                                    reconnect_in_flight = None;
+                                    desired_running = false;
+                                    active_request = None;
+                                    packet_reconnect_pending = None;
+                                    packet_size_controller = None;
+                                    unexpected_reconnect_attempted = false;
+                                    unexpected_reconnect_stable_since = None;
+                                    let _ = native_runtime.stop();
+                                    let _ = native_runtime.drain_events();
+                                    state = SessionState::Idle;
+                                    let _ = state_tx.send(state.clone());
+                                }
+                            }
+                        } else {
+                            terminal_cleanup_requested = true;
+                        }
+                    }
+
+                    if terminal_cleanup_requested && !failure_reconnect_requested {
+                        desired_running = false;
+                        active_request = None;
+                        packet_reconnect_pending = None;
+                        packet_size_controller = None;
+                        reconnect_in_flight = None;
+                        unexpected_reconnect_attempted = false;
+                        unexpected_reconnect_stable_since = None;
+                        let _ = native_runtime.stop();
+                        let _ = native_runtime.drain_events();
+                        if state != SessionState::Idle {
+                            state = SessionState::Idle;
+                            let _ = state_tx.send(state.clone());
                         }
                     }
                     if let Ok(stats) = native_runtime.read_stats() {
@@ -1207,43 +1910,154 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                             last_video_progress_at = Instant::now();
                         }
 
-                        let should_stop_for_stall = matches!(state, SessionState::Streaming | SessionState::Reconnecting)
-                            && stats.video_session_active
+                        let should_stop_for_stall = matches!(
+                            state,
+                            SessionState::Streaming | SessionState::Reconnecting
+                        ) && stats.video_session_active
                             && stats.renderer_ready
                             && stats.video_frame_count > 0
-                            && Instant::now().duration_since(last_video_progress_at) > Duration::from_secs(10);
+                            && Instant::now().duration_since(last_video_progress_at)
+                                > Duration::from_secs(10);
 
                         if should_stop_for_stall {
                             let payload = RuntimeEventMessage {
                                 kind: "error".to_string(),
                                 code: -4100,
-                                message: "Video frames stopped arriving for 10 seconds. Ending stream.".to_string(),
+                                session_generation: active_generation,
+                                message: "Video frames stopped arriving for 10 seconds. Ending stream."
+                                    .to_string(),
                             };
                             let _ = latest_event_tx.send(Some(payload.clone()));
                             let _ = event_tx.send(payload);
+                            desired_running = false;
+                            active_request = None;
+                            packet_reconnect_pending = None;
+                            packet_size_controller = None;
+                            reconnect_in_flight = None;
+                            unexpected_reconnect_attempted = false;
+                            unexpected_reconnect_stable_since = None;
                             let _ = native_runtime.stop();
+                            let _ = native_runtime.drain_events();
                             if let Ok(next) = transition(&state, SessionSignal::StopRequested) {
                                 state = next;
                                 let _ = state_tx.send(state.clone());
                             }
                             if let Ok(next) = transition(&state, SessionSignal::Stopped) {
                                 state = next;
-                                let _ = state_tx.send(state.clone());
                             } else {
                                 state = SessionState::Idle;
+                            }
+                            let _ = state_tx.send(state.clone());
+                        }
+
+                        let should_evaluate = should_evaluate_packet_size_policy(
+                            &state,
+                            desired_running,
+                            active_generation,
+                            stats.session_generation,
+                            stats.video_session_active,
+                            stats.renderer_ready,
+                            failure_reconnect_requested,
+                            reconnect_in_flight,
+                            packet_reconnect_pending.is_some(),
+                        );
+                        let decision = if should_evaluate {
+                            packet_size_controller.as_mut().and_then(|controller| {
+                                controller.observe(packet_size_observation(&stats), Instant::now())
+                            })
+                        } else {
+                            None
+                        };
+
+                        if let Some(decision) = decision {
+                            if let Some(controller) = packet_size_controller.as_mut() {
+                                controller.commit_downshift(decision.to);
+                            }
+                            let pending = PendingPacketReconnect {
+                                source_generation: active_generation,
+                                target: decision.to,
+                                score: decision.score,
+                                reason: decision.reason.clone(),
+                            };
+                            if let Ok(next) = transition(
+                                &state,
+                                SessionSignal::ControlledReconnectRequested,
+                            ) {
+                                state = next;
+                                packet_reconnect_pending = Some(pending.clone());
                                 let _ = state_tx.send(state.clone());
+                                let payload = RuntimeEventMessage {
+                                    kind: "packetSizeReconnecting".to_string(),
+                                    code: 0,
+                                    session_generation: active_generation,
+                                    message: format!(
+                                        "packet size reconnect from={} to={} score={} reason={}",
+                                        decision.from,
+                                        decision.to,
+                                        decision.score,
+                                        decision.reason,
+                                    ),
+                                };
+                                let _ = latest_event_tx.send(Some(payload.clone()));
+                                let _ = event_tx.send(payload);
+                                let _ = stats_tx.send(runtime_statistics_from_native(
+                                    &state,
+                                    &stats,
+                                    packet_size_controller.as_ref(),
+                                    adaptive_packet_reconnect_count,
+                                ));
+                                let _ = native_runtime.stop();
+                                let _ = native_runtime.drain_events();
+                                let command = RuntimeCommand::RestartWithPacketSize {
+                                    source_generation: pending.source_generation,
+                                    target: pending.target,
+                                    score: pending.score,
+                                    reason: pending.reason,
+                                };
+                                if let Err(error) = command_tx.try_send(command) {
+                                    tracing::error!(%error, "failed to queue packet-size reconnect");
+                                    desired_running = false;
+                                    active_request = None;
+                                    packet_reconnect_pending = None;
+                                    packet_size_controller = None;
+                                    reconnect_in_flight = None;
+                                    unexpected_reconnect_attempted = false;
+                                    unexpected_reconnect_stable_since = None;
+                                    state = SessionState::Idle;
+                                    let _ = state_tx.send(state.clone());
+                                }
+                                continue;
                             }
                         }
 
-                        let _ = stats_tx.send(runtime_statistics_from_native(&state, &stats));
+                        let _ = stats_tx.send(runtime_statistics_from_native(
+                            &state,
+                            &stats,
+                            packet_size_controller.as_ref(),
+                            adaptive_packet_reconnect_count,
+                        ));
                     }
                 }
                 maybe_command = command_rx.recv() => {
                     let Some(command) = maybe_command else { break; };
                     match command {
-                        RuntimeCommand::Start { request, response } => {
+                        RuntimeCommand::Start { mut request, response } => {
                             let result = (|| -> Result<(), MoonlightError> {
-                                state = transition(&state, SessionSignal::StartRequested)?;
+                                let (preparing_state, next_generation) =
+                                    next_external_generation(&state, active_generation)?;
+                                let controller =
+                                    prepare_packet_size_controller(&app_data_dir, &mut request);
+
+                                state = preparing_state;
+                                active_generation = next_generation;
+                                request.session_generation = active_generation;
+                                desired_running = true;
+                                unexpected_reconnect_attempted = false;
+                                unexpected_reconnect_stable_since = None;
+                                reconnect_in_flight = None;
+                                packet_reconnect_pending = None;
+                                packet_size_controller = Some(controller);
+                                active_request = Some(request.clone());
                                 let _ = state_tx.send(state.clone());
                                 state = transition(&state, SessionSignal::PreparationCompleted)?;
                                 let _ = state_tx.send(state.clone());
@@ -1264,7 +2078,12 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                     }
 
                                     let runtime_stats = native_runtime.read_stats().ok().map(|stats| {
-                                        let runtime_stats = runtime_statistics_from_native(&state, &stats);
+                                        let runtime_stats = runtime_statistics_from_native(
+                                            &state,
+                                            &stats,
+                                            packet_size_controller.as_ref(),
+                                            adaptive_packet_reconnect_count,
+                                        );
                                         let _ = stats_tx.send(runtime_stats.clone());
                                         runtime_stats
                                     });
@@ -1274,6 +2093,15 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                         latest_event.as_ref(),
                                         runtime_stats.as_ref(),
                                     );
+                                    desired_running = false;
+                                    active_request = None;
+                                    packet_reconnect_pending = None;
+                                    packet_size_controller = None;
+                                    reconnect_in_flight = None;
+                                    let _ = native_runtime.stop();
+                                    let _ = native_runtime.drain_events();
+                                    state = SessionState::Idle;
+                                    let _ = state_tx.send(state.clone());
                                     tracing::error!(
                                         host_id = %request.host_id,
                                         app_id = request.app_id,
@@ -1285,13 +2113,13 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                     return Err(enriched_error);
                                 }
 
-                                if let Ok(native_events) = native_runtime.drain_events() {
-                                    for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
-                                    }
-                                }
                                 if let Ok(stats) = native_runtime.read_stats() {
-                                    let _ = stats_tx.send(runtime_statistics_from_native(&state, &stats));
+                                    let _ = stats_tx.send(runtime_statistics_from_native(
+                                        &state,
+                                        &stats,
+                                        packet_size_controller.as_ref(),
+                                        adaptive_packet_reconnect_count,
+                                    ));
                                 }
                                 Ok(())
                             })();
@@ -1299,6 +2127,13 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                         }
                         RuntimeCommand::Stop { response } => {
                             let result = (|| -> Result<(), MoonlightError> {
+                                desired_running = false;
+                                active_request = None;
+                                unexpected_reconnect_attempted = false;
+                                unexpected_reconnect_stable_since = None;
+                                reconnect_in_flight = None;
+                                packet_reconnect_pending = None;
+                                packet_size_controller = None;
                                 state = match state {
                                     SessionState::Idle => SessionState::Idle,
                                     SessionState::Stopping => SessionState::Stopping,
@@ -1318,34 +2153,109 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
                                     let _ = state_tx.send(state.clone());
                                 }
                                 if let Ok(stats) = native_runtime.read_stats() {
-                                    let _ = stats_tx.send(runtime_statistics_from_native(&state, &stats));
+                                    let _ = stats_tx.send(runtime_statistics_from_native(
+                                        &state,
+                                        &stats,
+                                        packet_size_controller.as_ref(),
+                                        adaptive_packet_reconnect_count,
+                                    ));
                                 }
                                 Ok(())
                             })();
                             let _ = response.send(result);
                         }
-                        RuntimeCommand::AttachSurface { surface, response } => {
-                            let result = (|| -> Result<(), MoonlightError> {
-                                native_runtime.attach_surface(&surface)?;
-                                if let Ok(native_events) = native_runtime.drain_events() {
-                                    for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
-                                    }
+                        RuntimeCommand::RestartWithPacketSize {
+                            source_generation,
+                            target,
+                            score,
+                            reason,
+                        } => {
+                            let matches_pending = packet_reconnect_pending.as_ref().is_some_and(
+                                |pending| {
+                                    pending.source_generation == source_generation
+                                        && pending.target == target
+                                        && pending.score == score
+                                        && pending.reason == reason
+                                },
+                            );
+                            if !matches_pending
+                                || source_generation != active_generation
+                                || state != SessionState::Reconnecting
+                                || !desired_running
+                                || active_request.is_none()
+                                || packet_size_controller.is_none()
+                                || reconnect_in_flight.is_some()
+                            {
+                                tracing::debug!(
+                                    source_generation,
+                                    active_generation,
+                                    target,
+                                    score,
+                                    %reason,
+                                    "ignoring stale packet-size reconnect command"
+                                );
+                                continue;
+                            }
+
+                            let mut request = active_request.clone().expect("checked above");
+                            let controller = packet_size_controller.as_ref().expect("checked above");
+                            active_generation = active_generation.wrapping_add(1).max(1);
+                            request.session_generation = active_generation;
+                            apply_packet_size(
+                                &mut request,
+                                controller.resolved_remote_mode(),
+                                target,
+                            );
+                            active_request = Some(request.clone());
+                            packet_reconnect_pending = None;
+                            state = match transition(&state, SessionSignal::ReconnectRequested) {
+                                Ok(next) => next,
+                                Err(error) => {
+                                    tracing::error!(%error, "packet-size reconnect transition failed");
+                                    desired_running = false;
+                                    active_request = None;
+                                    packet_size_controller = None;
+                                    reconnect_in_flight = None;
+                                    unexpected_reconnect_attempted = false;
+                                    unexpected_reconnect_stable_since = None;
+                                    let _ = native_runtime.stop();
+                                    let _ = native_runtime.drain_events();
+                                    let _ = state_tx.send(SessionState::Idle);
+                                    state = SessionState::Idle;
+                                    continue;
                                 }
-                                Ok(())
-                            })();
+                            };
+                            let _ = state_tx.send(state.clone());
+                            adaptive_packet_reconnect_count =
+                                adaptive_packet_reconnect_count.saturating_add(1);
+                            native_runtime.record_reconnect_result(true, false);
+                            match native_runtime.start(&request) {
+                                Ok(()) => {
+                                    reconnect_in_flight = Some(ReconnectCause::PacketSize);
+                                    last_video_frame_count = 0;
+                                    last_video_progress_at = Instant::now();
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "packet-size reconnect failed");
+                                    desired_running = false;
+                                    active_request = None;
+                                    packet_size_controller = None;
+                                    reconnect_in_flight = None;
+                                    unexpected_reconnect_attempted = false;
+                                    unexpected_reconnect_stable_since = None;
+                                    let _ = native_runtime.stop();
+                                    let _ = native_runtime.drain_events();
+                                    state = SessionState::Idle;
+                                    let _ = state_tx.send(state.clone());
+                                }
+                            }
+                        }
+                        RuntimeCommand::AttachSurface { surface, response } => {
+                            let result = native_runtime.attach_surface(&surface);
                             let _ = response.send(result);
                         }
                         RuntimeCommand::DetachSurface { response } => {
-                            let result = (|| -> Result<(), MoonlightError> {
-                                native_runtime.detach_surface()?;
-                                if let Ok(native_events) = native_runtime.drain_events() {
-                                    for event in native_events {
-                                        process_native_event(&mut state, &state_tx, &latest_event_tx, &event_tx, event);
-                                    }
-                                }
-                                Ok(())
-                            })();
+                            let result = native_runtime.detach_surface();
                             let _ = response.send(result);
                         }
                         RuntimeCommand::SendRelativeMouse { delta_x, delta_y, response } => {
@@ -1433,22 +2343,42 @@ pub fn spawn_runtime_actor() -> MoonlightRuntimeHandle {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
+    use crate::moonlight::platform::NativeSurfaceDescriptor;
     use crate::moonlight::{
         domain::{
-            AudioConfiguration, AudioPreferences, Codec, ColorRange, ColorSpace, DecoderPreference,
-            EncryptionMode, InputPreferences, MouseMode, NetworkPreferences,
-            ReconnectionPreferences, StreamPreferences, StreamingMode, VideoPreferences,
-            WindowMode, WindowPreferences,
+            AudioConfiguration, RemoteStreamMode, SessionState, StreamPreferences, StreamingMode,
         },
         native,
-        platform::NativeSurfaceDescriptor,
     };
 
     use super::{
-        audio_configuration_native, process_native_event, NativeEvent, NativeRuntime,
-        RuntimeEventMessage,
+        apply_packet_size, audio_configuration_native, client_refresh_rate_x100,
+        next_external_generation, prepare_packet_size_controller, process_native_event,
+        resolve_remote_stream_config, should_auto_reconnect, should_evaluate_packet_size_policy,
+        should_reset_unexpected_reconnect_budget, NativeEvent, NativeRuntime, NativeStartRequest,
+        ReconnectCause, RuntimeEventMessage,
+    };
+    use std::{
+        fs,
+        mem::size_of,
+        path::PathBuf,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::{broadcast, watch};
+
+    #[test]
+    fn handwritten_native_bindings_match_c_abi_sizes() {
+        assert_eq!(size_of::<native::nl_start_request_t>(), unsafe {
+            native::nl_sizeof_start_request()
+        },);
+        assert_eq!(size_of::<native::nl_event_t>(), unsafe {
+            native::nl_sizeof_event()
+        },);
+        assert_eq!(size_of::<native::nl_stats_t>(), unsafe {
+            native::nl_sizeof_stats()
+        },);
+    }
 
     #[test]
     fn stereo_audio_configuration_matches_moonlight_layout() {
@@ -1460,8 +2390,10 @@ mod tests {
 
     #[test]
     fn generic_start_error_does_not_replace_failed_stage() {
-        let (state_tx, _) = watch::channel(crate::moonlight::domain::SessionState::Connecting);
-        let (latest_event_tx, _) = watch::channel::<Option<RuntimeEventMessage>>(None);
+        let (state_tx, _state_rx) =
+            watch::channel(crate::moonlight::domain::SessionState::Connecting);
+        let (latest_event_tx, _latest_event_rx) =
+            watch::channel::<Option<RuntimeEventMessage>>(None);
         let (event_tx, _) = broadcast::channel(4);
         let mut state = crate::moonlight::domain::SessionState::Connecting;
 
@@ -1473,6 +2405,7 @@ mod tests {
             NativeEvent {
                 kind: native::nl_event_kind_NL_EVENT_STAGE_FAILED,
                 code: -1,
+                session_generation: 1,
                 message: "RTSP handshake failed (-1)".to_string(),
             },
         );
@@ -1484,6 +2417,7 @@ mod tests {
             NativeEvent {
                 kind: native::nl_event_kind_NL_EVENT_ERROR,
                 code: -1,
+                session_generation: 1,
                 message: "LiStartConnection returned -1".to_string(),
             },
         );
@@ -1495,6 +2429,7 @@ mod tests {
             NativeEvent {
                 kind: native::nl_event_kind_NL_EVENT_STOPPED,
                 code: -1,
+                session_generation: 1,
                 message: "stopped (-1)".to_string(),
             },
         );
@@ -1502,6 +2437,251 @@ mod tests {
         let latest = latest_event_tx.borrow().clone().unwrap();
         assert_eq!(latest.kind, "stageFailed");
         assert_eq!(latest.message, "RTSP handshake failed (-1)");
+    }
+
+    fn sample_start_request() -> NativeStartRequest {
+        NativeStartRequest {
+            host_id: "host".to_string(),
+            app_id: 1,
+            host_address: "10.77.0.1".to_string(),
+            app_version: "1".to_string(),
+            gfe_version: None,
+            session_url: Some("rtsp://example/session".to_string()),
+            server_codec_mode_support: 1,
+            preferences: StreamPreferences::default(),
+            supported_video_formats: 1,
+            remote_input_key: [0; 16],
+            remote_input_iv: [0; 16],
+            session_generation: 1,
+        }
+    }
+
+    fn temp_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "no-land-runtime-{label}-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn applying_packet_size_uses_remote_field_only_for_force_remote() {
+        let mut request = sample_start_request();
+        request.preferences.latency.remote_packet_size = 1392;
+        request.preferences.network.packet_size = 1280;
+
+        apply_packet_size(&mut request, RemoteStreamMode::ForceRemote, 1152);
+        assert_eq!(request.preferences.latency.remote_packet_size, 1152);
+        assert_eq!(request.preferences.network.packet_size, 1280);
+
+        apply_packet_size(&mut request, RemoteStreamMode::ForceLocal, 1088);
+        assert_eq!(request.preferences.latency.remote_packet_size, 1152);
+        assert_eq!(request.preferences.network.packet_size, 1088);
+
+        apply_packet_size(&mut request, RemoteStreamMode::Auto, 1024);
+        assert_eq!(request.preferences.latency.remote_packet_size, 1152);
+        assert_eq!(request.preferences.network.packet_size, 1024);
+    }
+
+    #[test]
+    fn controller_selected_initial_remote_packet_is_applied_to_remote_field() {
+        let root = temp_test_dir("initial-remote");
+        let mut request = sample_start_request();
+        request.host_address = "203.0.113.1".to_string();
+        request.preferences.latency.remote_stream_mode = RemoteStreamMode::ForceRemote;
+        request.preferences.latency.remote_packet_size = 1392;
+        request.preferences.network.packet_size = 1280;
+        request.preferences.latency.adaptive_packet_size_enabled = true;
+
+        let controller = prepare_packet_size_controller(&root, &mut request);
+        assert!(controller.snapshot().enabled);
+        assert_eq!(
+            request.preferences.latency.remote_packet_size,
+            controller.selected_packet_size()
+        );
+        assert_eq!(request.preferences.network.packet_size, 1280);
+        assert_eq!(
+            request.preferences.latency.remote_stream_mode,
+            controller.resolved_remote_mode()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn disabled_controller_preserves_configured_mode_and_packet_fields() {
+        let root = temp_test_dir("disabled");
+        let mut request = sample_start_request();
+        request.host_address = "203.0.113.1".to_string();
+        request.preferences.latency.remote_stream_mode = RemoteStreamMode::Auto;
+        request.preferences.latency.remote_packet_size = 1152;
+        request.preferences.network.streaming_mode = StreamingMode::Remote;
+        request.preferences.network.packet_size = 1280;
+        request.preferences.latency.adaptive_packet_size_enabled = false;
+
+        let controller = prepare_packet_size_controller(&root, &mut request);
+        assert!(!controller.snapshot().enabled);
+        assert_eq!(
+            request.preferences.latency.remote_stream_mode,
+            RemoteStreamMode::Auto
+        );
+        assert_eq!(request.preferences.latency.remote_packet_size, 1152);
+        assert_eq!(request.preferences.network.packet_size, 1280);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejected_start_does_not_advance_bookkeeping() {
+        let state = SessionState::Streaming;
+        let generation = 41;
+        assert!(next_external_generation(&state, generation).is_err());
+        assert_eq!(state, SessionState::Streaming);
+        assert_eq!(generation, 41);
+    }
+
+    #[test]
+    fn stale_generation_stats_suppress_packet_policy() {
+        assert!(!should_evaluate_packet_size_policy(
+            &SessionState::Streaming,
+            true,
+            8,
+            7,
+            true,
+            true,
+            false,
+            None,
+            false,
+        ));
+        assert!(should_evaluate_packet_size_policy(
+            &SessionState::Streaming,
+            true,
+            8,
+            8,
+            true,
+            true,
+            false,
+            None,
+            false,
+        ));
+        assert!(!should_evaluate_packet_size_policy(
+            &SessionState::Streaming,
+            true,
+            8,
+            8,
+            true,
+            true,
+            true,
+            Some(ReconnectCause::UnexpectedFailure),
+            false,
+        ));
+    }
+
+    #[test]
+    fn client_refresh_rate_is_independent_from_stream_fps() {
+        let mut preferences = StreamPreferences::default();
+        assert_eq!(client_refresh_rate_x100(&preferences), 6000);
+        preferences.video.client_refresh_rate_x100 = 12_000;
+        assert_eq!(client_refresh_rate_x100(&preferences), 12_000);
+        preferences.video.fps = 120;
+        preferences.video.client_refresh_rate_x100 = 24_000;
+        assert_eq!(client_refresh_rate_x100(&preferences), 24_000);
+    }
+
+    #[test]
+    fn remote_stream_resolution_is_tunnel_safe() {
+        let preferences = StreamPreferences::default();
+        let resolved = resolve_remote_stream_config(&preferences);
+        assert_eq!(resolved.mode, RemoteStreamMode::ForceRemote);
+        assert_eq!(resolved.streaming_remotely, 1);
+        assert_eq!(resolved.packet_size, 1024);
+    }
+
+    #[test]
+    fn remote_stream_resolution_preserves_auto_and_local() {
+        let mut preferences = StreamPreferences::default();
+        preferences.network.streaming_mode = StreamingMode::Auto;
+        preferences.network.packet_size = 1392;
+        let resolved = resolve_remote_stream_config(&preferences);
+        assert_eq!(resolved.mode, RemoteStreamMode::Auto);
+        assert_eq!(resolved.streaming_remotely, 2);
+        assert_eq!(resolved.packet_size, 1392);
+
+        preferences.latency.remote_stream_mode = RemoteStreamMode::ForceLocal;
+        let resolved = resolve_remote_stream_config(&preferences);
+        assert_eq!(resolved.mode, RemoteStreamMode::ForceLocal);
+        assert_eq!(resolved.streaming_remotely, 0);
+        assert_eq!(resolved.packet_size, 1392);
+    }
+
+    #[test]
+    fn unexpected_reconnect_budget_resets_only_after_stability() {
+        let start = Instant::now();
+        assert!(!should_reset_unexpected_reconnect_budget(
+            &SessionState::Streaming,
+            true,
+            Some(start),
+            start + Duration::from_secs(29),
+        ));
+        assert!(should_reset_unexpected_reconnect_budget(
+            &SessionState::Streaming,
+            true,
+            Some(start),
+            start + Duration::from_secs(30),
+        ));
+        assert!(!should_reset_unexpected_reconnect_budget(
+            &SessionState::Reconnecting,
+            true,
+            Some(start),
+            start + Duration::from_secs(60),
+        ));
+    }
+
+    #[test]
+    fn reconnect_requires_unexpected_current_stream_failure() {
+        let request = sample_start_request();
+        let unexpected = NativeEvent {
+            kind: native::nl_event_kind_NL_EVENT_TERMINATED,
+            code: -1,
+            session_generation: 1,
+            message: "lost".to_string(),
+        };
+        assert!(should_auto_reconnect(
+            &SessionState::Streaming,
+            &unexpected,
+            true,
+            Some(&request),
+            false,
+        ));
+        assert!(!should_auto_reconnect(
+            &SessionState::Streaming,
+            &unexpected,
+            false,
+            Some(&request),
+            false,
+        ));
+        assert!(!should_auto_reconnect(
+            &SessionState::Streaming,
+            &unexpected,
+            true,
+            Some(&request),
+            true,
+        ));
+
+        let graceful = NativeEvent {
+            code: 0,
+            ..unexpected
+        };
+        assert!(!should_auto_reconnect(
+            &SessionState::Streaming,
+            &graceful,
+            true,
+            Some(&request),
+            false,
+        ));
     }
 
     #[test]

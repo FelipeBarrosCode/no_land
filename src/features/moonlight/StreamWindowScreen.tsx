@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   moonlightDisconnectStream,
@@ -6,6 +7,52 @@ import {
   moonlightGetInputDebugState,
   moonlightGetSessionState,
 } from "../../lib/backend";
+
+type LatencyStatistics = {
+  state: string;
+  streamFps: number;
+  clientRefreshRateX100: number;
+  configuredPacingMode: string;
+  effectivePacingMode: string;
+  videoPacketsInterval: number;
+  fecPacketsInterval: number;
+  fecRecoveriesInterval: number;
+  fecFailuresInterval: number;
+  outOfSequencePacketsInterval: number;
+  invalidPacketsInterval: number;
+  invalidFecPacketsInterval: number;
+  pendingCoreVideoFrames: number;
+  decoderQueueDepth: number;
+  renderQueueDepth: number;
+  averageDecodePipelineUs: number;
+  averageRenderQueueDwellUs: number;
+  lateFrameCount: number;
+  adaptiveStaleDropCount: number;
+  pacerBacklogDropCount: number;
+  maximumLatenessUs: number;
+  decoderBackpressureTimeUs: number;
+  decoderBackpressured: boolean;
+  renderedFpsX100: number;
+  smoothingQueueDepth: number;
+  smoothingQueueCapacity: number;
+  smoothingOverflowDrops: number;
+  smoothingUnderflowRepeats: number;
+  smoothingReserveBudgetUs: number;
+  frameTimingRingCount: number;
+  reconnectAttemptCount: number;
+  reconnectSuccessCount: number;
+  resolvedRemoteStreamMode: string;
+  requestedPacketSize: number;
+  adaptivePacketSizeEnabled: boolean;
+  packetSizeControllerState: string;
+  packetPathLabel: string;
+  packetPathMtuHint: number | null;
+  packetSizeLastGood: number | null;
+  packetSizeBadWindowCount: number;
+  packetSizeConfidence: number;
+  packetPathFingerprint: string;
+  adaptivePacketReconnectCount: number;
+};
 
 type DebugState = {
   captureActive: boolean;
@@ -75,6 +122,7 @@ export function StreamWindowScreen() {
     "relative" | "absolute" | null
   >(null);
   const [debugState, setDebugState] = useState<DebugState>(EMPTY_DEBUG);
+  const [latencyStats, setLatencyStats] = useState<LatencyStatistics | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
   const [showHud, setShowHud] = useState(true);
@@ -101,6 +149,15 @@ export function StreamWindowScreen() {
         window.close();
       }
     };
+
+    const unlistenStatsPromise = listen<LatencyStatistics>(
+      "moonlight://statistics",
+      ({ payload }) => {
+        if (!cancelled) {
+          setLatencyStats(payload);
+        }
+      },
+    );
 
     const unlistenCloseRequestedPromise = appWindow.onCloseRequested(
       async (event) => {
@@ -164,6 +221,7 @@ export function StreamWindowScreen() {
       cancelled = true;
       window.clearInterval(interval);
       void unlistenCloseRequestedPromise.then((unlisten) => unlisten());
+      void unlistenStatsPromise.then((unlisten) => unlisten());
       if (!teardownRequestedRef.current) {
         teardownRequestedRef.current = true;
         void moonlightDisconnectStream().catch(() => undefined);
@@ -247,6 +305,43 @@ export function StreamWindowScreen() {
             </div>
           ) : null}
         </div>
+
+        {showHud && latencyStats && (latencyStats.frameTimingRingCount > 0 || latencyStats.adaptivePacketSizeEnabled) ? (
+          <div className="absolute bottom-4 left-4 max-w-md rounded border border-emerald-400/60 bg-slate-950/70 px-3 py-2 font-mono text-[11px] leading-5 text-emerald-50 shadow-[0_0_18px_rgba(52,211,153,0.18)] backdrop-blur-sm">
+            <div>
+              render {(latencyStats.renderedFpsX100 / 100).toFixed(1)} FPS · stream {latencyStats.streamFps} FPS · display {(latencyStats.clientRefreshRateX100 / 100).toFixed(2)} Hz
+            </div>
+            <div>
+              pacing {latencyStats.effectivePacingMode} (configured {latencyStats.configuredPacingMode})
+            </div>
+            <div>
+              queues core={latencyStats.pendingCoreVideoFrames} decoder={latencyStats.decoderQueueDepth} render={latencyStats.renderQueueDepth}
+            </div>
+            <div>
+              decode {(latencyStats.averageDecodePipelineUs / 1000).toFixed(2)} ms · render dwell {(latencyStats.averageRenderQueueDwellUs / 1000).toFixed(2)} ms
+            </div>
+            <div>
+              RTP {latencyStats.videoPacketsInterval} · FEC total={latencyStats.fecPacketsInterval} recovered={latencyStats.fecRecoveriesInterval} failed={latencyStats.fecFailuresInterval} · OOS={latencyStats.outOfSequencePacketsInterval} invalid={latencyStats.invalidPacketsInterval}/{latencyStats.invalidFecPacketsInterval}
+            </div>
+            <div>
+              late={latencyStats.lateFrameCount} stale drops={latencyStats.adaptiveStaleDropCount} pacer drops={latencyStats.pacerBacklogDropCount} peak={(latencyStats.maximumLatenessUs / 1000).toFixed(2)} ms
+            </div>
+            <div>
+              backpressure {latencyStats.decoderBackpressured ? "active" : "idle"} · accumulated {(latencyStats.decoderBackpressureTimeUs / 1000).toFixed(1)} ms
+            </div>
+            <div>
+              smoothing {latencyStats.smoothingQueueDepth}/{latencyStats.smoothingQueueCapacity} · budget ≤ {(latencyStats.smoothingReserveBudgetUs / 1000).toFixed(1)} ms · overflow={latencyStats.smoothingOverflowDrops} repeat={latencyStats.smoothingUnderflowRepeats}
+            </div>
+            <div>
+              reconnect {latencyStats.reconnectSuccessCount}/{latencyStats.reconnectAttemptCount} · adaptive={latencyStats.adaptivePacketReconnectCount} · remote={latencyStats.resolvedRemoteStreamMode} packet={latencyStats.requestedPacketSize}
+            </div>
+            {latencyStats.adaptivePacketSizeEnabled ? (
+              <div>
+                packet controller={latencyStats.packetSizeControllerState} path={latencyStats.packetPathLabel} MTU hint={latencyStats.packetPathMtuHint ?? "unknown"} · good={latencyStats.packetSizeLastGood ?? "none"} bad windows={latencyStats.packetSizeBadWindowCount}/3 confidence={(latencyStats.packetSizeConfidence * 100).toFixed(0)}% · path #{latencyStats.packetPathFingerprint.slice(0, 8)}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
 
         {showHud ? (
           <div className="absolute bottom-4 right-4 max-w-lg rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">

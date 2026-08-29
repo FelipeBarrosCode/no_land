@@ -2,6 +2,7 @@
 #import <ApplicationServices/ApplicationServices.h>
 #import <Carbon/Carbon.h>
 #import <QuartzCore/QuartzCore.h>
+#import <dispatch/dispatch.h>
 #import <objc/runtime.h>
 
 extern void noland_macos_input_on_relative_mouse(double delta_x, double delta_y);
@@ -39,6 +40,14 @@ static const unsigned char kNolandModifierShift = 0x01;
 static const unsigned char kNolandModifierCtrl = 0x02;
 static const unsigned char kNolandModifierAlt = 0x04;
 static const unsigned char kNolandModifierMeta = 0x08;
+
+static void noland_macos_run_on_main_sync(dispatch_block_t block) {
+    if ([NSThread isMainThread]) {
+        block();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), block);
+    }
+}
 
 @class NolandMacosStreamInputBridge;
 
@@ -82,6 +91,16 @@ static const unsigned char kNolandModifierMeta = 0x08;
 
 - (BOOL)isOpaque {
     return YES;
+}
+
+- (void)layout {
+    [super layout];
+    for (CALayer *sublayer in self.layer.sublayers) {
+        NSUInteger fillMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        if ((sublayer.autoresizingMask & fillMask) == fillMask) {
+            sublayer.frame = self.bounds;
+        }
+    }
 }
 
 @end
@@ -136,6 +155,13 @@ static void noland_update_debug_overlay_visibility(NolandMacosStreamInputBridge 
 }
 
 void noland_macos_input_set_debug_overlay_enabled(bool enabled) {
+    if (![NSThread isMainThread]) {
+        noland_macos_run_on_main_sync(^{
+            noland_macos_input_set_debug_overlay_enabled(enabled);
+        });
+        return;
+    }
+
     kNolandDebugOverlayEnabled = enabled ? YES : NO;
     for (NolandMacosStreamInputBridge *bridge in noland_stream_input_bridges()) {
         noland_update_debug_overlay_visibility(bridge);
@@ -145,6 +171,14 @@ void noland_macos_input_set_debug_overlay_enabled(bool enabled) {
 int noland_macos_detect_main_display(unsigned int *width,
                                      unsigned int *height,
                                      unsigned int *refresh_hz) {
+    if (![NSThread isMainThread]) {
+        __block int result = 0;
+        noland_macos_run_on_main_sync(^{
+            result = noland_macos_detect_main_display(width, height, refresh_hz);
+        });
+        return result;
+    }
+
     NSScreen *screen = [NSScreen mainScreen];
     if (screen == nil) {
         NSArray<NSScreen *> *screens = [NSScreen screens];
@@ -825,6 +859,21 @@ static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge) {
     }
 }
 
+static void noland_macos_pin_stream_container(NolandMacosStreamContainerView *container,
+                                               NSView *contentView) {
+    if (container == nil || contentView == nil) {
+        return;
+    }
+
+    container.translatesAutoresizingMaskIntoConstraints = NO;
+    [NSLayoutConstraint activateConstraints:@[
+        [container.leadingAnchor constraintEqualToAnchor:contentView.leadingAnchor],
+        [container.trailingAnchor constraintEqualToAnchor:contentView.trailingAnchor],
+        [container.topAnchor constraintEqualToAnchor:contentView.topAnchor],
+        [container.bottomAnchor constraintEqualToAnchor:contentView.bottomAnchor],
+    ]];
+}
+
 static NSView *noland_macos_ensure_stream_target_view(NSView *view) {
     if (view == nil) {
         return nil;
@@ -844,16 +893,30 @@ static NSView *noland_macos_ensure_stream_target_view(NSView *view) {
     if (container == nil) {
         container = [[NolandMacosStreamContainerView alloc] initWithFrame:contentView.bounds];
         [contentView addSubview:container positioned:NSWindowAbove relativeTo:nil];
+        noland_macos_pin_stream_container(container, contentView);
         objc_setAssociatedObject(contentView, kNolandMacosStreamContainerViewKey, container, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     } else if (container.superview != contentView) {
+        [container removeFromSuperview];
         container.frame = contentView.bounds;
         [contentView addSubview:container positioned:NSWindowAbove relativeTo:nil];
+        noland_macos_pin_stream_container(container, contentView);
     }
 
+    [contentView layoutSubtreeIfNeeded];
+    container.frame = contentView.bounds;
+    [container setNeedsLayout:YES];
     return container;
 }
 
 void *noland_macos_resolve_stream_target_view(void *ns_view) {
+    if (![NSThread isMainThread]) {
+        __block void *result = NULL;
+        noland_macos_run_on_main_sync(^{
+            result = noland_macos_resolve_stream_target_view(ns_view);
+        });
+        return result;
+    }
+
     @autoreleasepool {
         if (ns_view == NULL) {
             return NULL;
@@ -866,6 +929,14 @@ void *noland_macos_resolve_stream_target_view(void *ns_view) {
 }
 
 int noland_macos_input_install(void *ns_view) {
+    if (![NSThread isMainThread]) {
+        __block int result = -1;
+        noland_macos_run_on_main_sync(^{
+            result = noland_macos_input_install(ns_view);
+        });
+        return result;
+    }
+
     @autoreleasepool {
         if (ns_view == NULL) {
             return -1;
@@ -982,6 +1053,13 @@ int noland_macos_input_install(void *ns_view) {
 }
 
 void noland_macos_input_uninstall(void *ns_view) {
+    if (![NSThread isMainThread]) {
+        noland_macos_run_on_main_sync(^{
+            noland_macos_input_uninstall(ns_view);
+        });
+        return;
+    }
+
     @autoreleasepool {
         if (ns_view == NULL) {
             return;
@@ -1024,6 +1102,14 @@ void noland_macos_input_uninstall(void *ns_view) {
 }
 
 int noland_macos_input_set_capture_active(void *ns_view, bool active, int mode) {
+    if (![NSThread isMainThread]) {
+        __block int result = -1;
+        noland_macos_run_on_main_sync(^{
+            result = noland_macos_input_set_capture_active(ns_view, active, mode);
+        });
+        return result;
+    }
+
     @autoreleasepool {
         if (ns_view == NULL) {
             return -1;

@@ -1,4 +1,5 @@
 #include "noland_video_renderer.h"
+#include "noland_frame_deadline_policy.h"
 #include "Limelight.h"
 
 #define WIN32_LEAN_AND_MEAN
@@ -20,7 +21,9 @@
 #include <cstdio>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <new>
+#include <utility>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -29,6 +32,13 @@ struct nl_windows_input_view {
   ComPtr<ID3D11Texture2D> texture;
   UINT subresource;
   ComPtr<ID3D11VideoProcessorInputView> view;
+};
+
+struct nl_windows_decoded_frame {
+  ComPtr<IMFSample> sample;
+  uint64_t presentation_time_us;
+  uint8_t colorspace;
+  bool has_presentation_time;
 };
 
 enum class nl_windows_pipeline_mode {
@@ -48,6 +58,7 @@ struct nl_windows_video_context {
   int height;
   int redraw_rate;
   HANDLE frame_thread;
+  HANDLE pacing_stop_event;
   CRITICAL_SECTION mutex;
   volatile LONG running;
   bool mf_started;
@@ -72,6 +83,24 @@ struct nl_windows_video_context {
   ComPtr<ID3D11VideoProcessorOutputView> output_view;
   std::vector<nl_windows_input_view> input_views;
   std::deque<uint8_t> pending_colorspaces;
+  nl_windows_decoded_frame smoothing_frames[4];
+  UINT smoothing_head;
+  UINT smoothing_count;
+  UINT smoothing_capacity;
+  uint64_t smoothing_overflow_drops;
+  uint64_t smoothing_underflow_repeats;
+  bool discard_decoder_outputs;
+  bool pts_anchor_valid;
+  uint64_t pts_anchor_media_us;
+  uint64_t pts_anchor_local_us;
+  uint64_t last_output_pts_us;
+  uint64_t next_software_present_us;
+  uint64_t latest_decoder_backpressure_us;
+  uint64_t decoder_backpressure_start_us;
+  bool decoder_backpressure_active;
+  nl_pacing_mode_t effective_pacing_mode;
+  uint32_t consecutive_late_frames;
+  uint64_t last_adaptive_drop_ns;
   UINT swap_chain_width;
   UINT swap_chain_height;
   UINT swap_chain_flags;
@@ -100,12 +129,30 @@ static nl_windows_video_context* nl_windows_ensure_context(nl_video_renderer_t* 
   context->height = 0;
   context->redraw_rate = 0;
   context->frame_thread = nullptr;
+  context->pacing_stop_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   context->running = FALSE;
   context->mf_started = false;
   context->com_initialized = false;
   context->has_received_input = false;
   context->pipeline_mode = nl_windows_pipeline_mode::none;
   context->device_manager_token = 0;
+  context->smoothing_head = 0;
+  context->smoothing_count = 0;
+  context->smoothing_capacity = 0;
+  context->smoothing_overflow_drops = 0;
+  context->smoothing_underflow_repeats = 0;
+  context->discard_decoder_outputs = false;
+  context->pts_anchor_valid = false;
+  context->pts_anchor_media_us = 0;
+  context->pts_anchor_local_us = 0;
+  context->last_output_pts_us = 0;
+  context->next_software_present_us = 0;
+  context->latest_decoder_backpressure_us = 0;
+  context->decoder_backpressure_start_us = 0;
+  context->decoder_backpressure_active = false;
+  context->effective_pacing_mode = NL_PACING_MODE_OFF;
+  context->consecutive_late_frames = 0;
+  context->last_adaptive_drop_ns = 0;
   context->swap_chain_width = 0;
   context->swap_chain_height = 0;
   context->swap_chain_flags = 0;
@@ -132,6 +179,32 @@ static void nl_release_video_processor_resources(nl_windows_video_context* conte
   context->video_processor_enumerator.Reset();
 }
 
+static void nl_reset_frame_timing(nl_windows_video_context* context) {
+  if (context == nullptr) return;
+  context->pts_anchor_valid = false;
+  context->pts_anchor_media_us = 0;
+  context->pts_anchor_local_us = 0;
+  context->last_output_pts_us = 0;
+  context->next_software_present_us = 0;
+  context->latest_decoder_backpressure_us = 0;
+  context->decoder_backpressure_start_us = 0;
+  context->decoder_backpressure_active = false;
+  context->consecutive_late_frames = 0;
+  context->last_adaptive_drop_ns = 0;
+}
+
+static void nl_flush_smoothing_queue(nl_windows_video_context* context) {
+  if (context == nullptr) return;
+  for (auto& frame : context->smoothing_frames) {
+    frame.sample.Reset();
+    frame.presentation_time_us = 0;
+    frame.colorspace = COLORSPACE_REC_709;
+    frame.has_presentation_time = false;
+  }
+  context->smoothing_head = 0;
+  context->smoothing_count = 0;
+}
+
 static void nl_release_swap_chain(nl_windows_video_context* context) {
   if (context == nullptr) return;
   nl_release_video_processor_resources(context);
@@ -145,6 +218,8 @@ static void nl_release_swap_chain(nl_windows_video_context* context) {
 
 static void nl_release_decoder(nl_windows_video_context* context) {
   if (context == nullptr) return;
+  nl_flush_smoothing_queue(context);
+  nl_reset_frame_timing(context);
   if (context->decoder != nullptr) {
     context->decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     context->decoder->ProcessMessage(MFT_MESSAGE_NOTIFY_END_STREAMING, 0);
@@ -849,9 +924,216 @@ static void nl_set_processor_colorspace(nl_windows_video_context* context,
       context->video_processor.Get(), &output_colorspace);
 }
 
-static HRESULT nl_render_sample(nl_windows_video_context* context,
+struct nl_windows_pacing_plan {
+  UINT sync_interval;
+  bool software_cadence;
+};
+
+static void nl_set_effective_pacing_mode(
+    nl_video_renderer_t* renderer,
+    nl_windows_video_context* context,
+    nl_pacing_mode_t mode) {
+  if (renderer == nullptr || context == nullptr ||
+      context->effective_pacing_mode == mode) {
+    return;
+  }
+  context->effective_pacing_mode = mode;
+  nl_latency_telemetry_set_pacing(
+      &renderer->telemetry,
+      renderer->latency_config.pacing_mode,
+      mode);
+}
+
+static nl_windows_pacing_plan nl_get_pacing_plan(
+    nl_video_renderer_t* renderer,
+    nl_windows_video_context* context) {
+  nl_windows_pacing_plan plan = {};
+  nl_set_effective_pacing_mode(renderer, context, NL_PACING_MODE_OFF);
+  if (renderer == nullptr || context == nullptr ||
+      renderer->latency_config.vsync_enabled == 0U ||
+      renderer->latency_config.pacing_mode == NL_PACING_MODE_OFF) {
+    return plan;
+  }
+
+  const uint32_t stream_fps = context->redraw_rate > 0
+                                  ? static_cast<uint32_t>(context->redraw_rate)
+                                  : 0U;
+  nl_pacing_resolution_t resolution = nl_resolve_pacing_mode(
+      renderer->latency_config.pacing_mode,
+      renderer->latency_config.vsync_enabled != 0U,
+      stream_fps,
+      renderer->client_refresh_rate_x100);
+  if (resolution.effective_mode == NL_PACING_MODE_HARDWARE_MULTIPLE) {
+    plan.sync_interval = static_cast<UINT>(resolution.sync_interval);
+    nl_set_effective_pacing_mode(renderer, context, resolution.effective_mode);
+  } else if (resolution.effective_mode == NL_PACING_MODE_SOFTWARE) {
+    plan.software_cadence = context->pacing_stop_event != nullptr;
+    if (plan.software_cadence) {
+      nl_set_effective_pacing_mode(renderer, context, resolution.effective_mode);
+    }
+  }
+  return plan;
+}
+
+static uint64_t nl_frame_period_us(const nl_windows_video_context* context) {
+  return context != nullptr && context->redraw_rate > 0
+             ? std::max<uint64_t>(1U, 1000000ULL /
+                                           static_cast<uint64_t>(context->redraw_rate))
+             : 0U;
+}
+
+static bool nl_wait_for_software_cadence(
+    nl_windows_video_context* context,
+    uint64_t frame_period_us) {
+  if (context == nullptr || context->pacing_stop_event == nullptr ||
+      frame_period_us == 0U) {
+    return true;
+  }
+
+  uint64_t now_us = LiGetMicroseconds();
+  uint64_t target_us = context->next_software_present_us;
+  if (target_us == 0U ||
+      (now_us > target_us && now_us - target_us > frame_period_us)) {
+    target_us = now_us;
+  }
+  if (target_us > now_us && target_us - now_us > frame_period_us) {
+    target_us = now_us + frame_period_us;
+  }
+
+  while (now_us < target_us) {
+    uint64_t remaining_us = target_us - now_us;
+    DWORD wait_ms = static_cast<DWORD>(std::min<uint64_t>(
+        5U, std::max<uint64_t>(1U, (remaining_us + 999U) / 1000U)));
+    DWORD wait_result = WaitForSingleObject(context->pacing_stop_event, wait_ms);
+    if (wait_result == WAIT_OBJECT_0) return false;
+    if (wait_result == WAIT_FAILED) break;
+    now_us = LiGetMicroseconds();
+  }
+
+  context->next_software_present_us =
+      target_us <= std::numeric_limits<uint64_t>::max() - frame_period_us
+          ? target_us + frame_period_us
+          : now_us;
+  return true;
+}
+
+static bool nl_get_output_presentation_time(IMFSample* sample,
+                                            uint64_t* presentation_time_us) {
+  if (sample == nullptr || presentation_time_us == nullptr) return false;
+  LONGLONG sample_time_100ns = 0;
+  if (FAILED(sample->GetSampleTime(&sample_time_100ns)) || sample_time_100ns < 0) {
+    return false;
+  }
+  *presentation_time_us = static_cast<uint64_t>(sample_time_100ns / 10LL);
+  return true;
+}
+
+static bool nl_get_render_deadline_us(nl_windows_video_context* context,
+                                      uint64_t presentation_time_us,
+                                      uint64_t now_us,
+                                      uint64_t* deadline_us) {
+  if (context == nullptr || deadline_us == nullptr) return false;
+  if (!context->pts_anchor_valid ||
+      presentation_time_us < context->last_output_pts_us) {
+    context->pts_anchor_valid = true;
+    context->pts_anchor_media_us = presentation_time_us;
+    context->pts_anchor_local_us = now_us;
+  }
+  context->last_output_pts_us = presentation_time_us;
+  uint64_t media_delta_us = presentation_time_us - context->pts_anchor_media_us;
+  if (media_delta_us >
+      std::numeric_limits<uint64_t>::max() - context->pts_anchor_local_us) {
+    context->pts_anchor_valid = false;
+    return false;
+  }
+  *deadline_us = context->pts_anchor_local_us + media_delta_us;
+  return true;
+}
+
+static uint64_t nl_decoder_backpressure_ms(
+    const nl_video_renderer_t* renderer,
+    const nl_windows_video_context* context,
+    uint64_t now_us) {
+  if (renderer == nullptr || context == nullptr ||
+      renderer->latency_config.decoder_backpressure_policy_enabled == 0U) {
+    return 0U;
+  }
+  uint64_t duration_us = context->latest_decoder_backpressure_us;
+  if (context->decoder_backpressure_active &&
+      now_us >= context->decoder_backpressure_start_us) {
+    duration_us = now_us - context->decoder_backpressure_start_us;
+  }
+  return (duration_us + 999U) / 1000U;
+}
+
+static bool nl_should_drop_adaptive(nl_video_renderer_t* renderer,
+                                    nl_windows_video_context* context,
+                                    const nl_windows_decoded_frame& frame,
+                                    bool newer_frame_queued) {
+  if (renderer == nullptr || context == nullptr ||
+      !frame.has_presentation_time ||
+      renderer->latency_config.adaptive_late_frame_drop_enabled == 0U) {
+    return false;
+  }
+
+  uint64_t now_us = LiGetMicroseconds();
+  uint64_t deadline_us = 0;
+  if (!nl_get_render_deadline_us(context,
+                                 frame.presentation_time_us,
+                                 now_us,
+                                 &deadline_us)) {
+    return false;
+  }
+
+  nl_frame_deadline_input_t input = {};
+  input.feature_enabled = true;
+  input.latency_priority_mode =
+      renderer->latency_config.frame_buffer_mode == NL_FRAME_BUFFER_MODE_OFF;
+  input.now_ns = now_us * 1000ULL;
+  input.render_deadline_ns = deadline_us * 1000ULL;
+  input.jitter_tolerance_ns = nl_jitter_tolerance_ns(
+      context->redraw_rate > 0 ? static_cast<uint32_t>(context->redraw_rate) : 0U,
+      renderer->latency_config.late_frame_tolerance_us);
+  input.estimated_frame_time_ns = nl_estimated_frame_time_ns(
+      context->redraw_rate > 0 ? static_cast<uint32_t>(context->redraw_rate) : 0U);
+  input.consecutive_late_frames = context->consecutive_late_frames;
+  input.latest_decoder_full_buffer_ms =
+      nl_decoder_backpressure_ms(renderer, context, now_us);
+  input.newer_frame_queued = newer_frame_queued;
+  input.last_adaptive_drop_ns = context->last_adaptive_drop_ns;
+
+  nl_frame_deadline_decision_t decision = nl_decide_frame_deadline(&input);
+  if (decision.is_late) {
+    context->consecutive_late_frames += 1U;
+    if (!decision.drop && context->consecutive_late_frames >= 3U) {
+      input.consecutive_late_frames = context->consecutive_late_frames;
+      decision = nl_decide_frame_deadline(&input);
+    }
+    nl_latency_telemetry_record_late(
+        &renderer->telemetry,
+        frame.presentation_time_us,
+        decision.lateness_ns / 1000ULL,
+        context->consecutive_late_frames);
+  } else {
+    context->consecutive_late_frames = 0;
+  }
+  if (!decision.drop) return false;
+
+  context->last_adaptive_drop_ns = input.now_ns;
+  nl_latency_telemetry_record_drop(
+      &renderer->telemetry,
+      frame.presentation_time_us,
+      decision.lateness_ns / 1000ULL,
+      NL_FRAME_DROP_LATE_SUPERSEDED);
+  return true;
+}
+
+static HRESULT nl_render_sample(nl_video_renderer_t* renderer,
+                                nl_windows_video_context* context,
                                 IMFSample* sample,
-                                uint8_t colorspace) {
+                                uint8_t colorspace,
+                                uint64_t presentation_time_us,
+                                bool has_presentation_time) {
   if (sample == nullptr) return E_POINTER;
   ComPtr<IMFMediaBuffer> buffer;
   HRESULT result = sample->GetBufferByIndex(0, &buffer);
@@ -951,8 +1233,21 @@ static HRESULT nl_render_sample(nl_windows_video_context* context,
       &stream);
   if (FAILED(result)) return result;
 
-  UINT present_flags = context->allow_tearing ? DXGI_PRESENT_ALLOW_TEARING : 0;
-  return context->swap_chain->Present(0, present_flags);
+  nl_windows_pacing_plan pacing = nl_get_pacing_plan(renderer, context);
+  if (pacing.software_cadence &&
+      !nl_wait_for_software_cadence(context, nl_frame_period_us(context))) {
+    return S_OK;
+  }
+  UINT present_flags = pacing.sync_interval == 0U && context->allow_tearing
+                           ? DXGI_PRESENT_ALLOW_TEARING
+                           : 0U;
+  if (has_presentation_time) {
+    nl_latency_telemetry_record_render_submit(
+        &renderer->telemetry,
+        presentation_time_us,
+        LiGetMicroseconds());
+  }
+  return context->swap_chain->Present(pacing.sync_interval, present_flags);
 }
 
 static IMFSample* nl_create_software_output_sample(
@@ -1056,7 +1351,10 @@ static HRESULT nl_convert_software_yuy2(nl_windows_video_context* context,
   return S_OK;
 }
 
-static void nl_present_software_bgra(nl_windows_video_context* context) {
+static void nl_present_software_bgra(nl_video_renderer_t* renderer,
+                                     nl_windows_video_context* context,
+                                     uint64_t presentation_time_us,
+                                     bool has_presentation_time) {
   HWND hwnd = nl_get_hwnd(context);
   RECT client = {};
   if (hwnd == nullptr || !IsWindow(hwnd) || !GetClientRect(hwnd, &client)) return;
@@ -1090,6 +1388,12 @@ static void nl_present_software_bgra(nl_windows_video_context* context) {
   bitmap.bmiHeader.biBitCount = 32;
   bitmap.bmiHeader.biCompression = BI_RGB;
   SetStretchBltMode(dc, HALFTONE);
+  if (has_presentation_time) {
+    nl_latency_telemetry_record_render_submit(
+        &renderer->telemetry,
+        presentation_time_us,
+        LiGetMicroseconds());
+  }
   StretchDIBits(dc,
                 target_x,
                 target_y,
@@ -1106,9 +1410,12 @@ static void nl_present_software_bgra(nl_windows_video_context* context) {
   ReleaseDC(hwnd, dc);
 }
 
-static HRESULT nl_render_software_sample(nl_windows_video_context* context,
+static HRESULT nl_render_software_sample(nl_video_renderer_t* renderer,
+                                         nl_windows_video_context* context,
                                          IMFSample* sample,
-                                         uint8_t colorspace) {
+                                         uint8_t colorspace,
+                                         uint64_t presentation_time_us,
+                                         bool has_presentation_time) {
   if (sample == nullptr) return E_POINTER;
   ComPtr<IMFMediaBuffer> buffer;
   HRESULT result = sample->ConvertToContiguousBuffer(&buffer);
@@ -1158,7 +1465,12 @@ static HRESULT nl_render_software_sample(nl_windows_video_context* context,
     } else {
       result = MF_E_INVALIDMEDIATYPE;
     }
-    if (SUCCEEDED(result)) nl_present_software_bgra(context);
+    if (SUCCEEDED(result)) {
+      nl_present_software_bgra(renderer,
+                               context,
+                               presentation_time_us,
+                               has_presentation_time);
+    }
   }
 
   if (locked_2d) {
@@ -1169,8 +1481,119 @@ static HRESULT nl_render_software_sample(nl_windows_video_context* context,
   return result;
 }
 
-static HRESULT nl_drain_decoder(nl_windows_video_context* context) {
-  while (context != nullptr && context->decoder != nullptr) {
+static void nl_update_smoothing_telemetry(nl_video_renderer_t* renderer,
+                                          nl_windows_video_context* context) {
+  if (renderer == nullptr || context == nullptr) return;
+  nl_latency_telemetry_set_smoothing(
+      &renderer->telemetry,
+      static_cast<uint8_t>(context->smoothing_count),
+      static_cast<uint8_t>(context->smoothing_capacity),
+      context->smoothing_overflow_drops,
+      context->smoothing_underflow_repeats,
+      context->redraw_rate > 0 ? static_cast<uint32_t>(context->redraw_rate) : 0U);
+}
+
+static bool nl_pop_smoothing_frame(nl_windows_video_context* context,
+                                   nl_windows_decoded_frame* frame) {
+  if (context == nullptr || frame == nullptr || context->smoothing_count == 0U) {
+    return false;
+  }
+  UINT index = context->smoothing_head;
+  *frame = std::move(context->smoothing_frames[index]);
+  context->smoothing_frames[index] = nl_windows_decoded_frame{};
+  context->smoothing_head = (context->smoothing_head + 1U) % 4U;
+  context->smoothing_count -= 1U;
+  return true;
+}
+
+static HRESULT nl_process_decoded_frame(nl_video_renderer_t* renderer,
+                                        nl_windows_video_context* context,
+                                        nl_windows_decoded_frame frame,
+                                        bool newer_frame_queued) {
+  if (frame.sample == nullptr) return E_POINTER;
+  if (nl_should_drop_adaptive(renderer, context, frame, newer_frame_queued)) {
+    return S_OK;
+  }
+  return context->pipeline_mode == nl_windows_pipeline_mode::gpu
+             ? nl_render_sample(renderer,
+                                context,
+                                frame.sample.Get(),
+                                frame.colorspace,
+                                frame.presentation_time_us,
+                                frame.has_presentation_time)
+             : nl_render_software_sample(renderer,
+                                         context,
+                                         frame.sample.Get(),
+                                         frame.colorspace,
+                                         frame.presentation_time_us,
+                                         frame.has_presentation_time);
+}
+
+static void nl_enqueue_smoothing_frame(nl_video_renderer_t* renderer,
+                                       nl_windows_video_context* context,
+                                       nl_windows_decoded_frame frame) {
+  if (context->smoothing_count == 4U) {
+    nl_windows_decoded_frame dropped;
+    if (nl_pop_smoothing_frame(context, &dropped)) {
+      context->smoothing_overflow_drops += 1U;
+      nl_latency_telemetry_record_drop(
+          &renderer->telemetry,
+          dropped.has_presentation_time ? dropped.presentation_time_us : 0U,
+          0U,
+          NL_FRAME_DROP_SMOOTHING_OVERFLOW);
+    }
+  }
+  UINT tail = (context->smoothing_head + context->smoothing_count) % 4U;
+  context->smoothing_frames[tail] = std::move(frame);
+  context->smoothing_count += 1U;
+  nl_update_smoothing_telemetry(renderer, context);
+}
+
+
+static HRESULT nl_render_smoothing_frame(nl_video_renderer_t* renderer,
+                                         nl_windows_video_context* context) {
+  if (context->smoothing_capacity == 0U ||
+      context->smoothing_count <= context->smoothing_capacity) {
+    nl_update_smoothing_telemetry(renderer, context);
+    return S_OK;
+  }
+
+  while (context->smoothing_count > context->smoothing_capacity + 1U) {
+    nl_windows_decoded_frame dropped;
+    if (!nl_pop_smoothing_frame(context, &dropped)) break;
+    nl_latency_telemetry_record_drop(
+        &renderer->telemetry,
+        dropped.has_presentation_time ? dropped.presentation_time_us : 0U,
+        0U,
+        NL_FRAME_DROP_PACER_BACKLOG);
+    uint64_t frame_period_us = nl_frame_period_us(context);
+    if (context->next_software_present_us <=
+        std::numeric_limits<uint64_t>::max() - frame_period_us) {
+      context->next_software_present_us += frame_period_us;
+    }
+  }
+
+  nl_windows_decoded_frame frame;
+  if (!nl_pop_smoothing_frame(context, &frame)) return S_OK;
+  bool newer_frame_queued = context->smoothing_count != 0U;
+  nl_update_smoothing_telemetry(renderer, context);
+  return nl_process_decoded_frame(renderer,
+                                  context,
+                                  std::move(frame),
+                                  newer_frame_queued);
+}
+
+static HRESULT nl_drain_decoder(nl_video_renderer_t* renderer,
+                                nl_windows_video_context* context,
+                                bool render_outputs) {
+  if (renderer == nullptr || context == nullptr) return E_POINTER;
+  nl_windows_decoded_frame adaptive_pending;
+  bool has_adaptive_pending = false;
+  const bool adaptive_lookahead =
+      renderer->latency_config.adaptive_late_frame_drop_enabled != 0U &&
+      context->smoothing_capacity == 0U;
+
+  while (context->decoder != nullptr) {
     MFT_OUTPUT_DATA_BUFFER output = {};
     DWORD status = 0;
     if (context->pipeline_mode == nl_windows_pipeline_mode::software &&
@@ -1183,11 +1606,23 @@ static HRESULT nl_drain_decoder(nl_windows_video_context* context) {
     if (result == MF_E_TRANSFORM_NEED_MORE_INPUT) {
       if (output.pSample != nullptr) output.pSample->Release();
       if (output.pEvents != nullptr) output.pEvents->Release();
-      return S_OK;
+      if (has_adaptive_pending && render_outputs) {
+        result = nl_process_decoded_frame(renderer,
+                                          context,
+                                          std::move(adaptive_pending),
+                                          false);
+        if (FAILED(result)) return result;
+      }
+      return render_outputs ? nl_render_smoothing_frame(renderer, context) : S_OK;
     }
     if (result == MF_E_TRANSFORM_STREAM_CHANGE) {
       if (output.pSample != nullptr) output.pSample->Release();
       if (output.pEvents != nullptr) output.pEvents->Release();
+      adaptive_pending.sample.Reset();
+      has_adaptive_pending = false;
+      nl_flush_smoothing_queue(context);
+      nl_reset_frame_timing(context);
+      nl_update_smoothing_telemetry(renderer, context);
       context->input_views.clear();
       result = context->pipeline_mode == nl_windows_pipeline_mode::gpu
                    ? nl_set_gpu_decoder_output_type(context)
@@ -1200,6 +1635,7 @@ static HRESULT nl_drain_decoder(nl_windows_video_context* context) {
       if (output.pEvents != nullptr) output.pEvents->Release();
       return result;
     }
+    uint64_t output_time_us = LiGetMicroseconds();
 
     uint8_t colorspace = COLORSPACE_REC_709;
     if (!context->pending_colorspaces.empty()) {
@@ -1210,11 +1646,54 @@ static HRESULT nl_drain_decoder(nl_windows_video_context* context) {
       if (output.pEvents != nullptr) output.pEvents->Release();
       return MF_E_UNSUPPORTED_D3D_TYPE;
     }
-    result = context->pipeline_mode == nl_windows_pipeline_mode::gpu
-                 ? nl_render_sample(context, output.pSample, colorspace)
-                 : nl_render_software_sample(context, output.pSample, colorspace);
-    output.pSample->Release();
+
+    nl_windows_decoded_frame decoded;
+    decoded.sample.Attach(output.pSample);
+    output.pSample = nullptr;
+    decoded.colorspace = colorspace;
+    decoded.presentation_time_us = 0;
+    decoded.has_presentation_time = nl_get_output_presentation_time(
+        decoded.sample.Get(), &decoded.presentation_time_us);
     if (output.pEvents != nullptr) output.pEvents->Release();
+
+    uint16_t output_queue_depth = context->smoothing_capacity != 0U
+        ? static_cast<uint16_t>(std::min<UINT>(
+              context->smoothing_capacity + 1U, context->smoothing_count + 1U))
+        : static_cast<uint16_t>(adaptive_lookahead
+                                    ? (has_adaptive_pending ? 2U : 1U)
+                                    : 0U);
+    if (decoded.has_presentation_time) {
+      nl_latency_telemetry_record_decoder_output(
+          &renderer->telemetry,
+          decoded.presentation_time_us,
+          output_time_us,
+          output_queue_depth,
+          context->decoder_backpressure_active ||
+              context->latest_decoder_backpressure_us != 0U);
+    }
+
+    if (!render_outputs || context->discard_decoder_outputs) continue;
+    if (context->smoothing_capacity != 0U) {
+      nl_enqueue_smoothing_frame(renderer, context, std::move(decoded));
+      continue;
+    }
+    if (adaptive_lookahead) {
+      if (has_adaptive_pending) {
+        nl_windows_decoded_frame previous = std::move(adaptive_pending);
+        adaptive_pending = std::move(decoded);
+        result = nl_process_decoded_frame(renderer,
+                                          context,
+                                          std::move(previous),
+                                          true);
+        if (FAILED(result)) return result;
+      } else {
+        adaptive_pending = std::move(decoded);
+        has_adaptive_pending = true;
+      }
+      continue;
+    }
+
+    result = nl_process_decoded_frame(renderer, context, std::move(decoded), false);
     if (FAILED(result)) return result;
   }
   return S_OK;
@@ -1380,6 +1859,13 @@ extern "C" int nl_video_renderer_platform_setup(nl_video_renderer_t* renderer,
   context->width = renderer->width;
   context->height = renderer->height;
   context->redraw_rate = renderer->redraw_rate;
+  context->smoothing_capacity = std::min<UINT>(
+      3U, static_cast<UINT>(renderer->latency_config.frame_buffer_mode));
+  context->smoothing_overflow_drops = 0;
+  context->smoothing_underflow_repeats = 0;
+  nl_flush_smoothing_queue(context);
+  nl_reset_frame_timing(context);
+  nl_update_smoothing_telemetry(renderer, context);
   if (context->hwnd == nullptr && renderer->surface_attached &&
       renderer->surface.surface_type == NL_SURFACE_WINDOWS_HWND) {
     context->hwnd = static_cast<HWND>(renderer->surface.window_handle);
@@ -1405,6 +1891,10 @@ extern "C" void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) 
       context->frame_thread != nullptr) {
     return;
   }
+  if (context->pacing_stop_event != nullptr) {
+    ResetEvent(context->pacing_stop_event);
+  }
+  context->next_software_present_us = 0;
   InterlockedExchange(&context->running, TRUE);
   context->frame_thread = CreateThread(nullptr, 0, nl_windows_frame_thread,
                                        renderer, 0, nullptr);
@@ -1417,18 +1907,31 @@ extern "C" void nl_video_renderer_platform_stop(nl_video_renderer_t* renderer) {
   nl_windows_video_context* context = nl_windows_context(renderer);
   if (context == nullptr) return;
   InterlockedExchange(&context->running, FALSE);
+  if (context->pacing_stop_event != nullptr) {
+    SetEvent(context->pacing_stop_event);
+  }
   LiWakeWaitForVideoFrame();
   if (context->frame_thread != nullptr) {
     WaitForSingleObject(context->frame_thread, INFINITE);
     CloseHandle(context->frame_thread);
     context->frame_thread = nullptr;
   }
+  const bool smoothing_enabled = context->smoothing_capacity != 0U;
+  if (smoothing_enabled) {
+    nl_flush_smoothing_queue(context);
+    nl_update_smoothing_telemetry(renderer, context);
+  }
   if (context->decoder != nullptr) {
     context->decoder->ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
-    nl_drain_decoder(context);
+    context->discard_decoder_outputs = smoothing_enabled;
+    nl_drain_decoder(renderer, context, !smoothing_enabled);
+    context->discard_decoder_outputs = false;
     context->decoder->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
     context->pending_colorspaces.clear();
   }
+  nl_flush_smoothing_queue(context);
+  nl_reset_frame_timing(context);
+  nl_update_smoothing_telemetry(renderer, context);
 }
 
 extern "C" void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer) {
@@ -1444,6 +1947,10 @@ extern "C" void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer
   if (context->com_initialized) {
     CoUninitialize();
     context->com_initialized = false;
+  }
+  if (context->pacing_stop_event != nullptr) {
+    CloseHandle(context->pacing_stop_event);
+    context->pacing_stop_event = nullptr;
   }
   DeleteCriticalSection(&context->mutex);
   delete context;
@@ -1469,6 +1976,7 @@ extern "C" int nl_video_renderer_platform_submit_frame(
   if (context == nullptr || decode_unit == nullptr) return DR_NEED_IDR;
   if (context->decoder == nullptr) {
     result = nl_recreate_pipeline(context);
+    nl_update_smoothing_telemetry(renderer, context);
     if (FAILED(result)) return DR_NEED_IDR;
   }
   if (!context->has_received_input && decode_unit->frameType != FRAME_TYPE_IDR) {
@@ -1514,16 +2022,33 @@ extern "C" int nl_video_renderer_platform_submit_frame(
   if (SUCCEEDED(result)) {
     result = context->decoder->ProcessInput(0, sample.Get(), 0);
     if (result == MF_E_NOTACCEPTING) {
-      result = nl_drain_decoder(context);
+      context->decoder_backpressure_start_us = LiGetMicroseconds();
+      context->decoder_backpressure_active = true;
+      nl_latency_telemetry_record_backpressure(
+          &renderer->telemetry, 0U, true);
+      result = nl_drain_decoder(renderer, context, true);
       if (SUCCEEDED(result)) {
         result = context->decoder->ProcessInput(0, sample.Get(), 0);
       }
+      uint64_t backpressure_end_us = LiGetMicroseconds();
+      context->latest_decoder_backpressure_us =
+          backpressure_end_us >= context->decoder_backpressure_start_us
+              ? backpressure_end_us - context->decoder_backpressure_start_us
+              : 0U;
+      context->decoder_backpressure_active = false;
+      nl_latency_telemetry_record_backpressure(
+          &renderer->telemetry,
+          context->latest_decoder_backpressure_us,
+          false);
+    } else {
+      context->latest_decoder_backpressure_us = 0U;
+      context->decoder_backpressure_active = false;
     }
     if (SUCCEEDED(result)) {
       context->has_received_input = true;
       context->pending_colorspaces.push_back(
           frame != nullptr ? frame->colorspace : COLORSPACE_REC_709);
-      result = nl_drain_decoder(context);
+      result = nl_drain_decoder(renderer, context, true);
     }
   }
 
@@ -1540,6 +2065,7 @@ extern "C" int nl_video_renderer_platform_submit_frame(
       HRESULT recreate_result = device_lost
                                     ? nl_recreate_pipeline(context)
                                     : nl_create_software_fallback_pipeline(context, result);
+      nl_update_smoothing_telemetry(renderer, context);
       if (FAILED(recreate_result)) {
         std::fprintf(stderr,
                      "[noland-video] decoder recovery failed: 0x%08lx\n",

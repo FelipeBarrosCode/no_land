@@ -2,6 +2,7 @@
 #define NOLAND_VIDEO_RENDERER_H
 
 #include "noland_moonlight.h"
+#include "noland_latency_telemetry.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -37,12 +38,17 @@ typedef struct nl_video_renderer {
   nl_video_frame_metadata_t last_frame;
   uint64_t submitted_frame_count;
   uint64_t dropped_frame_count;
+  nl_latency_config_t latency_config;
+  uint32_t client_refresh_rate_x100;
+  nl_latency_telemetry_t telemetry;
   void* platform_context;
   nl_video_frame_callback frame_processor;
   void* frame_processor_user_data;
 } nl_video_renderer_t;
 
 void nl_video_renderer_init(nl_video_renderer_t* renderer);
+void nl_video_renderer_destroy(nl_video_renderer_t* renderer);
+void nl_video_renderer_set_latency_config(nl_video_renderer_t* renderer, const nl_latency_config_t* config, uint32_t client_refresh_rate_x100);
 void nl_video_renderer_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface);
 void nl_video_renderer_detach_surface(nl_video_renderer_t* renderer);
 int nl_video_renderer_setup(nl_video_renderer_t* renderer, int video_format, int width, int height, int redraw_rate);

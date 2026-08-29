@@ -33,6 +33,12 @@ This phase implements a full vertical slice:
 - Tailwind CSS
 - Zustand
 
+## Streaming implementation notes
+
+- [`docs/moonlight-client-pipeline.md`](docs/moonlight-client-pipeline.md) — native frame pipeline, queues, timing domains, and ownership map
+- [`docs/moonlight-client-optimizations.md`](docs/moonlight-client-optimizations.md) — latency feature flags, source precedents, platform limits, and validation matrix
+- [`docs/moonlight-adaptive-packet-size.md`](docs/moonlight-adaptive-packet-size.md) — adaptive GameStream packet-size path hints, cache, scoring, and controlled reconnect
+
 ## Shout-outs / upstream projects
 
 Big shout-out to the upstream projects that make Noland Connect possible.

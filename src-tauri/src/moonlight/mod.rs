@@ -1,3 +1,4 @@
+pub mod adaptive_packet_size;
 pub mod application;
 pub mod composition;
 pub mod domain;

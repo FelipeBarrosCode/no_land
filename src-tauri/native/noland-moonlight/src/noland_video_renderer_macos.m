@@ -72,6 +72,15 @@ static CFTimeInterval nl_macos_now(void) {
   return CACurrentMediaTime();
 }
 
+static uint64_t nl_macos_layer_backpressure_duration_us(const nl_macos_video_context_t* context) {
+  CFTimeInterval elapsed;
+  if (context == NULL || context->layer_not_ready_since <= 0) {
+    return 0U;
+  }
+  elapsed = nl_macos_now() - context->layer_not_ready_since;
+  return elapsed > 0 ? (uint64_t)(elapsed * 1000000.0) : 0U;
+}
+
 static void nl_macos_reset_layer_backpressure(nl_macos_video_context_t* context) {
   if (context == NULL) {
     return;
@@ -651,7 +660,6 @@ int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const
   const DECODE_UNIT* decode_unit = (const DECODE_UNIT*)raw_decode_unit;
   CMSampleBufferRef sample_buffer = NULL;
   __block bool request_idr = false;
-  (void)frame;
 
   if (context == NULL || decode_unit == NULL || context->layer == nil) {
     return DR_OK;
@@ -689,14 +697,29 @@ int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const
       CFRelease(sample_buffer);
       return;
     }
-    if (!context->layer.readyForMoreMediaData && nl_macos_should_recover_for_backpressure(context)) {
-      nl_macos_recover_display_layer(context);
-      request_idr = true;
-      CFRelease(sample_buffer);
-      return;
+    if (!context->layer.readyForMoreMediaData) {
+      nl_latency_telemetry_record_backpressure(&renderer->telemetry, 0U, true);
+      if (nl_macos_should_recover_for_backpressure(context)) {
+        nl_latency_telemetry_record_backpressure(
+            &renderer->telemetry,
+            nl_macos_layer_backpressure_duration_us(context),
+            true);
+        nl_macos_recover_display_layer(context);
+        request_idr = true;
+        CFRelease(sample_buffer);
+        return;
+      }
     }
     [context->layer enqueueSampleBuffer:sample_buffer];
+    nl_latency_telemetry_record_render_submit(
+        &renderer->telemetry,
+        frame != NULL ? frame->presentation_time_us : 0U,
+        LiGetMicroseconds());
     if (context->layer.readyForMoreMediaData) {
+      nl_latency_telemetry_record_backpressure(
+          &renderer->telemetry,
+          nl_macos_layer_backpressure_duration_us(context),
+          false);
       nl_macos_reset_layer_backpressure(context);
     }
     CFRelease(sample_buffer);

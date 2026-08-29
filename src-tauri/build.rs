@@ -113,6 +113,36 @@ fn main() {
     println!(
         "cargo:rerun-if-changed={}",
         native_root
+            .join("noland-moonlight/src/noland_latency_telemetry.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_latency_telemetry.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_frame_deadline_policy.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("noland-moonlight/src/noland_frame_deadline_policy.h")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
+            .join("moonlight-common-c/src/RtpVideoQueue.c")
+            .display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        native_root
             .join("noland-moonlight/src/noland_audio_renderer.h")
             .display()
     );
@@ -402,6 +432,38 @@ pub const nl_surface_type_NL_SURFACE_MACOS_NSVIEW: nl_surface_type_t = 2;
 pub const nl_surface_type_NL_SURFACE_X11_WINDOW: nl_surface_type_t = 3;
 pub const nl_surface_type_NL_SURFACE_WAYLAND_SURFACE: nl_surface_type_t = 4;
 
+pub type nl_pacing_mode_t = ::std::os::raw::c_uint;
+pub const nl_pacing_mode_NL_PACING_MODE_OFF: nl_pacing_mode_t = 0;
+pub const nl_pacing_mode_NL_PACING_MODE_AUTOMATIC: nl_pacing_mode_t = 1;
+pub const nl_pacing_mode_NL_PACING_MODE_SOFTWARE: nl_pacing_mode_t = 2;
+pub const nl_pacing_mode_NL_PACING_MODE_HARDWARE_MULTIPLE: nl_pacing_mode_t = 3;
+
+pub type nl_frame_buffer_mode_t = ::std::os::raw::c_uint;
+pub const nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_OFF: nl_frame_buffer_mode_t = 0;
+pub const nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_ONE_FRAME: nl_frame_buffer_mode_t = 1;
+pub const nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_TWO_FRAMES: nl_frame_buffer_mode_t = 2;
+pub const nl_frame_buffer_mode_NL_FRAME_BUFFER_MODE_THREE_FRAMES: nl_frame_buffer_mode_t = 3;
+
+pub type nl_remote_stream_mode_t = ::std::os::raw::c_uint;
+pub const nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_AUTO: nl_remote_stream_mode_t = 0;
+pub const nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_REMOTE: nl_remote_stream_mode_t = 1;
+pub const nl_remote_stream_mode_NL_REMOTE_STREAM_MODE_FORCE_LOCAL: nl_remote_stream_mode_t = 2;
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct nl_latency_config_t {
+    pub telemetry_enabled: u8,
+    pub adaptive_late_frame_drop_enabled: u8,
+    pub decoder_backpressure_policy_enabled: u8,
+    pub auto_reconnect_on_unexpected_termination: u8,
+    pub vsync_enabled: u8,
+    pub pacing_mode: nl_pacing_mode_t,
+    pub frame_buffer_mode: nl_frame_buffer_mode_t,
+    pub remote_stream_mode: nl_remote_stream_mode_t,
+    pub remote_packet_size: u32,
+    pub late_frame_tolerance_us: u32,
+}
+
 #[repr(C)]
 pub struct nl_runtime_t {
     _unused: [u8; 0],
@@ -433,6 +495,8 @@ pub struct nl_start_request_t {
     pub encryption_flags: i32,
     pub remote_input_aes_key: [i8; 16],
     pub remote_input_aes_iv: [i8; 16],
+    pub session_generation: u64,
+    pub latency_config: nl_latency_config_t,
 }
 
 #[repr(C)]
@@ -452,6 +516,7 @@ pub struct nl_event_t {
     pub kind: nl_event_kind_t,
     pub state: nl_stream_state_t,
     pub code: i32,
+    pub session_generation: u64,
     pub message: [::std::os::raw::c_char; 256],
 }
 
@@ -496,6 +561,45 @@ pub struct nl_stats_t {
     pub last_video_rtp_timestamp: u32,
     pub last_video_hdr_active: u8,
     pub last_video_colorspace: u8,
+    pub session_generation: u64,
+    pub video_packets_interval: u32,
+    pub fec_packets_interval: u32,
+    pub fec_recoveries_interval: u32,
+    pub fec_failures_interval: u32,
+    pub out_of_sequence_packets_interval: u32,
+    pub invalid_packets_interval: u32,
+    pub invalid_fec_packets_interval: u32,
+    pub pending_core_video_frames: i32,
+    pub decoder_queue_depth: u16,
+    pub render_queue_depth: u16,
+    pub average_decode_pipeline_us: u64,
+    pub average_render_queue_dwell_us: u64,
+    pub late_frame_count: u64,
+    pub adaptive_stale_drop_count: u64,
+    pub pacer_backlog_drop_count: u64,
+    pub renderer_error_drop_count: u64,
+    pub maximum_lateness_us: u64,
+    pub decoder_backpressure_time_us: u64,
+    pub last_drop_lateness_us: u64,
+    pub rendered_fps_x100: u32,
+    pub consecutive_late_frames: u32,
+    pub late_tolerance_us: u32,
+    pub decoder_backpressured: u8,
+    pub smoothing_queue_depth: u8,
+    pub smoothing_queue_capacity: u8,
+    pub max_smoothing_queue_depth: u8,
+    pub smoothing_overflow_drops: u64,
+    pub smoothing_underflow_repeats: u64,
+    pub smoothing_reserve_budget_us: u64,
+    pub frame_timing_ring_count: u32,
+    pub reconnect_attempt_count: u64,
+    pub reconnect_success_count: u64,
+    pub resolved_remote_stream_mode: nl_remote_stream_mode_t,
+    pub requested_packet_size: u32,
+    pub stream_fps: u32,
+    pub client_refresh_rate_x100: u32,
+    pub configured_pacing_mode: nl_pacing_mode_t,
+    pub effective_pacing_mode: nl_pacing_mode_t,
 }
 
 unsafe extern "C" {
@@ -504,12 +608,16 @@ unsafe extern "C" {
     pub fn nl_runtime_version_string() -> *const ::std::os::raw::c_char;
     pub fn nl_get_launch_query_parameters() -> *const ::std::os::raw::c_char;
     pub fn nl_runtime_smoke_test() -> i32;
+    pub fn nl_sizeof_start_request() -> usize;
+    pub fn nl_sizeof_event() -> usize;
+    pub fn nl_sizeof_stats() -> usize;
     pub fn nl_runtime_start(runtime: *mut nl_runtime_t, request: *const nl_start_request_t) -> nl_result_t;
     pub fn nl_runtime_request_stop(runtime: *mut nl_runtime_t) -> nl_result_t;
     pub fn nl_runtime_attach_surface(runtime: *mut nl_runtime_t, surface: *const nl_surface_descriptor_t) -> nl_result_t;
     pub fn nl_runtime_detach_surface(runtime: *mut nl_runtime_t) -> nl_result_t;
     pub fn nl_runtime_poll_event(runtime: *mut nl_runtime_t, output: *mut nl_event_t) -> nl_result_t;
     pub fn nl_runtime_read_stats(runtime: *mut nl_runtime_t, output: *mut nl_stats_t) -> nl_result_t;
+    pub fn nl_runtime_record_reconnect_result(runtime: *mut nl_runtime_t, attempt_started: bool, succeeded: bool);
     pub fn nl_desktop_input_install(surface: *const nl_surface_descriptor_t) -> ::std::os::raw::c_int;
     pub fn nl_desktop_input_uninstall();
     pub fn nl_desktop_input_set_capture_active(active: bool, mode: ::std::os::raw::c_int) -> ::std::os::raw::c_int;
