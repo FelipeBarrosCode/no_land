@@ -144,14 +144,33 @@ function notarizationAuthArgs() {
 }
 
 function submitForNotarization(path, label) {
-  const result = run('xcrun', [
+  const args = [
     'notarytool',
     'submit',
     path,
     ...notarizationAuthArgs(),
     '--wait',
     '--output-format', 'json',
-  ], { captureOutput: true });
+  ];
+
+  let result;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    result = run('xcrun', args, { captureOutput: true, allowFailure: true });
+    if (result.status === 0) break;
+
+    const diagnostic = formatCommandFailure(result);
+    if (!isTransientNotaryFailure(diagnostic) || attempt === 3) {
+      throw new Error(
+        `[notarize-macos-bundle] Apple notary submission failed for ${label} (exit ${result.status}).\n${diagnostic}`,
+      );
+    }
+
+    const delayMs = attempt * 15_000;
+    console.warn(
+      `[notarize-macos-bundle] Transient Apple notary failure for ${label} on attempt ${attempt}/3; retrying in ${delayMs / 1_000}s.\n${diagnostic}`,
+    );
+    sleepMs(delayMs);
+  }
 
   const payload = parseJson(result.stdout, `notarytool submit output for ${label}`);
   const status = `${payload.status ?? ''}`.trim();
@@ -170,6 +189,15 @@ function submitForNotarization(path, label) {
   console.error(`[notarize-macos-bundle] ${label} notarization failed with status ${status || 'unknown'}`);
   console.error(JSON.stringify(logPayload, null, 2));
   throw new Error(`[notarize-macos-bundle] ${label} notarization failed with status ${status || 'unknown'} (submission ${submissionId})`);
+}
+
+function formatCommandFailure(result) {
+  return [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join('\n')
+    || 'notarytool returned no diagnostic output';
+}
+
+function isTransientNotaryFailure(output) {
+  return /(?:timed? out|timeout|temporar|network|connection|service unavailable|internal server|HTTP status code: 5\d\d|NSURLErrorDomain|CloudKit)/iu.test(output);
 }
 
 function fetchNotarizationLog(submissionId) {
@@ -342,11 +370,14 @@ function run(command, args, options = {}) {
     stdio: captureOutput ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     encoding: captureOutput ? 'utf8' : undefined,
   });
-  if (!allowFailure && result.status !== 0) {
-    throw new Error(`Command failed: ${command} ${args.join(' ')}`);
+  const status = result.status ?? (result.signal ? 128 : 1);
+  if (!allowFailure && status !== 0) {
+    const diagnostic = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join('\n');
+    const signal = result.signal ? ` (signal ${result.signal})` : '';
+    throw new Error(`Command failed: ${command}${signal}${diagnostic ? `\n${diagnostic}` : ''}`);
   }
   return {
-    status: result.status ?? 0,
+    status,
     stdout: typeof result.stdout === 'string' ? result.stdout : '',
     stderr: typeof result.stderr === 'string' ? result.stderr : '',
   };
