@@ -11,6 +11,7 @@ mod utils;
 
 use std::sync::Arc;
 
+use crate::moonlight::{domain::ColorRange, infrastructure::persistence::MoonlightStateRepository};
 use commands::*;
 use services::{
     app_config::AppConfig,
@@ -51,7 +52,7 @@ fn main() {
                 config.state_schema_version,
             ));
 
-            match tauri::async_runtime::block_on(
+            let moonlight_bootstrap_created = match tauri::async_runtime::block_on(
                 moonlight::composition::bootstrap_default_services(
                     state_path.clone(),
                     app_data_dir.clone(),
@@ -69,14 +70,18 @@ fn main() {
                             result.identity.unique_id
                         );
                     }
+                    result.created
                 }
                 Err(error) => {
                     warn!("Moonlight bootstrap could not complete: {error}");
+                    false
                 }
-            }
+            };
 
             let mut initial_state = tauri::async_runtime::block_on(state_store.load_state())
                 .map_err(|error| format!("Failed loading persisted state: {error}"))?;
+            let mut detected_stream_defaults = detect_client_display_for_provisioning()
+                .map(|(width, height, _)| (width, height));
 
             let mut state_changed = false;
             if initial_state
@@ -218,6 +223,10 @@ fn main() {
                 );
             }
 
+            if detected_stream_defaults.is_none() {
+                detected_stream_defaults = Some((width, height));
+            }
+
             if state_changed {
                 tauri::async_runtime::block_on(state_store.save_state(&initial_state))
                     .map_err(|error| format!("Failed normalizing persisted state: {error}"))?;
@@ -250,6 +259,22 @@ fn main() {
                 state_path.clone(),
                 app_data_dir.clone(),
             );
+            if moonlight_bootstrap_created {
+                if let Some((default_stream_width, default_stream_height)) = detected_stream_defaults {
+                    moonlight_manager
+                        .repository
+                        .update(|configuration| {
+                            let video = &mut configuration.defaults.video;
+                            video.width = default_stream_width;
+                            video.height = default_stream_height;
+                            video.color_range = ColorRange::Full;
+                            Ok(())
+                        })
+                        .map_err(|error| {
+                            format!("Failed seeding embedded Moonlight defaults: {error}")
+                        })?;
+                }
+            }
             moonlight_manager
                 .runtime
                 .start_event_bridge(app.handle().clone());

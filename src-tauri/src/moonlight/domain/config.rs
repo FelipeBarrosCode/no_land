@@ -109,7 +109,7 @@ impl Default for VideoPreferences {
             hdr: false,
             yuv444: false,
             color_space: ColorSpace::Rec709,
-            color_range: ColorRange::Limited,
+            color_range: ColorRange::Full,
         }
     }
 }
