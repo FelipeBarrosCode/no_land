@@ -255,76 +255,12 @@ jobs:
           path: src-tauri/target/${{ matrix.target }}/release/bundle
           if-no-files-found: error
 
-  windows-store:
-    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
-    environment: Secrets
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            arch: x64
-            target: x86_64-pc-windows-msvc
-          - os: windows-11-arm
-            arch: arm64
-            target: aarch64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Node
-        uses: actions/setup-node@v5
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Stage CI managed tools
-        run: node scripts/stage-ci-managed-tools.mjs --target ${{ matrix.target }}
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build Microsoft Store Windows installer
-        shell: bash
-        run: |
-          npm run tauri:build -- --target "${{ matrix.target }}" --config src-tauri/tauri.microsoftstore.conf.json
-
-      - name: Verify Microsoft Store installer
-        run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
-
-      - name: Collect Microsoft Store installer artifact
-        shell: bash
-        run: |
-          PRODUCT_NAME=$(node -p "require('./src-tauri/tauri.conf.json').productName")
-          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          SOURCE_PATH=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/nsis" -maxdepth 1 -name '*-setup.exe' | head -n 1)
-          DEST_DIR="artifacts/windows-store-${{ matrix.arch }}"
-          DEST_PATH="$DEST_DIR/${PRODUCT_NAME}_${VERSION}_${{ matrix.arch }}-store-setup.exe"
-          mkdir -p "$DEST_DIR"
-          cp "$SOURCE_PATH" "$DEST_PATH"
-          printf '/S\n' > "$DEST_DIR/silent-install-args.txt"
-          printf '${{ matrix.arch }}\n' > "$DEST_DIR/architecture.txt"
-
-      - name: Upload Microsoft Store installer artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: tauri-windows-store-${{ matrix.arch }}
-          path: artifacts/windows-store-${{ matrix.arch }}
-          if-no-files-found: error
 
   release:
     if: github.ref == 'refs/heads/main'
     environment: Secrets
     needs:
       - build
-      - windows-store
     runs-on: ubuntu-latest
 
     steps:
@@ -372,42 +308,6 @@ jobs:
         run: |
           node scripts/prepare-release-assets.mjs "${{ steps.version.outputs.release_tag }}"
 
-      - name: Upload Windows Store installer to Cloudflare R2
-        shell: bash
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-          CLOUDFLARE_R2_PUBLIC_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
-        run: |
-          if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" || -z "$CLOUDFLARE_R2_BUCKET" || -z "$CLOUDFLARE_R2_PUBLIC_BASE_URL" ]]; then
-            echo "Cloudflare R2 secrets are not fully configured; skipping Windows Store installer upload."
-            exit 0
-          fi
-
-          for ARCH in x64 arm64; do
-            STORE_INSTALLER=$(find release-publish -maxdepth 1 -type f -name "*_${ARCH}-store-setup.exe" | head -n 1)
-            STABLE_OBJECT_KEY_FILE="release-publish/windows-store-${ARCH}-object-key.txt"
-            VERSIONED_OBJECT_KEY_FILE="release-publish/windows-store-${ARCH}-versioned-object-key.txt"
-
-            if [[ -z "$STORE_INSTALLER" || ! -f "$STABLE_OBJECT_KEY_FILE" || ! -f "$VERSIONED_OBJECT_KEY_FILE" ]]; then
-              echo "No Windows Store ${ARCH} installer or object key metadata was generated; skipping this architecture."
-              continue
-            fi
-
-            STABLE_OBJECT_KEY=$(tr -d '\r\n' < "$STABLE_OBJECT_KEY_FILE")
-            VERSIONED_OBJECT_KEY=$(tr -d '\r\n' < "$VERSIONED_OBJECT_KEY_FILE")
-            if [[ -z "$STABLE_OBJECT_KEY" || -z "$VERSIONED_OBJECT_KEY" ]]; then
-              echo "Windows Store ${ARCH} object key metadata is empty; skipping this architecture."
-              continue
-            fi
-
-            npx --yes wrangler@4.29.1 r2 object put "$CLOUDFLARE_R2_BUCKET/$VERSIONED_OBJECT_KEY" --file "$STORE_INSTALLER" --remote
-            echo "Uploaded versioned Windows Store ${ARCH} installer to ${CLOUDFLARE_R2_PUBLIC_BASE_URL%/}/$VERSIONED_OBJECT_KEY"
-
-            npx --yes wrangler@4.29.1 r2 object put "$CLOUDFLARE_R2_BUCKET/$STABLE_OBJECT_KEY" --file "$STORE_INSTALLER" --remote
-            echo "Uploaded stable Windows Store ${ARCH} installer to ${CLOUDFLARE_R2_PUBLIC_BASE_URL%/}/$STABLE_OBJECT_KEY"
-          done
 
       - name: Publish GitHub release assets
         uses: softprops/action-gh-release@v2
