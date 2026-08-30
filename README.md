@@ -1,71 +1,112 @@
-# Noland Connect (Phase 1)
+<div align="center">
 
-Noland Connect is a Tauri 2 desktop setup assistant for Sunshine + Moonlight game streaming on Vast.ai GPU servers.
+# No Land
 
-## Documentation index
+### Turn on-demand GPU cloud machines into personal remote gaming PCs.
 
-Project-level docs are in `docs/`:
+[![Rust](https://img.shields.io/badge/Rust-Tauri-000000?logo=rust)](https://www.rust-lang.org/)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
+[![React](https://img.shields.io/badge/React-TypeScript-20232a?logo=react)](https://react.dev/)
+[![Linux](https://img.shields.io/badge/Linux-Ubuntu-FCC624?logo=linux&logoColor=black)](https://ubuntu.com/)
+[![WireGuard](https://img.shields.io/badge/WireGuard-Networking-88171A?logo=wireguard)](https://www.wireguard.com/)
 
-- `docs/README.md` (entry point)
-- `docs/architecture.md`
-- `docs/flows.md`
-- `docs/schemas.md`
-- `docs/api-reference.md`
-- `docs/configuration.md`
-- `docs/operations.md`
+**GPU orchestration · automated provisioning · low-latency streaming · networking · remote storage**
 
-This phase implements a full vertical slice:
+[Website](https://no-land.net) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Configuration](docs/configuration.md)
 
-- onboarding with local credentials + Vast API key
-- local JSON state persistence behind a storage trait
-- SSH key generation and auto-upload to Vast
-- offer discovery and ranking (location + reliability + cost + VRAM)
-- instance creation + polling
-- remote provisioning orchestration over SSH (`std::process::Command` wrappers)
-- local Moonlight config backup + patching
-- guided pairing workflow with PIN submission
+</div>
+
+---
+
+## Why No Land exists
+
+Cloud gaming solves the cost of owning high-end hardware, but many services still restrict users to a predefined game catalog.
+
+No Land explores a different model: rent a real GPU-powered Linux machine, provision it automatically, connect it securely, and use it as your own remote gaming PC.
+
+The project focuses less on game catalog management and more on the systems underneath remote computing: **GPU infrastructure, Linux provisioning, networking, streaming, audio, storage, and client orchestration**.
+
+## What it does
+
+From one desktop app, No Land can:
+
+1. authenticate locally and connect to a user's Vast.ai account;
+2. discover and rank GPU offers by location, reliability, price, storage, and VRAM;
+3. create or reuse a rented GPU instance;
+4. wait for the machine to become SSH-ready;
+5. configure NVIDIA headless graphics, Sunshine, audio, WireGuard, and supporting services;
+6. patch the local Moonlight configuration and guide pairing;
+7. persist provisioning checkpoints so completed steps can be safely skipped on retry;
+8. expose a native streaming path built around Moonlight/GameStream components.
+
+## System flow
+
+```text
+Desktop app
+   │
+   ▼
+Vast.ai offer discovery
+   │
+   ▼
+GPU instance creation / reuse
+   │
+   ▼
+SSH provisioning orchestrator
+   ├── NVIDIA / display
+   ├── Sunshine
+   ├── PipeWire / WirePlumber
+   ├── WireGuard
+   └── runtime validation
+   │
+   ▼
+Moonlight pairing + native client
+   │
+   ▼
+Low-latency remote gaming session
+```
+
+## Engineering highlights
+
+- **Rust orchestration layer** — Tauri backend built with `tokio`, `reqwest`, `serde`, and structured tracing.
+- **Cloud offer ranking** — selects machines using location, reliability, price, storage, and VRAM signals.
+- **Automated SSH provisioning** — turns a generic rented GPU machine into a usable remote gaming environment.
+- **Idempotent recovery** — stores per-server provisioning checkpoints and resumes only incomplete steps.
+- **Secure networking** — integrates WireGuard and an embedded userspace tunnel path.
+- **Low-latency Linux audio** — configures PipeWire/WirePlumber profiles for Sunshine streaming and includes fallback profiles for underruns/crackling.
+- **Native streaming work** — documents frame pipelines, queues, timing domains, packet sizing, reconnect behaviour, and latency optimization experiments.
+- **Cross-platform release pipeline** — GitHub Actions builds desktop binaries for macOS, Windows, and Linux.
 
 ## Stack
 
-- Tauri 2
-- Rust (`tokio`, `reqwest`, `serde`, `tracing`)
-- React + TypeScript + Vite
-- Tailwind CSS
-- Zustand
+| Area | Technology |
+| --- | --- |
+| Desktop | Tauri 2, Rust |
+| UI | React, TypeScript, Vite, Tailwind CSS, Zustand |
+| Async / HTTP | Tokio, Reqwest |
+| Cloud compute | Vast.ai GPU instances |
+| Streaming | Sunshine, Moonlight, moonlight-common-c |
+| Networking | WireGuard, GotaTun, UDP |
+| Media | GStreamer, PipeWire, WirePlumber |
+| Platform | Linux / NVIDIA |
+| CI/CD | GitHub Actions |
 
-## Streaming implementation notes
+## Architecture and documentation
+
+Project documentation lives in `docs/`:
+
+- [`docs/README.md`](docs/README.md) — documentation entry point
+- [`docs/architecture.md`](docs/architecture.md) — high-level system architecture
+- [`docs/flows.md`](docs/flows.md) — user and provisioning flows
+- [`docs/schemas.md`](docs/schemas.md) — persisted/runtime data shapes
+- [`docs/api-reference.md`](docs/api-reference.md) — API notes
+- [`docs/configuration.md`](docs/configuration.md) — runtime configuration
+- [`docs/operations.md`](docs/operations.md) — operational guidance
+
+### Streaming implementation notes
 
 - [`docs/moonlight-client-pipeline.md`](docs/moonlight-client-pipeline.md) — native frame pipeline, queues, timing domains, and ownership map
 - [`docs/moonlight-client-optimizations.md`](docs/moonlight-client-optimizations.md) — latency feature flags, source precedents, platform limits, and validation matrix
-- [`docs/moonlight-adaptive-packet-size.md`](docs/moonlight-adaptive-packet-size.md) — adaptive GameStream packet-size path hints, cache, scoring, and controlled reconnect
-
-## Shout-outs / upstream projects
-
-Big shout-out to the upstream projects that make Noland Connect possible.
-
-### App and developer tooling
-
-- [Tauri](https://github.com/tauri-apps/tauri) — desktop app framework
-- [React](https://github.com/facebook/react) — frontend UI layer
-- [Vite](https://github.com/vitejs/vite) — frontend build/dev tooling
-- [Tailwind CSS](https://github.com/tailwindlabs/tailwindcss) — styling system
-- [Zustand](https://github.com/pmndrs/zustand) — client-side state management
-
-### Streaming, networking, and media stack
-
-- [Sunshine](https://github.com/LizardByte/Sunshine) — remote game streaming host
-- [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt) — Moonlight desktop client lineage
-- [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c) — core GameStream protocol implementation used by the embedded client stack
-- [WireGuard tools](https://github.com/WireGuard/wireguard-tools) — tunnel tooling reference and interoperability target
-- [GotaTun](https://github.com/mullvad/gotatun) — embedded userspace tunnel engine used by `noland-net-helper`
-- [GStreamer](https://github.com/GStreamer/gstreamer) — media runtime used in the native streaming stack
-- [PipeWire](https://github.com/PipeWire/pipewire) — low-latency Linux audio/media runtime on provisioned hosts
-- [WirePlumber](https://github.com/PipeWire/wireplumber) — PipeWire session manager used in the host audio setup
-
-### Service integrations
-
-- Vast.ai — core cloud provider integration used by Noland Connect. I did not find a clearly verifiable official public source repository for Vast.ai, so the repo shout-out here stays with their docs instead:
-  - https://docs.vast.ai/api-reference/introduction
+- [`docs/moonlight-adaptive-packet-size.md`](docs/moonlight-adaptive-packet-size.md) — adaptive GameStream packet sizing, path hints, cache, scoring, and controlled reconnect
 
 ## Project layout
 
@@ -102,197 +143,86 @@ src-tauri/src/
     orchestration.rs
 ```
 
-## Setup
+## Run locally
 
-1. Install JS and Rust dependencies:
+Install dependencies:
 
 ```bash
 npm install
 ```
 
-2. Run frontend-only dev server:
+Frontend development:
 
 ```bash
 npm run dev
 ```
 
-3. Run full desktop app (Tauri):
+Full desktop app:
 
 ```bash
 npm run tauri:dev
 ```
 
-4. Production build:
+Production build:
 
 ```bash
 npm run tauri:build
 ```
 
-## Beta desktop releases (direct download)
+## Desktop releases
 
-This repo is configured to publish direct-download desktop binaries (no app stores).
+The repository includes GitHub Actions workflows for direct-download desktop builds.
 
-- Shared GitHub Actions workflow: `.github/workflows/release.yml`
-- Dedicated macOS Intel workflow: `.github/workflows/release-macos-intel.yml`
-- Triggers automatically on pushes to `main` and tags like `v0.1.1`
-- Builds on macOS, Linux, and Windows runners
-- Uploads artifacts to the workflow run and attaches installers to the GitHub Release
+- macOS artifacts include `.dmg` / app archives;
+- Windows builds produce installer artifacts;
+- Linux builds produce AppImage and package formats when supported by the runner;
+- pushes to `main` can update a rolling prerelease;
+- version tags can publish release artifacts.
 
-### Manual trigger
+macOS release builds are designed to require Developer ID signing and notarization credentials. Windows Authenticode and Linux package signing remain separate release-hardening work.
 
-Use **Actions -> Build Desktop Binaries -> Run workflow**.
+## Provisioning state and recovery
 
-### Tag-based release trigger
+No Land persists runtime state through a `StateStore` abstraction. Provisioned servers keep step-level completion state plus the runtime artifacts needed to resume safely.
 
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
+That allows a failed or restarted provisioning run to continue from the remaining steps rather than rebuilding the machine from scratch.
 
-### Main branch rolling prerelease
+## Low-latency audio
 
-- Every push to `main` updates prerelease tag `main-latest` with fresh build artifacts.
+During host provisioning, No Land configures PipeWire and WirePlumber for remote streaming and validates the result with system-level tooling.
 
-### Downloadable artifacts produced
+The provisioning logic can apply multiple fallback profiles when aggressive low-latency settings cause underruns on a particular machine.
 
-- macOS: `.dmg` (and app archive)
-- Windows: `.msi` / `.exe`
-- Linux: `.AppImage` and distro packages when supported by runner tooling
+## Upstream projects
 
-macOS release artifacts are required to use a Developer ID Application certificate and Apple notarization; the release build fails when those credentials are absent. Windows Authenticode signing and Linux repository/package signing are still pending.
+No Land builds on excellent open-source work including:
 
-## State persistence
+- [Sunshine](https://github.com/LizardByte/Sunshine)
+- [Moonlight Qt](https://github.com/moonlight-stream/moonlight-qt)
+- [moonlight-common-c](https://github.com/moonlight-stream/moonlight-common-c)
+- [WireGuard](https://github.com/WireGuard/wireguard-tools)
+- [GotaTun](https://github.com/mullvad/gotatun)
+- [GStreamer](https://github.com/GStreamer/gstreamer)
+- [PipeWire](https://github.com/PipeWire/pipewire)
+- [WirePlumber](https://github.com/PipeWire/wireplumber)
 
-State is saved to a single JSON file in the OS app data directory:
+Vast.ai is the current cloud-provider integration used for GPU instance discovery and provisioning.
 
-- file name: `state.json`
-- service: `src-tauri/src/services/state_store.rs`
-- abstraction: `StateStore` trait + `JsonStateStore` implementation
+## Current focus
 
-This keeps persistence swappable later (OS keychain / Stronghold) with minimal refactor.
+The project is actively evolving around:
 
-## Vast.ai references
+- resilience on unstable networks;
+- streaming latency and packet delivery;
+- adaptive networking and reconnect behaviour;
+- cross-platform tunnel integration;
+- stronger provisioning recovery;
+- remote application restore and shared storage workflows.
 
-This codebase references official docs and keeps uncertain payload assumptions isolated in the API adapter layer.
+---
 
-- API intro: https://docs.vast.ai/api-reference/introduction
-- Search offers: https://docs.vast.ai/api-reference/search/search-offers
-- Create instance: https://docs.vast.ai/api-reference/instances/create-instance
-- SSH docs: https://docs.vast.ai/documentation/instances/connect/ssh
-- API key flow: https://cloud.vast.ai/cli/
+<div align="center">
 
-## What is implemented now
+**Cloud gaming without giving up the freedom of a real PC.**
 
-- **Onboarding**
-  - Validates username/password/api key
-  - Persists credentials in local JSON (phase 1 requirement)
-  - Generates `nolandConnectSSH` ed25519 key if missing
-  - Uploads pubkey to Vast if not already present
-
-- **Server discovery**
-  - IP geolocation fallback command
-  - manual location override
-  - Vast offer search via typed backend client
-  - ranking by nearest distance, then cheapest, then highest VRAM
-  - selected offer persistence + storage adjustment
-
-- **Play orchestration**
-  - create instance from selected offer + template hash
-  - poll every 60s until SSH-ready
-  - verify instance reservation ownership in your Vast account before SSH connection
-  - SSH connect test
-  - run NVIDIA headless checks + Sunshine install/config + low-latency PipeWire/WirePlumber setup + WireGuard setup
-  - patch Moonlight local config with backup
-  - transition to pairing state and accept PIN
-
-- **Per-server provision checkpoints**
-  - backend persists per-instance step completion state (`provisionedServers`)
-  - saves WireGuard + Moonlight runtime artifacts per instance to safely restore skipped steps
-  - on restart/re-run, completed steps are skipped and only pending steps run
-  - tracks last known state and last error per provisioned instance
-
-- **Rented server reuse**
-  - lists currently rented Vast instances in dashboard
-  - can start provisioning from a rented instance directly
-  - if selected offer becomes unavailable (`no_such_ask`), attempts to reuse an active rented server
-
-- **UI**
-  - modern dark dashboard shell
-  - onboarding screen
-  - Netflix-style rows and cards
-  - server picker modal
-  - provisioning timeline + logs
-  - pairing modal
-  - settings stub screen
-
-## Safe defaults and central config
-
-All main assumptions are centralized in:
-
-- `src-tauri/src/services/app_config.rs`
-
-Notable defaults:
-
-- template hash: `2a62a7d5089a50a5ad89a9480f540d25`
-- minimum reliability: `0.85`
-- poll interval: `60s`
-- Sunshine baseline config values
-- WireGuard addressing defaults
-
-## Low-latency audio setup (Ubuntu)
-
-During remote provisioning, Noland applies an idempotent low-latency audio task for PipeWire + WirePlumber + Sunshine.
-
-Configured files on the server (for target user, default `user`):
-
-- `~/.config/pipewire/pipewire.conf.d/99-lowlatency.conf`
-- `~/.config/pipewire/pipewire-pulse.conf.d/10-lowlatency.conf`
-- `~/.config/wireplumber/wireplumber.conf.d/10-alsa-lowlatency.conf`
-- `/etc/security/limits.d/audio.conf`
-
-Additional server actions:
-
-- ensures `rtkit` is installed
-- ensures target user is in `audio` group
-- restarts user services (`pipewire`, `pipewire-pulse`, `wireplumber`) via user bus env
-- optionally sets CPU governor to `performance` if `cpupower` exists
-- preserves existing `audio_sink` in Sunshine unless override is explicitly enabled
-
-Verification output includes:
-
-- `pw-top` (or metadata fallback)
-- `pactl info`
-- `pactl list short sinks`
-- `pactl list short sources`
-- target user groups
-- rtprio guidance
-- CPU governor info
-
-### Fallback profiles for crackling/underruns
-
-Set environment variable before launching app:
-
-- `NOLAND_AUDIO_PROFILE=aggressive` (default)
-- `NOLAND_AUDIO_PROFILE=fallback1` (uses `512/48000` pulse req/quantum)
-- `NOLAND_AUDIO_PROFILE=fallback2` (uses `1024/48000` pulse req/quantum)
-
-Other useful envs:
-
-- `NOLAND_AUDIO_TARGET_USER` (default `user`)
-- `NOLAND_AUDIO_FORCE_SINK_OVERRIDE=true`
-- `NOLAND_AUDIO_SINK_OVERRIDE=<sink-name>`
-
-## Important notes
-
-- Secrets are intentionally stored in JSON in phase 1 per requirement.
-- Secret values are not logged.
-- Remote setup steps are idempotent-oriented and include validation gates.
-- Moonlight config is backed up before editing.
-- Vast API calls are logged with method/endpoint/status/latency at `info` level to help diagnose reservation and provisioning issues.
-
-## Deferred for next phase
-
-- stronger resume/recovery from mid-provisioning failures beyond current state tracking
-- richer per-step retry controls in UI
-- robust WireGuard client import automation per platform
-- production-hardened Sunshine pairing command variants across distributions
+</div>
