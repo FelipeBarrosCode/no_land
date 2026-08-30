@@ -3058,6 +3058,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     } else {
         state.ssh.ssh_username.clone()
     };
+    let ssh_password = state.ssh.ssh_password.clone();
     if ssh_host.trim().is_empty() || ssh_port == 0 {
         return Err(AppError::InvalidInput(
             "Instance SSH details are not available. Ensure the instance is running.".to_string(),
@@ -3068,6 +3069,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
         ssh_host,
         ssh_port,
         private_key_path,
+        ssh_password,
     })
 }
 
@@ -3088,6 +3090,7 @@ async fn build_remote_exec_for_instance(
     } else {
         state.ssh.ssh_username.clone()
     };
+    let ssh_password = state.ssh.ssh_password.clone();
 
     let target = state
         .provisioned_servers
@@ -3120,6 +3123,7 @@ async fn build_remote_exec_for_instance(
         ssh_host,
         ssh_port,
         private_key_path,
+        ssh_password,
     })
 }
 

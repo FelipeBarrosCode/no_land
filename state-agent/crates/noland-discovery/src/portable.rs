@@ -1,52 +1,9 @@
 //! Which discovered apps are worth showing or backing up.
 //!
-//! Image `.desktop` entries (KDE, Bluetooth, system settings, …) are not
-//! user state. Stores and game launchers are.
+//! The current product direction is to surface all discovered user software,
+//! while still hiding a small set of explicit system/Noland plumbing entries.
 
-use noland_state_core::{AppIdentity, LauncherKind};
-
-/// Steam, other stores, Wine/Proton frontends, and similar game tooling.
-const GAMING_OR_STORE_MARKERS: &[&str] = &[
-    "steam",
-    "steamos",
-    "lutris",
-    "heroic",
-    "bottles",
-    "playonlinux",
-    "q4wine",
-    "winetricks",
-    "proton",
-    "wine",
-    "legendary",
-    "rare",
-    "itch",
-    "minecraft",
-    "prismlauncher",
-    "multimc",
-    "curseforge",
-    "modrinth",
-    "gdlauncher",
-    "atlauncher",
-    "overwolf",
-    "battle.net",
-    "battlenet",
-    "blizzard",
-    "epic",
-    "gog",
-    "galaxy",
-    "ubisoft",
-    "uplay",
-    "origin",
-    "eaapp",
-    "ea-app",
-    "xbox",
-    "gamepass",
-    "riot",
-    "league",
-    "valorant",
-    "pinokio",
-    "sklauncher",
-];
+use noland_state_core::AppIdentity;
 
 /// Noland / OS / streaming plumbing — never a user bundle.
 const ALWAYS_IGNORE_MARKERS: &[&str] = &[
@@ -64,38 +21,7 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
 ];
 
 pub fn is_backup_candidate(app: &AppIdentity) -> bool {
-    if is_always_ignored(app) {
-        return false;
-    }
-    if app.steam_app_id.is_some() {
-        return true;
-    }
-    let id = app.app_id.as_str();
-    if id.starts_with("steam:")
-        || id.starts_with("lutris:")
-        || id.starts_with("heroic:")
-        || id.starts_with("bottles:")
-        || id.starts_with("wine:")
-        || id.starts_with("proton:")
-    {
-        return true;
-    }
-    match app.launcher {
-        Some(
-            LauncherKind::Steam
-            | LauncherKind::Proton
-            | LauncherKind::Wine
-            | LauncherKind::Bottles
-            | LauncherKind::Heroic
-            | LauncherKind::Lutris,
-        ) => return true,
-        _ => {}
-    }
-    // Learned from a real process/session — keep. Image .desktop spam is desktop:.
-    if id.starts_with("learned:") || id.starts_with("exe:") || id.starts_with("noland:") {
-        return true;
-    }
-    looks_like_gaming_or_store(app)
+    !is_always_ignored(app)
 }
 
 pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
@@ -109,11 +35,6 @@ pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
 fn is_always_ignored(app: &AppIdentity) -> bool {
     let hay = haystack(app);
     ALWAYS_IGNORE_MARKERS.iter().any(|m| hay.contains(m))
-}
-
-fn looks_like_gaming_or_store(app: &AppIdentity) -> bool {
-    let hay = haystack(app);
-    GAMING_OR_STORE_MARKERS.iter().any(|m| hay.contains(m))
 }
 
 fn haystack(app: &AppIdentity) -> String {
@@ -140,15 +61,15 @@ mod tests {
     use noland_state_core::AppId;
 
     #[test]
-    fn keeps_steam_drops_kate() {
+    fn keeps_discovered_apps_but_still_drops_explicitly_ignored_tools() {
         let steam = AppIdentity::new(AppId::steam(480), "Spacewar");
-        let mut steam_launcher = AppIdentity::new(AppId::desktop("steam"), "Steam");
-        steam_launcher.desktop_entry_id = Some("steam".into());
-        steam_launcher.launcher = Some(LauncherKind::Steam);
+        let pcsx2 = AppIdentity::new(AppId::desktop("net.pcsx2.PCSX2"), "PCSX2");
+        let vice_city = AppIdentity::new(AppId::desktop("vice-city"), "Vice City");
         let kate = AppIdentity::new(AppId::desktop("org.kde.kate"), "Kate");
         let dolphin = AppIdentity::new(AppId::desktop("org.kde.dolphin"), "Dolphin");
         assert!(is_backup_candidate(&steam));
-        assert!(is_backup_candidate(&steam_launcher));
+        assert!(is_backup_candidate(&pcsx2));
+        assert!(is_backup_candidate(&vice_city));
         assert!(!is_backup_candidate(&kate));
         assert!(!is_backup_candidate(&dolphin));
     }
