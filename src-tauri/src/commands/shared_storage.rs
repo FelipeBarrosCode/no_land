@@ -190,7 +190,7 @@ pub async fn disconnect_shared_storage_profile(
     }
 
     context
-        .update_state(|state| {
+        .update_state(|_| {
             // No-op for now: we keep it in the list so the UI still knows it exists.
             // Future work will add a 'status' field to ProfileReference.
         })
@@ -346,6 +346,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     } else {
         state.ssh.ssh_username.clone()
     };
+    let ssh_password = state.ssh.ssh_password.clone();
 
     let api_key = state.credentials.vast_api_key.clone();
     if api_key.trim().is_empty() {
@@ -378,6 +379,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
         ssh_host,
         ssh_port: instance.ssh_port,
         private_key_path,
+        ssh_password,
     })
 }
 

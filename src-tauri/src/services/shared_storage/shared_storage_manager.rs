@@ -231,8 +231,9 @@ impl SharedStorageManager {
 
         let source = Self::build_profile_storage_source(&active_profile);
         let list_cmd = format!(
-            "sudo -u {user} rclone lsf {src} --max-depth 1 2>&1 | sed -n '1,20p'",
-            user = target_user,
+            "{}{rclone} lsf {src} --max-depth 1 2>&1 | sed -n '1,20p'",
+            remote.sudo_as_user_prefix(target_user),
+            rclone = "rclone",
             src = shell_escape(&source),
         );
 
@@ -280,8 +281,8 @@ impl SharedStorageManager {
         let local_test_path = format!("/tmp/{}.txt", marker);
         let remote_test_path = format!("{}/.noland-healthcheck/{}.txt", source, marker);
         let write_local_cmd = format!(
-            "sudo -u {user} bash -lc 'printf %s {marker} > {path} && chmod 600 {path}'",
-            user = target_user,
+            "{}bash -lc 'printf %s {marker} > {path} && chmod 600 {path}'",
+            remote.sudo_as_user_prefix(target_user),
             marker = shell_escape(&marker),
             path = shell_escape(&local_test_path),
         );
@@ -295,8 +296,8 @@ impl SharedStorageManager {
         }
 
         let upload_cmd = format!(
-            "sudo -u {user} rclone copyto {local} {remote_path} 2>&1",
-            user = target_user,
+            "{}rclone copyto {local} {remote_path} 2>&1",
+            remote.sudo_as_user_prefix(target_user),
             local = shell_escape(&local_test_path),
             remote_path = shell_escape(&remote_test_path),
         );
@@ -326,8 +327,8 @@ impl SharedStorageManager {
         }
 
         let read_cmd = format!(
-            "sudo -u {user} rclone cat {remote_path} 2>&1",
-            user = target_user,
+            "{}rclone cat {remote_path} 2>&1",
+            remote.sudo_as_user_prefix(target_user),
             remote_path = shell_escape(&remote_test_path),
         );
         let read_output = {
@@ -356,8 +357,8 @@ impl SharedStorageManager {
         }
 
         let delete_cmd = format!(
-            "sudo -u {user} rclone deletefile {remote_path} 2>&1",
-            user = target_user,
+            "{}rclone deletefile {remote_path} 2>&1",
+            remote.sudo_as_user_prefix(target_user),
             remote_path = shell_escape(&remote_test_path),
         );
         let delete_output = {
@@ -386,7 +387,8 @@ impl SharedStorageManager {
         }
 
         let cleanup_cmd = format!(
-            "sudo rm -f {path} >/dev/null 2>&1 || true",
+            "{}rm -f {path} >/dev/null 2>&1 || true",
+            remote.sudo_prefix(),
             path = shell_escape(&local_test_path),
         );
         let _ = {
@@ -584,7 +586,8 @@ impl SharedStorageManager {
             ""
         };
         let cmd = format!(
-            "sudo rclone copy / {dest} --config {config} --filter-from {filter} --checksum{progress}",
+            "{}rclone copy / {dest} --config {config} --filter-from {filter} --checksum{progress}",
+            remote.sudo_prefix(),
             dest = shell_escape(&dest),
             config = shell_escape(&rclone_config_path),
             filter = shell_escape(&filter_path),
@@ -954,29 +957,60 @@ impl SharedStorageManager {
         )
     }
 
-    /// Ensure rclone is installed on the VM.
+    /// Ensure rclone is installed on the VM and accessible through sudo's PATH.
     pub(crate) async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
+        let check_cmd = if remote.is_root() {
+            "if command -v rclone >/dev/null 2>&1; then echo 'RCLONE_SUDO_OK'; else echo 'RCLONE_MISSING'; fi".to_string()
+        } else {
+            format!(
+                "if {}command -v rclone >/dev/null 2>&1; then echo 'RCLONE_SUDO_OK'; elif command -v rclone >/dev/null 2>&1; then echo 'RCLONE_USER_ONLY'; else echo 'RCLONE_MISSING'; fi",
+                remote.sudo_prefix()
+            )
+        };
         let check = {
             let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh("command -v rclone >/dev/null 2>&1 && echo 'RCLONE_OK' || echo 'RCLONE_MISSING'", Duration::from_secs(15))
-            })
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+            tokio::task::spawn_blocking(move || remote.ssh(&check_cmd, Duration::from_secs(15)))
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
-        if check.stdout.contains("RCLONE_OK") {
+        if check.stdout.contains("RCLONE_SUDO_OK") {
             return Ok(());
         }
 
-        info!("rclone not found, installing...");
+        if check.stdout.contains("RCLONE_USER_ONLY") {
+            let fix_path = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        &format!(
+                            "RCLONE_PATH=$(command -v rclone); if [ -n \"$RCLONE_PATH\" ] && [ ! -e /usr/bin/rclone ]; then {}ln -s \"$RCLONE_PATH\" /usr/bin/rclone; fi; {}command -v rclone >/dev/null 2>&1 && echo 'RCLONE_SUDO_OK' || echo 'RCLONE_STILL_MISSING'",
+                            remote.sudo_prefix(),
+                            remote.sudo_prefix(),
+                        ),
+                        Duration::from_secs(30),
+                    )
+                })
+                .await
+                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+            };
+            if fix_path.stdout.contains("RCLONE_SUDO_OK") {
+                info!("rclone already existed but required a sudo PATH compatibility symlink");
+                return Ok(());
+            }
+        }
+
+        info!("rclone not found for sudo, installing...");
 
         let install = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "curl -fsSL https://rclone.org/install.sh | sudo bash && echo 'RCLONE_INSTALLED'",
-                    Duration::from_secs(120),
+                    &format!(
+                        "if command -v apt-get >/dev/null 2>&1; then {sudo}DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 && {sudo}DEBIAN_FRONTEND=noninteractive apt-get install -y rclone >/dev/null 2>&1; else curl -fsSL https://rclone.org/install.sh | {sudo}bash >/dev/null 2>&1; fi; RCLONE_PATH=$(command -v rclone || true); if [ -n \"$RCLONE_PATH\" ] && [ ! -e /usr/bin/rclone ]; then {sudo}ln -s \"$RCLONE_PATH\" /usr/bin/rclone; fi; {sudo}command -v rclone >/dev/null 2>&1 && echo 'RCLONE_INSTALLED' || echo 'RCLONE_INSTALL_FAILED'",
+                        sudo = remote.sudo_prefix(),
+                    ),
+                    Duration::from_secs(180),
                 )
             })
             .await
@@ -985,7 +1019,7 @@ impl SharedStorageManager {
 
         if install.status_code != 0 || !install.stdout.contains("RCLONE_INSTALLED") {
             return Err(AppError::Provisioning(format!(
-                "Failed to install rclone: stdout: {} | stderr: {}",
+                "Failed to install rclone for sudo: stdout: {} | stderr: {}",
                 install.stdout.trim(),
                 install.stderr.trim()
             )));

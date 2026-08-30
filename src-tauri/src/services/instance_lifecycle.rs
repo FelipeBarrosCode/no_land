@@ -823,10 +823,11 @@ pub async fn build_remote_exec_for_instance(
     }
 
     let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
-        context.config.ssh_user.clone()
+        context.config.audio_target_user.clone()
     } else {
         state.ssh.ssh_username.clone()
     };
+    let ssh_password = state.ssh.ssh_password.clone();
 
     let instance = vast.get_instance(instance_id).await?;
     let ssh_host = if instance.public_ip.trim().is_empty() {
@@ -846,6 +847,7 @@ pub async fn build_remote_exec_for_instance(
         ssh_host,
         ssh_port: instance.ssh_port,
         private_key_path,
+        ssh_password,
     })
 }
 

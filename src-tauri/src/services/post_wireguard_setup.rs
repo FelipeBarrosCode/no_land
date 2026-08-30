@@ -1338,7 +1338,15 @@ async fn repair_sunshine_auth_state(
 }
 
 async fn sunshine_ssh_remote(context: &AppContext) -> AppResult<(RemoteExec, String)> {
-    let (private_key_path, key_passphrase, ssh_host, ssh_port, ssh_user, sunshine_user) = {
+    let (
+        private_key_path,
+        key_passphrase,
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        ssh_password,
+        sunshine_user,
+    ) = {
         let state = context.state.read().await;
         let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
             context.config.ssh_user.clone()
@@ -1351,6 +1359,7 @@ async fn sunshine_ssh_remote(context: &AppContext) -> AppResult<(RemoteExec, Str
             state.instance.ssh_host.clone(),
             state.instance.ssh_port,
             ssh_user,
+            state.ssh.ssh_password.clone(),
             context.config.audio_target_user.clone(),
         )
     };
@@ -1372,6 +1381,7 @@ async fn sunshine_ssh_remote(context: &AppContext) -> AppResult<(RemoteExec, Str
             ssh_host,
             ssh_port,
             private_key_path,
+            ssh_password,
         },
         sanitize_ssh_user(&sunshine_user),
     ))

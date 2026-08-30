@@ -1208,6 +1208,7 @@ async fn build_remote_exec_for_instance(
     } else {
         state.ssh.ssh_username.clone()
     };
+    let ssh_password = state.ssh.ssh_password.clone();
 
     if server.ssh_host.trim().is_empty() || server.ssh_port == 0 {
         return Err(AppError::InvalidInput(
@@ -1220,6 +1221,7 @@ async fn build_remote_exec_for_instance(
         ssh_host: server.ssh_host.clone(),
         ssh_port: server.ssh_port,
         private_key_path,
+        ssh_password,
     })
 }
 

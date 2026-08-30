@@ -53,9 +53,41 @@ pub struct RemoteExec {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub private_key_path: String,
+    pub ssh_password: String,
 }
 
 impl RemoteExec {
+    pub fn is_root(&self) -> bool {
+        self.ssh_user == "root"
+    }
+
+    pub fn sudo_prefix(&self) -> String {
+        if self.is_root() {
+            String::new()
+        } else if self.ssh_password.trim().is_empty() {
+            "sudo ".to_string()
+        } else {
+            format!(
+                "printf %s {} | sudo -S -p '' ",
+                shell_single_quote_escape(&self.ssh_password)
+            )
+        }
+    }
+
+    pub fn sudo_as_user_prefix(&self, target_user: &str) -> String {
+        if self.is_root() {
+            format!("sudo -u {} ", target_user)
+        } else if self.ssh_password.trim().is_empty() {
+            format!("sudo -u {} ", target_user)
+        } else {
+            format!(
+                "printf %s {} | sudo -S -p '' -u {} ",
+                shell_single_quote_escape(&self.ssh_password),
+                target_user
+            )
+        }
+    }
+
     pub fn ssh(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
         ensure_command_available("ssh")?;
         self.ssh_with_key(remote_command, timeout)
@@ -206,6 +238,10 @@ impl RemoteExec {
             .arg(format!("{}@{}:{remote_path}", self.ssh_user, self.ssh_host));
         run_with_timeout(command, Some(timeout))
     }
+}
+
+fn shell_single_quote_escape(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 fn ensure_command_available(command: &str) -> AppResult<()> {

@@ -341,6 +341,7 @@ impl OrchestrationService {
             ssh_host: pairing_context.host.clone(),
             ssh_port: pairing_context.port,
             private_key_path,
+            ssh_password: context.state.read().await.ssh.ssh_password.clone(),
         };
 
         let pairing_mode = detect_sunshine_pairing_mode(&remote).await?;
@@ -495,6 +496,7 @@ impl OrchestrationService {
                     ssh_host: pairing_context.host.clone(),
                     ssh_port: pairing_context.port,
                     private_key_path: snapshot.ssh.private_key_path.clone(),
+                    ssh_password: snapshot.ssh.ssh_password.clone(),
                 };
                 if let Err(error) = run_post_provision_step(
                     app,
@@ -1084,12 +1086,14 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             state.ssh.ssh_username.clone()
         }
     });
+    let ssh_password = context.state.read().await.ssh.ssh_password.clone();
     let target_user = sanitize_ssh_user(&context.config.audio_target_user);
     let mut remote = RemoteExec {
         ssh_user,
         ssh_host: instance.public_ip.clone(),
         ssh_port: instance.ssh_port,
         private_key_path: key_paths.private_key_path.display().to_string(),
+        ssh_password,
     };
 
     if server_step_is_completed(&context, instance.id, ProvisionStepMarker::SshConnected).await {
@@ -2054,12 +2058,14 @@ async fn run_existing_instance_orchestration(
             state.ssh.ssh_username.clone()
         }
     });
+    let ssh_password = context.state.read().await.ssh.ssh_password.clone();
     let target_user = sanitize_ssh_user(&context.config.audio_target_user);
     let mut remote = RemoteExec {
         ssh_user,
         ssh_host: instance.public_ip.clone(),
         ssh_port: instance.ssh_port,
         private_key_path: key_paths.private_key_path.display().to_string(),
+        ssh_password,
     };
 
     if server_step_is_completed(&context, instance.id, ProvisionStepMarker::SshConnected).await {
