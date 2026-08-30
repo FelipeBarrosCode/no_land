@@ -1,8 +1,22 @@
 {
   "bundle": {
+    "targets": ["nsis"],
+    "resources": [
+      "binaries/wintun-*-pc-windows-msvc.dll",
+      "binaries/wintun-LICENSE.txt",
+      "binaries/ssh-*-pc-windows-msvc.exe",
+      "binaries/scp-*-pc-windows-msvc.exe",
+      "binaries/ssh-keygen-*-pc-windows-msvc.exe",
+      "binaries/ssh-runtime/**/*",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*"
+    ],
     "windows": {
       "webviewInstallMode": {
         "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "compression": "lzma"
       }
     }
   }
