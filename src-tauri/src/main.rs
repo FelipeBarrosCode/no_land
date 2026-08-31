@@ -9,7 +9,7 @@ mod moonlight;
 mod services;
 mod utils;
 
-use std::sync::Arc;
+use std::{fs::OpenOptions, io::Write, path::Path, sync::Arc};
 
 use crate::moonlight::{domain::ColorRange, infrastructure::persistence::MoonlightStateRepository};
 use commands::*;
@@ -27,6 +27,65 @@ use services::{
 use tauri::{Manager, WindowEvent};
 use tracing::{error, info, warn};
 use utils::logging::init_logging;
+
+fn write_startup_diagnostic(stage: &str, message: &str) {
+    eprintln!("[startup:{stage}] {message}");
+
+    let path = std::env::temp_dir().join("noland-connect-startup.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[startup:{stage}] {message}");
+    }
+}
+
+fn reset_persisted_state(
+    state_store: &Arc<dyn StateStore>,
+    state_path: &Path,
+    app_data_dir: &Path,
+    moonlight_bootstrap_created: &mut bool,
+    reason: &str,
+) -> crate::models::app_state::PersistedAppState {
+    write_startup_diagnostic("state-reset", reason);
+    warn!("{reason}");
+
+    if let Err(error) = std::fs::remove_file(state_path) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            let message = format!(
+                "Failed deleting persisted state file {}: {error}",
+                state_path.display()
+            );
+            write_startup_diagnostic("state-reset", &message);
+            warn!("{message}");
+        }
+    }
+
+    match tauri::async_runtime::block_on(moonlight::composition::bootstrap_default_services(
+        state_path.to_path_buf(),
+        app_data_dir.to_path_buf(),
+    )) {
+        Ok(result) => {
+            *moonlight_bootstrap_created = result.created;
+        }
+        Err(error) => {
+            let message =
+                format!("Moonlight bootstrap after state reset could not complete: {error}");
+            write_startup_diagnostic("state-reset", &message);
+            warn!("{message}");
+            *moonlight_bootstrap_created = false;
+        }
+    }
+
+    match tauri::async_runtime::block_on(state_store.load_state()) {
+        Ok(state) => state,
+        Err(error) => {
+            let message = format!(
+                "Failed recreating persisted state after reset, continuing with defaults: {error}"
+            );
+            write_startup_diagnostic("state-reset", &message);
+            warn!("{message}");
+            crate::models::app_state::PersistedAppState::default()
+        }
+    }
+}
 
 fn main() {
     init_logging();
@@ -52,7 +111,7 @@ fn main() {
                 config.state_schema_version,
             ));
 
-            let moonlight_bootstrap_created = match tauri::async_runtime::block_on(
+            let mut moonlight_bootstrap_created = match tauri::async_runtime::block_on(
                 moonlight::composition::bootstrap_default_services(
                     state_path.clone(),
                     app_data_dir.clone(),
@@ -78,8 +137,16 @@ fn main() {
                 }
             };
 
-            let mut initial_state = tauri::async_runtime::block_on(state_store.load_state())
-                .map_err(|error| format!("Failed loading persisted state: {error}"))?;
+            let mut initial_state = match tauri::async_runtime::block_on(state_store.load_state()) {
+                Ok(state) => state,
+                Err(error) => reset_persisted_state(
+                    &state_store,
+                    &state_path,
+                    &app_data_dir,
+                    &mut moonlight_bootstrap_created,
+                    &format!("Failed loading persisted state; deleting and recreating it: {error}"),
+                ),
+            };
             let mut detected_stream_defaults = detect_client_display_for_provisioning()
                 .map(|(width, height, _)| (width, height));
 
@@ -104,10 +171,24 @@ fn main() {
                 state_changed = true;
             }
 
-            if normalize_wireguard_state_from_disk(&mut initial_state, &app_data_dir)
-                .map_err(|error| format!("Failed normalizing WireGuard state from disk: {error}"))?
-            {
-                state_changed = true;
+            match normalize_wireguard_state_from_disk(&mut initial_state, &app_data_dir) {
+                Ok(changed) => {
+                    if changed {
+                        state_changed = true;
+                    }
+                }
+                Err(error) => {
+                    initial_state = reset_persisted_state(
+                        &state_store,
+                        &state_path,
+                        &app_data_dir,
+                        &mut moonlight_bootstrap_created,
+                        &format!(
+                            "Failed normalizing WireGuard state from disk; deleting and recreating persisted state: {error}"
+                        ),
+                    );
+                    state_changed = false;
+                }
             }
 
             if !initial_state.has_completed_guided_setup
@@ -178,6 +259,11 @@ fn main() {
                 ));
                 candidates.push((1920, 1080, 60, "Fallback 1920x1080@60".to_string()));
             }
+            if !candidates.iter().any(|candidate| {
+                candidate.0 == 1920 && candidate.1 == 1080 && candidate.2 == 60
+            }) {
+                candidates.push((1920, 1080, 60, "Emergency fallback 1920x1080@60".to_string()));
+            }
             let mut generated = None;
             let mut last_generation_error = None;
             for (candidate_width, candidate_height, candidate_refresh, candidate_source) in
@@ -209,13 +295,14 @@ fn main() {
                 .trim()
                 .is_empty()
             {
-                return Err(format!(
-                    "Failed generating startup EDID: {}",
+                let message = format!(
+                    "Failed generating startup EDID and no previous EDID exists; continuing without refresh: {}",
                     last_generation_error
                         .map(|error| error.to_string())
                         .unwrap_or_else(|| "no compatible timing".to_string())
-                )
-                .into());
+                );
+                write_startup_diagnostic("edid-generation", &message);
+                warn!("{message}");
             } else if let Some(error) = last_generation_error {
                 warn!(
                     "Could not refresh the startup EDID; retaining the last valid profile: {}",
@@ -228,8 +315,13 @@ fn main() {
             }
 
             if state_changed {
-                tauri::async_runtime::block_on(state_store.save_state(&initial_state))
-                    .map_err(|error| format!("Failed normalizing persisted state: {error}"))?;
+                if let Err(error) = tauri::async_runtime::block_on(state_store.save_state(&initial_state)) {
+                    let message = format!(
+                        "Failed normalizing persisted state, continuing with in-memory state only: {error}"
+                    );
+                    write_startup_diagnostic("state-save", &message);
+                    warn!("{message}");
+                }
             }
 
             info!("Loaded state for Noland Connect");
@@ -261,18 +353,19 @@ fn main() {
             );
             if moonlight_bootstrap_created {
                 if let Some((default_stream_width, default_stream_height)) = detected_stream_defaults {
-                    moonlight_manager
-                        .repository
-                        .update(|configuration| {
-                            let video = &mut configuration.defaults.video;
-                            video.width = default_stream_width;
-                            video.height = default_stream_height;
-                            video.color_range = ColorRange::Full;
-                            Ok(())
-                        })
-                        .map_err(|error| {
-                            format!("Failed seeding embedded Moonlight defaults: {error}")
-                        })?;
+                    if let Err(error) = moonlight_manager.repository.update(|configuration| {
+                        let video = &mut configuration.defaults.video;
+                        video.width = default_stream_width;
+                        video.height = default_stream_height;
+                        video.color_range = ColorRange::Full;
+                        Ok(())
+                    }) {
+                        let message = format!(
+                            "Failed seeding embedded Moonlight defaults, continuing with generated defaults: {error}"
+                        );
+                        write_startup_diagnostic("moonlight-seed", &message);
+                        warn!("{message}");
+                    }
                 }
             }
             moonlight_manager
@@ -396,8 +489,6 @@ fn main() {
             get_launch_instance_software_job,
             get_software_artwork,
             update_igdb_credentials,
-            submit_pairing_pin,
-            skip_pairing_and_continue,
             local_environment_preflight,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
@@ -406,9 +497,7 @@ fn main() {
             verify_wireguard,
             get_setup_status_command,
             verify_sunshine,
-            detect_moonlight,
             setup_moonlight_sunshine_command,
-            submit_moonlight_pin_to_sunshine_command,
             retry_setup_stage_command,
             start_local_sleep_prevention,
             stop_local_sleep_prevention,
@@ -501,7 +590,9 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {
-            error!("error while running tauri application: {error}");
-            panic!("tauri app failed: {error}");
+            let message = format!("error while running tauri application: {error}");
+            write_startup_diagnostic("tauri-run", &message);
+            error!("{message}");
+            std::process::exit(1);
         });
 }

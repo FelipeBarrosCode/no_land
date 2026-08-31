@@ -114,7 +114,6 @@ pub enum RuntimeCommand {
     GetState {
         response: oneshot::Sender<SessionState>,
     },
-    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -487,10 +486,6 @@ impl MoonlightRuntimeHandle {
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEventMessage> {
         self.events.subscribe()
-    }
-
-    pub fn subscribe_latest_event(&self) -> watch::Receiver<Option<RuntimeEventMessage>> {
-        self.latest_event.clone()
     }
 
     pub fn latest_event(&self) -> Option<RuntimeEventMessage> {
@@ -2327,11 +2322,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                         RuntimeCommand::GetState { response } => {
                             let _ = response.send(state.clone());
                         }
-                        RuntimeCommand::Shutdown => {
-                            let _ = native_runtime.stop();
-                            let _ = native_runtime.detach_surface();
-                            break;
-                        }
+
                     }
                 }
             }

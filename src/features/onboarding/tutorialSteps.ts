@@ -71,8 +71,8 @@ export const tutorialSteps: TutorialStep[] = [
   },
   {
     eyebrow: "Step 9",
-    title: "Computer password",
+    title: "Sign in to your computer",
     description:
-      'The password to get into the computer is "password". Use that exact password when the remote computer asks for it.',
+      "Use the credentials configured for your session when the remote computer asks you to sign in.",
   },
 ];

@@ -28,8 +28,6 @@ pub async fn bootstrap_default_services(
 }
 
 pub struct MoonlightManager {
-    pub state_path: PathBuf,
-    pub app_data_dir: PathBuf,
     pub repository: Arc<JsonMoonlightStateRepository>,
     pub secret_store: Arc<dyn SecretStore>,
     pub pairing_sessions: PairingSessionStore,
@@ -47,8 +45,6 @@ impl MoonlightManager {
         let runtime = spawn_runtime_actor(app_data_dir.clone());
         let input = InputManager::new(runtime.clone());
         Self {
-            state_path: state_path.clone(),
-            app_data_dir,
             repository: Arc::new(JsonMoonlightStateRepository::new(state_path)),
             secret_store: Arc::new(FileSecretStore::new(identity_dir)),
             pairing_sessions: PairingSessionStore::default(),

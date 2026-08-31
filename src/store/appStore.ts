@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
   getAppState,
@@ -13,13 +14,10 @@ import {
   resumeProvisioningExistingInstance,
   startPlayExistingInstance,
   startPlayFlow,
-  submitPairingPin,
-  skipPairingAndContinue,
   subscribeProvisioningEvents,
   verifyWireguard,
   getSetupStatus,
   verifySunshine,
-  detectMoonlight,
   setupMoonlightSunshine,
   retrySetupStage,
   updatePlatformCredentials,
@@ -105,7 +103,6 @@ import type {
   MicSessionResponse,
   MicSettingsUpdate,
   MicQualityProfile,
-  MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
   EmbeddedMoonlightInstanceStatus,
   OrchestrationState,
@@ -136,14 +133,12 @@ interface AppStore {
   busy: boolean;
   blockingAction: BlockingActionState | null;
   isBlocking: boolean;
-  serverPickerOpen: boolean;
   provisioningModalDismissed: boolean;
   error: string | null;
   _eventsBound: boolean;
   vastWalletSummary: VastWalletSummary | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
-  setServerPickerOpen: (open: boolean) => void;
   dismissProvisioningModal: () => void;
   reopenProvisioningModal: () => void;
   runOnboarding: (payload: OnboardingPayload) => Promise<void>;
@@ -187,16 +182,12 @@ interface AppStore {
     mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
   }) => Promise<void>;
-  submitPin: (pin: string) => Promise<void>;
-  skipPairing: () => Promise<void>;
   setupLocalWireguardClient: () => Promise<void>;
   reconnectLocalWireguardClient: () => Promise<string | null>;
   setupWireguardAppHandoff: () => Promise<PostWireGuardSetupState | null>;
   verifyWireguardConnection: () => Promise<ReachabilityResult | null>;
   verifySunshine: () => Promise<SunshineVerificationResult | null>;
-  detectMoonlight: () => Promise<MoonlightDetectionResult | null>;
   setupMoonlightSunshine: () => Promise<PostWireGuardSetupState | null>;
-  submitMoonlightPin: (pin: string) => Promise<PostWireGuardSetupState | null>;
   retrySetupStage: (
     stage: SetupStage,
   ) => Promise<PostWireGuardSetupState | null>;
@@ -619,7 +610,7 @@ const PROVISIONING_STEP_LABELS: Partial<Record<OrchestrationState, string>> = {
   MoonlightSunshineReadyToSetup: "Ready to set up Moonlight and Sunshine",
   SunshineCredentialsConfiguring: "Configuring Sunshine credentials",
   SunshineVerifying: "Verifying Sunshine",
-  MoonlightDetecting: "Finding Moonlight",
+  MoonlightDetecting: "Preparing embedded streaming",
   MoonlightPairingStarted: "Starting Moonlight pairing",
   MoonlightPinReceived: "Moonlight PIN received",
   SunshinePinSubmitting: "Submitting PIN to Sunshine",
@@ -789,7 +780,6 @@ export const useAppStore = create<AppStore>((set, get) => {
     busy: false,
     blockingAction: null,
     isBlocking: false,
-    serverPickerOpen: false,
     provisioningModalDismissed: false,
     error: null,
     _eventsBound: false,
@@ -870,7 +860,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       set({ _eventsBound: true });
     },
 
-    setServerPickerOpen: (serverPickerOpen) => set({ serverPickerOpen }),
 
     dismissProvisioningModal: () => set({ provisioningModalDismissed: true }),
 
@@ -956,7 +945,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           const appState = await selectOffer(offerId, storageGb);
-          set({ appState, serverPickerOpen: false });
+          set({ appState });
           return true;
         },
         false,
@@ -1296,25 +1285,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    submitPin: async (pin) => {
-      set({ busy: true, error: null });
-      try {
-        const appState = await submitPairingPin(pin);
-        set({ appState, busy: false });
-      } catch (error) {
-        set({ busy: false, error: mapError(error) });
-      }
-    },
-
-    skipPairing: async () => {
-      set({ busy: true, error: null });
-      try {
-        const appState = await skipPairingAndContinue();
-        set({ appState, busy: false });
-      } catch (error) {
-        set({ busy: false, error: mapError(error) });
-      }
-    },
 
     setupLocalWireguardClient: async () => {
       await runBusyTask(
@@ -1401,21 +1371,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    detectMoonlight: async () => {
-      return runBusyTask(
-        {
-          key: "moonlight.detect",
-          label: "Finding Moonlight",
-          detail: "Looking for Moonlight on this machine.",
-        },
-        async () => {
-          const result = await detectMoonlight();
-          await refreshProvisioningState(set);
-          return result;
-        },
-        null,
-      );
-    },
 
     setupMoonlightSunshine: async () => {
       return runBusyTask(
@@ -1440,9 +1395,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    submitMoonlightPin: async (_pin) => {
-      throw new Error("Legacy Sunshine PIN submission is no longer used by provisioning handoff.");
-    },
 
     retrySetupStage: async (stage) => {
       return runBusyTask(
@@ -1666,7 +1618,6 @@ export const useAppStore = create<AppStore>((set, get) => {
         );
         set({ oauthSessionId: response.sessionId });
         if ("__TAURI_INTERNALS__" in window) {
-          const { openUrl } = await import("@tauri-apps/plugin-opener");
           await openUrl(response.authorizationUrl);
         } else {
           window.open(response.authorizationUrl, "_blank", "noopener,noreferrer");

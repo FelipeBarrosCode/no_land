@@ -21,7 +21,7 @@ interface Props {
   onSetupMoonlightSunshine: () => Promise<unknown>;
   activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
-  onCompleteMoonlightPairingHandoff: (pin: string) => Promise<unknown>;
+  onCompleteMoonlightPairingHandoff: (sessionId: string) => Promise<unknown>;
   onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
 }
 
@@ -90,11 +90,8 @@ export function PostWireguardModal({
     "SunshinePinSubmitting",
     "MoonlightSunshinePaired",
   ]).has(appState.orchestrationState);
-  const moonlightChecked =
-    stageShowsPinSubmission ||
-    orchestrationShowsPinSubmission ||
-    setup.moonlightInstalled ||
-    !!setup.lastError?.code.includes("moonlight");
+  const streamingReady =
+    stageShowsPinSubmission || orchestrationShowsPinSubmission;
   const pinRetryError =
     setup.lastError?.stage === "moonlight_pin_received" ||
     setup.lastError?.stage === "sunshine_pin_submitting";
@@ -244,9 +241,9 @@ export function PostWireguardModal({
                     Moonlight Status
                   </h4>
                   <p className="mt-2">
-                    {moonlightChecked
-                      ? "Streaming setup is ready. Use the pairing handoff below."
-                      : "Streaming setup is still in progress."}
+                    {streamingReady
+                      ? "Embedded streaming is ready. Use the pairing handoff below."
+                      : "Embedded streaming setup is still in progress."}
                   </p>
                 </div>
               </>
@@ -286,7 +283,7 @@ export function PostWireguardModal({
                       <Button
                         onClick={() =>
                           void onCompleteMoonlightPairingHandoff(
-                            pairingSession.pin,
+                            pairingSession.sessionId,
                           )
                         }
                         disabled={busy}

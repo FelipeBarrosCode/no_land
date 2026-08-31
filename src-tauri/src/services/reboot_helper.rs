@@ -11,13 +11,6 @@ use crate::{
 pub struct RebootHelperService;
 
 impl RebootHelperService {
-    pub async fn reboot_and_reinitialize(
-        remote: &RemoteExec,
-        target_user: &str,
-    ) -> AppResult<String> {
-        Self::reboot_and_reinitialize_internal(remote, target_user, None).await
-    }
-
     pub async fn reboot_and_reinitialize_with_endpoint_updates(
         remote: &RemoteExec,
         target_user: &str,
@@ -715,22 +708,18 @@ exit 1"#,
     }
 }
 
+#[cfg(test)]
 const BOOT_ID_PREFIX: &str = "REBOOT_BOOT_ID=";
 const DISPLAY_XAUTHORITY_PREFIX: &str = "DISPLAY_XAUTHORITY=";
 
+#[cfg(test)]
 fn normalize_boot_id(value: &str) -> Option<String> {
     let value = value.trim();
-    if value.is_empty() {
-        return None;
-    }
-
-    let valid = value
-        .bytes()
-        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');
-
-    valid.then(|| value.to_ascii_lowercase())
+    let parsed = uuid::Uuid::parse_str(value).ok()?;
+    (value.len() == 36).then(|| parsed.hyphenated().to_string())
 }
 
+#[cfg(test)]
 fn parse_marked_boot_id(stdout: &str) -> Option<String> {
     stdout.lines().find_map(|line| {
         line.trim()
@@ -739,6 +728,7 @@ fn parse_marked_boot_id(stdout: &str) -> Option<String> {
     })
 }
 
+#[cfg(test)]
 fn boot_id_changed(old_boot_id: &str, new_boot_id: &str) -> bool {
     match (
         normalize_boot_id(old_boot_id),

@@ -25,7 +25,7 @@ interface Props {
   onSetupMoonlightSunshine: () => Promise<unknown>;
   activeMoonlightPairing: MoonlightPairingSessionResponse | null;
   onPrepareMoonlightPairingHandoff: () => Promise<MoonlightPairingSessionResponse | null>;
-  onCompleteMoonlightPairingHandoff: (pin: string) => Promise<unknown>;
+  onCompleteMoonlightPairingHandoff: (sessionId: string) => Promise<unknown>;
   onRetrySetupStage: (stage: SetupStage) => Promise<unknown>;
   sleepPreventionActive: boolean;
   onStartSleepPrevention: () => Promise<string | null>;
@@ -65,10 +65,7 @@ export function ProvisioningScreen({
     );
     return index === -1 ? 0 : index;
   }, [appState.orchestrationState]);
-  const sunshineCredentials = {
-    username: "user",
-    password: "password",
-  };
+
   const provisioningModalRequested =
     appState.orchestrationState === "WireGuardConfigGenerated" ||
     appState.orchestrationState === "WireGuardAppHandoffStarted" ||
@@ -182,23 +179,7 @@ export function ProvisioningScreen({
                 );
               })}
             </ul>
-            <div className="mt-4 border border-[#3d426f] bg-[#10152f] p-4 text-[1.05rem] text-[#cfe7ff]">
-              <h3 className="font-display text-[16px] uppercase tracking-[0.12em] text-neon-cyan">
-                Sunshine Credentials
-              </h3>
-              <p className="mt-2">
-                Username:{" "}
-                <span className="text-neon-lime">
-                  {sunshineCredentials.username}
-                </span>
-              </p>
-              <p>
-                Password:{" "}
-                <span className="text-neon-lime">
-                  {sunshineCredentials.password}
-                </span>
-              </p>
-            </div>
+
           </Card>
 
           <Card className="pixel-frame">

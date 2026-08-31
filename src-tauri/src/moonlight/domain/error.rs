@@ -13,6 +13,8 @@ pub enum MoonlightError {
     Persistence(String),
     #[error("migration error: {0}")]
     Migration(String),
+
+    #[cfg(test)]
     #[error("secret store error: {0}")]
     SecretStore(String),
     #[error("identity is invalid: {0}")]

@@ -1,4 +1,4 @@
-use std::{env, path::PathBuf, process::Command};
+use std::{env, path::PathBuf};
 
 use crate::utils::managed_binaries::locate_bundled_binary;
 
@@ -75,23 +75,6 @@ impl OsDetection {
         } else {
             "/dev/null"
         }
-    }
-
-    pub fn command_exists(&self, command: &str) -> bool {
-        if self.is_windows() {
-            return Command::new("where")
-                .arg(command)
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-        }
-
-        Command::new("sh")
-            .arg("-lc")
-            .arg(format!("command -v {command} >/dev/null 2>&1"))
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false)
     }
 
     pub fn managed_binary_target_triple(&self) -> &'static str {

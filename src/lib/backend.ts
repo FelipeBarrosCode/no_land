@@ -32,7 +32,6 @@ import type {
   MicSettingsUpdate,
   MicQualityProfile,
   MicrophoneDevice,
-  MoonlightDetectionResult,
   MoonlightPairingSessionResponse,
   MoonlightHostLatencyPreferencesResponse,
   NolandLatencyConfig,
@@ -147,15 +146,6 @@ export async function updateIgdbCredentials(
   return invokeSafe<PersistedAppState>("update_igdb_credentials", { payload });
 }
 
-export async function submitPairingPin(
-  pin: string,
-): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("submit_pairing_pin", { pin });
-}
-
-export async function skipPairingAndContinue(): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("skip_pairing_and_continue");
-}
 
 export async function setupWireguardClient(): Promise<string> {
   return invokeSafe<string>("setup_wireguard_client");
@@ -184,22 +174,10 @@ export async function verifySunshine(): Promise<SunshineVerificationResult> {
   return invokeSafe<SunshineVerificationResult>("verify_sunshine");
 }
 
-export async function detectMoonlight(): Promise<MoonlightDetectionResult> {
-  return invokeSafe<MoonlightDetectionResult>("detect_moonlight");
-}
 
 export async function setupMoonlightSunshine(): Promise<PostWireGuardSetupState> {
   return invokeSafe<PostWireGuardSetupState>(
     "setup_moonlight_sunshine_command",
-  );
-}
-
-export async function submitMoonlightPinToSunshine(
-  pin: string,
-): Promise<PostWireGuardSetupState> {
-  return invokeSafe<PostWireGuardSetupState>(
-    "submit_moonlight_pin_to_sunshine_command",
-    { pin },
   );
 }
 

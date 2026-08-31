@@ -178,7 +178,7 @@ impl InputManager {
         });
     }
 
-    pub fn key(&self, virtual_key: u16, state: ButtonState, modifiers: u8, non_normalized: bool) {
+    pub fn key(&self, virtual_key: u16, state: ButtonState, modifiers: u8, _non_normalized: bool) {
         {
             let mut pressed = self.pressed.lock();
             match state {
@@ -195,7 +195,6 @@ impl InputManager {
             virtual_key,
             state,
             modifiers,
-            non_normalized,
         });
     }
 
@@ -246,15 +245,10 @@ impl InputManager {
                     virtual_key,
                     state: ButtonState::Released,
                     modifiers: 0,
-                    non_normalized: false,
                 }));
         }
 
         let _ = self.worker.events.try_send(OwnedInputEvent::ReleaseAll);
-    }
-
-    pub fn stop_worker(&self) {
-        self.worker.stop();
     }
 
     fn send_ordered(&self, event: InputEvent) {

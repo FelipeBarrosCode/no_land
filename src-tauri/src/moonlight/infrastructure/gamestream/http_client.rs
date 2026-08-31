@@ -160,22 +160,12 @@ impl GameStreamHttpClient for ReqwestGameStreamHttpClient {
             .await
             .map_err(|error| MoonlightError::Persistence(error.to_string()))?;
 
-        let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned);
         let body = response
             .text()
             .await
             .map_err(|error| MoonlightError::Persistence(error.to_string()))?;
 
-        Ok(GameStreamResponse {
-            status,
-            body,
-            content_type,
-        })
+        Ok(GameStreamResponse { body })
     }
 }
 
