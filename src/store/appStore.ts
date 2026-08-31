@@ -38,11 +38,8 @@ import {
   resetInstanceSunshineSettings,
   rebootInstanceServices,
   destroyInstance,
-  generateBundleIndex,
-  getInstanceRestoreBundles,
-  dryRunRestore,
-  restoreBundle,
-  getRestoreJob,
+
+
   getInstanceMicConfig,
   updateInstanceMicSettings,
   enableInstanceMic,
@@ -94,10 +91,7 @@ import type {
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
   SunshineSettingsResponse,
-  BundleIndex,
-  RestoreDryRunResult,
-  RestoreJob,
-  RestoreRequest,
+
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
   MicSessionResponse,
@@ -283,19 +277,7 @@ interface AppStore {
   ) => Promise<void>;
   rebootInstanceServices: (instanceId: number) => Promise<string | null>;
   destroyInstance: (instanceId: number) => Promise<void>;
-  bundleIndex: BundleIndex | null;
-  restoreJob: RestoreJob | null;
-  generateBundleIndex: () => Promise<void>;
-  loadRestoreBundles: (instanceId: number) => Promise<void>;
-  runDryRunRestore: (
-    instanceId: number,
-    payload: RestoreRequest,
-  ) => Promise<RestoreDryRunResult | null>;
-  runRestoreBundle: (
-    instanceId: number,
-    payload: RestoreRequest,
-  ) => Promise<RestoreJob | null>;
-  pollRestoreJob: (jobId: string) => Promise<void>;
+
   micConfig: InstanceMicConfig | null;
   micStatus: InstanceMicRuntimeStatus | null;
   micSession: MicSessionResponse | null;
@@ -801,8 +783,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     launchingSoftwareAppId: null,
     softwareArtwork: {},
     softwareArtworkLoading: {},
-    bundleIndex: null,
-    restoreJob: null,
+
     micConfig: null,
     micStatus: null,
     micSession: null,
@@ -1666,20 +1647,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         const status = await triggerInstanceBackup();
 
-        // Refresh bundle index immediately so restore UI reflects selectable bundles
-        // from the latest backup without requiring a manual "Generate Index" action.
-        const currentState = get().appState;
-        const activeInstanceId = currentState?.instance.instanceId;
-        if (activeInstanceId) {
-          try {
-            const index = await getInstanceRestoreBundles(activeInstanceId);
-            set({ backupStatus: status, bundleIndex: index, busy: false });
-            return;
-          } catch {
-            // Backup succeeded even if index retrieval fails; keep success status.
-          }
-        }
-
         set({ backupStatus: status, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
@@ -2042,74 +2009,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    generateBundleIndex: async () => {
-      await runBusyTask(
-        {
-          key: "restore.index.generate",
-          label: "Generating restore index",
-          detail: "Scanning backup metadata so bundles can be restored.",
-          blocking: true,
-        },
-        async () => {
-          await generateBundleIndex();
-        },
-        undefined,
-      );
-    },
 
-    loadRestoreBundles: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "restore.index.load",
-          label: "Loading restore bundles",
-          detail: "Fetching indexed backup bundles for this instance.",
-        },
-        async () => {
-          const index = await getInstanceRestoreBundles(instanceId);
-          set({ bundleIndex: index });
-        },
-        undefined,
-      );
-    },
-
-    runDryRunRestore: async (instanceId, payload) => {
-      return await runInstanceTask(
-        {
-          key: "restore.dry_run",
-          label: "Running restore dry run",
-          detail:
-            "Previewing which files would be restored before making changes.",
-        },
-        async () => await dryRunRestore(instanceId, payload),
-        null,
-      );
-    },
-
-    runRestoreBundle: async (instanceId, payload) => {
-      return await runInstanceTask(
-        {
-          key: "restore.run",
-          label: "Restoring backup bundle",
-          detail: "Copying the selected backup data back onto the instance.",
-          blocking: true,
-        },
-        async () => {
-          const job = await restoreBundle(instanceId, payload);
-          set({ restoreJob: job });
-          return job;
-        },
-        null,
-      );
-    },
-
-    pollRestoreJob: async (jobId) => {
-      try {
-        const job = await getRestoreJob(jobId);
-        set({ restoreJob: job });
-      } catch (error) {
-        set({ error: mapError(error) });
-      }
-    },
 
     loadMicConfig: async (instanceId) => {
       set({ instanceActionRunning: true, error: null });

@@ -29,13 +29,12 @@ use crate::{
     mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
-            BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
+            BackupStatusResponse, ConnectionProvider, EdidMode, InstanceMicConfig,
             InstanceMicRuntimeStatus, LocationSource, ManualLocationInput, MicQualityProfile,
             MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OnboardingPayload,
             OrchestrationState, PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary,
-            RestoreDryRunResult, RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
-            SharedStorageInstanceStatus, SharedStorageSettingsResponse,
-            SharedStorageSettingsUpdate,
+            ServerPreferencesUpdate, SetupStage, SharedStorageInstanceStatus,
+            SharedStorageSettingsResponse, SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
         vast::VastInstance,
@@ -82,8 +81,6 @@ use crate::{
         reboot_helper::RebootHelperService,
         remote_display::{ApplyDisplayModeResult, InstanceDisplayStatus, RemoteDisplayService},
         remote_exec::RemoteExec,
-        shared_storage::bundle_indexer::BundleIndexer,
-        shared_storage::bundle_restore::BundleRestoreService,
         shared_storage::shared_storage_manager::SharedStorageManager,
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
@@ -3982,78 +3979,6 @@ pub async fn reboot_instance_services(
     .await;
     InstanceLifecycleService::release_lock(instance_id).await;
     result.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn generate_bundle_index(context: State<'_, AppContext>) -> Result<(), FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    let instance_id = {
-        let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| {
-            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
-        })?
-    };
-    BundleIndexer::generate_and_upload(context.inner(), &remote, instance_id, &target_user)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn get_instance_restore_bundles(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-) -> Result<BundleIndex, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::list_bundles(context.inner(), &remote, instance_id, &target_user)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn dry_run_restore(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-    payload: RestoreRequest,
-) -> Result<RestoreDryRunResult, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::dry_run_restore(
-        context.inner(),
-        &remote,
-        instance_id,
-        &target_user,
-        payload,
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn restore_bundle(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-    payload: RestoreRequest,
-) -> Result<RestoreJob, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::restore_bundle(
-        context.inner(),
-        &remote,
-        instance_id,
-        &target_user,
-        payload,
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn get_restore_job(job_id: String) -> Result<RestoreJob, FrontendError> {
-    BundleRestoreService::get_job(&job_id)
-        .await
-        .map_err(Into::into)
 }
 
 #[tauri::command]

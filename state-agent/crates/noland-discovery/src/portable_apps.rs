@@ -1,5 +1,5 @@
 use noland_state_core::{AppId, AppIdentity, LauncherKind};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn discover_portable_apps(home: &Path) -> Vec<AppIdentity> {
     let mut apps = Vec::new();

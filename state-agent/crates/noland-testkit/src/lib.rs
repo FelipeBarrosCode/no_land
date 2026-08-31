@@ -29,7 +29,10 @@ impl Harness {
             .join(format!("{id}.desktop"));
         fs::write(
             path,
-            format!("[Desktop Entry]\nName={name}\nExec={}\nType=Application\n", exec.display()),
+            format!(
+                "[Desktop Entry]\nName={name}\nExec={}\nType=Application\n",
+                exec.display()
+            ),
         )
         .unwrap();
     }
@@ -41,7 +44,11 @@ impl Harness {
         fs::create_dir_all(self.home.join(".config/example-game")).unwrap();
         fs::write(data.join("saves/world/level.dat"), b"world-v1").unwrap();
         fs::write(data.join("mods/cool.jar"), b"mod-bytes").unwrap();
-        fs::write(self.home.join(".config/example-game/options.txt"), b"render=fancy").unwrap();
+        fs::write(
+            self.home.join(".config/example-game/options.txt"),
+            b"render=fancy",
+        )
+        .unwrap();
         data
     }
 }

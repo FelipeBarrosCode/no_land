@@ -131,7 +131,10 @@ pub async fn commit_bundle_with_index(
     let manifest_hash = format!("blake3:{}", blake3::hash(&manifest_json).to_hex());
     let enc = wrap_envelope(&keys.manifest, b"manifest", &manifest_json)?;
     provider
-        .put_small_versioned(Bytes::from(enc), &RemoteKey::new(format!("{bundle_prefix}/manifest.enc")))
+        .put_small_versioned(
+            Bytes::from(enc),
+            &RemoteKey::new(format!("{bundle_prefix}/manifest.enc")),
+        )
         .await?;
     provider
         .put_small_versioned(
@@ -280,7 +283,10 @@ pub async fn commit_checkpoint(
     let json = serde_json::to_vec_pretty(checkpoint)?;
     let enc = wrap_envelope(&keys.catalog, b"checkpoint", &json)?;
     provider
-        .put_small_versioned(Bytes::from(enc), &RemoteKey::new(format!("{dir}/state.enc")))
+        .put_small_versioned(
+            Bytes::from(enc),
+            &RemoteKey::new(format!("{dir}/state.enc")),
+        )
         .await?;
     provider
         .put_small_versioned(
@@ -326,5 +332,3 @@ fn enc_meta(checkpoint: &LearnedStateCheckpoint) -> Vec<u8> {
     }))
     .unwrap_or_default()
 }
-
-

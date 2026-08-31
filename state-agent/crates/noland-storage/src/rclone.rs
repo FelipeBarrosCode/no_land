@@ -107,7 +107,10 @@ impl SharedStorageProvider for RcloneStorage {
         self.run(vec!["mkdir".into(), self.root_remote()]).await?;
         for child in ["catalog", "bundles", "packs", "checkpoints", "instances"] {
             let _ = self
-                .run(vec!["mkdir".into(), format!("{}/{}", self.root_remote(), child)])
+                .run(vec![
+                    "mkdir".into(),
+                    format!("{}/{}", self.root_remote(), child),
+                ])
                 .await;
         }
         Ok(())
@@ -203,10 +206,8 @@ impl SharedStorageProvider for RcloneStorage {
     }
 
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta> {
-        let tmp = std::env::temp_dir().join(format!(
-            "noland-rclone-{}",
-            key.as_str().replace('/', "_")
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("noland-rclone-{}", key.as_str().replace('/', "_")));
         std::fs::write(&tmp, &bytes)?;
         let result = self.upload_immutable(&tmp, key).await;
         let _ = std::fs::remove_file(tmp);
@@ -242,7 +243,8 @@ pub fn shred_ephemeral_session(run_root: &Path, operation_id: &str) -> Result<()
     crate::shred_ephemeral_auth(run_root, operation_id)
 }
 
-pub fn assert_copy_only(command: &[String]) -> Result<()> {
+#[cfg(test)]
+fn assert_copy_only(command: &[String]) -> Result<()> {
     forbid_rclone_sync(command)
 }
 
@@ -256,8 +258,8 @@ mod tests {
 
     #[test]
     fn rejects_sync() {
-        assert!(forbid_rclone_sync(&["sync".into(), "src".into(), "dst".into()]).is_err());
-        assert!(forbid_rclone_sync(&["copy".into(), "src".into(), "dst".into()]).is_ok());
+        assert!(assert_copy_only(&["sync".into(), "src".into(), "dst".into()]).is_err());
+        assert!(assert_copy_only(&["copy".into(), "src".into(), "dst".into()]).is_ok());
     }
 
     #[test]
@@ -273,7 +275,10 @@ mod tests {
             prefix: Some("Noland Shared Storage".into()),
         };
         let session = session_from_input(&input, "op-42", TokenMode::Ephemeral).unwrap();
-        let storage = RcloneStorage::from_session(&session, Path::new("/run/noland/storage/op-42/rclone.conf"));
+        let storage = RcloneStorage::from_session(
+            &session,
+            Path::new("/run/noland/storage/op-42/rclone.conf"),
+        );
         assert_eq!(storage.provider_label(), "rclone:local");
         assert_eq!(
             storage.remote_path(&RemoteKey::new("packs/ab/id.pack")),

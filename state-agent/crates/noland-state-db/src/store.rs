@@ -20,9 +20,12 @@ impl StateDb {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
-        conn.pragma_update(None, "synchronous", "NORMAL").map_err(db_err)?;
-        conn.pragma_update(None, "foreign_keys", "ON").map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(db_err)?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -32,8 +35,10 @@ impl StateDb {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
-        conn.pragma_update(None, "foreign_keys", "ON").map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(db_err)?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -57,11 +62,9 @@ impl StateDb {
         let conn = self.lock()?;
         conn.execute_batch(MIGRATION_V1).map_err(db_err)?;
         let current: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
             .optional()
             .map_err(db_err)?
             .flatten();
@@ -213,6 +216,19 @@ impl StateDb {
             .map_err(db_err)
     }
 
+    pub fn open_session_app_ids(&self) -> Result<Vec<AppId>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT app_id FROM app_sessions WHERE ended_at IS NULL")
+            .map_err(db_err)?;
+        let app_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0).map(AppId))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(app_ids)
+    }
+
     pub fn open_session_for_app(&self, app_id: &AppId) -> Result<Option<AppSession>> {
         self.lock()?
             .query_row(
@@ -329,7 +345,10 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn associations_for_app(&self, app_id: &AppId) -> Result<Vec<(PathRecord, PathAssociation)>> {
+    pub fn associations_for_app(
+        &self,
+        app_id: &AppId,
+    ) -> Result<Vec<(PathRecord, PathAssociation)>> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -371,7 +390,12 @@ impl StateDb {
         Ok(rows)
     }
 
-    pub fn mark_dirty(&self, app_id: &AppId, path_id: Option<i64>, requires_reconciliation: bool) -> Result<()> {
+    pub fn mark_dirty(
+        &self,
+        app_id: &AppId,
+        path_id: Option<i64>,
+        requires_reconciliation: bool,
+    ) -> Result<()> {
         let now = now_secs();
         self.lock()?
             .execute(
@@ -398,10 +422,16 @@ impl StateDb {
 
     pub fn clear_dirty(&self, app_id: &AppId) -> Result<()> {
         self.lock()?
-            .execute("DELETE FROM dirty_apps WHERE app_id=?1", params![app_id.as_str()])
+            .execute(
+                "DELETE FROM dirty_apps WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
             .map_err(db_err)?;
         self.lock()?
-            .execute("DELETE FROM dirty_paths WHERE app_id=?1", params![app_id.as_str()])
+            .execute(
+                "DELETE FROM dirty_paths WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
             .map_err(db_err)?;
         Ok(())
     }
@@ -724,7 +754,15 @@ impl StateDb {
                 r#"INSERT OR REPLACE INTO image_baseline (
                     image_id, canonical_path, file_type, size, mode, package_owner, baseline_hash
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
-                params![image_id, path, file_type, size, mode, package_owner, baseline_hash],
+                params![
+                    image_id,
+                    path,
+                    file_type,
+                    size,
+                    mode,
+                    package_owner,
+                    baseline_hash
+                ],
             )
             .map_err(db_err)?;
         Ok(())
@@ -825,7 +863,13 @@ impl StateDb {
             .transpose()
     }
 
-    pub fn insert_restore(&self, restore_id: Uuid, bundle_id: Uuid, app_id: &AppId, staging: &str) -> Result<()> {
+    pub fn insert_restore(
+        &self,
+        restore_id: Uuid,
+        bundle_id: Uuid,
+        app_id: &AppId,
+        staging: &str,
+    ) -> Result<()> {
         let now = now_secs();
         self.lock()?
             .execute(
@@ -844,7 +888,12 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn update_restore(&self, restore_id: Uuid, state: RestoreState, last_error: Option<&str>) -> Result<()> {
+    pub fn update_restore(
+        &self,
+        restore_id: Uuid,
+        state: RestoreState,
+        last_error: Option<&str>,
+    ) -> Result<()> {
         self.lock()?
             .execute(
                 "UPDATE restore_operations SET state=?2, updated_at=?3, last_error=?4 WHERE restore_id=?1",
@@ -983,7 +1032,10 @@ mod tests {
         assert_eq!(db.integrity_check().unwrap(), "ok");
         let app = AppIdentity::new(AppId::steam(42), "Test Game");
         db.upsert_app(&app).unwrap();
-        assert_eq!(db.get_app(&app.app_id).unwrap().unwrap().display_name, "Test Game");
+        assert_eq!(
+            db.get_app(&app.app_id).unwrap().unwrap().display_name,
+            "Test Game"
+        );
         let session = AppSession::new(app.app_id.clone(), 1001, SessionSource::Steam);
         db.insert_session(&session).unwrap();
         assert!(db.session_for_pid(1001).unwrap().is_some());

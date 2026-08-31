@@ -13,6 +13,8 @@ use serde_json::json;
 
 use crate::StateAgent;
 
+const AGENT_API_VERSION: u64 = 2;
+
 pub struct AgentRpc(pub Arc<StateAgent>);
 
 #[async_trait]
@@ -22,14 +24,25 @@ impl RpcHandler for AgentRpc {
         match request.method.as_str() {
             "GetHealth" => {
                 let unfinished = agent.db.unfinished_operations()?.len();
-                Ok(serde_json::to_value(HealthStatus {
-                    status: "ok".into(),
+                let observer = agent.observer.status(agent.hub.queue.dropped());
+                let mut health = serde_json::to_value(HealthStatus {
+                    status: if observer.state == crate::observer::ObserverCapabilityState::Active {
+                        "ok".into()
+                    } else {
+                        "degraded".into()
+                    },
                     image_id: agent.config.image_id.clone(),
                     instance_id: agent.config.instance_id.to_string(),
                     socket: agent.config.paths.rpc_socket.display().to_string(),
                     metrics: agent.metrics.snapshot(),
                     unfinished_operations: unfinished,
-                })?)
+                })?;
+                let fields = health
+                    .as_object_mut()
+                    .expect("HealthStatus serializes as an object");
+                fields.insert("agent_api_version".into(), AGENT_API_VERSION.into());
+                fields.insert("observer".into(), serde_json::to_value(observer)?);
+                Ok(health)
             }
             "ListApps" => {
                 let _ = agent.discover();
@@ -151,7 +164,8 @@ impl RpcHandler for AgentRpc {
                         .and_then(|v| v.as_str())
                         .unwrap_or("personal_state"),
                 );
-                let seal = crate::seal::run_seal_with_session(agent, &session, &master, mode).await?;
+                let seal =
+                    crate::seal::run_seal_with_session(agent, &session, &master, mode).await?;
                 Ok(serde_json::to_value(seal)?)
             }
             "StartCheckpoint" => {
@@ -196,7 +210,8 @@ impl RpcHandler for AgentRpc {
                     .get("operation_id")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| StateError::Invalid("operation_id required".into()))?;
-                let uuid = uuid::Uuid::parse_str(id).map_err(|e| StateError::Invalid(e.to_string()))?;
+                let uuid =
+                    uuid::Uuid::parse_str(id).map_err(|e| StateError::Invalid(e.to_string()))?;
                 let op = agent
                     .db
                     .get_operation(uuid)?
@@ -214,7 +229,8 @@ impl RpcHandler for AgentRpc {
                 let config = write_ephemeral_session(&agent.config.paths.run_root, &session)?;
                 let storage = RcloneStorage::from_session(&session, &config);
                 let catalog = load_catalog(&storage, &master).await;
-                let _ = shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
+                let _ =
+                    shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
                 Ok(serde_json::to_value(catalog?)?)
             }
             "GetStorageHealth" => {
@@ -253,7 +269,9 @@ impl RpcHandler for AgentRpc {
                     .get("app_id")
                     .and_then(|v| v.as_str())
                     .map(|s| AppId(s.into()));
-                agent.db.set_path_policy(&path, app_id.as_ref(), "exclude")?;
+                agent
+                    .db
+                    .set_path_policy(&path, app_id.as_ref(), "exclude")?;
                 Ok(json!({"excluded": path}))
             }
             other => Err(StateError::Invalid(format!("unknown method {other}"))),
@@ -303,7 +321,9 @@ fn master_from_params(params: &serde_json::Value, agent: &StateAgent) -> Result<
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
     let hex = hex.trim();
     if hex.len() != 64 {
-        return Err(StateError::Crypto("master_key_hex must be 32 bytes hex".into()));
+        return Err(StateError::Crypto(
+            "master_key_hex must be 32 bytes hex".into(),
+        ));
     }
     (0..32)
         .map(|i| {

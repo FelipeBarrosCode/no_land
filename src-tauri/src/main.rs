@@ -544,11 +544,8 @@ fn main() {
             reboot_instance_services,
             pause_instance,
             destroy_instance,
-            generate_bundle_index,
-            get_instance_restore_bundles,
-            dry_run_restore,
-            restore_bundle,
-            get_restore_job,
+
+
             get_instance_mic_config,
             update_instance_mic_settings,
             enable_instance_mic,

@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use noland_cas::{blake3_hex, FileChunks};
-use noland_crypto::{encrypt, pack_key, decrypt, EncryptedBlob, MasterKey, NONCE_LEN};
+use noland_crypto::{decrypt, encrypt, pack_key, EncryptedBlob, MasterKey, NONCE_LEN};
 use noland_state_core::constants::{PACK_MAX, PACK_TARGET};
 use noland_state_core::{Result, StateError};
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,8 @@ pub fn pack_chunks(
         if known(&hash) {
             continue;
         }
-        if builder.current_size + payload.len() as u64 > builder.max && !builder.current.is_empty() {
+        if builder.current_size + payload.len() as u64 > builder.max && !builder.current.is_empty()
+        {
             if let Some(pack) = builder.flush(dest_dir, master)? {
                 out.push(pack);
             }
@@ -132,7 +133,10 @@ pub fn pack_chunks(
             }
         }
         builder.current_size += payload.len() as u64;
-        builder.current.push(Pending { hash, plaintext: payload });
+        builder.current.push(Pending {
+            hash,
+            plaintext: payload,
+        });
     }
     if let Some(pack) = builder.flush(dest_dir, master)? {
         out.push(pack);

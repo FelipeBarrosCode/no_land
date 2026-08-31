@@ -9,9 +9,7 @@ pub use commit::{
     read_committed_manifest, read_pack_index, update_catalog_with_bundle, CatalogStore,
 };
 pub use local::LocalStorage;
-pub use rclone::{
-    shred_ephemeral_session, write_ephemeral_session, RcloneStorage,
-};
+pub use rclone::{shred_ephemeral_session, write_ephemeral_session, RcloneStorage};
 
 use std::path::{Path, PathBuf};
 
@@ -32,7 +30,11 @@ impl RemoteKey {
         if self.0.is_empty() {
             Self(child.into())
         } else {
-            Self(format!("{}/{}", self.0.trim_end_matches('/'), child.trim_start_matches('/')))
+            Self(format!(
+                "{}/{}",
+                self.0.trim_end_matches('/'),
+                child.trim_start_matches('/')
+            ))
         }
     }
 

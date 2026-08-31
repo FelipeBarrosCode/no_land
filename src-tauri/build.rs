@@ -817,10 +817,6 @@ fn prepare_gstreamer_bundle(target: &str) -> io::Result<()> {
         .join("GStreamer.framework");
 
     if has_macos_gstreamer_framework(&bundled_framework) {
-        println!(
-            "cargo:warning=Using staged project GStreamer framework {}",
-            bundled_framework.display()
-        );
         return Ok(());
     }
 
@@ -832,10 +828,6 @@ fn prepare_gstreamer_bundle(target: &str) -> io::Result<()> {
             fs::remove_dir_all(&bundled_framework)?;
         }
         copy_dir_all(&source, &bundled_framework)?;
-        println!(
-            "cargo:warning=Staged GStreamer framework from {}",
-            source.display()
-        );
         return Ok(());
     }
 

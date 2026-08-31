@@ -33,7 +33,15 @@ impl SharedStorageProvider for LocalStorage {
 
     async fn ensure_root(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
-        for child in ["catalog", "commits", "bundles", "objects", "packs", "checkpoints", "instances"] {
+        for child in [
+            "catalog",
+            "commits",
+            "bundles",
+            "objects",
+            "packs",
+            "checkpoints",
+            "instances",
+        ] {
             std::fs::create_dir_all(self.root.join(child))?;
         }
         Ok(())

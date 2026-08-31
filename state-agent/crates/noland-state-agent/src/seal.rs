@@ -3,8 +3,8 @@ use noland_crypto::MasterKey;
 use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_state_core::*;
 use noland_storage::{
-    commit_checkpoint, commit_seal, shred_ephemeral_session, write_ephemeral_session, RcloneStorage,
-    SharedStorageProvider,
+    commit_checkpoint, commit_seal, shred_ephemeral_session, write_ephemeral_session,
+    RcloneStorage, SharedStorageProvider,
 };
 use uuid::Uuid;
 

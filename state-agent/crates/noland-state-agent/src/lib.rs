@@ -2,6 +2,7 @@
 
 pub mod backup;
 pub mod checkpoint;
+pub mod observer;
 pub mod reconcile;
 pub mod restore;
 pub mod rpc_handler;
@@ -67,8 +68,9 @@ impl AgentConfig {
 pub struct StateAgent {
     pub config: AgentConfig,
     pub db: StateDb,
-    pub hub: ObserverHub,
+    pub hub: Arc<ObserverHub>,
     pub metrics: Arc<Metrics>,
+    pub observer: observer::ObserverSupervisor,
     pub roots: Mutex<LogicalRootMap>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
 }
@@ -78,13 +80,14 @@ impl StateAgent {
         config.paths.ensure_dirs()?;
         let db = StateDb::open(&config.paths.db_path)?;
         let metrics = Metrics::shared();
-        let hub = ObserverHub::new(metrics.clone());
+        let hub = Arc::new(ObserverHub::new(metrics.clone()));
         let roots = LogicalRootMap::from_home(&config.home);
         Ok(Self {
             config,
             db,
             hub,
             metrics,
+            observer: observer::ObserverSupervisor::new(),
             roots: Mutex::new(roots),
             master_key: Mutex::new(None),
         })
@@ -125,8 +128,11 @@ impl StateAgent {
                 roots.steam_libraries.insert(id.clone(), lib.clone());
             }
             for app in &steam.apps {
-                self.db
-                    .add_known_root(&AppId::steam(app.app_id), "install", &app.install_dir.to_string_lossy())?;
+                self.db.add_known_root(
+                    &AppId::steam(app.app_id),
+                    "install",
+                    &app.install_dir.to_string_lossy(),
+                )?;
                 if let Some(prefix) = &app.prefix {
                     self.db.add_known_root(
                         &AppId::steam(app.app_id),
@@ -160,18 +166,32 @@ impl StateAgent {
         );
         let n = noland_attribution::process_hub_events(&mut engine, &self.hub)?;
         if self.hub.queue.take_loss_flag() {
-            for dirty in self.db.list_dirty_apps()? {
-                self.db.mark_dirty(&dirty.app_id, None, true)?;
+            let dropped = self.hub.queue.dropped();
+            let app_ids = self.db.open_session_app_ids()?;
+            for app_id in &app_ids {
+                self.db.mark_dirty(app_id, None, true)?;
             }
+            self.observer.signal_loss(
+                "agent_queue",
+                format!(
+                    "{dropped} total events dropped; {} active apps marked for reconciliation",
+                    app_ids.len()
+                ),
+            );
         }
         Ok(n)
+    }
+
+    pub fn start_observer(&self) {
+        self.observer.start(Arc::clone(&self.hub));
     }
 
     pub fn spawn_background(self: &Arc<Self>) {
         let agent = Arc::clone(self);
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_millis(250));
-            let mut checkpoint = tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
+            let mut checkpoint =
+                tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
             loop {
                 tokio::select! {
                     _ = tick.tick() => {

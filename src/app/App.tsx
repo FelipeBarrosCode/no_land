@@ -70,7 +70,6 @@ function RootRoute() {
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
-  const generateBundleIndex = useAppStore((state) => state.generateBundleIndex);
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
     (state) => state.setEmbeddedMoonlightPipelineEnabled,
@@ -163,14 +162,15 @@ function RootRoute() {
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
       onRefreshIndexing={async (instanceId?: number) => {
-        if (instanceId) {
-          try {
-            await forceUpdateStateAgent(instanceId);
-          } catch (e) {
-            console.error("Failed to force update state agent", e);
-          }
+        if (!instanceId) {
+          return;
         }
-        await generateBundleIndex();
+        try {
+          await forceUpdateStateAgent(instanceId);
+        } catch (e) {
+          console.error("Failed to force update state agent", e);
+        }
+        await listSyncableStorageObjects(instanceId);
       }}
     />
   );

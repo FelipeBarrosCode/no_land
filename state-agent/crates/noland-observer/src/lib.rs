@@ -4,9 +4,12 @@
 //! `ebpf` feature is later enabled). Tests and non-Linux hosts use an
 //! injectable observer so attribution can be proven without kernel probes.
 
+pub mod abi;
+mod bpf;
 mod cgroup;
 mod queue;
 
+pub use bpf::{BpfFeature, BpfObserver, BpfObserverConfig, CgroupObservationMode};
 pub use cgroup::{CgroupResolver, DedicatedCgroup};
 pub use queue::{EventQueue, QueuedEvent};
 
@@ -54,16 +57,38 @@ impl ObserverHub {
     }
 
     pub fn inject_fs(&self, event: FilesystemEvent) {
-        let mode = self.mode();
-        if mode == ObservationMode::SteadyState && event.kind.is_read() && !event.kind.is_mutation()
-        {
-            // Sample / suppress repetitive read-only events in steady state.
-            if event.sampled {
-                return;
-            }
+        if self.suppress_read(event.kind, event.sampled) {
+            return;
         }
         Metrics::inc(&self.metrics.filesystem_events_total);
         self.queue.push(QueuedEvent::Filesystem(event));
+    }
+
+    pub fn inject_ebpf_process(&self, fact: EbpfProcessFact) {
+        Metrics::inc(&self.metrics.process_events_total);
+        self.processes.apply(&fact.as_process_event());
+        self.queue.push(QueuedEvent::EbpfProcess(fact));
+    }
+
+    pub fn inject_ebpf_fs(&self, fact: EbpfFilesystemFact) {
+        if self.suppress_read(fact.kind, fact.sampled) {
+            return;
+        }
+        Metrics::inc(&self.metrics.filesystem_events_total);
+        self.queue.push(QueuedEvent::EbpfFilesystem(fact));
+    }
+
+    fn suppress_read(&self, kind: FsEventKind, sampled: bool) -> bool {
+        self.mode() == ObservationMode::SteadyState
+            && kind.is_read()
+            && !kind.is_mutation()
+            && sampled
+    }
+
+    /// Marks the observation stream incomplete. Kernel ring-buffer loss and
+    /// malformed ABI records flow through the same recovery signal as queue loss.
+    pub fn report_loss(&self, count: u64) {
+        self.queue.report_loss(count);
     }
 
     pub fn drain(&self) -> Vec<QueuedEvent> {
@@ -179,10 +204,7 @@ mod linux {
                 continue;
             };
             let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-            let ppid = stat
-                .as_deref()
-                .and_then(parse_ppid)
-                .unwrap_or(1);
+            let ppid = stat.as_deref().and_then(parse_ppid).unwrap_or(1);
             let exe = fs::read_link(format!("/proc/{pid}/exe")).ok();
             let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                 .ok()

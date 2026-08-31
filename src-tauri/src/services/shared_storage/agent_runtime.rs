@@ -7,9 +7,15 @@ use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
+const REQUIRED_AGENT_API_VERSION: u64 = 2;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-    if probe_agent(remote).await.is_ok() {
+    if probe_agent(remote).await.ok().and_then(|health| {
+        health
+            .get("agent_api_version")
+            .and_then(serde_json::Value::as_u64)
+    }) == Some(REQUIRED_AGENT_API_VERSION)
+    {
         return Ok(());
     }
 
@@ -58,7 +64,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         bootstrap.as_bytes(),
     );
     let setup = format!(
-        "sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user} && sudo chown -R {user}: /var/lib/noland /run/noland || true",
+        "sudo rm -rf /opt/noland/state-agent && sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user}",
         tar = shell_escape(&remote_tar),
         script = shell_escape(&encoded_script),
         user = shell_escape(target_user),
@@ -70,7 +76,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
             .map_err(|e| AppError::Command(format!("join failure: {e}")))??
     };
     let _ = std::fs::remove_file(&local_tar);
-    if !output.stdout.contains("STATE_AGENT_READY") && output.status_code != 0 {
+    if output.status_code != 0 || !output.stdout.contains("STATE_AGENT_READY") {
         return Err(AppError::Provisioning(format!(
             "Failed to start state-agent: {} {}",
             output.stdout.trim(),

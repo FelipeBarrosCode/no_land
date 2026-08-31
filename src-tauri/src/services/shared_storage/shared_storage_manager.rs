@@ -15,7 +15,7 @@ use crate::models::application_bundle::{
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
 use super::agent_handoff::AgentCatalogAppRecord;
-use super::bundle_indexer::BundleIndexer;
+
 use super::object_storage::StorageCredential;
 use super::provider_profiles::shared_profile_manager;
 
@@ -489,19 +489,6 @@ impl SharedStorageManager {
         let finished_at = chrono::Local::now().to_rfc3339();
         match result {
             Ok(()) => {
-                // Keep restore choices fresh in UI after each successful backup.
-                if let Err(error) =
-                    BundleIndexer::generate_and_upload(context, remote, instance_id, target_user)
-                        .await
-                {
-                    warn!(
-                        instance_id = instance_id,
-                        trigger = trigger,
-                        error = %error,
-                        "Backup succeeded but bundle indexing failed"
-                    );
-                }
-
                 context
                     .update_state(|state| {
                         state.shared_storage.last_backup_finished_at = Some(finished_at);

@@ -21,10 +21,7 @@ import type {
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
   SunshineSettingsResponse,
-  BundleIndex,
-  RestoreRequest,
-  RestoreDryRunResult,
-  RestoreJob,
+
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
   MicSidecarMetrics,
@@ -695,38 +692,7 @@ export async function destroyInstance(instanceId: number): Promise<void> {
   return invokeSafe<void>("destroy_instance", { instanceId });
 }
 
-export async function generateBundleIndex(): Promise<void> {
-  return invokeSafe<void>("generate_bundle_index");
-}
 
-export async function getInstanceRestoreBundles(
-  instanceId: number,
-): Promise<BundleIndex> {
-  return invokeSafe<BundleIndex>("get_instance_restore_bundles", {
-    instanceId,
-  });
-}
-
-export async function dryRunRestore(
-  instanceId: number,
-  payload: RestoreRequest,
-): Promise<RestoreDryRunResult> {
-  return invokeSafe<RestoreDryRunResult>("dry_run_restore", {
-    instanceId,
-    payload,
-  });
-}
-
-export async function restoreBundle(
-  instanceId: number,
-  payload: RestoreRequest,
-): Promise<RestoreJob> {
-  return invokeSafe<RestoreJob>("restore_bundle", { instanceId, payload });
-}
-
-export async function getRestoreJob(jobId: string): Promise<RestoreJob> {
-  return invokeSafe<RestoreJob>("get_restore_job", { jobId });
-}
 
 export async function getInstanceMicConfig(
   instanceId: number,

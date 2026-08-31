@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use crate::classify::{
-    BackupDecision, BackupMode, PersistenceClass, SemanticRole,
-};
+use crate::classify::{BackupDecision, BackupMode, PersistenceClass, SemanticRole};
 use crate::confidence::{association_strength, AssociationStrength};
 use crate::evidence::PathAssociation;
 use crate::paths::{

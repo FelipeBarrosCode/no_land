@@ -53,7 +53,10 @@ impl LogicalRoot {
             return Some(Self::SteamLibrary { id: rest.into() });
         }
         if let Some(rest) = token.strip_prefix("$PROTON_PREFIX:") {
-            return rest.parse().ok().map(|steam_app_id| Self::ProtonPrefix { steam_app_id });
+            return rest
+                .parse()
+                .ok()
+                .map(|steam_app_id| Self::ProtonPrefix { steam_app_id });
         }
         if let Some(rest) = token.strip_prefix("$WINE_PREFIX:") {
             return Some(Self::WinePrefix { id: rest.into() });
@@ -247,14 +250,19 @@ impl LogicalRootMap {
 
         let mut best: Option<(usize, LogicalRoot, PathBuf)> = None;
         for (len, root, base) in candidates {
-            if path_is_within(path, &base) && best.as_ref().map(|(best_len, _, _)| len > *best_len).unwrap_or(true)
+            if path_is_within(path, &base)
+                && best
+                    .as_ref()
+                    .map(|(best_len, _, _)| len > *best_len)
+                    .unwrap_or(true)
             {
                 best = Some((len, root, base));
             }
         }
         best.map(|(_, root, base)| {
             let rel = path.strip_prefix(&base).unwrap_or(path);
-            LogicalPath::new(root, rel.to_string_lossy().as_ref()).with_hint(path.display().to_string())
+            LogicalPath::new(root, rel.to_string_lossy().as_ref())
+                .with_hint(path.display().to_string())
         })
     }
 }
