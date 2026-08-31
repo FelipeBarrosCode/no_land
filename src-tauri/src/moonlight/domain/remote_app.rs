@@ -7,10 +7,3 @@ pub struct RemoteApp {
     pub name: String,
     pub hdr_supported: bool,
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AppArtwork {
-    pub app_id: u32,
-    pub content_type: String,
-    pub bytes: Vec<u8>,
-}

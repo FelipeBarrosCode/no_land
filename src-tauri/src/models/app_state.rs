@@ -383,7 +383,6 @@ pub struct PostWireGuardSetupState {
     pub wireguard_reachable_ports: Vec<u16>,
     pub sunshine_username: String,
     pub moonlight_host: String,
-    pub moonlight_installed: bool,
     pub paired: bool,
     pub setup_complete: bool,
     pub last_error: Option<SetupErrorState>,
@@ -402,7 +401,6 @@ impl Default for PostWireGuardSetupState {
             wireguard_reachable_ports: Vec::new(),
             sunshine_username: String::new(),
             moonlight_host: String::new(),
-            moonlight_installed: false,
             paired: false,
             setup_complete: false,
             last_error: None,
@@ -571,7 +569,7 @@ pub struct RentedInstanceSummary {
     pub ssh_host: String,
     pub ssh_port: u16,
     pub public_ip: String,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub embedded_moonlight_pipeline_enabled: bool,
     #[serde(default)]
     pub embedded_moonlight_session_state: Option<String>,
@@ -642,7 +640,7 @@ pub struct ProvisionedServerState {
     pub moonlight_host_address: String,
     #[serde(default)]
     pub connection_provider: ConnectionProvider,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub embedded_moonlight_pipeline_enabled: bool,
     #[serde(default)]
     pub embedded_moonlight_host_id: String,
@@ -779,14 +777,6 @@ pub struct ManualLocationInput {
     pub country: String,
     pub latitude: f64,
     pub longitude: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingContext {
-    pub host: String,
-    pub port: u16,
-    pub user: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

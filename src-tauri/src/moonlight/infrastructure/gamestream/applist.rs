@@ -3,19 +3,6 @@ use crate::moonlight::{
     infrastructure::gamestream::xml::{first_text, parse_document, parse_success_status},
 };
 
-#[derive(Debug, Clone)]
-pub struct RemoteAppAssetEndpoint {
-    pub path: String,
-}
-
-impl Default for RemoteAppAssetEndpoint {
-    fn default() -> Self {
-        Self {
-            path: "/appasset".to_string(),
-        }
-    }
-}
-
 pub fn parse_app_list_response(xml: &str) -> Result<Vec<RemoteApp>, MoonlightError> {
     let endpoint = "/applist";
     let document = parse_document(xml, endpoint)?;

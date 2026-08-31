@@ -25,7 +25,6 @@ pub fn generate_state() -> String {
 /// OAuth provider configuration for the client-side flow.
 #[derive(Debug, Clone)]
 pub struct OAuthProviderConfig {
-    pub provider: crate::models::application_bundle::StorageProvider,
     pub authorization_endpoint: &'static str,
     pub token_endpoint: &'static str,
     pub client_id: String,
@@ -71,7 +70,6 @@ pub fn get_oauth_config(
 ) -> Option<OAuthProviderConfig> {
     match provider {
         crate::models::application_bundle::StorageProvider::GoogleDrive => Some(OAuthProviderConfig {
-            provider: provider.clone(),
             authorization_endpoint: "https://accounts.google.com/o/oauth2/v2/auth",
             token_endpoint: "https://oauth2.googleapis.com/token",
             client_id: client_id.to_string(),
@@ -80,7 +78,6 @@ pub fn get_oauth_config(
             extra_auth_params: &[("access_type", "offline"), ("prompt", "consent")],
         }),
         crate::models::application_bundle::StorageProvider::MicrosoftOneDrive => Some(OAuthProviderConfig {
-            provider: provider.clone(),
             authorization_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
             token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             client_id: client_id.to_string(),
@@ -89,7 +86,6 @@ pub fn get_oauth_config(
             extra_auth_params: &[],
         }),
         crate::models::application_bundle::StorageProvider::Dropbox => Some(OAuthProviderConfig {
-            provider: provider.clone(),
             authorization_endpoint: "https://www.dropbox.com/oauth2/authorize",
             token_endpoint: "https://api.dropboxapi.com/oauth2/token",
             client_id: client_id.to_string(),
@@ -98,7 +94,6 @@ pub fn get_oauth_config(
             extra_auth_params: &[("token_access_type", "offline")],
         }),
         crate::models::application_bundle::StorageProvider::Box => Some(OAuthProviderConfig {
-            provider: provider.clone(),
             authorization_endpoint: "https://account.box.com/api/oauth2/authorize",
             token_endpoint: "https://api.box.com/oauth2/token",
             client_id: client_id.to_string(),
@@ -108,16 +103,6 @@ pub fn get_oauth_config(
         }),
         _ => None,
     }
-}
-
-/// Authorization session state kept in memory during the OAuth flow.
-#[derive(Debug, Clone)]
-pub struct OAuthSession {
-    pub provider: crate::models::application_bundle::StorageProvider,
-    pub state: String,
-    pub code_verifier: String,
-    pub redirect_uri: String,
-    pub display_name: String,
 }
 
 /// Result of a completed OAuth authorization code exchange.

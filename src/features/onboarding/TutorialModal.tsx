@@ -40,7 +40,7 @@ export function TutorialModal({
                 {step.eyebrow}
               </p>
               <AIPromptHelper
-                topic={`Help Guide: ${step.title}`}
+                topic={`Noland tutorial: ${step.title}`}
                 promptText={APP_PROMPTS[`helpStep${stepIndex + 1}` as keyof typeof APP_PROMPTS] || ""}
                 variant="icon"
               />
@@ -92,7 +92,9 @@ export function TutorialModal({
             <Button variant="ghost" onClick={onBack} disabled={stepIndex === 0}>
               Back
             </Button>
-            <Button onClick={onNext}>{isLastStep ? "Start Setup" : "Next"}</Button>
+            <Button onClick={onNext}>
+              {isLastStep ? (closable ? "Done" : "Start Setup") : "Next"}
+            </Button>
           </div>
         </div>
       </ModalBody>

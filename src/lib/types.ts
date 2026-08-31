@@ -564,12 +564,6 @@ export interface ReachabilityResult {
   error?: string;
 }
 
-export interface MoonlightDetectionResult {
-  installed: boolean;
-  launchKind: "native_path" | "path_lookup" | "flatpak" | "snap" | "unknown";
-  executablePath?: string;
-  error?: string;
-}
 
 export interface MoonlightPairingSessionResponse {
   sessionId: string;

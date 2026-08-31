@@ -383,18 +383,6 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     })
 }
 
-// ─── Request types ────────────────────────────────────────
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SaveProviderCredentialRequest {
-    pub provider: String,
-    pub credentials: serde_json::Value,
-    pub bucket: Option<String>,
-    pub prefix: Option<String>,
-    pub display_name: String,
-}
-
 // ─── OAuth flow state ────────────────────────────────────
 
 use tokio::sync::RwLock;
@@ -412,7 +400,7 @@ struct OAuthPendingSession {
     pub display_name: String,
     pub code_verifier: String,
     pub state: String,
-    pub redirect_port: u16,
+
     pub oauth_fields: HashMap<String, String>,
     pub status: OAuthSessionStatus,
 }
@@ -484,7 +472,7 @@ pub async fn begin_oauth_authorization(
                 display_name: display_name.clone(),
                 code_verifier,
                 state,
-                redirect_port: port,
+
                 oauth_fields: {
                     let mut fields = provider_fields_json
                         .as_deref()

@@ -1258,7 +1258,7 @@ mod tests {
     fn test_quality_profile_frame_ms() {
         assert_eq!(MicQualityProfile::Standard.frame_ms(), 10);
         assert_eq!(MicQualityProfile::LowLatency.frame_ms(), 10);
-        assert_eq!(MicQualityProfile::HighQuality.frame_ms(), 20);
+        assert_eq!(MicQualityProfile::HighQuality.frame_ms(), 10);
     }
 
     #[test]

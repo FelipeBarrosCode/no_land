@@ -1,5 +1,5 @@
 pub mod file_store;
-pub mod keyring_store;
+
 pub mod secret_store;
 
 pub use file_store::FileSecretStore;

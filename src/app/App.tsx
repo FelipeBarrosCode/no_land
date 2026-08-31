@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Card } from "../components/ui/Card";
@@ -9,6 +10,7 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
+import { forceUpdateStateAgent } from "../lib/backend";
 
 function RootRoute() {
   const appState = useAppStore((state) => state.appState);
@@ -163,7 +165,7 @@ function RootRoute() {
       onRefreshIndexing={async (instanceId?: number) => {
         if (instanceId) {
           try {
-            await import("../lib/backend").then(m => m.forceUpdateStateAgent(instanceId));
+            await forceUpdateStateAgent(instanceId);
           } catch (e) {
             console.error("Failed to force update state agent", e);
           }
@@ -217,6 +219,10 @@ function ProvisioningRoute() {
     return null;
   }
 
+  if (!appState.onboardingCompleted) {
+    return <Navigate to="/" replace />;
+  }
+
   const provisioningInstanceId =
     appState.postWireguardSetup.currentInstanceId ?? appState.instance.instanceId;
 
@@ -238,13 +244,13 @@ function ProvisioningRoute() {
         }
         return prepareEmbeddedMoonlightPairing(provisioningInstanceId);
       }}
-      onCompleteMoonlightPairingHandoff={(_pin) => {
-        if (!provisioningInstanceId || !activeMoonlightPairing?.sessionId) {
+      onCompleteMoonlightPairingHandoff={(sessionId) => {
+        if (!provisioningInstanceId) {
           return Promise.resolve(null);
         }
         return completeEmbeddedMoonlightPairing(
           provisioningInstanceId,
-          activeMoonlightPairing.sessionId,
+          sessionId,
         );
       }}
       onRetrySetupStage={retrySetupStage}
@@ -342,8 +348,7 @@ export function App() {
         return;
       }
       try {
-        const api = await import("@tauri-apps/api/window");
-        const currentWindow = api.getCurrentWindow();
+        const currentWindow = getCurrentWindow();
         if (!cancelled) {
           setWindowLabel(currentWindow.label);
           setWindowLabelResolved(true);
@@ -410,7 +415,7 @@ export function App() {
           <Route
             path="/settings"
             element={
-              appState ? (
+              appState?.onboardingCompleted ? (
                 <SettingsScreen
                   appState={appState}
                   busy={busy}
@@ -434,7 +439,9 @@ export function App() {
                   onSaveSshCredentials={saveSshCredentials}
                   onRegenerateEdid={regenerateEdid}
                 />
-              ) : null
+              ) : (
+                <Navigate to="/" replace />
+              )
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />

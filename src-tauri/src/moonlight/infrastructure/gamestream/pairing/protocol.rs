@@ -31,10 +31,6 @@ pub struct PairHostResult {
     pub server_certificate_sha256: String,
 }
 
-pub async fn pair_host(request: PairHostRequest) -> Result<PairHostResult, MoonlightError> {
-    pair_host_with_stage1_authorization(request, || async { Ok(()) }).await
-}
-
 pub async fn pair_host_with_stage1_authorization<F, Fut>(
     request: PairHostRequest,
     authorize_after_stage1_pending: F,

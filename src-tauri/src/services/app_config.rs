@@ -16,9 +16,7 @@ pub struct AppConfig {
     pub audio_profile: String,
     pub audio_force_sink_override: bool,
     pub audio_sink_override: Option<String>,
-    pub moonlight_download_url_windows: String,
-    pub moonlight_download_url_macos: String,
-    pub moonlight_download_url_linux: String,
+
     pub igdb: IgdbConfig,
 
     pub sunshine: SunshineDefaults,
@@ -53,7 +51,7 @@ pub struct WireGuardDefaults {
     pub server_interface_name: String,
     pub server_tunnel_ip: String,
     pub client_tunnel_ip: String,
-    pub listen_port: u16,
+
     pub client_listen_port: u16,
     pub tunnel_mtu: u16,
     pub persistent_keepalive_secs: u16,
@@ -113,12 +111,7 @@ impl Default for AppConfig {
                         Some(trimmed)
                     }
                 }),
-            moonlight_download_url_windows:
-                "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
-            moonlight_download_url_macos:
-                "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
-            moonlight_download_url_linux:
-                "https://github.com/moonlight-stream/moonlight-qt/releases".to_string(),
+
             igdb: IgdbConfig {
                 twitch_client_id: non_empty_env("NOLAND_TWITCH_CLIENT_ID")
                     .or_else(|| non_empty_env("TWITCH_CLIENT_ID")),
@@ -148,7 +141,7 @@ impl Default for AppConfig {
                 server_interface_name: "wg0".to_string(),
                 server_tunnel_ip: "10.77.0.1/24".to_string(),
                 client_tunnel_ip: "10.77.0.2/32".to_string(),
-                listen_port: 51820,
+
                 client_listen_port: env::var("NOLAND_WIREGUARD_CLIENT_LISTEN_PORT")
                     .ok()
                     .and_then(|value| value.parse::<u16>().ok())

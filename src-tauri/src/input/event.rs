@@ -15,10 +15,6 @@ pub enum ButtonState {
 
 #[derive(Debug, Clone, Copy)]
 pub enum InputEvent {
-    RelativeMouseMove {
-        dx: i32,
-        dy: i32,
-    },
     AbsoluteMouseMove {
         x: i32,
         y: i32,
@@ -41,7 +37,6 @@ pub enum InputEvent {
         virtual_key: u16,
         state: ButtonState,
         modifiers: u8,
-        non_normalized: bool,
     },
 }
 

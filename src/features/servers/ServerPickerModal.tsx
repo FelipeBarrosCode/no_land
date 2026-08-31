@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -110,42 +110,6 @@ function formatTimeRemaining(hours: number): string {
   return days > 0 ? `${days}d ${remainingHours}h` : `${remainingHours}h`;
 }
 
-function offerSearchDocument(offer: OfferCandidate): string {
-  const labels = [
-    offer.isVerified ? "verified" : "unverified",
-    offer.isDatacenter ? "datacenter" : "community host",
-    offer.hasStaticIp ? "static ip" : "dynamic ip",
-    offer.hasAvx ? "avx" : "no avx",
-  ];
-
-  return [
-    offer.id,
-    offer.hostId,
-    offer.hostLabel,
-    offer.locationLabel,
-    offer.city,
-    offer.region,
-    offer.country,
-    offer.gpuName,
-    offer.gpuRamMb,
-    offer.gpuCount,
-    offer.cpuName,
-    offer.cpuCores,
-    offer.internetDownMbps,
-    offer.internetUpMbps,
-    offer.hourlyPrice,
-    offer.availableStorageGb,
-    offer.estimatedDistanceKm,
-    offer.reliability,
-    offer.score,
-    offer.timeRemainingHours,
-    offer.offerType,
-    ...labels,
-  ]
-    .filter((value) => value !== null && value !== undefined)
-    .join(" ")
-    .toLocaleLowerCase();
-}
 
 export function ServerPickerModal({
   open,
@@ -168,7 +132,6 @@ export function ServerPickerModal({
   const [countryCode, setCountryCode] = useState(
     serverPreferences.geolocationCountryCode || "US",
   );
-  const [fullTextQuery, setFullTextQuery] = useState("");
 
   useEffect(() => {
     setCountryCode(serverPreferences.geolocationCountryCode || "US");
@@ -185,22 +148,6 @@ export function ServerPickerModal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [open, onClose]);
 
-  const filteredOffers = useMemo(() => {
-    const terms = fullTextQuery
-      .trim()
-      .toLocaleLowerCase()
-      .split(/\s+/u)
-      .filter(Boolean);
-
-    if (terms.length === 0) {
-      return offers;
-    }
-
-    return offers.filter((offer) => {
-      const document = offerSearchDocument(offer);
-      return terms.every((term) => document.includes(term));
-    });
-  }, [fullTextQuery, offers]);
 
   if (!open) {
     return null;
@@ -216,25 +163,9 @@ export function ServerPickerModal({
     });
 
     await onUpdateServerPreferences({
-      minReliability: 0.8,
-      minHourlyPrice: 0,
-      maxHourlyPrice: 0,
-      requireVerified: false,
-      requireDatacenter: false,
-      includeOnDemand: true,
-      includeInterruptible: true,
-      includeReserved: true,
-      requireStaticIp: false,
-      requireAvx: false,
-      minGpuCount: 1,
-      minGpuRamGb: 0,
-      minCpuCores: 0,
-      minInetDownMbps: 0,
-      minInetUpMbps: 0,
       geolocationCountryCode: countryCode,
     });
 
-    setFullTextQuery("");
     await onSearchOffers(1);
   }
 
@@ -250,8 +181,7 @@ export function ServerPickerModal({
               Select Server
             </h2>
             <p className="text-[1.25rem] leading-none text-[#b4c8de]">
-              Search the market by country, then filter the returned servers by
-              any text.
+              Search the market by country.
             </p>
           </div>
           <AIPromptHelper
@@ -278,7 +208,7 @@ export function ServerPickerModal({
           </p>
         )}
 
-        <div className="mb-4 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,0.8fr)_auto_minmax(16rem,1.2fr)] md:items-end">
+        <div className="mb-4 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,0.8fr)_auto] md:items-end">
           <label>
             <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">
               Country
@@ -306,24 +236,10 @@ export function ServerPickerModal({
             Find Offers
           </Button>
 
-          <label>
-            <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">
-              Search returned offers
-            </span>
-            <input
-              className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-3 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731] placeholder:text-[#647695]"
-              type="search"
-              value={fullTextQuery}
-              onChange={(event) => setFullTextQuery(event.target.value)}
-              placeholder="State, city, GPU, CPU, host, price..."
-              aria-label="Search all returned offer fields"
-            />
-          </label>
         </div>
 
         <p className="mb-3 text-[1.05rem] text-[#9ec4df]" aria-live="polite">
-          Showing {filteredOffers.length} of {offers.length} returned offers on
-          market page {offersPage}.
+          Showing {offers.length} returned offers on market page {offersPage}.
         </p>
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -331,13 +247,8 @@ export function ServerPickerModal({
             <Card className="col-span-full text-[1.3rem] text-[#b4c8de]">
               No offers yet. Select a country and click Find Offers.
             </Card>
-          ) : filteredOffers.length === 0 ? (
-            <Card className="col-span-full text-[1.3rem] text-[#b4c8de]">
-              No returned offers match “{fullTextQuery.trim()}”. Try a broader
-              search or load another market page.
-            </Card>
           ) : (
-            filteredOffers.map((offer) => {
+            offers.map((offer) => {
               const isSelected = offer.id === selectedOfferId;
               return (
                 <Card

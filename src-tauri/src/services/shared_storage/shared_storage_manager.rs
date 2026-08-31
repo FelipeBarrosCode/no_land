@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     time::{Duration, Instant},
 };
 
@@ -22,15 +22,9 @@ use super::provider_profiles::shared_profile_manager;
 /// In-memory tracking of running backups per instance to prevent overlap.
 static RUNNING_BACKUPS: std::sync::OnceLock<RwLock<HashMap<u64, BackupJobInfo>>> =
     std::sync::OnceLock::new();
-static LISTING_READY_CACHE: std::sync::OnceLock<RwLock<HashSet<String>>> =
-    std::sync::OnceLock::new();
 
 fn get_running_backups() -> &'static RwLock<HashMap<u64, BackupJobInfo>> {
     RUNNING_BACKUPS.get_or_init(|| RwLock::new(HashMap::new()))
-}
-
-fn get_listing_ready_cache() -> &'static RwLock<HashSet<String>> {
-    LISTING_READY_CACHE.get_or_init(|| RwLock::new(HashSet::new()))
 }
 
 #[derive(Debug, Clone)]
@@ -45,13 +39,6 @@ pub(crate) struct ActiveSharedStorageProfile {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SharedStorageNamespace {
-    pub root: String,
-    pub metadata_root: String,
-    pub catalogs_root: String,
-    pub healthcheck_root: String,
-}
-
 /// Shared Storage Manager service.
 ///
 /// Handles Backblaze B2 backup configuration, manual/scheduled backup
@@ -59,14 +46,8 @@ pub(crate) struct SharedStorageNamespace {
 pub struct SharedStorageManager;
 
 impl SharedStorageManager {
-    const SELECTED_ONLY_MESSAGE: &'static str =
-        "Shared storage now only moves files you explicitly select in the interface.";
     const SCHEDULED_BACKUPS_DISABLED_MESSAGE: &'static str =
         "Scheduled shared-storage backups are disabled. Save selected files manually from the shared storage interface.";
-
-    fn profile_not_connected_message() -> String {
-        "No shared storage provider is connected. Connect a provider profile first.".to_string()
-    }
 
     pub async fn list_local_objects(
         context: &AppContext,
@@ -648,32 +629,6 @@ impl SharedStorageManager {
         Ok(())
     }
 
-    pub(crate) async fn prepare_active_profile_remote(
-        context: &AppContext,
-        remote: &RemoteExec,
-        target_user: &str,
-    ) -> AppResult<ActiveSharedStorageProfile> {
-        let active_profile = Self::resolve_active_profile(context).await?;
-        Self::ensure_rclone_installed(remote).await?;
-        Self::configure_rclone_remote_for_profile(remote, target_user, &active_profile).await?;
-        Ok(active_profile)
-    }
-
-    pub(crate) fn namespace_for_profile(
-        active_profile: &ActiveSharedStorageProfile,
-    ) -> SharedStorageNamespace {
-        let root = Self::build_profile_storage_source(active_profile);
-        let metadata_root = format!("{}/metadata", root);
-        let catalogs_root = format!("{}/catalogs", root);
-        let healthcheck_root = format!("{}/.noland-healthcheck", root);
-        SharedStorageNamespace {
-            root,
-            metadata_root,
-            catalogs_root,
-            healthcheck_root,
-        }
-    }
-
     pub(crate) async fn resolve_active_profile(
         context: &AppContext,
     ) -> AppResult<ActiveSharedStorageProfile> {
@@ -942,21 +897,6 @@ impl SharedStorageManager {
         .unwrap_or_else(|_| format!("{}:", active_profile.remote_name))
     }
 
-    pub fn mint_ephemeral_rclone_session(
-        active_profile: &ActiveSharedStorageProfile,
-        operation_id: &str,
-    ) -> AppResult<noland_rclone_adapter::EphemeralRcloneSession> {
-        super::rclone_adapter::mint_ephemeral_session(
-            &active_profile.profile.provider,
-            &active_profile.credentials,
-            &active_profile.provider_fields,
-            active_profile.profile.bucket.as_deref(),
-            active_profile.profile.prefix.as_deref(),
-            &active_profile.remote_name,
-            operation_id,
-        )
-    }
-
     /// Ensure rclone is installed on the VM and accessible through sudo's PATH.
     pub(crate) async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
         let check_cmd = if remote.is_root() {
@@ -1071,109 +1011,8 @@ impl SharedStorageManager {
 
     /// Configure the rclone remote for Backblaze B2.
     /// Writes config directly to file to avoid exposing secrets in CLI args / process lists.
-    async fn configure_rclone_remote(
-        remote: &RemoteExec,
-        target_user: &str,
-        settings: &crate::models::app_state::SharedStorageSettings,
-    ) -> AppResult<()> {
-        let rclone_conf_dir = format!("/home/{}/.config/rclone", target_user);
-        let rclone_conf_path = format!("{}/rclone.conf", rclone_conf_dir);
-
-        // Ensure config directory exists
-        let mkdir_cmd = format!(
-            "sudo -u {user} mkdir -p {dir}",
-            user = target_user,
-            dir = shell_escape(&rclone_conf_dir),
-        );
-
-        let _ = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&mkdir_cmd, Duration::from_secs(15)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        // Build rclone config file content directly (no secrets in process list)
-        let config_content = format!(
-            "[{name}]\ntype = b2\naccount = {account}\nkey = {key}\n\n[{crypt_name}]\ntype = crypt\nremote = {name}:{bucket}\nfilename_encryption = off\ndirectory_name_encryption = false\npassword = {crypt_pass}\n",
-            name = settings.remote_name,
-            account = settings.backblaze_key_id,
-            key = settings.backblaze_application_key,
-            crypt_name = crypt_remote_name(&settings.remote_name),
-            bucket = settings.bucket_name,
-            crypt_pass = settings.crypt_password.as_deref().unwrap_or(""),
-        );
-
-        let write_cmd = format!(
-            "sudo -u {user} bash -lc 'cat > {path} <<\"RCLONE_EOF\"\n{content}\nRCLONE_EOF\nchmod 600 {path}'",
-            user = target_user,
-            path = shell_escape(&rclone_conf_path),
-            content = config_content,
-        );
-
-        let output = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&write_cmd, Duration::from_secs(30)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-        };
-
-        if output.status_code != 0 {
-            let redacted = redact_secrets(&output.stdout, settings);
-            return Err(AppError::Provisioning(format!(
-                "Failed to write rclone config: {}",
-                redacted.trim()
-            )));
-        }
-
-        info!(
-            "rclone remote '{}' configured (secrets written directly to config file)",
-            settings.remote_name
-        );
-        Ok(())
-    }
-
     /// Determine the effective remote name for backups.
     /// If crypt password is set, uses the crypt overlay; otherwise uses plain B2.
-    fn effective_remote_name(settings: &crate::models::app_state::SharedStorageSettings) -> String {
-        if settings
-            .crypt_password
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false)
-        {
-            crypt_remote_name(&settings.remote_name)
-        } else {
-            settings.remote_name.clone()
-        }
-    }
-
-    fn build_storage_source(
-        settings: &crate::models::app_state::SharedStorageSettings,
-        force_plain: bool,
-    ) -> String {
-        let effective_remote = if force_plain {
-            settings.remote_name.clone()
-        } else {
-            Self::effective_remote_name(settings)
-        };
-
-        if !force_plain
-            && settings
-                .crypt_password
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false)
-        {
-            format!("{}:{}", effective_remote, settings.destination_prefix)
-        } else {
-            format!(
-                "{}:{}/{}",
-                effective_remote, settings.bucket_name, settings.destination_prefix
-            )
-        }
-    }
-
     /// Set up the hourly backup schedule via cron.
     pub async fn setup_scheduled_backup(
         context: &AppContext,
@@ -1200,20 +1039,6 @@ impl SharedStorageManager {
     /// Non-blocking by design from orchestration's perspective: callers can log
     /// and continue if this returns an error. This method itself is best-effort
     /// and skips silently when storage is not configured or no remote data exists.
-    pub async fn auto_restore_instance(
-        context: &AppContext,
-        remote: &RemoteExec,
-        instance_id: u64,
-        target_user: &str,
-    ) -> AppResult<()> {
-        let _ = (context, remote, target_user);
-        info!(
-            instance_id = instance_id,
-            "Skipping shared-storage auto-restore because only explicit user-selected transfers are allowed"
-        );
-        Ok(())
-    }
-
     /// Sync current VM state to B2 in destructive mode for teardown.
     ///
     /// This is used before destroy so files deleted on VM are deleted in B2.
@@ -1458,66 +1283,6 @@ fn shell_escape(input: &str) -> String {
     input.replace('\'', "'\"'\"'")
 }
 
-fn split_parent_and_name(path: &str) -> (String, String) {
-    let trimmed = path.trim_matches('/');
-    if trimmed.is_empty() {
-        return ("/".to_string(), "/".to_string());
-    }
-
-    if let Some((parent, name)) = trimmed.rsplit_once('/') {
-        (format!("/{parent}"), name.to_string())
-    } else {
-        ("/".to_string(), trimmed.to_string())
-    }
-}
-
-fn parent_dir(path: &str) -> String {
-    let trimmed = path.trim_matches('/');
-    if let Some((parent, _)) = trimmed.rsplit_once('/') {
-        if parent.is_empty() {
-            "/".to_string()
-        } else {
-            format!("/{parent}")
-        }
-    } else {
-        "/".to_string()
-    }
-}
-
-fn normalize_selection_path(path: &str) -> AppResult<String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::InvalidInput(
-            "Selected sync path cannot be empty.".to_string(),
-        ));
-    }
-
-    if trimmed.contains("..") {
-        return Err(AppError::InvalidInput(
-            "Selected sync path cannot contain '..'.".to_string(),
-        ));
-    }
-
-    let normalized = format!("/{}", trimmed.trim_start_matches('/').trim_end_matches('/'));
-    Ok(normalized)
-}
-
-fn listing_cache_key(
-    remote: &RemoteExec,
-    target_user: &str,
-    active_profile: &ActiveSharedStorageProfile,
-) -> String {
-    format!(
-        "{}:{}:{}:{}:{}:{}",
-        remote.ssh_host,
-        remote.ssh_port,
-        target_user,
-        active_profile.remote_name,
-        active_profile.profile.id,
-        active_profile.profile.provider.label(),
-    )
-}
-
 fn infer_provider_from_label(label: &str) -> Option<StorageProvider> {
     let normalized = label.trim().to_ascii_lowercase();
     match normalized.as_str() {
@@ -1562,41 +1327,6 @@ fn extract_actionable_rclone_error(output: &str) -> Option<String> {
 }
 
 /// Generate the crypt remote overlay name from the base remote name.
-fn crypt_remote_name(base: &str) -> String {
-    format!("{}-crypt", base)
-}
-
-fn redact_secrets(
-    input: &str,
-    settings: &crate::models::app_state::SharedStorageSettings,
-) -> String {
-    let mut result = input.to_string();
-    if !settings.backblaze_application_key.is_empty() {
-        result = result.replace(&settings.backblaze_application_key, "***REDACTED***");
-    }
-    if !settings.backblaze_key_id.is_empty() {
-        result = result.replace(&settings.backblaze_key_id, "***REDACTED***");
-    }
-    if let Some(ref pwd) = settings.crypt_password {
-        if !pwd.is_empty() {
-            result = result.replace(pwd, "***REDACTED***");
-        }
-    }
-    result
-}
-
-fn oauth_token_json(access_token: &str, refresh_token: Option<&str>, expires_at: i64) -> String {
-    let expiry = chrono::DateTime::<chrono::Utc>::from_timestamp(expires_at, 0)
-        .unwrap_or_else(chrono::Utc::now)
-        .to_rfc3339();
-    serde_json::json!({
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "expiry": expiry,
-    })
-    .to_string()
-}
-
 fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfile) -> String {
     let mut result = input.to_string();
 

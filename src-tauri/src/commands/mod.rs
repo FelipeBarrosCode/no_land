@@ -75,10 +75,9 @@ use crate::{
         orchestration::OrchestrationService,
         os_detection::OsDetection,
         post_wireguard_setup::{
-            authorize_sunshine_pin, detect_moonlight_client, get_setup_status, retry_setup_stage,
-            setup_moonlight_sunshine, setup_wireguard_app_handoff,
-            submit_moonlight_pin_to_sunshine, verify_sunshine_api, verify_wireguard_connection,
-            MoonlightDetectionResult, ReachabilityResult, SunshineVerificationResult,
+            authorize_sunshine_pin, get_setup_status, retry_setup_stage, setup_moonlight_sunshine,
+            setup_wireguard_app_handoff, verify_sunshine_api, verify_wireguard_connection,
+            ReachabilityResult, SunshineVerificationResult,
         },
         reboot_helper::RebootHelperService,
         remote_display::{ApplyDisplayModeResult, InstanceDisplayStatus, RemoteDisplayService},
@@ -275,17 +274,6 @@ pub struct EmbeddedMoonlightInstanceStatus {
     pub renderer_dropped_frame_count: u64,
     pub audio_sample_count: u64,
     pub last_runtime_event: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EmbeddedMoonlightLaunchResponse {
-    pub operation: String,
-    pub state: String,
-    pub has_session_url: bool,
-    pub host_id: String,
-    pub app_id: u32,
-    pub app_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -596,29 +584,6 @@ fn resolve_embedded_moonlight_host_ports(state: &PersistedAppState, instance_id:
         http: http_port,
         https: https_port,
     }
-}
-
-fn provisioning_indicates_instance_paired(state: &PersistedAppState, instance_id: u64) -> bool {
-    let post_wireguard_matches_instance = state
-        .post_wireguard_setup
-        .current_instance_id
-        .map(|current| current == instance_id)
-        .unwrap_or(false);
-
-    let provisioned_server = state
-        .provisioned_servers
-        .iter()
-        .find(|server| server.instance_id == instance_id);
-
-    let provisioning_paired = post_wireguard_matches_instance
-        && state.post_wireguard_setup.paired
-        && state.post_wireguard_setup.setup_complete;
-
-    let server_marked_paired = provisioned_server
-        .map(|server| server.embedded_moonlight_paired || server.steps.pairing_completed)
-        .unwrap_or(false);
-
-    provisioning_paired || server_marked_paired
 }
 
 fn is_missing_embedded_identity_private_key_error(
@@ -1971,7 +1936,7 @@ pub(super) async fn start_launch_pc_for_instance(
         .map_err(moonlight_frontend_error)?;
         let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
             .map_err(moonlight_frontend_error)?;
-        let mut host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+        let host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
             .await
             .map_err(moonlight_frontend_error)?;
 
@@ -1986,9 +1951,17 @@ pub(super) async fn start_launch_pc_for_instance(
             auto_pair_embedded_host(context, moonlight, &host_id)
                 .await
                 .map_err(moonlight_frontend_error)?;
-            host_status = hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
+            hosts::refresh_host(moonlight.repository.as_ref(), &client, &host_id)
                 .await
                 .map_err(moonlight_frontend_error)?;
+            if !embedded_host_is_paired(moonlight.repository.as_ref(), &host_id) {
+                return Err(moonlight_frontend_error(
+                    crate::moonlight::domain::MoonlightError::Validation(
+                        "embedded Moonlight repository did not persist automatic pairing"
+                            .to_string(),
+                    ),
+                ));
+            }
         }
 
         let host_address = resolve_embedded_moonlight_host_address(&state_snapshot, instance_id)
@@ -2037,25 +2010,6 @@ pub(super) async fn start_launch_pc_for_instance(
             .await?;
         return Ok("embedded".to_string());
     }
-}
-
-#[tauri::command]
-pub async fn submit_pairing_pin(
-    app: AppHandle,
-    context: State<'_, AppContext>,
-    pin: String,
-) -> Result<PersistedAppState, FrontendError> {
-    OrchestrationService::submit_pairing_pin(&app, context.inner(), pin).await?;
-    Ok(context.state.read().await.clone())
-}
-
-#[tauri::command]
-pub async fn skip_pairing_and_continue(
-    app: AppHandle,
-    context: State<'_, AppContext>,
-) -> Result<PersistedAppState, FrontendError> {
-    OrchestrationService::skip_pairing_and_continue(&app, context.inner()).await?;
-    Ok(context.state.read().await.clone())
 }
 
 fn active_instance_wireguard_config_path(state: &PersistedAppState) -> Option<String> {
@@ -2238,31 +2192,11 @@ pub async fn verify_sunshine(
 }
 
 #[tauri::command]
-pub async fn detect_moonlight(
-    context: State<'_, AppContext>,
-) -> Result<MoonlightDetectionResult, FrontendError> {
-    detect_moonlight_client(context.inner())
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
 pub async fn setup_moonlight_sunshine_command(
     app: AppHandle,
     context: State<'_, AppContext>,
 ) -> Result<PostWireGuardSetupState, FrontendError> {
     setup_moonlight_sunshine(&app, context.inner())
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn submit_moonlight_pin_to_sunshine_command(
-    app: AppHandle,
-    context: State<'_, AppContext>,
-    pin: String,
-) -> Result<PostWireGuardSetupState, FrontendError> {
-    submit_moonlight_pin_to_sunshine(&app, context.inner(), pin)
         .await
         .map_err(Into::into)
 }
@@ -2299,6 +2233,7 @@ pub async fn stop_local_sleep_prevention() -> Result<String, FrontendError> {
 #[tauri::command]
 pub async fn get_rented_instances(
     context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
 ) -> Result<Vec<RentedInstanceSummary>, FrontendError> {
     let state = context.state.read().await.clone();
     if state.credentials.vast_api_key.trim().is_empty() {
@@ -2345,10 +2280,16 @@ pub async fn get_rented_instances(
                 .provisioned_servers
                 .iter()
                 .find(|record| record.instance_id == instance.id);
-            let embedded_enabled = server
-                .map(|record| record.embedded_moonlight_pipeline_enabled)
-                .unwrap_or(false);
-            let paired = server.map(|record| record.embedded_moonlight_paired);
+            let embedded_enabled = true;
+            let host_id = server
+                .map(|record| record.embedded_moonlight_host_id.as_str())
+                .filter(|host_id| !host_id.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| embedded_moonlight_host_id(instance.id));
+            let paired = Some(embedded_host_is_paired(
+                moonlight.repository.as_ref(),
+                &host_id,
+            ));
             RentedInstanceSummary {
                 instance_id: instance.id,
                 label: if instance.label.is_empty() {
@@ -2566,6 +2507,7 @@ pub async fn set_instance_moonlight_pipeline_enabled(
     enabled: bool,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
+    let _ = enabled;
     let next_state = context
         .update_state(|state| {
             if let Some(server) = state
@@ -2573,20 +2515,14 @@ pub async fn set_instance_moonlight_pipeline_enabled(
                 .iter_mut()
                 .find(|record| record.instance_id == instance_id)
             {
-                server.embedded_moonlight_pipeline_enabled = enabled;
-                if enabled && server.embedded_moonlight_host_id.trim().is_empty() {
+                server.embedded_moonlight_pipeline_enabled = true;
+                if server.embedded_moonlight_host_id.trim().is_empty() {
                     server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
-                }
-                if !enabled {
-                    server.embedded_moonlight_paired = false;
                 }
             } else {
-                let mut server = crate::models::app_state::ProvisionedServerState::new(instance_id);
-                server.embedded_moonlight_pipeline_enabled = enabled;
-                if enabled {
-                    server.embedded_moonlight_host_id = embedded_moonlight_host_id(instance_id);
-                }
-                state.provisioned_servers.push(server);
+                state.provisioned_servers.push(
+                    crate::models::app_state::ProvisionedServerState::new(instance_id),
+                );
             }
             state.last_error = None;
         })
@@ -2612,10 +2548,8 @@ pub async fn moonlight_get_instance_pipeline_status(
         server.embedded_moonlight_host_id.clone()
     };
 
-    if server.embedded_moonlight_pipeline_enabled {
-        let _ = ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id)
-            .await;
-    }
+    let _ =
+        ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id).await;
 
     let paired = embedded_host_is_paired(moonlight.repository.as_ref(), &host_id);
     let runtime_stats = moonlight.runtime.latest_statistics();
@@ -2636,7 +2570,7 @@ pub async fn moonlight_get_instance_pipeline_status(
         });
     Ok(EmbeddedMoonlightInstanceStatus {
         instance_id,
-        enabled: server.embedded_moonlight_pipeline_enabled,
+        enabled: true,
         host_id,
         paired,
         host_address: resolve_embedded_moonlight_host_address(&state, instance_id)
@@ -2788,6 +2722,13 @@ pub async fn moonlight_complete_instance_pairing(
     )
     .await
     .map_err(moonlight_frontend_error)?;
+    if !embedded_host_is_paired(moonlight.repository.as_ref(), &result.host_id) {
+        return Err(moonlight_frontend_error(
+            crate::moonlight::domain::MoonlightError::Validation(
+                "embedded Moonlight repository did not persist a paired host".to_string(),
+            ),
+        ));
+    }
     context
         .update_state(|state| {
             if let Some(server) = state

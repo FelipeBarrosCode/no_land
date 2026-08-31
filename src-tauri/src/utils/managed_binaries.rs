@@ -54,7 +54,7 @@ fn is_debug_placeholder_stub(path: &Path) -> bool {
     preview.contains("debug placeholder") && preview.contains("npm run tauri:dev")
 }
 
-fn has_valid_executable_header(path: &Path) -> bool {
+fn has_valid_executable_header(_path: &Path) -> bool {
     #[cfg(target_os = "windows")]
     {
         let uses_exe_suffix = path

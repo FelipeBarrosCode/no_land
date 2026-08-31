@@ -8,7 +8,7 @@ use tracing::{error, warn};
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        app_state::{OfferCandidate, PairingContext, PersistedAppState},
+        app_state::{OfferCandidate, PersistedAppState},
         events::ProvisioningEvent,
     },
 };
@@ -23,8 +23,7 @@ pub struct AppContext {
     pub http_client: reqwest::Client,
     pub provisioning_logs: Arc<RwLock<Vec<ProvisioningEvent>>>,
     pub offer_cache: Arc<RwLock<Vec<OfferCandidate>>>,
-    pub pairing_context: Arc<RwLock<Option<PairingContext>>>,
-    pub pairing_pin_in_memory: Arc<RwLock<Option<String>>>,
+
     pub orchestration_guard: Arc<Mutex<bool>>,
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
@@ -60,8 +59,7 @@ impl AppContext {
             http_client: reqwest::Client::new(),
             provisioning_logs: Arc::new(RwLock::new(Vec::new())),
             offer_cache: Arc::new(RwLock::new(Vec::new())),
-            pairing_context: Arc::new(RwLock::new(None)),
-            pairing_pin_in_memory: Arc::new(RwLock::new(None)),
+
             orchestration_guard: Arc::new(Mutex::new(false)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
@@ -85,10 +83,6 @@ impl AppContext {
                     .to_string(),
             )
         })
-    }
-
-    pub fn wireguard_mutation_in_progress(&self) -> bool {
-        self.wireguard_mutation_in_progress.load(Ordering::SeqCst)
     }
 
     pub async fn update_state<F>(&self, update: F) -> AppResult<PersistedAppState>

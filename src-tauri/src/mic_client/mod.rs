@@ -4,7 +4,7 @@ pub mod runtime;
 
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
@@ -191,49 +191,6 @@ fn prepare_sidecar_stderr() -> Stdio {
         .open(log_path)
         .map(Stdio::from)
         .unwrap_or_else(|_| Stdio::null())
-}
-
-#[cfg(unix)]
-fn stale_stream_pids(sidecar: &Path) -> Vec<String> {
-    let output = Command::new("pgrep")
-        .arg("-f")
-        .arg(format!("{} (stream|daemon)", sidecar.to_string_lossy()))
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|pid| !pid.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
-}
-
-#[cfg(unix)]
-fn cleanup_stale_stream_processes(sidecar: &Path) {
-    let pids = stale_stream_pids(sidecar);
-    for pid in &pids {
-        let _ = Command::new("kill").arg("-TERM").arg(pid).status();
-    }
-    if !pids.is_empty() {
-        thread::sleep(Duration::from_millis(250));
-    }
-}
-
-#[cfg(not(unix))]
-fn cleanup_stale_stream_processes(_sidecar: &Path) {}
-
-pub fn cleanup_stale_pipeline_processes() -> AppResult<()> {
-    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
-    return Ok(());
-
-    #[cfg(not(all(target_os = "windows", target_arch = "aarch64")))]
-    {
-        let sidecar = runtime::resolve_mic_sender_binary()?;
-        cleanup_stale_stream_processes(&sidecar);
-        Ok(())
-    }
 }
 
 /// Start and handshake with the local media sidecar over JSON-lines stdio IPC.

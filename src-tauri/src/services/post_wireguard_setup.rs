@@ -22,7 +22,6 @@ use tracing::{info, warn};
 
 use super::{
     app_context::AppContext,
-    orchestration,
     remote_exec::RemoteExec,
     ssh_keys::SshKeyService,
     wireguard::{setup_local_wireguard_client, verify_managed_gotatun_tunnel},
@@ -110,15 +109,6 @@ pub struct ReachabilityResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct MoonlightDetectionResult {
-    pub installed: bool,
-    pub launch_kind: String,
-    pub executable_path: Option<String>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct SunshineVerificationResult {
     pub reachable: bool,
     pub authenticated: bool,
@@ -162,7 +152,6 @@ pub async fn initialize_post_wireguard_flow(
                 wireguard_reachable_ports: Vec::new(),
                 sunshine_username: state.credentials.app_username.clone(),
                 moonlight_host: TUNNEL_HOST.to_string(),
-                moonlight_installed: false,
                 paired: false,
                 setup_complete: false,
                 last_error: None,
@@ -533,37 +522,6 @@ pub async fn verify_sunshine_api(
     Ok(result)
 }
 
-pub async fn detect_moonlight_client(context: &AppContext) -> AppResult<MoonlightDetectionResult> {
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.moonlight_installed = true;
-            if let Some(instance_id) = state
-                .post_wireguard_setup
-                .current_instance_id
-                .or(state.instance.instance_id)
-            {
-                if let Some(server) = state
-                    .provisioned_servers
-                    .iter_mut()
-                    .find(|record| record.instance_id == instance_id)
-                {
-                    server.embedded_moonlight_pipeline_enabled = true;
-                    if server.embedded_moonlight_host_id.trim().is_empty() {
-                        server.embedded_moonlight_host_id = format!("instance-{instance_id}");
-                    }
-                }
-            }
-        })
-        .await?;
-
-    Ok(MoonlightDetectionResult {
-        installed: true,
-        launch_kind: "embedded".to_string(),
-        executable_path: None,
-        error: None,
-    })
-}
-
 pub async fn setup_moonlight_sunshine(
     app: &AppHandle,
     context: &AppContext,
@@ -784,175 +742,6 @@ pub async fn setup_moonlight_sunshine(
 
         return Ok(state.post_wireguard_setup);
     }
-}
-
-pub async fn submit_moonlight_pin_to_sunshine(
-    app: &AppHandle,
-    context: &AppContext,
-    pin: String,
-) -> AppResult<PostWireGuardSetupState> {
-    let pin = pin.trim().to_string();
-    if pin.len() < 4 || !pin.chars().all(|value| value.is_ascii_digit()) {
-        return Err(AppError::InvalidInput(
-            "Enter the PIN shown in Moonlight.".to_string(),
-        ));
-    }
-
-    let (username, password) = {
-        let state = context.state.read().await;
-        (
-            state.credentials.app_username.clone(),
-            state.credentials.app_password.clone(),
-        )
-    };
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.stage = SetupStage::MoonlightPinReceived;
-            state.orchestration_state = OrchestrationState::MoonlightPinReceived;
-        })
-        .await?;
-
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::MoonlightPinReceived,
-        "Moonlight PIN received",
-        Some("Submitting the PIN to Sunshine.".to_string()),
-        false,
-    )
-    .await;
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.stage = SetupStage::SunshinePinSubmitting;
-            state.orchestration_state = OrchestrationState::SunshinePinSubmitting;
-        })
-        .await?;
-
-    let moonlight_host = {
-        context
-            .state
-            .read()
-            .await
-            .post_wireguard_setup
-            .moonlight_host
-            .clone()
-    };
-
-    if let Err(error) =
-        authorize_sunshine_pin(&moonlight_host, &username, &password, &pin, None).await
-    {
-        let error_text = error.to_string();
-        let retry_code = if error_text.contains("first-run welcome flow") {
-            "sunshine_setup_incomplete".to_string()
-        } else {
-            "sunshine_pin_rejected".to_string()
-        };
-        set_pin_retryable_failure(context, &retry_code, &error_text, None).await?;
-        emit_post_wireguard_event(
-            app,
-            context,
-            OrchestrationState::MoonlightPinReceived,
-            "Sunshine rejected the PIN submission",
-            Some(error_text.clone()),
-            true,
-        )
-        .await;
-        return Err(error);
-    }
-
-    {
-        let mut pin_memory = context.pairing_pin_in_memory.write().await;
-        *pin_memory = Some(pin.clone());
-    }
-
-    let state = context
-        .update_state(|state| {
-            state.post_wireguard_setup.stage = SetupStage::SetupComplete;
-            state.post_wireguard_setup.paired = true;
-            state.post_wireguard_setup.setup_complete = true;
-            state.orchestration_state = OrchestrationState::Ready;
-            state.has_completed_guided_setup = true;
-            state.last_error = None;
-
-            if let Some(instance_id) = state
-                .post_wireguard_setup
-                .current_instance_id
-                .or(state.instance.instance_id)
-            {
-                if let Some(server) = state
-                    .provisioned_servers
-                    .iter_mut()
-                    .find(|server| server.instance_id == instance_id)
-                {
-                    server.embedded_moonlight_host_id = format!("instance-{}", instance_id);
-                    server.embedded_moonlight_paired = true;
-                }
-            }
-        })
-        .await?;
-
-    let (instance_id, offer_id, status, ssh_host, ssh_port) = {
-        let snapshot = context.state.read().await.clone();
-        let instance_id = snapshot
-            .post_wireguard_setup
-            .current_instance_id
-            .or(snapshot.instance.instance_id)
-            .ok_or_else(|| {
-                AppError::State(
-                    "Missing instance id for post-WireGuard completion bookkeeping.".to_string(),
-                )
-            })?;
-        (
-            instance_id,
-            snapshot.instance.offer_id,
-            snapshot.instance.status,
-            snapshot.instance.ssh_host,
-            snapshot.instance.ssh_port,
-        )
-    };
-
-    orchestration::mark_server_step_completed(
-        context,
-        instance_id,
-        orchestration::ProvisionStepMarker::PairingCompleted,
-        OrchestrationState::Ready,
-        &status,
-        &ssh_host,
-        ssh_port,
-        offer_id,
-    )
-    .await?;
-
-    let (remote, _) = sunshine_ssh_remote(context).await?;
-    if let Err(error) =
-        orchestration::run_post_provision_step(app, context, &remote, instance_id, offer_id).await
-    {
-        warn!("Post-provision setup failed (non-fatal): {error}");
-    }
-
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::MoonlightSunshinePaired,
-        "Moonlight and Sunshine paired",
-        Some("Your secure streaming connection is ready.".to_string()),
-        false,
-    )
-    .await;
-
-    emit_post_wireguard_event(
-        app,
-        context,
-        OrchestrationState::Ready,
-        "Setup complete",
-        Some("Your secure streaming connection is ready.".to_string()),
-        false,
-    )
-    .await;
-
-    Ok(state.post_wireguard_setup)
 }
 
 pub async fn get_setup_status(context: &AppContext) -> PostWireGuardSetupState {
@@ -1606,32 +1395,6 @@ async fn set_setup_failure(
                 state.post_wireguard_setup.wireguard_setup_status
             };
             state.orchestration_state = orchestration_state;
-            state.last_error = Some(message.to_string());
-        })
-        .await?;
-
-    Ok(())
-}
-
-async fn set_pin_retryable_failure(
-    context: &AppContext,
-    code: &str,
-    message: &str,
-    details: Option<String>,
-) -> AppResult<()> {
-    let error = SetupErrorState {
-        code: code.to_string(),
-        message: message.to_string(),
-        stage: SetupStage::SunshinePinSubmitting,
-        retryable: true,
-        details: details.clone(),
-    };
-
-    context
-        .update_state(|state| {
-            state.post_wireguard_setup.stage = SetupStage::MoonlightPinReceived;
-            state.post_wireguard_setup.last_error = Some(error.clone());
-            state.orchestration_state = OrchestrationState::MoonlightPinReceived;
             state.last_error = Some(message.to_string());
         })
         .await?;

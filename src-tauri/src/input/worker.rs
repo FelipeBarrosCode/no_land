@@ -102,13 +102,6 @@ impl MotionAccumulator {
 pub struct InputWorkerHandle {
     pub events: Sender<OwnedInputEvent>,
     pub motion: Arc<MotionAccumulator>,
-    running: Arc<AtomicBool>,
-}
-
-impl InputWorkerHandle {
-    pub fn stop(&self) {
-        self.running.store(false, Ordering::Release);
-    }
 }
 
 pub fn start_input_worker(runtime: MoonlightRuntimeHandle) -> InputWorkerHandle {
@@ -124,11 +117,7 @@ pub fn start_input_worker(runtime: MoonlightRuntimeHandle) -> InputWorkerHandle 
         .spawn(move || run_input_worker(rx, thread_motion, thread_running, runtime))
         .expect("failed to start input worker");
 
-    InputWorkerHandle {
-        events: tx,
-        motion,
-        running,
-    }
+    InputWorkerHandle { events: tx, motion }
 }
 
 fn run_input_worker(
@@ -246,17 +235,7 @@ fn handle_ordered_event(event: OwnedInputEvent, runtime: &MoonlightRuntimeHandle
                 SEND_ERRORS.fetch_add(1, Ordering::Relaxed);
             }
         }
-        OwnedInputEvent::Immediate(InputEvent::RelativeMouseMove { dx, dy }) => {
-            RELATIVE_SEND_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
-            if tauri::async_runtime::block_on(runtime.send_relative_mouse(
-                dx.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-                dy.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
-            ))
-            .is_err()
-            {
-                SEND_ERRORS.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+
         OwnedInputEvent::ReleaseAll => {}
     }
 }

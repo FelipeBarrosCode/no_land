@@ -35,10 +35,6 @@ impl DisplayModeSpec {
         validate_display_mode(self)
     }
 
-    pub fn refresh_label(&self) -> String {
-        format_refresh_millihz(self.refresh_millihz)
-    }
-
     pub fn label(&self) -> String {
         format!(
             "{}x{}@{}",
@@ -149,6 +145,7 @@ pub const fn hz_to_millihz(refresh_hz: u32) -> u32 {
     refresh_hz.saturating_mul(1_000)
 }
 
+#[cfg(test)]
 pub fn millihz_to_hz(refresh_millihz: u32) -> f64 {
     f64::from(refresh_millihz) / 1_000.0
 }

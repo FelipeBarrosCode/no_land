@@ -1,14 +1,14 @@
-use std::{fs, time::Duration};
+use std::time::Duration;
 
 use chrono::Utc;
 
 use crate::moonlight::{
     application::bootstrap::bootstrap_client_identity,
-    domain::{AppArtwork, CachedRemoteApp, MoonlightError, RemoteApp},
+    domain::{CachedRemoteApp, MoonlightError, RemoteApp},
     infrastructure::{
         gamestream::{
             parse_app_list_response, GameStreamHttpClient, GameStreamRequest, GameStreamScheme,
-            PinnedCertificate, RemoteAppAssetEndpoint,
+            PinnedCertificate,
         },
         persistence::{JsonMoonlightStateRepository, MoonlightStateRepository},
         secrets::SecretStore,
@@ -106,76 +106,6 @@ pub async fn list_remote_apps(
     Ok(apps)
 }
 
-pub async fn get_remote_app_artwork(
-    repository: &JsonMoonlightStateRepository,
-    secret_store: &dyn SecretStore,
-    client: &impl GameStreamHttpClient,
-    app_data_dir: &std::path::Path,
-    host_id: &str,
-    app_id: u32,
-) -> Result<AppArtwork, MoonlightError> {
-    let host = repository.get_host(host_id)?;
-    let address = host
-        .addresses
-        .overlay
-        .or(host.addresses.lan)
-        .or(host.addresses.external)
-        .ok_or_else(|| {
-            MoonlightError::Validation(format!("host {host_id} has no usable address"))
-        })?;
-
-    let pairing = host
-        .pairing
-        .clone()
-        .ok_or_else(|| MoonlightError::Validation(format!("host {host_id} is not paired")))?;
-    let identity = bootstrap_client_identity(repository, secret_store)
-        .await?
-        .identity
-        .persisted();
-
-    let response = client
-        .execute(GameStreamRequest {
-            address,
-            port: host.ports.https.unwrap_or(host.ports.http),
-            scheme: GameStreamScheme::Https,
-            endpoint: RemoteAppAssetEndpoint::default().path,
-            query: vec![("appid".to_string(), app_id.to_string())],
-            identity: Some(
-                crate::moonlight::infrastructure::gamestream::ClientIdentityReference {
-                    certificate_pem: identity.certificate_pem.clone(),
-                    private_key_ref: identity.private_key_ref.clone(),
-                },
-            ),
-            pinned_certificate: Some(PinnedCertificate {
-                sha256_hex: pairing.server_certificate_sha256.clone(),
-                certificate_pem: pairing.server_certificate_pem.clone(),
-            }),
-            timeout: Duration::from_secs(10),
-        })
-        .await?;
-
-    let content_type = response
-        .content_type
-        .unwrap_or_else(|| "image/png".to_string());
-    let bytes = response.body.into_bytes();
-
-    let artwork_path = app_data_dir
-        .join("moonlight")
-        .join("artwork")
-        .join(host_id)
-        .join(format!("{app_id}.png"));
-    if let Some(parent) = artwork_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(&artwork_path, &bytes)?;
-
-    Ok(AppArtwork {
-        app_id,
-        content_type,
-        bytes,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, sync::Mutex};
@@ -214,9 +144,7 @@ mod tests {
         ) -> Result<GameStreamResponse, MoonlightError> {
             self.requests.lock().unwrap().push(request);
             Ok(GameStreamResponse {
-                status: 200,
                 body: self.body.clone(),
-                content_type: Some("application/xml".to_string()),
             })
         }
     }
