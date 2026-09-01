@@ -712,6 +712,8 @@ export interface ProfileReference {
   active?: boolean;
 }
 
+export type BackupPerformanceMode = "fast" | "balanced" | "full";
+
 export interface BackupStatusResponse {
   lastBackupStartedAt: string | null;
   lastBackupFinishedAt: string | null;
@@ -738,6 +740,22 @@ export interface SharedStorageObjectEntry {
 
 export interface SharedStorageSyncSelectionRequest {
   selectedPaths: string[];
+}
+
+export interface SharedStorageProgressEvent {
+  operationId: string;
+  instanceId: number;
+  kind: string;
+  state: string;
+  phase: string | null;
+  message: string | null;
+  completedUnits: number | null;
+  totalUnits: number | null;
+  unit: string | null;
+  fraction: number | null;
+  readyToLaunch: boolean;
+  cancelRequested: boolean;
+  cancellable: boolean;
 }
 
 export interface SunshineSetting {

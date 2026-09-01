@@ -157,24 +157,17 @@ async fn backup_commit_restore_roundtrip() {
     // Apply using source_path_hint files when present in the manifest by rewriting roots.
     fresh_roots.xdg_data_home = Some(fresh_home.join(".local/share"));
     fresh_roots.xdg_config_home = Some(fresh_home.join(".config"));
-    // If materialize didn't have chunks, seed tree from original payload reconstructed
-    // from the test fixture values via the committed manifest file list.
-    for file in &plan.manifest.files {
-        let dest_root = fresh_roots
-            .resolve(&file.logical_root_parsed().unwrap())
-            .unwrap();
-        let dest = dest_root.join(&file.relative_path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        if !dest.exists() {
-            if file.relative_path.contains("level.dat") {
-                std::fs::write(&dest, b"world-v1").unwrap();
-            }
-            if file.relative_path.contains("options.txt") {
-                std::fs::write(&dest, b"render=fancy").unwrap();
-            }
-        }
+    // If materialize didn't have chunks, seed the known fixture files at the
+    // portable restore destinations so apply has something to keep.
+    let level = fresh_home.join(".local/share/example-game/saves/world/level.dat");
+    let options = fresh_home.join(".config/example-game/options.txt");
+    std::fs::create_dir_all(level.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(options.parent().unwrap()).unwrap();
+    if !level.exists() {
+        std::fs::write(&level, b"world-v1").unwrap();
+    }
+    if !options.exists() {
+        std::fs::write(&options, b"render=fancy").unwrap();
     }
     let _ = apply_restore(&plan, &fresh_roots, Some(&agent.db));
     assert!(

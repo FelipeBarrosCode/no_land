@@ -7,6 +7,36 @@ use uuid::Uuid;
 
 use crate::{ImmutableUpload, MetadataBatch, MetadataWrite, RemoteKey, SharedStorageProvider};
 
+const COMPRESSED_DOCUMENT_MAGIC: &[u8; 4] = b"NLZ1";
+const COMPRESSION_MIN_BYTES: usize = 4 * 1024;
+
+fn encode_document(bytes: &[u8]) -> Result<Vec<u8>> {
+    if bytes.len() < COMPRESSION_MIN_BYTES {
+        return Ok(bytes.to_vec());
+    }
+    let compressed = zstd::bulk::compress(bytes, 3)
+        .map_err(|error| StateError::Storage(format!("metadata compression failed: {error}")))?;
+    if compressed
+        .len()
+        .saturating_add(COMPRESSED_DOCUMENT_MAGIC.len())
+        >= bytes.len()
+    {
+        return Ok(bytes.to_vec());
+    }
+    let mut encoded = Vec::with_capacity(COMPRESSED_DOCUMENT_MAGIC.len() + compressed.len());
+    encoded.extend_from_slice(COMPRESSED_DOCUMENT_MAGIC);
+    encoded.extend_from_slice(&compressed);
+    Ok(encoded)
+}
+
+fn decode_document(bytes: &[u8]) -> Result<Vec<u8>> {
+    let Some(compressed) = bytes.strip_prefix(COMPRESSED_DOCUMENT_MAGIC) else {
+        return Ok(bytes.to_vec());
+    };
+    zstd::stream::decode_all(compressed)
+        .map_err(|error| StateError::Integrity(format!("metadata decompression failed: {error}")))
+}
+
 pub struct CatalogStore {
     pub document: CatalogDocument,
 }
@@ -47,7 +77,7 @@ async fn fetch_catalog_commit(
     let _ = std::fs::remove_file(&tmp);
     let keys = derive_keys(master);
     let plain = unwrap_envelope(&keys.catalog, b"catalog", &bytes)?;
-    Ok(serde_json::from_slice(&plain)?)
+    Ok(serde_json::from_slice(&decode_document(&plain)?)?)
 }
 
 async fn recover_latest_catalog(
@@ -99,19 +129,81 @@ pub async fn commit_bundle_with_index(
     pack_index_json: Option<&[u8]>,
     db: Option<&noland_state_db::StateDb>,
 ) -> Result<()> {
+    commit_bundle_with_index_for_operation(
+        provider,
+        master,
+        manifest,
+        pack_files,
+        pack_index_json,
+        db,
+        None,
+    )
+    .await
+}
+
+pub async fn commit_bundle_with_index_for_operation(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    manifest: &BundleManifest,
+    pack_files: &[(String, std::path::PathBuf)],
+    pack_index_json: Option<&[u8]>,
+    db: Option<&noland_state_db::StateDb>,
+    operation_id: Option<Uuid>,
+) -> Result<()> {
     provider.ensure_root().await?;
     let keys = derive_keys(master);
     let bundle_prefix = bundle_dir(&manifest.app.app_id, manifest.bundle_id);
 
-    let pack_uploads: Vec<_> = pack_files
+    let all_pack_uploads: Vec<_> = pack_files
         .iter()
         .map(|(pack_id, path)| {
             ImmutableUpload::new(path.clone(), RemoteKey::new(pack_key(pack_id)))
         })
         .collect();
-    provider.upload_immutable_bulk(&pack_uploads).await?;
-    if let Some(db) = db {
+    let mut pack_uploads = Vec::new();
+    for upload in &all_pack_uploads {
+        let completed = match (db, operation_id) {
+            (Some(db), Some(operation_id)) => {
+                db.sync_journal_completed(operation_id, upload.key.as_str())?
+            }
+            _ => false,
+        };
+        if completed {
+            continue;
+        }
+        if let (Some(db), Some(operation_id)) = (db, operation_id) {
+            db.start_sync_journal_item(
+                operation_id,
+                upload.key.as_str(),
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+                Some(&upload.local.to_string_lossy()),
+                Some(upload.key.as_str()),
+                Some(std::fs::metadata(&upload.local)?.len()),
+            )?;
+        }
+        pack_uploads.push(upload.clone());
+    }
+    if let Err(error) = provider.upload_immutable_bulk(&pack_uploads).await {
+        if let (Some(db), Some(operation_id)) = (db, operation_id) {
+            for upload in &pack_uploads {
+                let _ = db.fail_sync_journal_item(
+                    operation_id,
+                    upload.key.as_str(),
+                    &error.to_string(),
+                );
+            }
+        }
+        return Err(error);
+    }
+    if let (Some(db), Some(operation_id)) = (db, operation_id) {
         for upload in &pack_uploads {
+            let size = std::fs::metadata(&upload.local)?.len();
+            db.complete_sync_journal_item(operation_id, upload.key.as_str(), size)?;
+        }
+    }
+    if let Some(db) = db {
+        for upload in &all_pack_uploads {
             db.journal_put(
                 &manifest.commit_id.to_string(),
                 upload.key.as_str(),
@@ -124,16 +216,18 @@ pub async fn commit_bundle_with_index(
 
     let mut metadata = Vec::new();
     if let Some(index) = pack_index_json {
-        let enc_index = wrap_envelope(&keys.manifest, b"pack-index", index)?;
+        let encoded_index = encode_document(index)?;
+        let enc_index = wrap_envelope(&keys.manifest, b"pack-index", &encoded_index)?;
         metadata.push(MetadataWrite::new(
             RemoteKey::new(format!("{bundle_prefix}/index.enc")),
             Bytes::from(enc_index),
         ));
     }
 
-    let manifest_json = serde_json::to_vec_pretty(manifest)?;
+    let manifest_json = serde_json::to_vec(manifest)?;
     let manifest_hash = format!("blake3:{}", blake3::hash(&manifest_json).to_hex());
-    let enc = wrap_envelope(&keys.manifest, b"manifest", &manifest_json)?;
+    let encoded_manifest = encode_document(&manifest_json)?;
+    let enc = wrap_envelope(&keys.manifest, b"manifest", &encoded_manifest)?;
     metadata.push(MetadataWrite::new(
         RemoteKey::new(format!("{bundle_prefix}/manifest.enc")),
         Bytes::from(enc),
@@ -208,8 +302,9 @@ pub async fn write_catalog(
     catalog: &CatalogDocument,
 ) -> Result<()> {
     let keys = derive_keys(master);
-    let json = serde_json::to_vec_pretty(catalog)?;
-    let enc = wrap_envelope(&keys.catalog, b"catalog", &json)?;
+    let json = serde_json::to_vec(catalog)?;
+    let encoded = encode_document(&json)?;
+    let enc = wrap_envelope(&keys.catalog, b"catalog", &encoded)?;
     let commit_key = RemoteKey::new(catalog_commit_key(catalog.catalog_commit_id));
     provider
         .put_metadata_batch(&MetadataBatch::with_committed(
@@ -239,16 +334,63 @@ pub async fn read_pack_index(
     app_id: &AppId,
     bundle_id: Uuid,
 ) -> Result<Vec<noland_pack::PackIndexEntry>> {
+    read_pack_index_for_operation(provider, master, app_id, bundle_id, None, None).await
+}
+
+pub async fn read_pack_index_for_operation(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    app_id: &AppId,
+    bundle_id: Uuid,
+    db: Option<&noland_state_db::StateDb>,
+    operation_id: Option<Uuid>,
+) -> Result<Vec<noland_pack::PackIndexEntry>> {
     let prefix = bundle_dir(app_id, bundle_id);
+    let remote_key = format!("{prefix}/index.enc");
+    if let (Some(db), Some(operation_id)) = (db, operation_id) {
+        db.start_sync_journal_item(
+            operation_id,
+            &remote_key,
+            ContentObjectKind::Other,
+            SyncDirection::Download,
+            None,
+            Some(&remote_key),
+            None,
+        )?;
+    }
     let tmp = std::env::temp_dir().join(format!("noland-idx-{bundle_id}"));
-    provider
-        .download(&RemoteKey::new(format!("{prefix}/index.enc")), &tmp)
-        .await?;
+    let download = provider
+        .download(&RemoteKey::new(remote_key.clone()), &tmp)
+        .await;
+    if let Err(error) = download {
+        if let (Some(db), Some(operation_id)) = (db, operation_id) {
+            let _ = db.fail_sync_journal_item(operation_id, &remote_key, &error.to_string());
+        }
+        return Err(error);
+    }
     let bytes = std::fs::read(&tmp)?;
+    let size = bytes.len() as u64;
     let _ = std::fs::remove_file(&tmp);
     let keys = derive_keys(master);
-    let plain = unwrap_envelope(&keys.manifest, b"pack-index", &bytes)?;
-    Ok(serde_json::from_slice(&plain)?)
+    let decoded = (|| {
+        let plain = unwrap_envelope(&keys.manifest, b"pack-index", &bytes)?;
+        serde_json::from_slice(&decode_document(&plain)?)
+            .map_err(|error| StateError::Integrity(error.to_string()))
+    })();
+    match decoded {
+        Ok(index) => {
+            if let (Some(db), Some(operation_id)) = (db, operation_id) {
+                db.complete_sync_journal_item(operation_id, &remote_key, size)?;
+            }
+            Ok(index)
+        }
+        Err(error) => {
+            if let (Some(db), Some(operation_id)) = (db, operation_id) {
+                let _ = db.fail_sync_journal_item(operation_id, &remote_key, &error.to_string());
+            }
+            Err(error)
+        }
+    }
 }
 
 pub async fn read_committed_manifest(
@@ -273,7 +415,7 @@ pub async fn read_committed_manifest(
     let _ = std::fs::remove_file(&tmp);
     let keys = derive_keys(master);
     let plain = unwrap_envelope(&keys.manifest, b"manifest", &bytes)?;
-    Ok(serde_json::from_slice(&plain)?)
+    Ok(serde_json::from_slice(&decode_document(&plain)?)?)
 }
 
 pub async fn commit_checkpoint(
@@ -283,8 +425,9 @@ pub async fn commit_checkpoint(
 ) -> Result<()> {
     let keys = derive_keys(master);
     let dir = checkpoint_dir(checkpoint.instance_id, checkpoint.checkpoint_id);
-    let json = serde_json::to_vec_pretty(checkpoint)?;
-    let enc = wrap_envelope(&keys.catalog, b"checkpoint", &json)?;
+    let json = serde_json::to_vec(checkpoint)?;
+    let encoded = encode_document(&json)?;
+    let enc = wrap_envelope(&keys.catalog, b"checkpoint", &encoded)?;
     provider
         .put_metadata_batch(&MetadataBatch::with_committed(
             vec![
@@ -310,8 +453,9 @@ pub async fn commit_seal(
 ) -> Result<()> {
     let keys = derive_keys(master);
     let dir = seal_dir(seal.instance_id, seal.seal_id);
-    let json = serde_json::to_vec_pretty(seal)?;
-    let enc = wrap_envelope(&keys.catalog, b"seal", &json)?;
+    let json = serde_json::to_vec(seal)?;
+    let encoded = encode_document(&json)?;
+    let enc = wrap_envelope(&keys.catalog, b"seal", &encoded)?;
     provider
         .put_metadata_batch(&MetadataBatch::with_committed(
             vec![MetadataWrite::new(

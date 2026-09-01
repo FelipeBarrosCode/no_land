@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::errors::{AppError, AppResult};
+use crate::models::app_state::BackupPerformanceMode;
 use crate::models::application_bundle::{
     SharedStorageProfile, SharedStorageStatus, StorageProvider,
 };
@@ -62,6 +63,7 @@ impl SharedStorageManager {
         instance_id: u64,
         target_user: &str,
         selected_paths: &[String],
+        performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
         let app_ids = selected_app_ids(selected_paths);
         let ids: Vec<String> = if app_ids.is_empty() {
@@ -69,7 +71,16 @@ impl SharedStorageManager {
         } else {
             app_ids
         };
-        Self::trigger_backup(context, remote, instance_id, target_user, &ids, "manual").await?;
+        Self::trigger_backup(
+            context,
+            remote,
+            instance_id,
+            target_user,
+            &ids,
+            "manual",
+            performance_mode,
+        )
+        .await?;
         Ok("Application-state backup completed".to_string())
     }
     pub async fn list_remote_objects(
@@ -86,7 +97,6 @@ impl SharedStorageManager {
         target_user: &str,
         selected_paths: &[String],
     ) -> AppResult<String> {
-        let _ = instance_id;
         if selected_paths.is_empty() {
             return Err(AppError::InvalidInput(
                 "Select at least one application bundle to restore.".into(),
@@ -107,6 +117,7 @@ impl SharedStorageManager {
             let result = Self::start_agent_restore(
                 context,
                 remote,
+                instance_id,
                 target_user,
                 &app_id,
                 &bundle_id,
@@ -406,6 +417,7 @@ impl SharedStorageManager {
             target_user,
             &["*".to_string()],
             "manual",
+            BackupPerformanceMode::Balanced,
         )
         .await
     }
@@ -416,12 +428,14 @@ impl SharedStorageManager {
         target_user: &str,
         app_ids: &[String],
         trigger: &str,
+        performance_mode: BackupPerformanceMode,
     ) -> AppResult<()> {
         info!(
             event = "shared_storage_backup_start",
             instance_id = instance_id,
             target_user = target_user,
             trigger = trigger,
+            performance_mode = ?performance_mode,
             "Shared storage backup started"
         );
         // Concurrency guard
@@ -457,18 +471,29 @@ impl SharedStorageManager {
         // so the running-job guard and state update below always run.
         let run_all = app_ids.is_empty() || app_ids.iter().any(|id| id == "*");
         let result: AppResult<()> = if run_all {
-            Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None)
-                .await
-                .map(|_| ())
+            Self::start_agent_backup(
+                context,
+                remote,
+                instance_id,
+                target_user,
+                "*",
+                "personal_state",
+                performance_mode,
+                None,
+            )
+            .await
+            .map(|_| ())
         } else {
             let mut outcome: AppResult<()> = Ok(());
             for app_id in app_ids {
                 if let Err(err) = Self::start_agent_backup(
                     context,
                     remote,
+                    instance_id,
                     target_user,
                     app_id,
                     "personal_state",
+                    performance_mode,
                     None,
                 )
                 .await

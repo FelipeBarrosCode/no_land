@@ -1,19 +1,47 @@
 use std::{fs, path::PathBuf, time::Instant};
 
 use noland_crypto::MasterKey;
-use noland_rclone_adapter::EphemeralRcloneSession;
+use noland_rclone_adapter::{EphemeralRcloneSession, TransferTuning};
 use noland_restore::{
-    apply_restore, cleanup_restore, download_and_verify, materialize_tree, prepare_restore,
+    apply_restore_to, cleanup_restore, download_and_verify_to, materialize_tree_to,
+    prepare_restore, DownloadJournal, DownloadOptions, DownloadReport, RestoreTarget,
 };
 use noland_state_core::*;
 use noland_storage::{
-    read_pack_index, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
+    read_pack_index_for_operation, write_guarded_ephemeral_session, RcloneStorage,
+    SharedStorageProvider,
 };
 
 use crate::StateAgent;
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn persist_restore_progress(
+    agent: &StateAgent,
+    operation_id: uuid::Uuid,
+    progress: &mut OperationProgress,
+    phase: &str,
+    completed_units: u64,
+    message: &str,
+) -> Result<()> {
+    progress.phase = phase.into();
+    progress.completed_units = completed_units;
+    progress.message = Some(message.into());
+    progress.updated_at = chrono::Utc::now();
+    agent
+        .db
+        .set_operation_progress(operation_id, Some(progress))
+}
+
+fn download_report_json(report: DownloadReport) -> serde_json::Value {
+    serde_json::json!({
+        "packs_downloaded": report.packs_downloaded,
+        "packs_reused": report.packs_reused,
+        "chunks_extracted": report.chunks_extracted,
+        "chunks_reused": report.chunks_reused,
+    })
 }
 
 fn persist_restore_failure(
@@ -71,15 +99,35 @@ pub async fn run_restore_with_session(
 ) -> Result<()> {
     let total_started = Instant::now();
     let mut metrics = OperationMetrics::default();
+    let mut progress = OperationProgress::new(RestoreState::FetchingManifest.as_str(), 0);
+    progress.unit = Some("files".into());
+    progress.detail_json = serde_json::json!({
+        "bundle_id": bundle_id,
+        "ready_to_launch_reached": false,
+        "milestones": [],
+    });
     persist_restore_operation(
         agent,
         operation_id,
         RestoreState::FetchingManifest,
         &metrics,
     )?;
+    persist_restore_progress(
+        agent,
+        operation_id,
+        &mut progress,
+        RestoreState::FetchingManifest.as_str(),
+        0,
+        "Fetching and verifying the restore manifest",
+    )?;
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
-    let storage = RcloneStorage::from_session(session, &config_path);
+    let tuning = if agent.db.open_session_app_ids()?.is_empty() {
+        TransferTuning::throughput()
+    } else {
+        TransferTuning::gameplay_safe()
+    };
+    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
     let storage_before = storage.operation_metrics();
 
     // Dynamic roots such as Steam libraries may appear after the agent starts.
@@ -103,12 +151,39 @@ pub async fn run_restore_with_session(
     metrics.manifest_duration_ms = elapsed_ms(manifest_started);
     let result = match plan {
         Ok(plan) => {
+            let priority_plan = plan.priority_plan();
+            let total_files = u64::try_from(priority_plan.entries.len()).unwrap_or(u64::MAX);
+            let ready_to_launch_files = u64::try_from(
+                priority_plan
+                    .entries_for(RestoreTarget::ReadyToLaunch)
+                    .count(),
+            )
+            .unwrap_or(u64::MAX);
+            progress.total_units = Some(total_files);
+            progress.detail_json = serde_json::json!({
+                "bundle_id": bundle_id,
+                "restore_id": plan.restore_id,
+                "ready_to_launch_files": ready_to_launch_files,
+                "total_files": total_files,
+                "ready_to_launch_reached": false,
+                "milestones": [],
+                "target": "READY_TO_LAUNCH",
+            });
             persist_restore_operation(
                 agent,
                 operation_id,
                 RestoreState::CheckingPrerequisites,
                 &metrics,
             )?;
+            persist_restore_progress(
+                agent,
+                operation_id,
+                &mut progress,
+                RestoreState::CheckingPrerequisites.as_str(),
+                0,
+                "Planning launch-critical and remaining restore work",
+            )?;
+
             let restore_result = async {
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
@@ -124,6 +199,25 @@ pub async fn run_restore_with_session(
                 })?;
 
                 ensure_steam_appmanifest(agent, manifest_app)?;
+                let index = read_pack_index_for_operation(
+                    &storage,
+                    master,
+                    app_id,
+                    bundle_id,
+                    Some(&agent.db),
+                    Some(operation_id),
+                )
+                .await?;
+                crate::backup::remember_remote_pack_index(
+                    agent,
+                    storage.storage_identity(),
+                    &index,
+                )?;
+                let roots = agent.roots.lock().clone();
+                let download_journal = Some(DownloadJournal {
+                    db: &agent.db,
+                    operation_id,
+                });
 
                 persist_restore_operation(
                     agent,
@@ -131,10 +225,30 @@ pub async fn run_restore_with_session(
                     RestoreState::Downloading,
                     &metrics,
                 )?;
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Downloading.as_str(),
+                    0,
+                    "Downloading launch-critical packs with cache and resume support",
+                )?;
                 let download_started = Instant::now();
-                let index = read_pack_index(&storage, master, app_id, bundle_id).await?;
-                download_and_verify(&storage, master, &plan, &index).await?;
-                metrics.download_duration_ms = elapsed_ms(download_started);
+                let ready_download = download_and_verify_to(
+                    &storage,
+                    master,
+                    &plan,
+                    &index,
+                    RestoreTarget::ReadyToLaunch,
+                    DownloadOptions::default(),
+                    download_journal,
+                )
+                .await?;
+                metrics.download_duration_ms = metrics
+                    .download_duration_ms
+                    .saturating_add(elapsed_ms(download_started));
+                progress.detail_json["ready_to_launch_download"] =
+                    download_report_json(ready_download);
 
                 persist_restore_operation(
                     agent,
@@ -142,10 +256,22 @@ pub async fn run_restore_with_session(
                     RestoreState::Materializing,
                     &metrics,
                 )?;
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Materializing.as_str(),
+                    0,
+                    "Materializing launch-critical files from verified chunks",
+                )?;
                 let materialize_started = Instant::now();
-                let roots = agent.roots.lock().clone();
-                materialize_tree(&plan, &roots)?;
-                metrics.restore_materialize_duration_ms = elapsed_ms(materialize_started);
+                let ready_materialized =
+                    materialize_tree_to(&plan, &roots, RestoreTarget::ReadyToLaunch)?;
+                metrics.restore_materialize_duration_ms = metrics
+                    .restore_materialize_duration_ms
+                    .saturating_add(elapsed_ms(materialize_started));
+                progress.detail_json["ready_to_launch_materialized_files"] =
+                    serde_json::json!(ready_materialized.len());
 
                 persist_restore_operation(
                     agent,
@@ -153,10 +279,137 @@ pub async fn run_restore_with_session(
                     RestoreState::CreatingRollbackPoint,
                     &metrics,
                 )?;
-                let apply_started = Instant::now();
                 persist_restore_operation(agent, operation_id, RestoreState::Applying, &metrics)?;
-                let rollback = apply_restore(&plan, &roots, Some(&agent.db))?;
-                metrics.restore_apply_duration_ms = elapsed_ms(apply_started);
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Applying.as_str(),
+                    0,
+                    "Applying launch-critical files with rollback protection",
+                )?;
+                let apply_started = Instant::now();
+                let _ready_rollback =
+                    apply_restore_to(&plan, &roots, Some(&agent.db), RestoreTarget::ReadyToLaunch)?;
+                metrics.restore_apply_duration_ms = metrics
+                    .restore_apply_duration_ms
+                    .saturating_add(elapsed_ms(apply_started));
+
+                progress.detail_json["ready_to_launch_reached"] = serde_json::json!(true);
+                progress.detail_json["milestones"] = serde_json::json!(["READY_TO_LAUNCH"]);
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    "READY_TO_LAUNCH",
+                    ready_to_launch_files,
+                    "Launch-critical restore data is ready; prefetching soon-needed packs",
+                )?;
+
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Downloading.as_str(),
+                    ready_to_launch_files,
+                    "Prefetching the soon-needed restore tier from cached and remote packs",
+                )?;
+                let prefetch_started = Instant::now();
+                let soon_download = download_and_verify_to(
+                    &storage,
+                    master,
+                    &plan,
+                    &index,
+                    RestoreTarget::Soon,
+                    DownloadOptions::default(),
+                    download_journal,
+                )
+                .await?;
+                metrics.download_duration_ms = metrics
+                    .download_duration_ms
+                    .saturating_add(elapsed_ms(prefetch_started));
+                progress.detail_json["soon_prefetch_download"] =
+                    download_report_json(soon_download);
+                progress.detail_json["milestones"] =
+                    serde_json::json!(["READY_TO_LAUNCH", "SOON_PREFETCH"]);
+
+                progress.detail_json["target"] = serde_json::json!("COMPLETE");
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::Downloading,
+                    &metrics,
+                )?;
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Downloading.as_str(),
+                    ready_to_launch_files,
+                    "Resuming from verified chunks and cached packs for the complete restore",
+                )?;
+                let download_started = Instant::now();
+                let complete_download = download_and_verify_to(
+                    &storage,
+                    master,
+                    &plan,
+                    &index,
+                    RestoreTarget::Complete,
+                    DownloadOptions::default(),
+                    download_journal,
+                )
+                .await?;
+                metrics.download_duration_ms = metrics
+                    .download_duration_ms
+                    .saturating_add(elapsed_ms(download_started));
+                progress.detail_json["complete_download"] = download_report_json(complete_download);
+
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::Materializing,
+                    &metrics,
+                )?;
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Materializing.as_str(),
+                    ready_to_launch_files,
+                    "Materializing all remaining restore files",
+                )?;
+                let materialize_started = Instant::now();
+                let complete_materialized =
+                    materialize_tree_to(&plan, &roots, RestoreTarget::Complete)?;
+                metrics.restore_materialize_duration_ms = metrics
+                    .restore_materialize_duration_ms
+                    .saturating_add(elapsed_ms(materialize_started));
+                progress.detail_json["complete_materialized_files"] =
+                    serde_json::json!(complete_materialized.len());
+
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::CreatingRollbackPoint,
+                    &metrics,
+                )?;
+                persist_restore_operation(agent, operation_id, RestoreState::Applying, &metrics)?;
+                persist_restore_progress(
+                    agent,
+                    operation_id,
+                    &mut progress,
+                    RestoreState::Applying.as_str(),
+                    ready_to_launch_files,
+                    "Applying the complete restore and deferred tombstones",
+                )?;
+                let apply_started = Instant::now();
+                let rollback =
+                    apply_restore_to(&plan, &roots, Some(&agent.db), RestoreTarget::Complete)?;
+                metrics.restore_apply_duration_ms = metrics
+                    .restore_apply_duration_ms
+                    .saturating_add(elapsed_ms(apply_started));
+                progress.detail_json["milestones"] =
+                    serde_json::json!(["READY_TO_LAUNCH", "COMPLETE"]);
                 Ok(rollback)
             }
             .await;
@@ -189,9 +442,34 @@ pub async fn run_restore_with_session(
     metrics.total_duration_ms = elapsed_ms(total_started);
     match &result {
         Ok(()) => {
+            let completed_units = progress.total_units.unwrap_or(progress.completed_units);
+            persist_restore_progress(
+                agent,
+                operation_id,
+                &mut progress,
+                RestoreState::Completed.as_str(),
+                completed_units,
+                "Restore completed",
+            )?;
             persist_restore_operation(agent, operation_id, RestoreState::Completed, &metrics)?;
         }
         Err(error) => {
+            let completed_units = progress.completed_units;
+            progress.detail_json["failed"] = serde_json::json!(true);
+            if let Err(persist_error) = persist_restore_progress(
+                agent,
+                operation_id,
+                &mut progress,
+                RestoreState::Failed.as_str(),
+                completed_units,
+                &error.to_string(),
+            ) {
+                tracing::warn!(
+                    %operation_id,
+                    %persist_error,
+                    "failed to persist restore failure progress"
+                );
+            }
             if let Err(persist_error) =
                 persist_restore_failure(agent, operation_id, &metrics, &error.to_string())
             {

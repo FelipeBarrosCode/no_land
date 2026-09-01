@@ -675,7 +675,8 @@ impl StateDb {
         self.lock()?
             .query_row(
                 r#"SELECT commit_id, bundle_id, manifest_hash FROM bundle_commits
-                   WHERE app_id=?1 AND state='COMMITTED' ORDER BY committed_at DESC LIMIT 1"#,
+                   WHERE app_id=?1 AND state='COMMITTED'
+                   ORDER BY committed_at DESC, rowid DESC LIMIT 1"#,
                 params![app_id.as_str()],
                 |row| {
                     Ok((

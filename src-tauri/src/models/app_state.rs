@@ -895,10 +895,27 @@ pub struct SharedStorageObjectEntry {
     pub is_dir: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupPerformanceMode {
+    Fast,
+    #[default]
+    Balanced,
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageSyncSelectionRequest {
     pub selected_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageBackupSelectionRequest {
+    pub selected_paths: Vec<String>,
+    #[serde(default)]
+    pub performance_mode: BackupPerformanceMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1134,7 +1151,26 @@ pub struct MicSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::MicQualityProfile;
+    use super::{BackupPerformanceMode, MicQualityProfile, SharedStorageBackupSelectionRequest};
+
+    #[test]
+    fn backup_performance_mode_defaults_to_balanced() {
+        let request: SharedStorageBackupSelectionRequest =
+            serde_json::from_str(r#"{"selectedPaths":["/apps/example"]}"#).unwrap();
+
+        assert_eq!(request.performance_mode, BackupPerformanceMode::Balanced);
+    }
+
+    #[test]
+    fn backup_performance_modes_use_provider_neutral_values() {
+        for (mode, expected) in [
+            (BackupPerformanceMode::Fast, r#""fast""#),
+            (BackupPerformanceMode::Balanced, r#""balanced""#),
+            (BackupPerformanceMode::Full, r#""full""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn mic_quality_profiles_use_frontend_camel_case() {

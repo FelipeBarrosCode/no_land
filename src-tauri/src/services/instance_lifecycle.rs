@@ -11,7 +11,10 @@ use tracing::{info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
-    models::{app_state::ProvisionedServerState, vast::VastInstance},
+    models::{
+        app_state::{BackupPerformanceMode, ProvisionedServerState},
+        vast::VastInstance,
+    },
 };
 
 use super::{
@@ -669,6 +672,7 @@ impl InstanceLifecycleService {
             &target_user,
             &["*".to_string()],
             "manual",
+            BackupPerformanceMode::Balanced,
         )
         .await?;
         SharedStorageManager::get_backup_status(context).await
@@ -799,6 +803,7 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
         selected_paths: Vec<String>,
+        performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
         let api_key = {
             let state = context.state.read().await;
@@ -824,8 +829,57 @@ impl InstanceLifecycleService {
             instance_id,
             &target_user,
             &selected_paths,
+            performance_mode,
         )
         .await
+    }
+
+    pub async fn cancel_shared_storage_operation(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<String> {
+        let operation = context
+            .active_agent_operation
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                AppError::InvalidInput("No shared storage operation is running.".into())
+            })?;
+        if operation.instance_id != instance_id {
+            return Err(AppError::InvalidInput(
+                "The running shared storage operation belongs to a different instance.".into(),
+            ));
+        }
+        let api_key = {
+            let state = context.state.read().await;
+            state.credentials.vast_api_key.clone()
+        };
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".into()));
+        }
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        let target_user = context.config.audio_target_user.clone();
+        crate::services::shared_storage::agent_runtime::ensure_state_agent(&remote, &target_user)
+            .await?;
+        info!(
+            instance_id,
+            operation_id = %operation.operation_id,
+            kind = %operation.kind,
+            "cancelling shared storage operation"
+        );
+        let result = crate::services::shared_storage::agent_runtime::call_agent_raw(
+            &remote,
+            "CancelOperation",
+            serde_json::json!({"operation_id": operation.operation_id}),
+        )
+        .await?;
+        Ok(result.to_string())
     }
 }
 

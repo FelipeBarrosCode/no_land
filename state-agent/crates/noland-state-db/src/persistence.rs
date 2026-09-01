@@ -68,6 +68,20 @@ impl StateDb {
         Ok(rows)
     }
 
+    /// Exact unprocessed mutation count. Prefer this over scanning with a cap.
+    pub fn count_pending_app_mutations(&self, app_id: &AppId) -> Result<u64> {
+        let count: i64 = self
+            .lock()?
+            .query_row(
+                r#"SELECT COUNT(*) FROM app_mutation_journal
+                   WHERE app_id=?1 AND processed_at_ms IS NULL"#,
+                params![app_id.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(db_err)?;
+        Ok(nonnegative(count))
+    }
+
     /// Marks the supplied mutations processed in one transaction. Unknown IDs
     /// are ignored; the return value is the number of rows changed.
     pub fn mark_app_mutations_processed(
@@ -657,6 +671,79 @@ impl StateDb {
         Ok(changed != 0)
     }
 
+    pub fn sync_journal_completed(&self, operation_id: Uuid, item_key: &str) -> Result<bool> {
+        Ok(self
+            .get_sync_journal_entry(operation_id, item_key)?
+            .is_some_and(|entry| entry.state == SyncJournalState::Completed))
+    }
+
+    pub fn start_sync_journal_item(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        item_kind: ContentObjectKind,
+        direction: SyncDirection,
+        local_path: Option<&str>,
+        remote_path: Option<&str>,
+        size: Option<u64>,
+    ) -> Result<()> {
+        let mut entry = self
+            .get_sync_journal_entry(operation_id, item_key)?
+            .unwrap_or_else(|| {
+                SyncJournalEntry::pending(operation_id, item_key, item_kind, direction)
+            });
+        entry.item_kind = item_kind;
+        entry.direction = direction;
+        entry.local_path = local_path.map(str::to_string);
+        entry.remote_path = remote_path.map(str::to_string);
+        if size.is_some() {
+            entry.size = size;
+        }
+        entry.updated_at = Utc::now();
+        self.upsert_sync_journal_entry(&entry)?;
+        self.set_sync_journal_state(
+            operation_id,
+            item_key,
+            SyncJournalState::InProgress,
+            None,
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn complete_sync_journal_item(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        bytes_transferred: u64,
+    ) -> Result<()> {
+        self.update_sync_journal_progress(operation_id, item_key, bytes_transferred)?;
+        self.set_sync_journal_state(
+            operation_id,
+            item_key,
+            SyncJournalState::Completed,
+            None,
+            None,
+        )?;
+        Ok(())
+    }
+
+    pub fn fail_sync_journal_item(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        error: &str,
+    ) -> Result<()> {
+        self.set_sync_journal_state(
+            operation_id,
+            item_key,
+            SyncJournalState::Failed,
+            Some(error),
+            None,
+        )?;
+        Ok(())
+    }
+
     pub fn sync_journal_summary(&self, operation_id: Uuid) -> Result<SyncJournalSummary> {
         self.lock()?
             .query_row(
@@ -1008,6 +1095,7 @@ mod tests {
         db.append_app_mutation(&mutation).unwrap();
         let pending = db.pending_app_mutations(&app_id, 10).unwrap();
         assert_eq!(pending.len(), 1);
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 1);
         assert_eq!(pending[0].session_id, Some(session_id));
         assert_eq!(
             pending[0].provenance.as_ref().map(|item| item.kind),
@@ -1035,6 +1123,7 @@ mod tests {
             1
         );
         assert!(db.pending_app_mutations(&app_id, 10).unwrap().is_empty());
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 0);
         assert_eq!(
             db.mark_app_mutations_processed(&[mutation.mutation_id], Utc::now())
                 .unwrap(),

@@ -3619,15 +3619,26 @@ pub async fn list_instance_exportable_storage_objects(
 pub async fn save_instance_to_shared_storage_selected(
     context: State<'_, AppContext>,
     instance_id: u64,
-    payload: crate::models::app_state::SharedStorageSyncSelectionRequest,
+    payload: crate::models::app_state::SharedStorageBackupSelectionRequest,
 ) -> Result<String, FrontendError> {
     InstanceLifecycleService::save_instance_to_shared_storage_selected(
         context.inner(),
         instance_id,
         payload.selected_paths,
+        payload.performance_mode,
     )
     .await
     .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn cancel_shared_storage_operation(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<String, FrontendError> {
+    InstanceLifecycleService::cancel_shared_storage_operation(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]

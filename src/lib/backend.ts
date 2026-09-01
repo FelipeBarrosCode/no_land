@@ -17,9 +17,11 @@ import type {
   SharedStorageTestResult,
   ProviderDefinition,
   ProfileReference,
+  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageProgressEvent,
   SunshineSettingsResponse,
 
   InstanceMicConfig,
@@ -605,13 +607,34 @@ export async function listInstanceExportableStorageObjects(instanceId: number) {
   );
 }
 
+export async function subscribeSharedStorageProgress(
+  callback: (event: SharedStorageProgressEvent) => void,
+): Promise<() => void> {
+  const unlisten = await listen<SharedStorageProgressEvent>(
+    "shared-storage:progress",
+    ({ payload }) => {
+      callback(payload);
+    },
+  );
+  return () => {
+    unlisten();
+  };
+}
+
+export async function cancelSharedStorageOperation(
+  instanceId: number,
+): Promise<string> {
+  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId });
+}
+
 export async function saveInstanceToSharedStorageSelected(
   instanceId: number,
   selectedPaths: string[],
+  performanceMode: BackupPerformanceMode = "balanced",
 ): Promise<string> {
   return invokeSafe<string>("save_instance_to_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths },
+    payload: { selectedPaths, performanceMode },
   });
 }
 

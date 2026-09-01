@@ -103,16 +103,59 @@ impl StateAgent {
         }
         noland_storage::shred_all_ephemeral_sessions(&self.config.paths.run_root)?;
         for mut op in self.db.unfinished_operations()? {
+            let journal = self.db.sync_journal_summary(op.operation_id)?;
+            let has_retry = op.detail_json.get("retry").is_some();
+            if let Some(retry) = op.detail_json.get("retry") {
+                if let (Some(method), Some(params)) = (
+                    retry.get("method").and_then(|value| value.as_str()),
+                    retry.get("params"),
+                ) {
+                    self.operations
+                        .remember_retry(op.operation_id, method, params);
+                }
+            }
+            let resume_mode = if journal.completed_items > 0 && op.kind == "backup" {
+                "UPLOAD_JOURNAL"
+            } else {
+                "NEEDS_CLIENT_RESUBMIT"
+            };
             tracing::warn!(
                 operation_id = %op.operation_id,
                 kind = %op.kind,
                 state = %op.state,
-                "unfinished operation after restart; marking failed"
+                resume_mode,
+                completed_journal_items = journal.completed_items,
+                retry_available = has_retry,
+                "unfinished operation after restart; marking failed for client resubmit"
             );
             op.state = BackupState::Failed.as_str().into();
             op.updated_at = chrono::Utc::now();
-            op.last_error = Some("operation interrupted by state-agent restart".into());
+            op.last_error = Some(
+                "operation interrupted by state-agent restart; retry with a new session or resubmit the original request".into(),
+            );
+            if !op.detail_json.is_object() {
+                op.detail_json = serde_json::json!({});
+            }
+            if let Some(fields) = op.detail_json.as_object_mut() {
+                fields.insert(
+                    "resume".into(),
+                    serde_json::json!({
+                        "reason": "agent_restart",
+                        "mode": resume_mode,
+                        "completed_journal_items": journal.completed_items,
+                        "retry_available": has_retry,
+                    }),
+                );
+            }
             self.db.upsert_operation(&op)?;
+            let mut progress = OperationProgress::new("interrupted", journal.completed_items);
+            progress.message = op.last_error.clone();
+            progress.detail_json = serde_json::json!({
+                "resume_mode": resume_mode,
+                "completed_journal_items": journal.completed_items,
+            });
+            self.db
+                .set_operation_progress(op.operation_id, Some(&progress))?;
         }
         for event in noland_observer::bootstrap_from_procfs() {
             self.hub.inject_process(event);
@@ -259,5 +302,67 @@ impl StateAgent {
 
     pub fn take_master_key(&self) -> Option<noland_crypto::MasterKey> {
         self.master_key.lock().take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use noland_state_core::{ContentObjectKind, SyncDirection, SyncJournalEntry, SyncJournalState};
+
+    #[test]
+    fn recover_marks_unfinished_operations_failed_with_retry_context() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-recover-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let operation_id = Uuid::new_v4();
+        agent
+            .db
+            .upsert_operation(&OperationRecord {
+                operation_id,
+                kind: "backup".into(),
+                app_id: Some(AppId::desktop("game")),
+                state: BackupState::Uploading.as_str().into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+                detail_json: serde_json::json!({
+                    "retry": {
+                        "method": "StartBackup",
+                        "params": {"app_id": "desktop:game", "mode": "personal_state"}
+                    }
+                }),
+            })
+            .unwrap();
+        let mut entry = SyncJournalEntry::pending(
+            operation_id,
+            "packs/ab/pack.pack",
+            ContentObjectKind::Pack,
+            SyncDirection::Upload,
+        );
+        entry.state = SyncJournalState::Completed;
+        agent.db.upsert_sync_journal_entry(&entry).unwrap();
+
+        agent.recover().unwrap();
+
+        let recovered = agent.db.get_operation(operation_id).unwrap().unwrap();
+        assert_eq!(recovered.state, BackupState::Failed.as_str());
+        assert_eq!(
+            recovered.detail_json["resume"]["mode"],
+            serde_json::json!("UPLOAD_JOURNAL")
+        );
+        assert_eq!(
+            recovered.detail_json["resume"]["retry_available"],
+            serde_json::json!(true)
+        );
+        assert!(agent.operations.retry_descriptor(operation_id).is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

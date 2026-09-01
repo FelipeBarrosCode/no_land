@@ -290,6 +290,9 @@ export function App() {
   const clearError = useAppStore((state) => state.clearError);
   const blockingAction = useAppStore((state) => state.blockingAction);
   const isBlocking = useAppStore((state) => state.isBlocking);
+  const cancelSharedStorageOperation = useAppStore(
+    (state) => state.cancelSharedStorageOperation,
+  );
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
@@ -404,7 +407,16 @@ export function App() {
       )}
 
       {isBlocking && blockingAction && (
-        <BlockingLoaderOverlay action={blockingAction} />
+        <BlockingLoaderOverlay
+          action={blockingAction}
+          onCancel={
+            blockingAction.instanceId != null
+              ? () => {
+                  void cancelSharedStorageOperation(blockingAction.instanceId as number);
+                }
+              : undefined
+          }
+        />
       )}
 
       <HashRouter>

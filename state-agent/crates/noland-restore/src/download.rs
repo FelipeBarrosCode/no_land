@@ -7,13 +7,21 @@ use std::task::Poll;
 use noland_crypto::MasterKey;
 use noland_pack::{extract_chunk, PackIndexEntry};
 use noland_state_core::pack_key as remote_pack_key;
-use noland_state_core::{Result, StateError};
+use noland_state_core::{ContentObjectKind, Result, StateError, SyncDirection};
+use noland_state_db::StateDb;
 use noland_storage::{RemoteKey, SharedStorageProvider};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::{RestorePlan, RestorePriority, RestoreTarget};
 
 pub const DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS: usize = 4;
+
+#[derive(Clone, Copy)]
+pub struct DownloadJournal<'a> {
+    pub db: &'a StateDb,
+    pub operation_id: Uuid,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DownloadOptions {
@@ -65,6 +73,7 @@ pub async fn download_and_verify_to(
     pack_index: &[PackIndexEntry],
     target: RestoreTarget,
     options: DownloadOptions,
+    journal: Option<DownloadJournal<'_>>,
 ) -> Result<DownloadReport> {
     if options.max_parallel_packs == 0 {
         return Err(StateError::Invalid(
@@ -126,7 +135,7 @@ pub async fn download_and_verify_to(
     });
 
     run_bounded(jobs, options.max_parallel_packs, |job| {
-        process_pack(provider, master, plan, job)
+        process_pack(provider, master, plan, job, journal)
     })
     .await
 }
@@ -136,6 +145,7 @@ async fn process_pack(
     master: &MasterKey,
     plan: &RestorePlan,
     job: PackJob,
+    journal: Option<DownloadJournal<'_>>,
 ) -> Result<DownloadReport> {
     let mut report = DownloadReport::default();
     let mut missing = Vec::new();
@@ -157,11 +167,31 @@ async fn process_pack(
         .staging
         .join("packs")
         .join(format!("{}.pack", job.pack_id));
+    let remote_key = remote_pack_key(&job.pack_id);
+    let journal_completed = match journal {
+        Some(journal) => journal
+            .db
+            .sync_journal_completed(journal.operation_id, &remote_key)?,
+        None => false,
+    };
     let reused_cache = cache_path.is_file();
     if reused_cache {
         report.packs_reused += 1;
+        if let Some(journal) = journal {
+            if !journal_completed {
+                mark_pack_completed(journal, &remote_key, &cache_path)?;
+            }
+        }
     } else {
-        download_pack(provider, plan, &job.pack_id, &cache_path).await?;
+        download_pack_journaled(
+            provider,
+            plan,
+            &job.pack_id,
+            &cache_path,
+            &remote_key,
+            journal,
+        )
+        .await?;
         report.packs_downloaded += 1;
     }
     link_staged_pack(&cache_path, &stage_path)?;
@@ -172,7 +202,15 @@ async fn process_pack(
             remove_file_if_present(&cache_path)?;
             remove_file_if_present(&verified_marker_path(&cache_path))?;
             remove_file_if_present(&stage_path)?;
-            download_pack(provider, plan, &job.pack_id, &cache_path).await?;
+            download_pack_journaled(
+                provider,
+                plan,
+                &job.pack_id,
+                &cache_path,
+                &remote_key,
+                journal,
+            )
+            .await?;
             report.packs_reused = report.packs_reused.saturating_sub(1);
             report.packs_downloaded += 1;
             link_staged_pack(&cache_path, &stage_path)?;
@@ -187,6 +225,72 @@ async fn process_pack(
 
     record_verified_chunks(&cache_path, &job.pack_id, &job.entries)?;
     Ok(report)
+}
+
+async fn download_pack_journaled(
+    provider: &dyn SharedStorageProvider,
+    plan: &RestorePlan,
+    pack_id: &str,
+    cache_path: &Path,
+    remote_key: &str,
+    journal: Option<DownloadJournal<'_>>,
+) -> Result<()> {
+    if let Some(journal) = journal {
+        journal.db.start_sync_journal_item(
+            journal.operation_id,
+            remote_key,
+            ContentObjectKind::Pack,
+            SyncDirection::Download,
+            Some(&cache_path.to_string_lossy()),
+            Some(remote_key),
+            None,
+        )?;
+    }
+    match download_pack(provider, plan, pack_id, cache_path).await {
+        Ok(()) => {
+            if let Some(journal) = journal {
+                let size = std::fs::metadata(cache_path)
+                    .map(|meta| meta.len())
+                    .unwrap_or(0);
+                journal
+                    .db
+                    .complete_sync_journal_item(journal.operation_id, remote_key, size)?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(journal) = journal {
+                let _ = journal.db.fail_sync_journal_item(
+                    journal.operation_id,
+                    remote_key,
+                    &error.to_string(),
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+fn mark_pack_completed(
+    journal: DownloadJournal<'_>,
+    remote_key: &str,
+    cache_path: &Path,
+) -> Result<()> {
+    journal.db.start_sync_journal_item(
+        journal.operation_id,
+        remote_key,
+        ContentObjectKind::Pack,
+        SyncDirection::Download,
+        Some(&cache_path.to_string_lossy()),
+        Some(remote_key),
+        std::fs::metadata(cache_path).ok().map(|meta| meta.len()),
+    )?;
+    let size = std::fs::metadata(cache_path)
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    journal
+        .db
+        .complete_sync_journal_item(journal.operation_id, remote_key, size)
 }
 
 async fn download_pack(

@@ -16,6 +16,8 @@ import {
   startPlayExistingInstance,
   startPlayFlow,
   subscribeProvisioningEvents,
+  subscribeSharedStorageProgress,
+  cancelSharedStorageOperation,
   verifyWireguard,
   getSetupStatus,
   verifySunshine,
@@ -89,9 +91,11 @@ import type {
   SshCredentialsUpdate,
   SharedStorageSettingsUpdate,
   SharedStorageSettingsResponse,
+  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageProgressEvent,
   SunshineSettingsResponse,
 
   InstanceMicConfig,
@@ -238,7 +242,9 @@ interface AppStore {
   saveInstanceStorageSelected: (
     instanceId: number,
     selectedPaths: string[],
+    performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
+  cancelSharedStorageOperation: (instanceId: number) => Promise<void>;
   listExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
@@ -619,6 +625,51 @@ function getProvisioningProgress(state: OrchestrationState): number | null {
   return ((index + 1) / PROVISIONING_ORDER.length) * 100;
 }
 
+const SHARED_STORAGE_ACTION_KEYS = new Set([
+  "instance.storage.export",
+  "instance.storage.sync",
+]);
+
+function applySharedStorageProgress(
+  event: SharedStorageProgressEvent,
+  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+) {
+  set((state) => {
+    if (
+      !state.blockingAction ||
+      !SHARED_STORAGE_ACTION_KEYS.has(state.blockingAction.key)
+    ) {
+      return {};
+    }
+    const percent =
+      typeof event.fraction === "number"
+        ? Math.round(event.fraction * 100)
+        : null;
+    const units =
+      event.completedUnits != null && event.totalUnits != null
+        ? `${event.completedUnits}/${event.totalUnits}${event.unit ? ` ${event.unit}` : ""}`
+        : null;
+    const phaseLabel = event.readyToLaunch
+      ? "Ready to launch"
+      : event.phase
+        ? event.phase.replace(/_/g, " ")
+        : event.state;
+    return {
+      blockingAction: {
+        ...state.blockingAction,
+        label: phaseLabel,
+        detail: [event.message, units].filter(Boolean).join(" · ") || state.blockingAction.detail,
+        progress: percent,
+        mode: percent == null ? "indeterminate" : "determinate",
+        cancellable: event.cancellable,
+        cancelRequested: event.cancelRequested,
+        operationId: event.operationId,
+        instanceId: event.instanceId,
+      },
+    };
+  });
+}
+
 function createBlockingAction(
   state: AppStore,
   next: Omit<BlockingActionState, "startedAt"> & { startedAt?: number },
@@ -841,6 +892,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         provisioningEventQueue = provisioningEventQueue
           .then(() => applyProvisioningEventState(event, set))
           .catch(() => undefined);
+      });
+      await subscribeSharedStorageProgress((event) => {
+        applySharedStorageProgress(event, set);
       });
 
       set({ _eventsBound: true });
@@ -1730,7 +1784,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    saveInstanceStorageSelected: async (instanceId, selectedPaths) => {
+    saveInstanceStorageSelected: async (
+      instanceId,
+      selectedPaths,
+      performanceMode,
+    ) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
@@ -1739,9 +1797,31 @@ export const useAppStore = create<AppStore>((set, get) => {
           blocking: true,
         },
         async () =>
-          await saveInstanceToSharedStorageSelected(instanceId, selectedPaths),
+          await saveInstanceToSharedStorageSelected(
+            instanceId,
+            selectedPaths,
+            performanceMode,
+          ),
         null,
       );
+    },
+
+    cancelSharedStorageOperation: async (instanceId) => {
+      try {
+        await cancelSharedStorageOperation(instanceId);
+        set((state) => ({
+          blockingAction: state.blockingAction
+            ? {
+                ...state.blockingAction,
+                cancelRequested: true,
+                cancellable: false,
+                detail: "Cancel requested. Waiting for the state agent to stop.",
+              }
+            : null,
+        }));
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
     },
 
     listExportableStorageObjects: async (instanceId) => {

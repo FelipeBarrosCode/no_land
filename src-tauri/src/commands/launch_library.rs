@@ -200,6 +200,7 @@ async fn run_launch(
         SharedStorageManager::start_agent_restore(
             context,
             &remote,
+            instance_id,
             &target_user,
             app_id,
             &bundle_id,

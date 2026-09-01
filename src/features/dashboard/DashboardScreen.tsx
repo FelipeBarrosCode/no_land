@@ -17,6 +17,7 @@ import {
   VAST_API_KEY_URL,
 } from "../../lib/constants";
 import type {
+  BackupPerformanceMode,
   OfferCandidate,
   OfferCountryAvailability,
   PersistedAppState,
@@ -107,6 +108,7 @@ interface Props {
   onSaveInstanceStorageSelected: (
     instanceId: number,
     selectedPaths: string[],
+    performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
   onSyncInstanceStorage: (
     instanceId: number,
@@ -306,12 +308,19 @@ export function DashboardScreen({
     setSyncInstanceId(null);
   }
 
-  async function handleExportSelection(selectedPaths: string[]) {
+  async function handleExportSelection(
+    selectedPaths: string[],
+    performanceMode: BackupPerformanceMode,
+  ) {
     if (exportInstanceId === null) {
       return;
     }
 
-    await onSaveInstanceStorageSelected(exportInstanceId, selectedPaths);
+    await onSaveInstanceStorageSelected(
+      exportInstanceId,
+      selectedPaths,
+      performanceMode,
+    );
     setExportInstanceId(null);
   }
 

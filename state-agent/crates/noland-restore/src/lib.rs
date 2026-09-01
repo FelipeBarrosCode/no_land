@@ -20,11 +20,12 @@ use noland_storage::{read_committed_manifest, SharedStorageProvider};
 use uuid::Uuid;
 
 pub use download::{
-    download_and_verify_to, DownloadOptions, DownloadReport, DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
+    download_and_verify_to, DownloadJournal, DownloadOptions, DownloadReport,
+    DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
 };
 pub use planner::{
-    plan_restore_priorities, restore_priority, RestorePlanEntry, RestorePriority,
-    RestorePriorityPlan, RestoreTarget, READY_TO_LAUNCH,
+    embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
+    RestorePriority, RestorePriorityPlan, RestoreTarget, READY_TO_LAUNCH,
 };
 
 #[derive(Debug, Clone)]
@@ -93,6 +94,7 @@ pub async fn download_and_verify(
         pack_index,
         RestoreTarget::Complete,
         DownloadOptions::default(),
+        None,
     )
     .await
     .map(|_| ())
@@ -249,12 +251,12 @@ pub fn apply_restore_to(
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        if dest.exists() && !dest.is_dir() {
-            fs::remove_file(&dest)?;
-        }
         if staged.is_dir() {
             fs::create_dir_all(&dest)?;
         } else if staged.exists() {
+            if dest.exists() && !dest.is_dir() {
+                fs::remove_file(&dest)?;
+            }
             fs::copy(&staged, &dest)?;
         }
         if let Some(db) = db {
@@ -641,6 +643,7 @@ mod tests {
             DownloadOptions {
                 max_parallel_packs: 2,
             },
+            None,
         ))
         .unwrap();
         assert_eq!(first_report.packs_downloaded, 1);
@@ -661,6 +664,7 @@ mod tests {
             &pack.entries,
             RestoreTarget::Complete,
             DownloadOptions::default(),
+            None,
         ))
         .unwrap();
         assert_eq!(second_report.packs_downloaded, 0);

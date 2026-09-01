@@ -9,7 +9,7 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{OfferCandidate, PersistedAppState},
-        events::ProvisioningEvent,
+        events::{ProvisioningEvent, SharedStorageProgressEvent},
     },
 };
 
@@ -28,6 +28,15 @@ pub struct AppContext {
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
     pub wireguard_mutation_in_progress: Arc<AtomicBool>,
+    pub shared_storage_progress: tokio::sync::broadcast::Sender<SharedStorageProgressEvent>,
+    pub active_agent_operation: Arc<RwLock<Option<ActiveAgentOperation>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveAgentOperation {
+    pub instance_id: u64,
+    pub operation_id: String,
+    pub kind: String,
 }
 
 pub struct WireGuardMutationGuard {
@@ -64,6 +73,8 @@ impl AppContext {
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
             wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),
+            shared_storage_progress: tokio::sync::broadcast::channel(64).0,
+            active_agent_operation: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -129,5 +140,9 @@ impl AppContext {
                 error!("{details}");
             }
         }
+    }
+
+    pub fn emit_shared_storage_progress(&self, event: SharedStorageProgressEvent) {
+        let _ = self.shared_storage_progress.send(event);
     }
 }

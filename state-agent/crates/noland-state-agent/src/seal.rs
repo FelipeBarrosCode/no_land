@@ -57,7 +57,16 @@ pub async fn run_seal(
     agent.db.upsert_operation(&op)?;
     let mut commits = Vec::new();
     for dirty in agent.db.list_dirty_apps()? {
-        let manifest = run_backup(agent, &dirty.app_id, mode, provider, master, None).await?;
+        let manifest = run_backup(
+            agent,
+            &dirty.app_id,
+            mode,
+            BackupPerformanceMode::Balanced,
+            provider,
+            master,
+            None,
+        )
+        .await?;
         commits.push(SealAppCommit {
             app_id: dirty.app_id,
             bundle_id: manifest.bundle_id,

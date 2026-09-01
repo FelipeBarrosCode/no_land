@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
+blake3.workspace = true
 chrono.workspace = true
 noland-attribution.workspace = true
 noland-baseline.workspace = true

@@ -37,6 +37,33 @@ impl Default for TransferTuning {
 }
 
 impl TransferTuning {
+    /// Higher provider-neutral concurrency for foreground user-initiated transfers.
+    pub fn throughput() -> Self {
+        Self {
+            max_parallel_uploads: 4,
+            max_parallel_downloads: 8,
+            max_bulk_files: 1_024,
+            max_bulk_bytes: 1024 * 1024 * 1024,
+            rclone_transfers: 8,
+            rclone_checkers: 8,
+            ..Self::default()
+        }
+    }
+
+    /// Limits disk, CPU, and network contention while an application session is active.
+    pub fn gameplay_safe() -> Self {
+        Self {
+            max_parallel_uploads: 1,
+            max_parallel_downloads: 2,
+            max_bulk_files: 128,
+            max_bulk_bytes: 128 * 1024 * 1024,
+            min_request_interval_ms: 25,
+            rclone_transfers: 2,
+            rclone_checkers: 2,
+            ..Self::default()
+        }
+    }
+
     pub fn normalized(&self) -> Self {
         let mut tuning = self.clone();
         tuning.max_parallel_uploads = tuning.max_parallel_uploads.max(1);
@@ -248,6 +275,15 @@ mod tests {
         assert_eq!(normalized.max_parallel_uploads, 1);
         assert_eq!(normalized.max_attempts, 1);
         assert_eq!(normalized.rclone_transfers, 1);
+    }
+
+    #[test]
+    fn workload_profiles_trade_throughput_for_gameplay_isolation() {
+        let throughput = TransferTuning::throughput();
+        let gameplay = TransferTuning::gameplay_safe();
+        assert!(throughput.max_parallel_uploads > gameplay.max_parallel_uploads);
+        assert!(throughput.rclone_transfers > gameplay.rclone_transfers);
+        assert!(gameplay.min_request_interval_ms > 0);
     }
 
     #[test]

@@ -10,10 +10,11 @@ use noland_rclone_adapter::{
 };
 use noland_state_core::{Result, StateError};
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+use crate::adaptive::AdaptiveConcurrency;
 use crate::{RemoteKey, RemoteMeta, SharedStorageProvider};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,7 +363,7 @@ where
 {
     let tuning = tuning.normalized();
     let gate = Arc::new(SharedRetryGate::new(tuning.clone()));
-    let semaphore = Arc::new(Semaphore::new(tuning.max_parallel_uploads));
+    let limiter = AdaptiveConcurrency::for_uploads(&tuning);
     let mut tasks = JoinSet::new();
     let mut skipped = Vec::new();
 
@@ -381,17 +382,15 @@ where
         }
         let provider = Arc::clone(&provider);
         let gate = Arc::clone(&gate);
-        let semaphore = Arc::clone(&semaphore);
+        let limiter = Arc::clone(&limiter);
         let journal = journal.clone();
         let max_attempts = tuning.max_attempts;
         tasks.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|error| StateError::Storage(error.to_string()))?;
+            let _permit = limiter.acquire().await?;
             let key = upload.key.clone();
             let result = retry_transfer(
                 &gate,
+                Some(&limiter),
                 max_attempts,
                 TransferDirection::Upload,
                 &key,
@@ -437,7 +436,7 @@ where
 {
     let tuning = tuning.normalized();
     let gate = Arc::new(SharedRetryGate::new(tuning.clone()));
-    let semaphore = Arc::new(Semaphore::new(tuning.max_parallel_downloads));
+    let limiter = AdaptiveConcurrency::for_downloads(&tuning);
     let mut tasks = JoinSet::new();
     let mut skipped = Vec::new();
 
@@ -456,17 +455,15 @@ where
         }
         let provider = Arc::clone(&provider);
         let gate = Arc::clone(&gate);
-        let semaphore = Arc::clone(&semaphore);
+        let limiter = Arc::clone(&limiter);
         let journal = journal.clone();
         let max_attempts = tuning.max_attempts;
         tasks.spawn(async move {
-            let _permit = semaphore
-                .acquire_owned()
-                .await
-                .map_err(|error| StateError::Storage(error.to_string()))?;
+            let _permit = limiter.acquire().await?;
             let key = download.key.clone();
             retry_transfer(
                 &gate,
+                Some(&limiter),
                 max_attempts,
                 TransferDirection::Download,
                 &key,
@@ -508,6 +505,7 @@ where
 
 async fn retry_transfer<T, F, Fut>(
     gate: &SharedRetryGate,
+    limiter: Option<&AdaptiveConcurrency>,
     max_attempts: u32,
     direction: TransferDirection,
     key: &RemoteKey,
@@ -527,8 +525,12 @@ where
             attempt,
             error: None,
         })?;
+        let started = Instant::now();
         match operation().await {
             Ok(value) => {
+                if let Some(limiter) = limiter {
+                    limiter.record_success(started.elapsed());
+                }
                 journal.record(&TransferJournalEvent {
                     direction,
                     key: key.clone(),
@@ -541,6 +543,9 @@ where
             Err(error) => {
                 let message = error.to_string();
                 let class = classify_remote_error(None, &message);
+                if let Some(limiter) = limiter {
+                    limiter.record_error(class);
+                }
                 if class.is_retryable() && attempt < max_attempts {
                     gate.wait_for_retry(attempt, class).await;
                     continue;

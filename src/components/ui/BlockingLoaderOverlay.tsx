@@ -11,12 +11,17 @@ export interface BlockingActionState {
   progress?: number | null;
   startedAt: number;
   mode: BlockingLoaderMode;
+  cancellable?: boolean;
+  cancelRequested?: boolean;
+  operationId?: string | null;
+  instanceId?: number | null;
 }
 
 interface Props {
   action: BlockingActionState;
   inline?: boolean;
   className?: string;
+  onCancel?: () => void;
 }
 
 function formatElapsed(startedAt: number, now: number): string {
@@ -32,7 +37,12 @@ function formatElapsed(startedAt: number, now: number): string {
   return `${minutes}m ${remainingSeconds}s elapsed`;
 }
 
-export function BlockingLoaderOverlay({ action, inline = false, className }: Props) {
+export function BlockingLoaderOverlay({
+  action,
+  inline = false,
+  className,
+  onCancel,
+}: Props) {
   const [now, setNow] = useState(() => Date.now());
   const progress =
     action.mode === "determinate" && typeof action.progress === "number"
@@ -86,6 +96,19 @@ export function BlockingLoaderOverlay({ action, inline = false, className }: Pro
               <span>{formatElapsed(action.startedAt, now)}</span>
             </div>
           </div>
+
+          {onCancel && action.cancellable && (
+            <div className="mt-4">
+              <button
+                type="button"
+                className="border border-[#ff8ca2] bg-[#4b1f2f] px-3 py-2 font-display text-[12px] uppercase tracking-[0.12em] text-[#ffc1cf] hover:bg-[#673149] disabled:opacity-50"
+                disabled={action.cancelRequested}
+                onClick={onCancel}
+              >
+                {action.cancelRequested ? "Cancelling..." : "Cancel"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </div>

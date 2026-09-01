@@ -1,13 +1,16 @@
 //! Shared Storage providers. Backup uses copy/additive semantics only.
 
+mod adaptive;
 mod commit;
 mod local;
 mod rclone;
 mod transfer;
 
+pub use adaptive::AdaptiveConcurrency;
 pub use commit::{
-    commit_bundle, commit_bundle_with_index, commit_checkpoint, commit_seal, load_catalog,
-    read_committed_manifest, read_pack_index, update_catalog_with_bundle, CatalogStore,
+    commit_bundle, commit_bundle_with_index, commit_bundle_with_index_for_operation,
+    commit_checkpoint, commit_seal, load_catalog, read_committed_manifest, read_pack_index,
+    read_pack_index_for_operation, update_catalog_with_bundle, CatalogStore,
 };
 pub use local::LocalStorage;
 pub use noland_rclone_adapter::{
