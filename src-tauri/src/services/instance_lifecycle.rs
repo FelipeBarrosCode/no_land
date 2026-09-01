@@ -453,6 +453,18 @@ impl InstanceLifecycleService {
     /// Run backup before pause/destroy if shared storage is configured.
     async fn maybe_run_backup_first(context: &AppContext, instance_id: u64) -> AppResult<()> {
         let state = context.state.read().await;
+        let provisioning_completed = state
+            .provisioned_servers
+            .iter()
+            .find(|record| record.instance_id == instance_id)
+            .is_some_and(|record| {
+                record.steps.post_provision_completed
+                    || record.steps.pairing_completed
+                    || matches!(
+                        record.last_state,
+                        crate::models::app_state::OrchestrationState::Ready
+                    )
+            });
         let ss_enabled = state.shared_storage.settings.enabled;
         let has_credentials = !state
             .shared_storage
@@ -469,6 +481,14 @@ impl InstanceLifecycleService {
         let api_key = state.credentials.vast_api_key.clone();
         let has_profile = !state.shared_storage_profiles.is_empty();
         drop(state);
+
+        if !provisioning_completed {
+            info!(
+                instance_id = instance_id,
+                "Provisioning never completed; skipping pre-action backup"
+            );
+            return Ok(());
+        }
 
         if !has_profile && (!ss_enabled || !has_credentials) {
             info!(

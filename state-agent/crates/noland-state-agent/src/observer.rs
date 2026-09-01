@@ -154,6 +154,19 @@ impl ObserverSupervisor {
         status
     }
 
+    pub fn loss_generation(&self) -> u64 {
+        self.status.lock().loss_events
+    }
+
+    pub fn complete_reconciliation(&self, expected_loss_generation: u64) -> bool {
+        let mut status = self.status.lock();
+        if status.loss_events != expected_loss_generation {
+            return false;
+        }
+        status.reconciliation_required = false;
+        true
+    }
+
     pub fn signal_loss(&self, source: &'static str, detail: impl Into<String>) {
         let detail = detail.into();
         let mut status = self.status.lock();
@@ -263,5 +276,18 @@ mod tests {
         assert_eq!(status.loss_events, 1);
         assert_eq!(status.queue_events_dropped, 7);
         assert!(status.reconciliation_required);
+    }
+
+    #[test]
+    fn reconciliation_only_clears_the_observed_loss_generation() {
+        let observer = ObserverSupervisor::new();
+        observer.signal_loss("test", "first loss");
+        let generation = observer.loss_generation();
+        assert!(observer.complete_reconciliation(generation));
+        assert!(!observer.status(0).reconciliation_required);
+
+        observer.signal_loss("test", "second loss");
+        assert!(!observer.complete_reconciliation(generation));
+        assert!(observer.status(0).reconciliation_required);
     }
 }

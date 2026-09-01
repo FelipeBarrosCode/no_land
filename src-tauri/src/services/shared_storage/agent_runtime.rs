@@ -7,7 +7,7 @@ use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
-const REQUIRED_AGENT_API_VERSION: u64 = 2;
+const REQUIRED_AGENT_API_VERSION: u64 = 7;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
     if probe_agent(remote).await.ok().and_then(|health| {
@@ -29,7 +29,9 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     let stamp = chrono::Utc::now().timestamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
     let status = std::process::Command::new("tar")
+        .env("COPYFILE_DISABLE", "1")
         .args([
+            "--no-xattrs",
             "-czf",
             &local_tar.display().to_string(),
             "--exclude",
@@ -57,41 +59,133 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
             .await
             .map_err(|e| AppError::Command(format!("join failure: {e}")))??;
     }
+    let _ = std::fs::remove_file(&local_tar);
 
+    let remote_src = format!("/opt/noland/state-agent-{stamp}");
+    let remote_script = format!("/tmp/noland-bootstrap-agent-{stamp}.sh");
+    let remote_log = format!("/tmp/noland-bootstrap-agent-{stamp}.log");
+    let remote_status = format!("/tmp/noland-bootstrap-agent-{stamp}.status");
     let bootstrap = include_str!("../../../../state-agent/scripts/bootstrap-remote.sh");
     let encoded_script = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
         bootstrap.as_bytes(),
     );
-    let setup = format!(
-        "sudo rm -rf /opt/noland/state-agent && sudo mkdir -p /opt/noland/state-agent && sudo tar -xzf {tar} -C /opt/noland/state-agent && printf %s {script} | base64 -d > /tmp/noland-bootstrap-agent.sh && sudo bash /tmp/noland-bootstrap-agent.sh /opt/noland/state-agent /usr/local/bin/noland-state-agent {user}",
-        tar = shell_escape(&remote_tar),
-        script = shell_escape(&encoded_script),
+    let sudo = remote.sudo_prefix();
+    let worker = format!(
+        "flock -w 1200 /run/lock/noland-state-agent-bootstrap.lock bash {script} {src} /usr/local/bin/noland-state-agent {user}; code=$?; printf '%s\\n' \"$code\" > {status}",
+        script = shell_escape(&remote_script),
+        src = shell_escape(&remote_src),
         user = shell_escape(target_user),
+        status = shell_escape(&remote_status),
     );
-    let output = {
-        let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh_until_complete(&setup))
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-    };
-    let _ = std::fs::remove_file(&local_tar);
-    if output.status_code != 0 || !output.stdout.contains("STATE_AGENT_READY") {
+    let launcher = format!(
+        "rm -f {status} {log}; nohup sh -c {worker} > {log} 2>&1 < /dev/null &",
+        status = shell_escape(&remote_status),
+        log = shell_escape(&remote_log),
+        worker = shell_escape(&worker),
+    );
+    let setup = format!(
+        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
+        sudo = sudo,
+        src = shell_escape(&remote_src),
+        tar = shell_escape(&remote_tar),
+        encoded = shell_escape(&encoded_script),
+        script = shell_escape(&remote_script),
+        launcher = shell_escape(&launcher),
+    );
+    let setup_output = ssh_command(remote, setup, Duration::from_secs(180)).await?;
+    if setup_output.status_code != 0 {
         return Err(AppError::Provisioning(format!(
-            "Failed to start state-agent: {} {}",
-            output.stdout.trim(),
-            output.stderr.trim()
+            "Failed to launch state-agent installation: {}",
+            concise_remote_failure(&setup_output.stdout, &setup_output.stderr)
         )));
     }
 
-    // Give the socket a moment, then require a health reply.
-    for _ in 0..10 {
-        if probe_agent(remote).await.is_ok() {
+    wait_for_bootstrap(remote, &remote_status, &remote_log).await
+}
+
+async fn wait_for_bootstrap(
+    remote: &RemoteExec,
+    remote_status: &str,
+    remote_log: &str,
+) -> AppResult<()> {
+    const BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+    const POLL_INTERVAL: Duration = Duration::from_secs(3);
+
+    let deadline = tokio::time::Instant::now() + BOOTSTRAP_TIMEOUT;
+    let status_command = format!(
+        "if test -f {status}; then cat {status}; else printf RUNNING; fi",
+        status = shell_escape(remote_status)
+    );
+    let mut last_connection_error = None;
+
+    while tokio::time::Instant::now() < deadline {
+        if probe_agent(remote)
+            .await
+            .ok()
+            .is_some_and(|health| agent_api_is_compatible(&health))
+        {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        match ssh_command(remote, status_command.clone(), Duration::from_secs(20)).await {
+            Ok(output) if output.status_code == 0 => {
+                let status = output.stdout.trim();
+                if let Ok(exit_code) = status.parse::<i32>() {
+                    if exit_code != 0 {
+                        let log = read_bootstrap_log(remote, remote_log).await;
+                        return Err(AppError::Provisioning(format!(
+                            "Failed to install or start state-agent (exit {exit_code}): {log}"
+                        )));
+                    }
+                }
+            }
+            Ok(output) => {
+                last_connection_error =
+                    Some(concise_remote_failure(&output.stdout, &output.stderr));
+            }
+            Err(error) => {
+                // Reboots and package-manager SSH restarts are transient. The detached
+                // bootstrap keeps running and is checked again on the next poll.
+                last_connection_error = Some(error.to_string());
+            }
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
-    probe_agent(remote).await.map(|_| ())
+
+    let log = read_bootstrap_log(remote, remote_log).await;
+    Err(AppError::Timeout(format!(
+        "Timed out waiting for detached state-agent installation. Last SSH error: {}. Bootstrap log: {}",
+        last_connection_error.unwrap_or_else(|| "none".to_string()),
+        log
+    )))
+}
+
+async fn read_bootstrap_log(remote: &RemoteExec, remote_log: &str) -> String {
+    let command = format!("tail -n 60 {} 2>/dev/null", shell_escape(remote_log));
+    match ssh_command(remote, command, Duration::from_secs(30)).await {
+        Ok(output) => concise_remote_failure(&output.stdout, &output.stderr),
+        Err(error) => format!("log unavailable: {error}"),
+    }
+}
+
+async fn ssh_command(
+    remote: &RemoteExec,
+    command: String,
+    timeout: Duration,
+) -> AppResult<crate::services::remote_exec::ExecOutput> {
+    let remote = remote.clone();
+    tokio::task::spawn_blocking(move || remote.ssh(&command, timeout))
+        .await
+        .map_err(|error| AppError::Command(format!("join failure: {error}")))?
+}
+
+fn agent_api_is_compatible(health: &serde_json::Value) -> bool {
+    health
+        .get("agent_api_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(REQUIRED_AGENT_API_VERSION)
 }
 
 pub async fn probe_agent(remote: &RemoteExec) -> AppResult<serde_json::Value> {
@@ -143,6 +237,18 @@ pub async fn call_agent_raw(
         )));
     }
     Ok(value.get("result").cloned().unwrap_or(value))
+}
+
+fn concise_remote_failure(stdout: &str, stderr: &str) -> String {
+    const MAX_LINES: usize = 30;
+    let combined = format!("{stdout}\n{stderr}");
+    let lines = combined
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let start = lines.len().saturating_sub(MAX_LINES);
+    lines[start..].join("\n")
 }
 
 fn shell_escape(value: &str) -> String {

@@ -475,11 +475,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             complete_onboarding,
-            force_update_state_agent,
+            refresh_state_agent_index,
             refresh_ip_location,
             set_manual_location,
             set_os_location,
             search_offers,
+            list_available_offer_countries,
             select_offer,
             start_play_flow,
             resume_provisioning_existing_instance,

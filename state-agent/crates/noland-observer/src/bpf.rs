@@ -146,7 +146,11 @@ fn normalize(raw: RawEvent, at: DateTime<Utc>) -> Option<NormalizedEvent> {
                 RawEventKind::ProcessExit => ProcessEventKind::Exit,
                 _ => unreachable!(),
             };
-            let executable = bytes_path(raw.path);
+            let executable = if kind == ProcessEventKind::Exec {
+                crate::process_executable(pid, bytes_path(raw.path))
+            } else {
+                bytes_path(raw.path)
+            };
             let comm = nonempty_string(raw.comm);
             Some(NormalizedEvent::Process(EbpfProcessFact {
                 kind,
@@ -167,6 +171,16 @@ fn normalize(raw: RawEvent, at: DateTime<Utc>) -> Option<NormalizedEvent> {
         }
         kind => {
             let path = event_path(&raw.path, &raw.name, raw.flags);
+            if path.as_os_str().is_empty() {
+                tracing::debug!(
+                    tgid = raw.tgid,
+                    device = raw.dev,
+                    inode = raw.ino,
+                    ?kind,
+                    "filesystem event path anchor could not be resolved"
+                );
+                return None;
+            }
             let dest_path = event_path(&raw.dest_path, &raw.dest_name, raw.flags);
             Some(NormalizedEvent::Filesystem(EbpfFilesystemFact {
                 kind: match kind {
@@ -195,7 +209,10 @@ fn normalize(raw: RawEvent, at: DateTime<Utc>) -> Option<NormalizedEvent> {
                 device: (raw.dev != 0).then_some(raw.dev),
                 io_result: Some(raw.result),
                 open_flags: matches!(kind, RawEventKind::FsOpen).then_some(raw.operation_flags),
+                mmap_requested_prot: matches!(kind, RawEventKind::FsMmap)
+                    .then_some(raw.length as u32),
                 mmap_prot: matches!(kind, RawEventKind::FsMmap).then_some(raw.mode),
+                mmap_flags: matches!(kind, RawEventKind::FsMmap).then_some(raw.operation_flags),
                 source: ObservationSource::Ebpf,
                 sequence: raw.sequence,
                 accumulated_count: raw.accumulated_count.max(1),
@@ -254,7 +271,10 @@ fn program_feature(section: &str) -> Option<BpfFeature> {
         Some(BpfFeature::Process)
     } else if section.starts_with("fentry/security_")
         || section.starts_with("fexit/security_")
+        || section.starts_with("fentry/do_sys_openat2")
+        || section.starts_with("fexit/do_sys_openat2")
         || section.starts_with("fexit/vfs_")
+        || section.starts_with("tracepoint/syscalls/")
     {
         Some(BpfFeature::Filesystem)
     } else {
@@ -265,6 +285,8 @@ fn program_feature(section: &str) -> Option<BpfFeature> {
 #[cfg(target_os = "linux")]
 mod platform {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
@@ -403,12 +425,12 @@ mod platform {
         running: Arc<AtomicBool>,
         startup: mpsc::SyncSender<io::Result<()>>,
     ) -> io::Result<()> {
-        let result = (|| {
+        let result: io::Result<()> = (|| -> io::Result<()> {
             let (supported, gaps) = probe_programs(object_data, &config.enabled_features)?;
             let mut open = open_object(object_data)?;
             select_programs(&mut open, &supported);
-            let object = open.load().map_err(libbpf_error)?;
-            let links = attach_selected_programs(&object, &supported)?;
+            let mut object = open.load().map_err(libbpf_error)?;
+            let links = attach_selected_programs(&mut object, &supported)?;
             for gap in &gaps {
                 tracing::warn!(tracing_program_gap = %gap, "optional BPF tracing program unavailable");
             }
@@ -429,11 +451,13 @@ mod platform {
                 .ok_or_else(|| missing_map(&config.ringbuf_map))?;
             let callback_hub = hub.clone();
             let clock = BootClock::new();
+            let mut path_resolver = ProcPathResolver::default();
             let mut builder = RingBufferBuilder::new();
             builder
                 .add(&events_map, move |bytes| {
                     match parse_record(bytes) {
-                        Ok(raw) => {
+                        Ok(mut raw) => {
+                            path_resolver.enrich(&mut raw);
                             let at = clock.at(raw.timestamp_ns);
                             if let Some(event) = normalize(raw, at) {
                                 dispatch(&callback_hub, event);
@@ -513,6 +537,160 @@ mod platform {
         result
     }
 
+    #[derive(Default)]
+    struct ProcPathResolver {
+        cache: HashMap<(i32, u64, u64), PathBuf>,
+    }
+
+    impl ProcPathResolver {
+        fn enrich(&mut self, raw: &mut RawEvent) {
+            let tgid = i32::try_from(raw.tgid).unwrap_or(i32::MAX);
+            if !raw.path.is_empty()
+                && matches!(raw.kind, RawEventKind::FsOpen | RawEventKind::FsCreate)
+            {
+                let supplied = bytes_path(raw.path.clone()).unwrap_or_default();
+                if let Some(path) = self
+                    .resolve(tgid, raw.dev, raw.ino)
+                    .or_else(|| resolve_open_input(tgid, raw.offset as i64 as i32, &supplied))
+                {
+                    if metadata_matches_for_process(tgid, &path, raw.dev, raw.ino) {
+                        self.cache.insert((tgid, raw.dev, raw.ino), path.clone());
+                    }
+                    raw.path = path_bytes(path);
+                }
+            } else if raw.path.is_empty() {
+                if let Some(mut path) = self.resolve(tgid, raw.dev, raw.ino) {
+                    if raw.flags & FLAG_PARENT_AND_NAME != 0 && !raw.name.is_empty() {
+                        path.push(bytes_path(raw.name.clone()).unwrap_or_default());
+                    }
+                    raw.path = path_bytes(path);
+                } else if raw.flags & FLAG_PARENT_AND_NAME != 0 {
+                    raw.name.clear();
+                }
+            }
+
+            if matches!(raw.kind, RawEventKind::FsRename)
+                && raw.dest_path.is_empty()
+                && !raw.dest_name.is_empty()
+            {
+                if let Some(mut path) = self.resolve(tgid, raw.offset, raw.length) {
+                    path.push(bytes_path(raw.dest_name.clone()).unwrap_or_default());
+                    raw.dest_path = path_bytes(path);
+                } else {
+                    raw.dest_name.clear();
+                }
+            }
+        }
+
+        fn resolve(&mut self, tgid: i32, device: u64, inode: u64) -> Option<PathBuf> {
+            if tgid <= 0 || device == 0 || inode == 0 {
+                return None;
+            }
+            let key = (tgid, device, inode);
+            if let Some(path) = self.cache.get(&key) {
+                if metadata_matches_for_process(tgid, path, device, inode) {
+                    return Some(path.clone());
+                }
+                self.cache.remove(&key);
+            }
+
+            let proc_root = PathBuf::from(format!("/proc/{tgid}"));
+            for special in ["cwd", "root", "exe"] {
+                let link = proc_root.join(special);
+                if metadata_matches(&link, device, inode) {
+                    let path = clean_proc_link(fs::read_link(&link).ok()?);
+                    self.cache.insert(key, path.clone());
+                    return Some(path);
+                }
+            }
+
+            let entries = fs::read_dir(proc_root.join("fd")).ok()?;
+            for entry in entries.flatten() {
+                let link = entry.path();
+                if !metadata_matches(&link, device, inode) {
+                    continue;
+                }
+                let path = clean_proc_link(fs::read_link(&link).ok()?);
+                self.cache.insert(key, path.clone());
+                return Some(path);
+            }
+            None
+        }
+    }
+
+    fn resolve_open_input(tgid: i32, dfd: i32, supplied: &std::path::Path) -> Option<PathBuf> {
+        if supplied.as_os_str().is_empty() || tgid <= 0 {
+            return None;
+        }
+        if supplied.is_absolute() {
+            return Some(normalize_lexically(supplied));
+        }
+
+        let base_link = if dfd == libc::AT_FDCWD {
+            PathBuf::from(format!("/proc/{tgid}/cwd"))
+        } else if dfd >= 0 {
+            PathBuf::from(format!("/proc/{tgid}/fd/{dfd}"))
+        } else {
+            return None;
+        };
+        let base = clean_proc_link(fs::read_link(base_link).ok()?);
+        Some(normalize_lexically(&base.join(supplied)))
+    }
+
+    fn normalize_lexically(path: &std::path::Path) -> PathBuf {
+        use std::path::Component;
+
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    normalized.pop();
+                }
+                Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                    normalized.push(component.as_os_str());
+                }
+            }
+        }
+        normalized
+    }
+
+    fn metadata_matches_for_process(
+        tgid: i32,
+        path: &std::path::Path,
+        device: u64,
+        inode: u64,
+    ) -> bool {
+        if metadata_matches(path, device, inode) {
+            return true;
+        }
+        if !path.is_absolute() || tgid <= 0 {
+            return false;
+        }
+        let process_path = PathBuf::from(format!("/proc/{tgid}/root"))
+            .join(path.strip_prefix("/").unwrap_or(path));
+        metadata_matches(&process_path, device, inode)
+    }
+
+    fn metadata_matches(path: &std::path::Path, device: u64, inode: u64) -> bool {
+        fs::metadata(path)
+            .map(|metadata| metadata.dev() == device && metadata.ino() == inode)
+            .unwrap_or(false)
+    }
+
+    fn clean_proc_link(path: PathBuf) -> PathBuf {
+        const DELETED: &str = " (deleted)";
+        let text = path.to_string_lossy();
+        text.strip_suffix(DELETED)
+            .map(PathBuf::from)
+            .unwrap_or(path)
+    }
+
+    fn path_bytes(path: PathBuf) -> Vec<u8> {
+        use std::os::unix::ffi::OsStringExt;
+        path.into_os_string().into_vec()
+    }
+
     fn open_object(data: &[u8]) -> io::Result<OpenObject> {
         ObjectBuilder::default()
             .open_memory(data)
@@ -556,6 +734,8 @@ mod platform {
         if supported.contains("noland_security_file_truncate") {
             supported.remove("noland_security_path_truncate");
         }
+        select_open_path_correlation(&mut supported, &mut gaps);
+        select_permission_fallback(&mut supported, &mut gaps);
         if supported.is_empty() && !enabled.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -568,6 +748,56 @@ mod platform {
         Ok((supported, gaps))
     }
 
+    fn select_open_path_correlation(supported: &mut HashSet<String>, gaps: &mut Vec<String>) {
+        const DO_SYS_ENTER: &str = "noland_do_sys_openat2_enter";
+        const DO_SYS_EXIT: &str = "noland_do_sys_openat2_exit";
+        const TRACEPOINTS: &[&str] = &[
+            "noland_sys_enter_open",
+            "noland_sys_enter_openat",
+            "noland_sys_enter_openat2",
+            "noland_sys_exit_open",
+            "noland_sys_exit_openat",
+            "noland_sys_exit_openat2",
+        ];
+
+        let has_do_sys_pair = supported.contains(DO_SYS_ENTER) && supported.contains(DO_SYS_EXIT);
+        if has_do_sys_pair {
+            for tracepoint in TRACEPOINTS {
+                supported.remove(*tracepoint);
+            }
+            return;
+        }
+
+        let has_partial_do_sys =
+            supported.contains(DO_SYS_ENTER) || supported.contains(DO_SYS_EXIT);
+        if has_partial_do_sys {
+            supported.remove(DO_SYS_ENTER);
+            supported.remove(DO_SYS_EXIT);
+            gaps.push(
+                "do_sys_openat2 open-path correlation is only partially available; falling back to tracepoint correlation"
+                    .to_string(),
+            );
+        }
+    }
+
+    fn select_permission_fallback(supported: &mut HashSet<String>, gaps: &mut Vec<String>) {
+        const FALLBACK: &str = "noland_security_file_permission";
+        if !supported.contains(FALLBACK) {
+            return;
+        }
+        let has_read =
+            supported.contains("noland_vfs_read") || supported.contains("noland_vfs_iter_read");
+        let has_write =
+            supported.contains("noland_vfs_write") || supported.contains("noland_vfs_iter_write");
+        if has_read && has_write {
+            supported.remove(FALLBACK);
+        } else {
+            gaps.push(format!(
+                "primary successful-I/O coverage incomplete (read={has_read}, write={has_write}); using security_file_permission fallback"
+            ));
+        }
+    }
+
     fn probe_program(object_data: &[u8], selected: &str) -> io::Result<()> {
         let mut open = open_object(object_data)?;
         for mut program in open.progs_mut() {
@@ -576,7 +806,7 @@ mod platform {
         }
         let object = open.load().map_err(libbpf_error)?;
         let program = object
-            .progs()
+            .progs_mut()
             .find(|program| program.name() == selected)
             .ok_or_else(|| {
                 io::Error::new(
@@ -584,7 +814,7 @@ mod platform {
                     format!("BPF program {selected} disappeared after load"),
                 )
             })?;
-        let _probe_link = program.attach().map_err(libbpf_error)?;
+        let _probe_link = libbpf_rs::ProgramMut::attach(&program).map_err(libbpf_error)?;
         Ok(())
     }
 
@@ -595,13 +825,13 @@ mod platform {
     }
 
     fn attach_selected_programs(
-        object: &Object,
+        object: &mut Object,
         selected: &HashSet<String>,
     ) -> io::Result<Vec<Link>> {
         object
-            .progs()
+            .progs_mut()
             .filter(|program| selected.contains(program.name().to_string_lossy().as_ref()))
-            .map(|program| program.attach().map_err(libbpf_error))
+            .map(|program| libbpf_rs::ProgramMut::attach(&program).map_err(libbpf_error))
             .collect()
     }
 
@@ -914,7 +1144,7 @@ mod tests {
         assert_eq!(program_feature("lsm/file_open"), None);
         assert_eq!(
             program_feature("tracepoint/syscalls/sys_enter_openat"),
-            None
+            Some(BpfFeature::Filesystem)
         );
     }
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the state agent binary and systemd unit on a disposable Linux instance.
+# Install, enable, and start the state agent on a disposable Linux instance.
 set -euo pipefail
 
 PREFIX="${PREFIX:-/usr/local}"
@@ -43,5 +43,23 @@ install -d /var/lib/noland/state /run/noland /usr/local/lib/noland
 install -m 0644 "$BPF_OBJECT" /usr/local/lib/noland/noland_observer.bpf.o
 install -m 0644 "${UNIT_SRC}" /etc/systemd/system/noland-state-agent.service
 systemctl daemon-reload
-systemctl enable --now noland-state-agent.service
+systemctl enable noland-state-agent.service >/dev/null 2>&1 || true
+systemctl restart noland-state-agent.service >/dev/null 2>&1 || systemctl start noland-state-agent.service
+
+SOCKET_PATH="/run/noland/state-agent.sock"
+for _ in $(seq 1 30); do
+  if [[ -S "$SOCKET_PATH" ]]; then
+    break
+  fi
+  sleep 1
+  if ! systemctl is-active --quiet noland-state-agent.service; then
+    systemctl --no-pager --full status noland-state-agent.service >&2 || true
+    exit 1
+  fi
+done
+
 systemctl --no-pager --full status noland-state-agent.service || true
+if [[ ! -S "$SOCKET_PATH" ]]; then
+  echo "state-agent service is active but RPC socket did not appear at $SOCKET_PATH within 30 seconds" >&2
+  exit 1
+fi

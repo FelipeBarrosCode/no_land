@@ -140,6 +140,11 @@ export interface ServerPreferences {
   geolocationCountryCode: string;
 }
 
+export interface OfferCountryAvailability {
+  code: string;
+  offerCount: number;
+}
+
 export interface OfferCandidate {
   id: number;
   hostId: number | null;

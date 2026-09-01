@@ -18,6 +18,7 @@ import {
 } from "../../lib/constants";
 import type {
   OfferCandidate,
+  OfferCountryAvailability,
   PersistedAppState,
   RentedInstanceSummary,
   ServerPreferences,
@@ -53,6 +54,9 @@ interface Props {
   instanceActionRunning: boolean;
   blockingAction: BlockingActionState | null;
   onSearchOffers: (page?: number) => Promise<void>;
+  onLoadAvailableOfferCountries: () => Promise<
+    OfferCountryAvailability[] | null
+  >;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
   onManualLocationSave: (payload: {
@@ -130,6 +134,7 @@ export function DashboardScreen({
   instanceActionRunning,
   blockingAction,
   onSearchOffers,
+  onLoadAvailableOfferCountries,
   onNextOffersPage,
   onPreviousOffersPage,
   onManualLocationSave,
@@ -162,6 +167,9 @@ export function DashboardScreen({
   onRefreshIndexing,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [availableOfferCountries, setAvailableOfferCountries] = useState<
+    OfferCountryAvailability[]
+  >([]);
   const [syncInstanceId, setSyncInstanceId] = useState<number | null>(null);
   const [exportInstanceId, setExportInstanceId] = useState<number | null>(null);
   const [displayInstanceId, setDisplayInstanceId] = useState<number | null>(null);
@@ -177,6 +185,14 @@ export function DashboardScreen({
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
+
+  const openServerPicker = async () => {
+    setPickerOpen(true);
+    const countries = await onLoadAvailableOfferCountries();
+    if (countries && countries.length > 0) {
+      setAvailableOfferCountries(countries);
+    }
+  };
   const showDashboardGuidance = !appState.hasCompletedGuidedSetup;
   const displayInstance = rentedInstances.find(
     (instance) => instance.instanceId === displayInstanceId,
@@ -352,7 +368,7 @@ export function DashboardScreen({
             <Button variant="ghost" onClick={() => navigate("/settings")}>
               Settings
             </Button>
-            <Button variant="secondary" onClick={() => setPickerOpen(true)}>
+            <Button variant="secondary" onClick={openServerPicker}>
               Select Server
             </Button>
             <ArcadeSoundToggle />
@@ -417,7 +433,7 @@ export function DashboardScreen({
 
             <Card
               interactive
-              onClick={() => setPickerOpen(true)}
+              onClick={openServerPicker}
               className="pixel-frame min-h-40 flex flex-col justify-center p-4"
             >
               <div className="flex items-center justify-between">
@@ -642,7 +658,7 @@ export function DashboardScreen({
 
               <Card
                 interactive
-                onClick={() => setPickerOpen(true)}
+                onClick={openServerPicker}
                 className="flex items-center justify-center border-2 border-dashed border-[#3a4068] hover:border-neon-cyan hover:bg-[#10152f]/30 transition-colors min-h-[14rem] bg-[#10152f]/10"
               >
                 <div className="text-[9rem] text-[#bfd3ee] font-bold transition-transform hover:scale-110 select-none leading-none">
@@ -803,6 +819,7 @@ export function DashboardScreen({
         selectedOfferId={appState.selectedOffer?.id ?? null}
         serverPreferences={appState.serverPreferences}
         storageGb={appState.serverPreferences.storageGb}
+        availableCountries={availableOfferCountries}
         searchingOffers={searchingOffers}
         offersPage={offersPage}
         offersHasNextPage={offersHasNextPage}

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -13,7 +14,7 @@ use serde_json::json;
 
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 2;
+const AGENT_API_VERSION: u64 = 7;
 
 pub struct AgentRpc(pub Arc<StateAgent>);
 
@@ -251,6 +252,43 @@ impl RpcHandler for AgentRpc {
                 let n = crate::reconcile::reconcile_app(agent, &app_id)?;
                 Ok(json!({"reconciled": n}))
             }
+            "RefreshIndex" => {
+                let processed_events = agent.process_events()?;
+                let generation = agent.observer.loss_generation();
+                agent.discover()?;
+
+                let candidates = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
+                let candidate_ids = candidates
+                    .into_iter()
+                    .map(|app| app.app_id)
+                    .collect::<HashSet<_>>();
+                let actions = reconciliation_actions(&candidate_ids, agent.db.list_dirty_apps()?);
+
+                let mut apps_reconciled = 0_usize;
+                let mut reconciled_paths = 0_usize;
+                let mut excluded_flags_cleared = 0_usize;
+                for action in actions {
+                    match action {
+                        ReconciliationAction::Reconcile(app_id) => {
+                            reconciled_paths += crate::reconcile::reconcile_app(agent, &app_id)?;
+                            apps_reconciled += 1;
+                        }
+                        ReconciliationAction::ClearExcluded(app_id) => {
+                            agent.db.clear_reconciliation_required(&app_id)?;
+                            excluded_flags_cleared += 1;
+                        }
+                    }
+                }
+
+                let loss_state_cleared = agent.observer.complete_reconciliation(generation);
+                Ok(json!({
+                    "apps_reconciled": apps_reconciled,
+                    "paths_reconciled": reconciled_paths,
+                    "excluded_flags_cleared": excluded_flags_cleared,
+                    "processed_events": processed_events,
+                    "loss_state_cleared": loss_state_cleared,
+                }))
+            }
             "SetManualPathBinding" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
                 let path = req_str(&request.params, "path")?;
@@ -318,6 +356,29 @@ fn master_from_params(params: &serde_json::Value, agent: &StateAgent) -> Result<
         .ok_or_else(|| StateError::Crypto("master key not installed and not provided".into()))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReconciliationAction {
+    Reconcile(AppId),
+    ClearExcluded(AppId),
+}
+
+fn reconciliation_actions(
+    candidate_ids: &HashSet<AppId>,
+    dirty_apps: Vec<DirtyState>,
+) -> Vec<ReconciliationAction> {
+    dirty_apps
+        .into_iter()
+        .filter(|dirty| dirty.requires_reconciliation)
+        .map(|dirty| {
+            if candidate_ids.contains(&dirty.app_id) {
+                ReconciliationAction::Reconcile(dirty.app_id)
+            } else {
+                ReconciliationAction::ClearExcluded(dirty.app_id)
+            }
+        })
+        .collect()
+}
+
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
     let hex = hex.trim();
     if hex.len() != 64 {
@@ -336,6 +397,39 @@ fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_index_only_reconciles_flagged_candidates() {
+        let candidate = AppId("app:candidate".into());
+        let unflagged_candidate = AppId("app:unflagged".into());
+        let excluded = AppId("exe:noland-state-agent".into());
+        let candidate_ids = HashSet::from([candidate.clone(), unflagged_candidate.clone()]);
+        let now = chrono::Utc::now();
+        let dirty = |app_id, requires_reconciliation| DirtyState {
+            app_id,
+            first_dirty_at: now,
+            last_dirty_at: now,
+            dirty_paths: Vec::new(),
+            requires_reconciliation,
+        };
+
+        let actions = reconciliation_actions(
+            &candidate_ids,
+            vec![
+                dirty(candidate.clone(), true),
+                dirty(unflagged_candidate, false),
+                dirty(excluded.clone(), true),
+            ],
+        );
+
+        assert_eq!(
+            actions,
+            vec![
+                ReconciliationAction::Reconcile(candidate),
+                ReconciliationAction::ClearExcluded(excluded),
+            ]
+        );
+    }
 
     #[test]
     fn app_identity_rpc_value_includes_launch_metadata() {

@@ -83,8 +83,22 @@ fn main() {
 fn validate_tracing_architecture() {
     const SOURCE: &str = "bpf/noland_observer.bpf.c";
     const REQUIRED: &[&str] = &[
+        "raw_tracepoint/sched_process_fork",
+        "raw_tracepoint/sched_process_exec",
+        "raw_tracepoint/sched_process_exit",
+        "tracepoint/syscalls/sys_enter_open",
+        "tracepoint/syscalls/sys_enter_openat",
+        "tracepoint/syscalls/sys_enter_openat2",
+        "tracepoint/syscalls/sys_exit_open",
+        "tracepoint/syscalls/sys_exit_openat",
+        "tracepoint/syscalls/sys_exit_openat2",
+        "fentry/do_sys_openat2",
+        "fexit/do_sys_openat2",
+        "fexit/vfs_read",
+        "fexit/vfs_write",
         "fexit/security_file_open",
         "fexit/security_mmap_file",
+        "fexit/security_file_permission",
         "fexit/security_inode_create",
         "fexit/security_path_mknod",
         "fexit/security_path_truncate",

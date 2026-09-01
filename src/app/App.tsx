@@ -10,7 +10,7 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
-import { forceUpdateStateAgent } from "../lib/backend";
+import { refreshStateAgentIndex } from "../lib/backend";
 
 function RootRoute() {
   const appState = useAppStore((state) => state.appState);
@@ -69,6 +69,9 @@ function RootRoute() {
   const clearLaunchLibrary = useAppStore((state) => state.clearLaunchLibrary);
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
+  );
+  const loadAvailableOfferCountries = useAppStore(
+    (state) => state.loadAvailableOfferCountries,
   );
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
@@ -132,6 +135,7 @@ function RootRoute() {
       blockingAction={blockingAction}
       vastWalletSummary={vastWalletSummary}
       onSearchOffers={discoverOffers}
+      onLoadAvailableOfferCountries={loadAvailableOfferCountries}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
       onManualLocationSave={saveManualLocation}
@@ -165,12 +169,7 @@ function RootRoute() {
         if (!instanceId) {
           return;
         }
-        try {
-          await forceUpdateStateAgent(instanceId);
-        } catch (e) {
-          console.error("Failed to force update state agent", e);
-        }
-        await listSyncableStorageObjects(instanceId);
+        await refreshStateAgentIndex(instanceId);
       }}
     />
   );

@@ -254,6 +254,15 @@ pub struct OfferCandidate {
     pub has_avx: bool,
 }
 
+/// A two-letter geolocation code with the number of rentable offers Vast
+/// currently serves there. Used to constrain the server-picker country list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferCountryAvailability {
+    pub code: String,
+    pub offer_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceState {

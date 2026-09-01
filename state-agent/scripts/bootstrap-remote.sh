@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build and start noland-state-agent on a disposable Linux instance.
+# Build, enable, and start noland-state-agent on a disposable Linux instance.
 set -euo pipefail
 
 SRC="${1:-/opt/noland/state-agent}"
@@ -8,6 +8,40 @@ TARGET_USER="${3:-}"
 
 export NOLAND_STATE_ROOT="${NOLAND_STATE_ROOT:-/var/lib/noland/state}"
 export NOLAND_RUN_ROOT="${NOLAND_RUN_ROOT:-/run/noland}"
+export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
+
+install_build_dependencies() {
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    export NEEDRESTART_MODE=l
+    export NEEDRESTART_SUSPEND=1
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends \
+      build-essential ca-certificates clang curl libelf-dev llvm pkg-config zlib1g-dev
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y clang elfutils-libelf-devel gcc llvm make pkgconf-pkg-config zlib-devel curl ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y clang elfutils-libelf-devel gcc llvm make pkgconfig zlib-devel curl ca-certificates
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install clang gcc libelf-devel llvm make pkg-config zlib-devel curl ca-certificates
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Syu --noconfirm --needed base-devel clang curl libelf llvm pkgconf zlib ca-certificates
+  else
+    echo "cannot install state-agent build dependencies: unsupported Linux package manager" >&2
+    return 1
+  fi
+}
+
+require_bpf_compiler() {
+  local probe_object
+  probe_object="$(mktemp /tmp/noland-bpf-probe.XXXXXX.o)"
+  if ! printf 'int x;\n' | clang -target bpf -O2 -x c -c -o "$probe_object" - >/dev/null 2>&1; then
+    rm -f "$probe_object"
+    echo "installed clang does not provide the BPF backend required by noland-observer" >&2
+    return 1
+  fi
+  rm -f "$probe_object"
+}
 
 require_ebpf_unit_support() {
   local cap_last systemd_version
@@ -32,6 +66,15 @@ find_bpf_object() {
 }
 
 mkdir -p "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
+
+if ! command -v clang >/dev/null 2>&1 \
+  || ! command -v cc >/dev/null 2>&1 \
+  || ! command -v make >/dev/null 2>&1 \
+  || ! command -v pkg-config >/dev/null 2>&1 \
+  || ! pkg-config --exists libelf; then
+  install_build_dependencies
+fi
+require_bpf_compiler
 
 if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
@@ -66,7 +109,8 @@ if [[ -f "$SRC/systemd/noland-state-agent.service" ]]; then
       cp "$SRC/systemd/noland-state-agent.service" /etc/systemd/system/noland-state-agent.service
     fi
     systemctl daemon-reload
-    systemctl enable --now noland-state-agent.service
+    systemctl enable noland-state-agent.service >/dev/null 2>&1 || true
+    systemctl restart noland-state-agent.service >/dev/null 2>&1 || systemctl start noland-state-agent.service
 else
   echo "missing systemd unit at $SRC/systemd/noland-state-agent.service" >&2
   exit 1
@@ -76,9 +120,21 @@ if ! systemctl is-active --quiet noland-state-agent.service; then
   systemctl --no-pager --full status noland-state-agent.service >&2 || true
   exit 1
 fi
-if ! ss -xl 2>/dev/null | grep -q "$NOLAND_RUN_ROOT/state-agent.sock"; then
-  echo "state-agent service is active but RPC socket is missing" >&2
-  exit 1
-fi
 
-echo "STATE_AGENT_READY"
+SOCKET_PATH="$NOLAND_RUN_ROOT/state-agent.sock"
+for _ in $(seq 1 30); do
+  if [[ -S "$SOCKET_PATH" ]]; then
+    echo "STATE_AGENT_READY"
+    exit 0
+  fi
+  sleep 1
+  if ! systemctl is-active --quiet noland-state-agent.service; then
+    echo "state-agent service stopped before RPC socket became ready" >&2
+    systemctl --no-pager --full status noland-state-agent.service >&2 || true
+    exit 1
+  fi
+done
+
+echo "state-agent service is active but RPC socket did not appear at $SOCKET_PATH within 30 seconds" >&2
+systemctl --no-pager --full status noland-state-agent.service >&2 || true
+exit 1

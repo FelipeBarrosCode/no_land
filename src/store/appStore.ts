@@ -6,6 +6,7 @@ import {
   getRentedInstances,
   getProvisioningLogs,
   searchOffers,
+  listAvailableOfferCountries,
   selectOffer,
   setManualLocation,
   setupWireguardClient,
@@ -77,6 +78,7 @@ import type {
   ManualLocationInput,
   MoonlightPreferences,
   OfferCandidate,
+  OfferCountryAvailability,
   OnboardingPayload,
   PlatformCredentialsUpdate,
   IgdbCredentialsUpdate,
@@ -140,6 +142,9 @@ interface AppStore {
   discoverOffers: (page?: number) => Promise<void>;
   nextOffersPage: () => Promise<void>;
   previousOffersPage: () => Promise<void>;
+  loadAvailableOfferCountries: () => Promise<
+    OfferCountryAvailability[] | null
+  >;
   chooseOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   startPlay: () => Promise<void>;
   resumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
@@ -914,6 +919,15 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
 
       await state.discoverOffers(state.offersPage - 1);
+    },
+
+    loadAvailableOfferCountries: async () => {
+      try {
+        return await listAvailableOfferCountries();
+      } catch (error) {
+        console.error("Failed to load available offer countries", error);
+        return null;
+      }
     },
 
     chooseOffer: async (offerId, storageGb) => {

@@ -205,7 +205,9 @@ mod linux {
             };
             let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
             let ppid = stat.as_deref().and_then(parse_ppid).unwrap_or(1);
-            let exe = fs::read_link(format!("/proc/{pid}/exe")).ok();
+            let exe = fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .and_then(|exe| process_executable(pid, Some(exe)));
             let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                 .ok()
                 .map(|s| s.trim().to_string());
@@ -237,6 +239,7 @@ mod linux {
     /// Linux process connector (NETLINK_CONNECTOR / CN_IDX_PROC) is the
     /// event-driven primary path. The socket is opened when the agent starts
     /// on Linux; failures fall back to a restart-gap + reconciliation.
+    #[allow(dead_code)]
     pub fn open_proc_connector() -> std::io::Result<std::net::UdpSocket> {
         // Placeholder: real netlink bind is implemented in the agent runtime
         // when deployed on the disposable Linux instance. Tests never take
@@ -246,6 +249,39 @@ mod linux {
             "proc connector is only fully bound in the Linux runtime",
         ))
     }
+}
+
+pub(crate) fn process_executable(_pid: i32, kernel_executable: Option<PathBuf>) -> Option<PathBuf> {
+    let kernel_executable = kernel_executable?;
+    if !kernel_executable
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("/tmp/.mount_")
+    {
+        return Some(kernel_executable);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(cmdline) = std::fs::read(format!("/proc/{_pid}/cmdline")) {
+            if let Some(appimage) = appimage_argv0(&cmdline) {
+                return Some(appimage);
+            }
+        }
+    }
+    Some(kernel_executable)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn appimage_argv0(cmdline: &[u8]) -> Option<PathBuf> {
+    let argv0 = cmdline.split(|byte| *byte == 0).next()?;
+    let argv0 = std::str::from_utf8(argv0).ok()?;
+    let path = PathBuf::from(argv0);
+    let is_appimage = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"));
+    (path.is_absolute() && is_appimage).then_some(path)
 }
 
 pub fn now_event_time() -> chrono::DateTime<Utc> {
@@ -280,5 +316,20 @@ pub fn process_exec(pid: i32, ppid: i32, exe: impl Into<PathBuf>) -> ProcessEven
         argv_hash: None,
         comm,
         at: Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_absolute_appimage_argv0() {
+        assert_eq!(
+            appimage_argv0(b"/home/gamer/PCSX2.AppImage\0--fullscreen\0"),
+            Some(PathBuf::from("/home/gamer/PCSX2.AppImage"))
+        );
+        assert_eq!(appimage_argv0(b"relative.AppImage\0"), None);
+        assert_eq!(appimage_argv0(b"/usr/bin/pcsx2-qt\0"), None);
     }
 }

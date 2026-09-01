@@ -45,6 +45,7 @@ import type {
   LaunchSoftwareJob,
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
+  OfferCountryAvailability,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -78,6 +79,12 @@ export async function searchOffers(
   pageSize = 24,
 ): Promise<OfferCandidate[]> {
   return invokeSafe<OfferCandidate[]>("search_offers", { page, pageSize });
+}
+
+export async function listAvailableOfferCountries(): Promise<
+  OfferCountryAvailability[]
+> {
+  return invokeSafe<OfferCountryAvailability[]>("list_available_offer_countries");
 }
 
 export async function selectOffer(
@@ -831,6 +838,34 @@ export async function listMicrophones(
   return request;
 }
 
-export async function forceUpdateStateAgent(instanceId: number) {
-  return invokeSafe<void>("force_update_state_agent", { instanceId });
+export interface StateAgentIndexRefreshResult {
+  appsReconciled: number;
+  pathsReconciled: number;
+  excludedFlagsCleared: number;
+  processedEvents: number;
+  lossStateCleared: boolean;
+}
+
+interface RawStateAgentIndexRefreshResult {
+  apps_reconciled: number;
+  paths_reconciled: number;
+  excluded_flags_cleared: number;
+  processed_events: number;
+  loss_state_cleared: boolean;
+}
+
+export async function refreshStateAgentIndex(
+  instanceId: number,
+): Promise<StateAgentIndexRefreshResult> {
+  const result = await invokeSafe<RawStateAgentIndexRefreshResult>(
+    "refresh_state_agent_index",
+    { instanceId },
+  );
+  return {
+    appsReconciled: result.apps_reconciled,
+    pathsReconciled: result.paths_reconciled,
+    excludedFlagsCleared: result.excluded_flags_cleared,
+    processedEvents: result.processed_events,
+    lossStateCleared: result.loss_state_cleared,
+  };
 }

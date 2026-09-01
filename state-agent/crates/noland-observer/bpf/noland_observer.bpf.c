@@ -5,7 +5,7 @@
 
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 16 * 1024 * 1024);
+    __uint(max_entries, 128 * 1024 * 1024);
 } events SEC(".maps");
 
 struct {
@@ -56,6 +56,24 @@ struct pending_create_value {
     __u64 timestamp_ns;
 };
 
+struct pending_open_value {
+    __s32 dfd;
+    __u32 reserved;
+    char path[NOLAND_PATH_LEN];
+};
+
+struct syscall_enter_ctx {
+    __u64 common_fields;
+    __s64 syscall_nr;
+    __u64 args[6];
+};
+
+struct syscall_exit_ctx {
+    __u64 common_fields;
+    __s64 syscall_nr;
+    __s64 result;
+};
+
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 32768);
@@ -76,6 +94,20 @@ struct {
     __type(key, __u64);
     __type(value, struct pending_create_value);
 } pending_create SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 4096);
+    __type(key, __u64);
+    __type(value, struct pending_open_value);
+} pending_open SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct pending_open_value);
+} pending_open_scratch SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_ARRAY);
@@ -170,6 +202,15 @@ static __always_inline int current_is_ignored(__u64 class,
     return task_is_ignored(tgid, cgroup_id, cfg);
 }
 
+static __always_inline __u64 userspace_dev(__u32 dev)
+{
+    __u32 major = dev >> 20;
+    __u32 minor = dev & ((1U << 20) - 1);
+
+    /* Linux new_encode_dev(), matching st_dev returned by stat(2). */
+    return (minor & 0xff) | (major << 8) | ((__u64)(minor & ~0xff) << 12);
+}
+
 static __always_inline int file_is_ignored(struct file *file)
 {
     struct inode *inode;
@@ -184,7 +225,7 @@ static __always_inline int file_is_ignored(struct file *file)
     sb = BPF_CORE_READ(inode, i_sb);
     key.ino = BPF_CORE_READ(inode, i_ino);
     if (sb)
-        key.dev = BPF_CORE_READ(sb, s_dev);
+        key.dev = userspace_dev(BPF_CORE_READ(sb, s_dev));
     if (bpf_map_lookup_elem(&ignored_files, &key)) {
         count_stat(NOLAND_STAT_IGNORED);
         return 1;
@@ -275,6 +316,68 @@ static __always_inline void submit_event(struct noland_event_v1 *event)
     count_stat(NOLAND_STAT_EMITTED);
 }
 
+static __always_inline void remember_open_path_ptr(__s32 dfd, const char *path, int user_ptr)
+{
+    const struct noland_config_v1 *cfg;
+    struct pending_open_value *value;
+    __u64 pid_tgid;
+    __u32 zero = 0;
+    long copied;
+
+    if (!path || current_is_ignored(NOLAND_CLASS_OPEN, &cfg))
+        return;
+    value = bpf_map_lookup_elem(&pending_open_scratch, &zero);
+    if (!value)
+        return;
+    value->dfd = dfd;
+    value->reserved = 0;
+    if (user_ptr)
+        copied = bpf_probe_read_user_str(value->path, sizeof(value->path), path);
+    else
+        copied = bpf_probe_read_kernel_str(value->path, sizeof(value->path), path);
+    if (copied <= 0)
+        return;
+    pid_tgid = bpf_get_current_pid_tgid();
+    bpf_map_update_elem(&pending_open, &pid_tgid, value, BPF_ANY);
+}
+
+static __always_inline void remember_open_path(struct syscall_enter_ctx *ctx,
+                                                int dfd_index, int path_index,
+                                                __s32 fixed_dfd)
+{
+    __s32 dfd;
+    const char *path;
+
+    if (!ctx)
+        return;
+    dfd = dfd_index >= 0 ? (__s32)ctx->args[dfd_index] : fixed_dfd;
+    path = (const char *)ctx->args[path_index];
+    remember_open_path_ptr(dfd, path, 1);
+}
+
+static __always_inline void consume_open_path(struct noland_event_v1 *event)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct pending_open_value *pending = bpf_map_lookup_elem(&pending_open, &pid_tgid);
+
+    if (!pending)
+        return;
+    event->offset = (__s64)pending->dfd;
+    bpf_probe_read_kernel_str(event->path, sizeof(event->path), pending->path);
+    bpf_map_delete_elem(&pending_open, &pid_tgid);
+}
+
+static __always_inline int clear_pending_open(void)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+
+    /* security_file_open consumes successful correlations before syscall exit.
+     * Delete anything left behind (including when that hook is unavailable) so
+     * a later kernel-internal open on the same thread cannot inherit stale input. */
+    bpf_map_delete_elem(&pending_open, &pid_tgid);
+    return 0;
+}
+
 static __always_inline int consume_pending_create(struct file *file)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
@@ -302,24 +405,53 @@ static __always_inline void fill_inode(struct noland_event_v1 *event, struct ino
     event->mode = BPF_CORE_READ(inode, i_mode);
     sb = BPF_CORE_READ(inode, i_sb);
     if (sb)
-        event->dev = BPF_CORE_READ(sb, s_dev);
+        event->dev = userspace_dev(BPF_CORE_READ(sb, s_dev));
 }
 
 static __always_inline void fill_file(struct noland_event_v1 *event, struct file *file)
 {
     struct inode *inode;
-    long path_len;
     if (!file)
         return;
     inode = BPF_CORE_READ(file, f_inode);
     fill_inode(event, inode);
     event->operation_flags = BPF_CORE_READ(file, f_flags);
-    path_len = bpf_d_path(__builtin_preserve_access_index(&file->f_path),
-                          event->path, sizeof(event->path));
-    if (path_len < 0) {
-        event->flags |= NOLAND_F_PARTIAL_PATH;
-        count_stat(NOLAND_STAT_PATH_ERRORS);
+    /*
+     * bpf_d_path() is only permitted for a small kernel BTF allowlist and is
+     * rejected from ordinary fentry/fexit probes on several supported kernels.
+     * Userspace resolves this stable device/inode anchor through /proc/<tgid>.
+     */
+    event->flags |= NOLAND_F_PARTIAL_PATH;
+}
+
+static __always_inline void fill_path_anchor(struct noland_event_v1 *event,
+                                              const struct path *path,
+                                              int destination)
+{
+    struct dentry *dentry;
+    struct inode *inode;
+    struct super_block *sb;
+    __u64 ino = 0;
+    __u64 dev = 0;
+
+    if (!path)
+        return;
+    dentry = BPF_CORE_READ(path, dentry);
+    inode = dentry ? BPF_CORE_READ(dentry, d_inode) : NULL;
+    if (inode) {
+        ino = BPF_CORE_READ(inode, i_ino);
+        sb = BPF_CORE_READ(inode, i_sb);
+        if (sb)
+            dev = userspace_dev(BPF_CORE_READ(sb, s_dev));
     }
+    if (destination) {
+        event->offset = dev;
+        event->length = ino;
+    } else {
+        event->dev = dev;
+        event->ino = ino;
+    }
+    event->flags |= NOLAND_F_PARTIAL_PATH;
 }
 
 static __always_inline void fill_parent_and_name(struct noland_event_v1 *event,
@@ -328,29 +460,16 @@ static __always_inline void fill_parent_and_name(struct noland_event_v1 *event,
                                                   int destination)
 {
     const unsigned char *name;
-    struct inode *inode;
-    long path_len;
 
+    fill_path_anchor(event, parent, destination);
+    name = dentry ? BPF_CORE_READ(dentry, d_name.name) : NULL;
     if (destination) {
-        path_len = parent ? bpf_d_path((struct path *)parent, event->dest_path,
-                                      sizeof(event->dest_path)) : -1;
-        name = dentry ? BPF_CORE_READ(dentry, d_name.name) : NULL;
         if (name)
             bpf_probe_read_kernel_str(event->dest_name, sizeof(event->dest_name), name);
-    } else {
-        path_len = parent ? bpf_d_path((struct path *)parent, event->path,
-                                      sizeof(event->path)) : -1;
-        name = dentry ? BPF_CORE_READ(dentry, d_name.name) : NULL;
-        if (name)
-            bpf_probe_read_kernel_str(event->name, sizeof(event->name), name);
-        inode = dentry ? BPF_CORE_READ(dentry, d_inode) : NULL;
-        fill_inode(event, inode);
+    } else if (name) {
+        bpf_probe_read_kernel_str(event->name, sizeof(event->name), name);
     }
     event->flags |= NOLAND_F_PARENT_AND_NAME;
-    if (path_len < 0) {
-        event->flags |= NOLAND_F_PARTIAL_PATH;
-        count_stat(NOLAND_STAT_PATH_ERRORS);
-    }
 }
 
 static __always_inline int should_sample_read(const struct noland_config_v1 *cfg)
@@ -385,7 +504,8 @@ static __always_inline int coalesced(const struct noland_config_v1 *cfg, __u16 t
     if (!cfg || !ino)
         return 0;
     mode = observation_mode(cfg, cgroup_id);
-    if (type == NOLAND_EVENT_FILE_READ) {
+    if (type == NOLAND_EVENT_FILE_READ || type == NOLAND_EVENT_FILE_OPEN ||
+        type == NOLAND_EVENT_FILE_MMAP) {
         window = mode == NOLAND_OBSERVE_STEADY ? cfg->steady_read_ns : cfg->discovery_read_ns;
     } else if (type == NOLAND_EVENT_FILE_WRITE) {
         window = cfg->write_ns;
@@ -399,8 +519,8 @@ static __always_inline int coalesced(const struct noland_config_v1 *cfg, __u16 t
         next.count = previous->count + 1;
         bpf_map_update_elem(&coalesce, &key, &next, BPF_ANY);
         count_stat(NOLAND_STAT_COALESCED);
-        count_stat(type == NOLAND_EVENT_FILE_READ ? NOLAND_STAT_READ_COALESCED
-                                                  : NOLAND_STAT_WRITE_COALESCED);
+        count_stat(type == NOLAND_EVENT_FILE_WRITE ? NOLAND_STAT_WRITE_COALESCED
+                                                   : NOLAND_STAT_READ_COALESCED);
         return 1;
     }
     next.last_emit_ns = now;
@@ -432,7 +552,7 @@ static __always_inline int emit_io(struct file *file, __u16 type, __s64 result,
         ino = BPF_CORE_READ(inode, i_ino);
         sb = BPF_CORE_READ(inode, i_sb);
         if (sb)
-            dev = BPF_CORE_READ(sb, s_dev);
+            dev = userspace_dev(BPF_CORE_READ(sb, s_dev));
     }
     if (coalesced(cfg, type, cgroup_id, dev, ino, &accumulated))
         return 0;
@@ -471,6 +591,59 @@ static __always_inline int trace_mutation(__u16 type, const struct path *parent,
     return 0;
 }
 
+SEC("tracepoint/syscalls/sys_enter_open")
+int noland_sys_enter_open(struct syscall_enter_ctx *ctx)
+{
+    remember_open_path(ctx, -1, 0, -100);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat")
+int noland_sys_enter_openat(struct syscall_enter_ctx *ctx)
+{
+    remember_open_path(ctx, 0, 1, -100);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_enter_openat2")
+int noland_sys_enter_openat2(struct syscall_enter_ctx *ctx)
+{
+    remember_open_path(ctx, 0, 1, -100);
+    return 0;
+}
+
+SEC("tracepoint/syscalls/sys_exit_open")
+int noland_sys_exit_open(struct syscall_exit_ctx *ctx)
+{
+    return clear_pending_open();
+}
+
+SEC("tracepoint/syscalls/sys_exit_openat")
+int noland_sys_exit_openat(struct syscall_exit_ctx *ctx)
+{
+    return clear_pending_open();
+}
+
+SEC("tracepoint/syscalls/sys_exit_openat2")
+int noland_sys_exit_openat2(struct syscall_exit_ctx *ctx)
+{
+    return clear_pending_open();
+}
+
+/* do_sys_openat2(dfd, filename, how) -> fd; BTF trampoline fallback for blocked tracepoints. */
+SEC("fentry/do_sys_openat2")
+int noland_do_sys_openat2_enter(__u64 *ctx)
+{
+    remember_open_path_ptr((__s32)ctx[0], (const char *)ctx[1], 1);
+    return 0;
+}
+
+SEC("fexit/do_sys_openat2")
+int noland_do_sys_openat2_exit(__u64 *ctx)
+{
+    return clear_pending_open();
+}
+
 SEC("raw_tracepoint/sched_process_fork")
 int noland_process_fork(struct bpf_raw_tracepoint_args *ctx)
 {
@@ -501,7 +674,7 @@ SEC("raw_tracepoint/sched_process_exec")
 int noland_process_exec(struct bpf_raw_tracepoint_args *ctx)
 {
     const struct noland_config_v1 *cfg;
-    struct linux_binprm *bprm = (void *)ctx->args[2];
+    struct linux_binprm *bprm = (void *)ctx->args[0];
     struct noland_event_v1 *event;
     const char *filename;
 
@@ -572,28 +745,37 @@ int noland_security_file_open(__u64 *ctx)
     int result = (int)ctx[1];
     const struct noland_config_v1 *cfg;
     struct noland_event_v1 *event;
+    __u16 type;
+    __u32 accumulated = 1;
 
     if (result < 0 || current_is_ignored(NOLAND_CLASS_OPEN, &cfg) || file_is_ignored(file))
         return 0;
-    event = new_event(consume_pending_create(file) ? NOLAND_EVENT_FILE_CREATE
-                                                   : NOLAND_EVENT_FILE_OPEN,
-                      0);
+    type = consume_pending_create(file) ? NOLAND_EVENT_FILE_CREATE : NOLAND_EVENT_FILE_OPEN;
+    event = new_event(type, 0);
     if (!event)
         return 0;
     event->result = result;
+    consume_open_path(event);
     fill_file(event, file);
+    if (type == NOLAND_EVENT_FILE_OPEN &&
+        coalesced(cfg, type, event->cgroup_id, event->dev, event->ino, &accumulated))
+        return 0;
+    event->accumulated_count = accumulated;
     submit_event(event);
     return 0;
 }
 
-/* security_mmap_file(file, prot, flags) -> int */
+/* security_mmap_file(file, prot, flags) -> int on supported kernels. */
 SEC("fexit/security_mmap_file")
 int noland_security_mmap_file(__u64 *ctx)
 {
     struct file *file = (void *)ctx[0];
+    __u32 prot = (__u32)ctx[1];
+    __u32 flags = (__u32)ctx[2];
     int result = (int)ctx[3];
     const struct noland_config_v1 *cfg;
     struct noland_event_v1 *event;
+    __u32 accumulated = 1;
 
     if (!file || result < 0 || current_is_ignored(NOLAND_CLASS_MMAP, &cfg) || file_is_ignored(file))
         return 0;
@@ -601,10 +783,37 @@ int noland_security_mmap_file(__u64 *ctx)
     if (!event)
         return 0;
     event->result = result;
-    event->mode = (__u32)ctx[1];
-    event->operation_flags = (__u32)ctx[2];
+    /* This hook exposes one protection mask on this kernel; preserve it in both fields. */
+    event->length = prot;
     fill_file(event, file);
+    if (coalesced(cfg, NOLAND_EVENT_FILE_MMAP, event->cgroup_id,
+                  event->dev, event->ino, &accumulated))
+        return 0;
+    event->accumulated_count = accumulated;
+    event->mode = prot;
+    event->operation_flags = flags;
     submit_event(event);
+    return 0;
+}
+
+/*
+ * Fallback for kernels without usable vfs_read/vfs_write trampolines.
+ * The loader enables this only when primary I/O coverage is incomplete.
+ * MAY_EXEC=1, MAY_WRITE=2, MAY_READ=4, MAY_APPEND=8.
+ */
+SEC("fexit/security_file_permission")
+int noland_security_file_permission(__u64 *ctx)
+{
+    struct file *file = (void *)ctx[0];
+    int mask = (int)ctx[1];
+    int result = (int)ctx[2];
+
+    if (result < 0)
+        return 0;
+    if (mask & 4)
+        emit_io(file, NOLAND_EVENT_FILE_READ, 1, 0, NULL);
+    if (mask & (2 | 8))
+        emit_io(file, NOLAND_EVENT_FILE_WRITE, 1, 0, NULL);
     return 0;
 }
 
@@ -649,15 +858,7 @@ int noland_security_path_truncate(__u64 *ctx)
     if (!event)
         return 0;
     event->result = result;
-    if (path) {
-        long n = bpf_d_path((struct path *)path, event->path, sizeof(event->path));
-        struct dentry *dentry = BPF_CORE_READ(path, dentry);
-        fill_inode(event, dentry ? BPF_CORE_READ(dentry, d_inode) : NULL);
-        if (n < 0) {
-            event->flags |= NOLAND_F_PARTIAL_PATH;
-            count_stat(NOLAND_STAT_PATH_ERRORS);
-        }
-    }
+    fill_path_anchor(event, path, 0);
     submit_event(event);
     return 0;
 }
@@ -766,8 +967,7 @@ int noland_security_path_chmod(__u64 *ctx)
         return 0;
     event->result = result;
     event->mode = (__u32)ctx[1];
-    if (path)
-        bpf_d_path((struct path *)path, event->path, sizeof(event->path));
+    fill_path_anchor(event, path, 0);
     submit_event(event);
     return 0;
 }
@@ -789,8 +989,7 @@ int noland_security_path_chown(__u64 *ctx)
     event->result = result;
     event->uid = (__u32)ctx[1];
     event->gid = (__u32)ctx[2];
-    if (path)
-        bpf_d_path((struct path *)path, event->path, sizeof(event->path));
+    fill_path_anchor(event, path, 0);
     submit_event(event);
     return 0;
 }

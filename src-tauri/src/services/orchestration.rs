@@ -28,6 +28,7 @@ use super::{
     nvidia_headless::NvidiaHeadlessService,
     post_wireguard_setup::initialize_post_wireguard_flow,
     remote_exec::RemoteExec,
+    shared_storage::agent_runtime::ensure_state_agent,
     ssh_keys::SshKeyService,
     sunshine::SunshineService,
     vast_api::VastApiClient,
@@ -775,6 +776,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         )
         .await?;
     }
+    ensure_not_cancelled(&context)?;
+
+    info!(
+        "Ensuring state-agent is installed and enabled on instance {}",
+        instance.id
+    );
+    ensure_state_agent(&remote, &target_user).await?;
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -1749,6 +1757,13 @@ async fn run_existing_instance_orchestration(
     }
     ensure_not_cancelled(&context)?;
 
+    info!(
+        "Ensuring state-agent is installed and enabled on existing instance {}",
+        instance.id
+    );
+    ensure_state_agent(&remote, &target_user).await?;
+    ensure_not_cancelled(&context)?;
+
     emit_transition(
         &app,
         &context,
@@ -2594,7 +2609,7 @@ async fn ensure_post_nvidia_reboot(
 
     sleep(Duration::from_secs(8)).await;
 
-    const REBOOT_RECONNECT_ATTEMPTS: usize = 36;
+    const REBOOT_RECONNECT_ATTEMPTS: usize = 90;
     const REBOOT_RECONNECT_INTERVAL: Duration = Duration::from_secs(10);
 
     for attempt in 1..=REBOOT_RECONNECT_ATTEMPTS {
@@ -2624,7 +2639,7 @@ async fn ensure_post_nvidia_reboot(
                 };
                 remote.ssh_port = instance.ssh_port;
 
-                let probe = {
+                let probe_result = {
                     let remote = remote.clone();
                     tokio::task::spawn_blocking(move || {
                         remote.ssh("echo reboot-online", Duration::from_secs(15))
@@ -2632,7 +2647,32 @@ async fn ensure_post_nvidia_reboot(
                     .await
                     .map_err(|error| {
                         AppError::Command(format!("reboot probe join failure: {error}"))
-                    })??
+                    })?
+                };
+                let probe = match probe_result {
+                    Ok(probe) => probe,
+                    Err(error) => {
+                        emit_transition(
+                            app,
+                            context,
+                            OrchestrationState::ConnectingSsh,
+                            "Waiting for SSH after reboot",
+                            Some(format!(
+                                "Attempt {}/{} | ssh={}:{} | transient error={}",
+                                attempt,
+                                REBOOT_RECONNECT_ATTEMPTS,
+                                remote.ssh_host,
+                                remote.ssh_port,
+                                error
+                            )),
+                            false,
+                        )
+                        .await;
+                        if attempt < REBOOT_RECONNECT_ATTEMPTS {
+                            sleep(REBOOT_RECONNECT_INTERVAL).await;
+                        }
+                        continue;
+                    }
                 };
 
                 if probe.status_code == 0 {

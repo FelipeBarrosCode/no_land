@@ -420,6 +420,16 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn clear_reconciliation_required(&self, app_id: &AppId) -> Result<()> {
+        self.lock()?
+            .execute(
+                "UPDATE dirty_apps SET requires_reconciliation=0 WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn clear_dirty(&self, app_id: &AppId) -> Result<()> {
         self.lock()?
             .execute(

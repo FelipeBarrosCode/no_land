@@ -80,7 +80,7 @@ pub fn reconcile_app(agent: &StateAgent, app_id: &AppId) -> Result<usize> {
             found += 1;
         }
     }
-    agent.db.mark_dirty(app_id, None, false)?;
+    agent.db.clear_reconciliation_required(app_id)?;
     Ok(found)
 }
 

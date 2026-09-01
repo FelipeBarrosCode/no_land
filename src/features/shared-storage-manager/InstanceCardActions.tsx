@@ -13,7 +13,7 @@ interface Props {
   onOpenLaunchLibrary: (instanceId: number) => void;
   onDisplay: (instanceId: number) => void;
   onReboot: (instanceId: number) => void;
-  onDestroy: (instanceId: number) => void;
+  onDestroy: (instanceId: number) => Promise<void>;
   onSaveStorage: (instanceId: number) => void;
   onSyncStorage: (instanceId: number) => void;
 }
@@ -36,13 +36,14 @@ export function InstanceCardActions({
   const actionDisabled = busy || instanceActionRunning;
   const loadingKey = blockingAction?.key ?? null;
 
-  const handleDestroy = () => {
-    if (showDestroyConfirm) {
-      onDestroy(instance.instanceId);
-      setShowDestroyConfirm(false);
-    } else {
+  const handleDestroy = async () => {
+    if (!showDestroyConfirm) {
       setShowDestroyConfirm(true);
+      return;
     }
+
+    await onDestroy(instance.instanceId);
+    setShowDestroyConfirm(false);
   };
 
   return (
