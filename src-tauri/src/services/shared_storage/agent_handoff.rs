@@ -89,7 +89,7 @@ impl SharedStorageManager {
     ) -> AppResult<serde_json::Value> {
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
-        call_agent_raw(
+        let queued = call_agent_raw(
             remote,
             "StartBackup",
             json!({
@@ -99,7 +99,12 @@ impl SharedStorageManager {
                 "master_key_hex": hex,
             }),
         )
-        .await
+        .await?;
+        let operation_id = queued
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AppError::State("state-agent backup returned no operation_id".into()))?;
+        wait_for_agent_operation(remote, operation_id, Duration::from_secs(2 * 60 * 60)).await
     }
 
     pub async fn start_agent_seal(
@@ -151,7 +156,7 @@ impl SharedStorageManager {
         mode: &str,
     ) -> AppResult<serde_json::Value> {
         let (session, hex) = Self::prepare_agent_operation(context, remote, target_user).await?;
-        call_agent_raw(
+        let queued = call_agent_raw(
             remote,
             "StartRestore",
             json!({
@@ -162,7 +167,14 @@ impl SharedStorageManager {
                 "master_key_hex": hex,
             }),
         )
-        .await
+        .await?;
+        let operation_id = queued
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AppError::State("state-agent restore returned no operation_id".into())
+            })?;
+        wait_for_agent_operation(remote, operation_id, Duration::from_secs(2 * 60 * 60)).await
     }
 
     pub async fn list_agent_apps(
@@ -225,6 +237,49 @@ impl SharedStorageManager {
             .await?;
         Ok(hex::encode(key))
     }
+}
+
+async fn wait_for_agent_operation(
+    remote: &RemoteExec,
+    operation_id: &str,
+    timeout: Duration,
+) -> AppResult<serde_json::Value> {
+    tokio::time::timeout(timeout, async {
+        loop {
+            let status = call_agent_raw(
+                remote,
+                "GetOperationStatus",
+                json!({"operation_id": operation_id}),
+            )
+            .await?;
+            match status
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("UNKNOWN")
+            {
+                "COMPLETED" | "SEALED" | "ROLLED_BACK" => return Ok(status),
+                "FAILED" => {
+                    let error = status
+                        .get("last_error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("state-agent operation failed");
+                    return Err(AppError::Provisioning(error.to_string()));
+                }
+                "CANCELLED" => {
+                    return Err(AppError::State(format!(
+                        "state-agent operation {operation_id} was cancelled"
+                    )));
+                }
+                _ => tokio::time::sleep(Duration::from_secs(2)).await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        AppError::Command(format!(
+            "timed out waiting for state-agent operation {operation_id}"
+        ))
+    })?
 }
 
 fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>> {

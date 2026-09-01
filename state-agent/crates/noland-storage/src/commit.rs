@@ -5,7 +5,7 @@ use noland_crypto::{derive_keys, unwrap_envelope, wrap_envelope, MasterKey};
 use noland_state_core::*;
 use uuid::Uuid;
 
-use crate::{RemoteKey, SharedStorageProvider};
+use crate::{ImmutableUpload, MetadataBatch, MetadataWrite, RemoteKey, SharedStorageProvider};
 
 pub struct CatalogStore {
     pub document: CatalogDocument,
@@ -103,13 +103,18 @@ pub async fn commit_bundle_with_index(
     let keys = derive_keys(master);
     let bundle_prefix = bundle_dir(&manifest.app.app_id, manifest.bundle_id);
 
-    for (pack_id, path) in pack_files {
-        let key = RemoteKey::new(pack_key(pack_id));
-        provider.upload_immutable(path, &key).await?;
-        if let Some(db) = db {
+    let pack_uploads: Vec<_> = pack_files
+        .iter()
+        .map(|(pack_id, path)| {
+            ImmutableUpload::new(path.clone(), RemoteKey::new(pack_key(pack_id)))
+        })
+        .collect();
+    provider.upload_immutable_bulk(&pack_uploads).await?;
+    if let Some(db) = db {
+        for upload in &pack_uploads {
             db.journal_put(
                 &manifest.commit_id.to_string(),
-                key.as_str(),
+                upload.key.as_str(),
                 "upload",
                 "ok",
                 None,
@@ -117,37 +122,35 @@ pub async fn commit_bundle_with_index(
         }
     }
 
+    let mut metadata = Vec::new();
     if let Some(index) = pack_index_json {
         let enc_index = wrap_envelope(&keys.manifest, b"pack-index", index)?;
-        provider
-            .put_small_versioned(
-                Bytes::from(enc_index),
-                &RemoteKey::new(format!("{bundle_prefix}/index.enc")),
-            )
-            .await?;
+        metadata.push(MetadataWrite::new(
+            RemoteKey::new(format!("{bundle_prefix}/index.enc")),
+            Bytes::from(enc_index),
+        ));
     }
 
     let manifest_json = serde_json::to_vec_pretty(manifest)?;
     let manifest_hash = format!("blake3:{}", blake3::hash(&manifest_json).to_hex());
     let enc = wrap_envelope(&keys.manifest, b"manifest", &manifest_json)?;
+    metadata.push(MetadataWrite::new(
+        RemoteKey::new(format!("{bundle_prefix}/manifest.enc")),
+        Bytes::from(enc),
+    ));
+    metadata.push(MetadataWrite::new(
+        RemoteKey::new(format!("{bundle_prefix}/manifest.hash")),
+        Bytes::from(manifest_hash.clone()),
+    ));
+    // COMMITTED is the final batch phase. Incomplete bundles stay invisible.
     provider
-        .put_small_versioned(
-            Bytes::from(enc),
-            &RemoteKey::new(format!("{bundle_prefix}/manifest.enc")),
-        )
-        .await?;
-    provider
-        .put_small_versioned(
-            Bytes::from(manifest_hash.clone()),
-            &RemoteKey::new(format!("{bundle_prefix}/manifest.hash")),
-        )
-        .await?;
-    // COMMITTED is written last. Incomplete bundles stay invisible.
-    provider
-        .put_small_versioned(
-            Bytes::from(manifest.commit_id.to_string()),
-            &RemoteKey::new(format!("{bundle_prefix}/{COMMITTED_MARKER}")),
-        )
+        .put_metadata_batch(&MetadataBatch::with_committed(
+            metadata,
+            MetadataWrite::new(
+                RemoteKey::new(format!("{bundle_prefix}/{COMMITTED_MARKER}")),
+                Bytes::from(manifest.commit_id.to_string()),
+            ),
+        ))
         .await?;
 
     if let Some(db) = db {
@@ -209,16 +212,16 @@ pub async fn write_catalog(
     let enc = wrap_envelope(&keys.catalog, b"catalog", &json)?;
     let commit_key = RemoteKey::new(catalog_commit_key(catalog.catalog_commit_id));
     provider
-        .put_small_versioned(Bytes::from(enc), &commit_key)
-        .await?;
-    provider
-        .put_small_versioned(
-            Bytes::from(COMMITTED_MARKER.as_bytes().to_vec()),
-            &RemoteKey::new(format!(
-                "catalog/commits/{}.{}",
-                catalog.catalog_commit_id, COMMITTED_MARKER
-            )),
-        )
+        .put_metadata_batch(&MetadataBatch::with_committed(
+            vec![MetadataWrite::new(commit_key, Bytes::from(enc))],
+            MetadataWrite::new(
+                RemoteKey::new(format!(
+                    "catalog/commits/{}.{}",
+                    catalog.catalog_commit_id, COMMITTED_MARKER
+                )),
+                Bytes::from(COMMITTED_MARKER.as_bytes().to_vec()),
+            ),
+        ))
         .await?;
     // LATEST is a convenience pointer. Restore can recover from catalog history.
     let _ = provider
@@ -283,22 +286,19 @@ pub async fn commit_checkpoint(
     let json = serde_json::to_vec_pretty(checkpoint)?;
     let enc = wrap_envelope(&keys.catalog, b"checkpoint", &json)?;
     provider
-        .put_small_versioned(
-            Bytes::from(enc),
-            &RemoteKey::new(format!("{dir}/state.enc")),
-        )
-        .await?;
-    provider
-        .put_small_versioned(
-            Bytes::from(enc_meta(checkpoint)),
-            &RemoteKey::new(format!("{dir}/checkpoint.enc")),
-        )
-        .await?;
-    provider
-        .put_small_versioned(
-            Bytes::from(checkpoint.checkpoint_id.to_string()),
-            &RemoteKey::new(format!("{dir}/{COMMITTED_MARKER}")),
-        )
+        .put_metadata_batch(&MetadataBatch::with_committed(
+            vec![
+                MetadataWrite::new(RemoteKey::new(format!("{dir}/state.enc")), Bytes::from(enc)),
+                MetadataWrite::new(
+                    RemoteKey::new(format!("{dir}/checkpoint.enc")),
+                    Bytes::from(enc_meta(checkpoint)),
+                ),
+            ],
+            MetadataWrite::new(
+                RemoteKey::new(format!("{dir}/{COMMITTED_MARKER}")),
+                Bytes::from(checkpoint.checkpoint_id.to_string()),
+            ),
+        ))
         .await?;
     Ok(())
 }
@@ -313,13 +313,16 @@ pub async fn commit_seal(
     let json = serde_json::to_vec_pretty(seal)?;
     let enc = wrap_envelope(&keys.catalog, b"seal", &json)?;
     provider
-        .put_small_versioned(Bytes::from(enc), &RemoteKey::new(format!("{dir}/seal.enc")))
-        .await?;
-    provider
-        .put_small_versioned(
-            Bytes::from(seal.seal_id.to_string()),
-            &RemoteKey::new(format!("{dir}/{COMMITTED_MARKER}")),
-        )
+        .put_metadata_batch(&MetadataBatch::with_committed(
+            vec![MetadataWrite::new(
+                RemoteKey::new(format!("{dir}/seal.enc")),
+                Bytes::from(enc),
+            )],
+            MetadataWrite::new(
+                RemoteKey::new(format!("{dir}/{COMMITTED_MARKER}")),
+                Bytes::from(seal.seal_id.to_string()),
+            ),
+        ))
         .await?;
     Ok(())
 }

@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use noland_crypto::MasterKey;
@@ -7,14 +8,13 @@ use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_rpc::{HealthStatus, RpcHandler, RpcRequest};
 use noland_state_core::*;
 use noland_storage::{
-    load_catalog, shred_ephemeral_session, write_ephemeral_session, RcloneStorage,
-    SharedStorageProvider,
+    load_catalog, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
 };
 use serde_json::json;
 
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 7;
+const AGENT_API_VERSION: u64 = 9;
 
 pub struct AgentRpc(pub Arc<StateAgent>);
 
@@ -97,8 +97,6 @@ impl RpcHandler for AgentRpc {
                 );
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                let _ = agent.discover();
-                let _ = agent.process_events();
                 let op_id = uuid::Uuid::new_v4();
                 let op = OperationRecord {
                     operation_id: op_id,
@@ -115,45 +113,95 @@ impl RpcHandler for AgentRpc {
                     detail_json: json!({"session_operation": session.operation_id}),
                 };
                 agent.db.upsert_operation(&op)?;
-                let result = if app_id_raw == "*" || app_id_raw == "_all" {
-                    crate::backup::run_backup_all_with_session(agent, mode, &session, &master)
-                        .await
-                        .map(|manifests| {
-                            json!({
-                                "operation_id": op_id,
-                                "state": "COMPLETED",
-                                "count": manifests.len(),
-                                "bundle_ids": manifests.iter().map(|m| m.bundle_id).collect::<Vec<_>>(),
+
+                let all_apps = app_id_raw == "*" || app_id_raw == "_all";
+                let app_id = (!all_apps).then(|| AppId(app_id_raw.into()));
+                let task_agent = Arc::clone(agent);
+                let terminated_agent = Arc::clone(agent);
+                let operation_manager = agent.operations.clone();
+                let total_started = Instant::now();
+                let spawned = operation_manager.spawn(
+                    op_id,
+                    async move {
+                        let discovery_started = Instant::now();
+                        let discovery = task_agent
+                            .discover()
+                            .and_then(|_| task_agent.process_events().map(|_| ()));
+                        if let Err(error) = discovery {
+                            mark_operation_failed(
+                                &task_agent,
+                                op_id,
+                                error.to_string(),
+                                total_started,
+                            );
+                            return;
+                        }
+                        record_discovery_duration(&task_agent, op_id, discovery_started);
+
+                        let result = if all_apps {
+                            crate::backup::run_backup_all_with_session(
+                                &task_agent,
+                                mode,
+                                &session,
+                                &master,
+                            )
+                            .await
+                            .map(|manifests| {
+                                let bundle_ids = manifests
+                                    .iter()
+                                    .map(|manifest| manifest.bundle_id)
+                                    .collect::<Vec<_>>();
+                                (manifests.len(), bundle_ids)
                             })
-                        })
-                } else {
-                    crate::backup::run_backup_with_session(
-                        agent,
-                        &AppId(app_id_raw.into()),
-                        mode,
-                        &session,
-                        &master,
-                    )
-                    .await
-                    .map(|manifest| {
-                        json!({
-                            "operation_id": op_id,
-                            "state": "COMPLETED",
-                            "bundle_id": manifest.bundle_id,
-                            "commit_id": manifest.commit_id,
-                        })
-                    })
-                };
-                match result {
-                    Ok(value) => Ok(value),
-                    Err(err) => {
-                        let mut failed = op;
-                        failed.state = BackupState::Failed.as_str().into();
-                        failed.last_error = Some(err.to_string());
-                        agent.db.upsert_operation(&failed)?;
-                        Err(err)
-                    }
+                        } else {
+                            crate::backup::run_backup_with_session(
+                                &task_agent,
+                                app_id.as_ref().expect("single-app backup has an app id"),
+                                mode,
+                                &session,
+                                &master,
+                                Some(op_id),
+                            )
+                            .await
+                            .map(|manifest| (1, vec![manifest.bundle_id]))
+                        };
+
+                        match result {
+                            Ok((count, bundle_ids)) if all_apps => {
+                                mark_all_backup_completed(
+                                    &task_agent,
+                                    op_id,
+                                    count,
+                                    &bundle_ids,
+                                    total_started,
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                mark_operation_failed(
+                                    &task_agent,
+                                    op_id,
+                                    error.to_string(),
+                                    total_started,
+                                );
+                            }
+                        }
+                    },
+                    move |error| {
+                        mark_operation_failed(&terminated_agent, op_id, error, total_started);
+                    },
+                );
+                if !spawned {
+                    return Err(StateError::Invalid(format!(
+                        "operation {op_id} is already running"
+                    )));
                 }
+
+                Ok(json!({
+                    "operation_id": op_id,
+                    "state": BackupState::Queued.as_str(),
+                    "stage": BackupState::Queued.as_str(),
+                }))
             }
             "StartSeal" => {
                 let session = parse_session(&request.params)?;
@@ -165,21 +213,22 @@ impl RpcHandler for AgentRpc {
                         .and_then(|v| v.as_str())
                         .unwrap_or("personal_state"),
                 );
-                let seal =
-                    crate::seal::run_seal_with_session(agent, &session, &master, mode).await?;
+                let seal = agent
+                    .operations
+                    .run_exclusive(crate::seal::run_seal_with_session(
+                        agent, &session, &master, mode,
+                    ))
+                    .await?;
                 Ok(serde_json::to_value(seal)?)
             }
             "StartCheckpoint" => {
                 let checkpoint = crate::checkpoint::write_local_checkpoint(agent)?;
                 if let Ok(session) = parse_session(&request.params) {
                     let master = master_from_params(&request.params, agent)?;
-                    let config = write_ephemeral_session(&agent.config.paths.run_root, &session)?;
+                    let (config, _session_guard) =
+                        write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
                     let storage = RcloneStorage::from_session(&session, &config);
                     let _ = noland_storage::commit_checkpoint(&storage, &master, &checkpoint).await;
-                    let _ = shred_ephemeral_session(
-                        &agent.config.paths.run_root,
-                        &session.operation_id,
-                    );
                 }
                 Ok(json!({"checkpoint_id": checkpoint.checkpoint_id}))
             }
@@ -199,13 +248,65 @@ impl RpcHandler for AgentRpc {
                 };
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                crate::restore::run_restore_with_session(
-                    agent, &app_id, bundle_id, mode, &session, &master,
-                )
-                .await?;
-                Ok(json!({"state": "COMPLETED", "app_id": app_id.as_str(), "bundle_id": bundle_id}))
+                let operation_id = uuid::Uuid::new_v4();
+                let operation = OperationRecord {
+                    operation_id,
+                    kind: "restore".into(),
+                    app_id: Some(app_id.clone()),
+                    state: RestoreState::Queued.as_str().into(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                    last_error: None,
+                    detail_json: json!({
+                        "bundle_id": bundle_id,
+                        "session_operation": session.operation_id,
+                    }),
+                };
+                agent.db.upsert_operation(&operation)?;
+
+                let task_agent = Arc::clone(agent);
+                let terminated_agent = Arc::clone(agent);
+                let operation_manager = agent.operations.clone();
+                let started = Instant::now();
+                let spawned = operation_manager.spawn(
+                    operation_id,
+                    async move {
+                        if let Err(error) = crate::restore::run_restore_with_session(
+                            &task_agent,
+                            &app_id,
+                            bundle_id,
+                            mode,
+                            &session,
+                            &master,
+                            operation_id,
+                        )
+                        .await
+                        {
+                            mark_operation_failed(
+                                &task_agent,
+                                operation_id,
+                                error.to_string(),
+                                started,
+                            );
+                        }
+                    },
+                    move |error| {
+                        mark_operation_failed(&terminated_agent, operation_id, error, started);
+                    },
+                );
+                if !spawned {
+                    return Err(StateError::Invalid(format!(
+                        "operation {operation_id} is already running"
+                    )));
+                }
+
+                Ok(json!({
+                    "operation_id": operation_id,
+                    "state": RestoreState::Queued.as_str(),
+                    "stage": RestoreState::Queued.as_str(),
+                }))
             }
-            "GetBackupStatus" | "GetRestoreStatus" | "GetSealStatus" => {
+            "GetOperationStatus" | "GetBackupStatus" | "GetRestoreStatus" | "GetSealStatus" => {
                 let id = request
                     .params
                     .get("operation_id")
@@ -217,9 +318,16 @@ impl RpcHandler for AgentRpc {
                     .db
                     .get_operation(uuid)?
                     .ok_or_else(|| StateError::NotFound(id.into()))?;
-                Ok(serde_json::to_value(op)?)
+                let mut value = serde_json::to_value(op)?;
+                value
+                    .as_object_mut()
+                    .expect("operation serializes as an object")
+                    .insert("running".into(), agent.operations.is_running(uuid).into());
+                Ok(value)
             }
-            "CancelBackup" | "CancelRestore" => Ok(json!({"cancelled": true})),
+            "CancelBackup" | "CancelRestore" | "CancelOperation" => Err(StateError::Invalid(
+                "operation cancellation is not implemented safely yet".into(),
+            )),
             "ListLocalCommits" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
                 Ok(json!(agent.db.latest_commit(&app_id)?))
@@ -227,22 +335,18 @@ impl RpcHandler for AgentRpc {
             "ListCloudCatalog" => {
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                let config = write_ephemeral_session(&agent.config.paths.run_root, &session)?;
+                let (config, _session_guard) =
+                    write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
                 let storage = RcloneStorage::from_session(&session, &config);
                 let catalog = load_catalog(&storage, &master).await;
-                let _ =
-                    shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
                 Ok(serde_json::to_value(catalog?)?)
             }
             "GetStorageHealth" => {
                 if let Ok(session) = parse_session(&request.params) {
-                    let config = write_ephemeral_session(&agent.config.paths.run_root, &session)?;
+                    let (config, _session_guard) =
+                        write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
                     let storage = RcloneStorage::from_session(&session, &config);
                     let health = storage.health_check().await?;
-                    let _ = shred_ephemeral_session(
-                        &agent.config.paths.run_root,
-                        &session.operation_id,
-                    );
                     return Ok(serde_json::to_value(health)?);
                 }
                 Ok(json!({"ok": true, "provider": "none"}))
@@ -314,6 +418,110 @@ impl RpcHandler for AgentRpc {
             }
             other => Err(StateError::Invalid(format!("unknown method {other}"))),
         }
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn record_discovery_duration(agent: &StateAgent, operation_id: uuid::Uuid, started: Instant) {
+    let result = (|| -> Result<()> {
+        let Some(mut op) = agent.db.get_operation(operation_id)? else {
+            return Ok(());
+        };
+        let mut metrics = op
+            .detail_json
+            .get("metrics")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<OperationMetrics>(value).ok())
+            .unwrap_or_default();
+        metrics.discovery_duration_ms = elapsed_ms(started);
+        op.state = BackupState::Discovering.as_str().into();
+        op.updated_at = chrono::Utc::now();
+        if !op.detail_json.is_object() {
+            op.detail_json = json!({});
+        }
+        op.detail_json
+            .as_object_mut()
+            .expect("operation detail is an object")
+            .insert("metrics".into(), serde_json::to_value(metrics)?);
+        agent.db.upsert_operation(&op)
+    })();
+    if let Err(error) = result {
+        tracing::warn!(%operation_id, %error, "failed to persist discovery metrics");
+    }
+}
+
+fn mark_all_backup_completed(
+    agent: &StateAgent,
+    operation_id: uuid::Uuid,
+    count: usize,
+    bundle_ids: &[uuid::Uuid],
+    started: Instant,
+) {
+    let result = (|| -> Result<()> {
+        let Some(mut op) = agent.db.get_operation(operation_id)? else {
+            return Ok(());
+        };
+        let mut metrics = op
+            .detail_json
+            .get("metrics")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<OperationMetrics>(value).ok())
+            .unwrap_or_default();
+        metrics.total_duration_ms = elapsed_ms(started);
+        op.state = BackupState::Completed.as_str().into();
+        op.updated_at = chrono::Utc::now();
+        op.last_error = None;
+        if !op.detail_json.is_object() {
+            op.detail_json = json!({});
+        }
+        let detail = op
+            .detail_json
+            .as_object_mut()
+            .expect("operation detail is an object");
+        detail.insert("metrics".into(), serde_json::to_value(metrics)?);
+        detail.insert("count".into(), count.into());
+        detail.insert("bundle_ids".into(), serde_json::to_value(bundle_ids)?);
+        agent.db.upsert_operation(&op)
+    })();
+    if let Err(error) = result {
+        tracing::error!(%operation_id, %error, "failed to persist completed all-app backup");
+    }
+}
+
+fn mark_operation_failed(
+    agent: &StateAgent,
+    operation_id: uuid::Uuid,
+    error: String,
+    started: Instant,
+) {
+    let result = (|| -> Result<()> {
+        let Some(mut op) = agent.db.get_operation(operation_id)? else {
+            return Ok(());
+        };
+        let mut metrics = op
+            .detail_json
+            .get("metrics")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<OperationMetrics>(value).ok())
+            .unwrap_or_default();
+        metrics.total_duration_ms = elapsed_ms(started);
+        op.state = BackupState::Failed.as_str().into();
+        op.updated_at = chrono::Utc::now();
+        op.last_error = Some(error);
+        if !op.detail_json.is_object() {
+            op.detail_json = json!({});
+        }
+        op.detail_json
+            .as_object_mut()
+            .expect("operation detail is an object")
+            .insert("metrics".into(), serde_json::to_value(metrics)?);
+        agent.db.upsert_operation(&op)
+    })();
+    if let Err(error) = result {
+        tracing::error!(%operation_id, %error, "failed to persist failed backup");
     }
 }
 

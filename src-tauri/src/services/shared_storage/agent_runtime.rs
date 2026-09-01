@@ -1,5 +1,7 @@
 //! Deploy and start noland-state-agent on the remote disposable instance.
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,7 +9,7 @@ use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
-const REQUIRED_AGENT_API_VERSION: u64 = 7;
+const REQUIRED_AGENT_API_VERSION: u64 = 9;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
     if probe_agent(remote).await.ok().and_then(|health| {
@@ -197,27 +199,84 @@ pub async fn call_agent_raw(
     method: &str,
     params: serde_json::Value,
 ) -> AppResult<serde_json::Value> {
+    let request_id = uuid::Uuid::new_v4();
     let request = serde_json::json!({
-        "id": uuid::Uuid::new_v4().to_string(),
+        "id": request_id.to_string(),
         "method": method,
         "params": params,
     });
-    let encoded = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        format!("{request}\n").as_bytes(),
-    );
-    let cmd = format!(
-        "python3 -c 'import socket,sys,base64; req=base64.b64decode(sys.argv[1]); s=socket.socket(socket.AF_UNIX); s.settimeout(300); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(b\"\".join(iter(lambda:s.recv(65536), b\"\")))' {req}",
-        sock = AGENT_SOCKET,
-        req = shell_escape(&encoded),
-    );
-    let output = {
+    let local_request = std::env::temp_dir().join(format!("noland-rpc-{request_id}.json"));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut request_file = options
+        .open(&local_request)
+        .map_err(|error| AppError::State(format!("create state-agent RPC request: {error}")))?;
+    let _local_request_guard = TempFileGuard(local_request.clone());
+    request_file
+        .write_all(format!("{request}\n").as_bytes())
+        .and_then(|_| request_file.sync_all())
+        .map_err(|error| AppError::State(format!("write state-agent RPC request: {error}")))?;
+    drop(request_file);
+    let remote_request = format!("/run/noland/noland-rpc-{request_id}.json");
+    let transfer_task = {
         let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(600)))
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        let local_request = local_request.clone();
+        let remote_request = remote_request.clone();
+        tokio::task::spawn_blocking(move || {
+            remote.scp(&local_request, &remote_request, Duration::from_secs(60))
+        })
+    };
+    let transfer = match transfer_task.await {
+        Ok(Ok(transfer)) => transfer,
+        Ok(Err(error)) => {
+            cleanup_remote_request(remote, &remote_request).await;
+            return Err(error);
+        }
+        Err(error) => {
+            cleanup_remote_request(remote, &remote_request).await;
+            return Err(AppError::Command(format!("join failure: {error}")));
+        }
+    };
+    if transfer.status_code != 0 {
+        cleanup_remote_request(remote, &remote_request).await;
+        return Err(AppError::Provisioning(format!(
+            "failed to transfer state-agent RPC request: {}",
+            concise_remote_failure(&transfer.stdout, &transfer.stderr)
+        )));
+    }
+    let rpc_timeout_secs = match method {
+        "StartSeal" => 2 * 60 * 60,
+        _ => 5 * 60,
+    };
+    let ssh_timeout = Duration::from_secs(rpc_timeout_secs + 60);
+    let cmd = format!(
+        "python3 -c 'import glob,os,socket,sys,time; path=sys.argv[1]; now=time.time(); [(os.unlink(p) if p != path and now-os.path.getmtime(p) > 300 else None) for p in glob.glob(\"/run/noland/noland-rpc-*.json\")]; req=open(path,\"rb\").read(); os.unlink(path); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(b\"\".join(iter(lambda:s.recv(65536), b\"\")))' {request}",
+        timeout = rpc_timeout_secs,
+        sock = AGENT_SOCKET,
+        request = shell_escape(&remote_request),
+    );
+    let output_task = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || remote.ssh(&cmd, ssh_timeout))
+    };
+    let output = match output_task.await {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            cleanup_remote_request(remote, &remote_request).await;
+            return Err(error);
+        }
+        Err(error) => {
+            cleanup_remote_request(remote, &remote_request).await;
+            return Err(AppError::Command(format!("join failure: {error}")));
+        }
     };
     if output.status_code != 0 {
+        cleanup_remote_request(remote, &remote_request).await;
         return Err(AppError::Provisioning(format!(
             "state-agent RPC {method} failed: {} {}",
             output.stdout.trim(),
@@ -237,6 +296,21 @@ pub async fn call_agent_raw(
         )));
     }
     Ok(value.get("result").cloned().unwrap_or(value))
+}
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+async fn cleanup_remote_request(remote: &RemoteExec, remote_request: &str) {
+    let command = format!("rm -f -- {}", shell_escape(remote_request));
+    let remote = remote.clone();
+    let _ =
+        tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(15))).await;
 }
 
 fn concise_remote_failure(stdout: &str, stderr: &str) -> String {

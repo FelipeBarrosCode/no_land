@@ -3,13 +3,26 @@
 mod commit;
 mod local;
 mod rclone;
+mod transfer;
 
 pub use commit::{
     commit_bundle, commit_bundle_with_index, commit_checkpoint, commit_seal, load_catalog,
     read_committed_manifest, read_pack_index, update_catalog_with_bundle, CatalogStore,
 };
 pub use local::LocalStorage;
-pub use rclone::{shred_ephemeral_session, write_ephemeral_session, RcloneStorage};
+pub use noland_rclone_adapter::{
+    classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning,
+};
+pub use rclone::{
+    shred_all_ephemeral_sessions, shred_ephemeral_session, write_ephemeral_session,
+    write_guarded_ephemeral_session, EphemeralSessionGuard, RcloneStorage,
+};
+pub use transfer::{
+    compare_remote_known, download_bounded, list_remote_known, upload_immutable_bounded,
+    DownloadBatchReport, DownloadRequest, ImmutableUpload, MetadataBatch, MetadataWrite,
+    RemoteKnownComparison, RemoteKnownSet, RemoteSizeConflict, SharedRetryGate, TransferDirection,
+    TransferJournalCallbacks, TransferJournalEvent, TransferJournalState, UploadBatchReport,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -43,7 +56,7 @@ impl RemoteKey {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RemoteMeta {
     pub key: RemoteKey,
     pub size: u64,
@@ -54,6 +67,47 @@ pub struct RemoteEntry {
     pub key: RemoteKey,
     pub size: u64,
     pub is_prefix: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageOperationMetrics {
+    pub rclone_invocations: u64,
+    pub remote_stat_calls: u64,
+    pub remote_list_calls: u64,
+    pub remote_mkdir_calls: u64,
+    pub remote_upload_calls: u64,
+    pub remote_download_calls: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+}
+
+impl StorageOperationMetrics {
+    pub fn saturating_sub(self, previous: Self) -> Self {
+        Self {
+            rclone_invocations: self
+                .rclone_invocations
+                .saturating_sub(previous.rclone_invocations),
+            remote_stat_calls: self
+                .remote_stat_calls
+                .saturating_sub(previous.remote_stat_calls),
+            remote_list_calls: self
+                .remote_list_calls
+                .saturating_sub(previous.remote_list_calls),
+            remote_mkdir_calls: self
+                .remote_mkdir_calls
+                .saturating_sub(previous.remote_mkdir_calls),
+            remote_upload_calls: self
+                .remote_upload_calls
+                .saturating_sub(previous.remote_upload_calls),
+            remote_download_calls: self
+                .remote_download_calls
+                .saturating_sub(previous.remote_download_calls),
+            bytes_uploaded: self.bytes_uploaded.saturating_sub(previous.bytes_uploaded),
+            bytes_downloaded: self
+                .bytes_downloaded
+                .saturating_sub(previous.bytes_downloaded),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,6 +126,40 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()>;
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>>;
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta>;
+
+    async fn upload_immutable_bulk(&self, uploads: &[ImmutableUpload]) -> Result<Vec<RemoteMeta>> {
+        let mut uploaded = Vec::with_capacity(uploads.len());
+        for upload in uploads {
+            uploaded.push(self.upload_immutable(&upload.local, &upload.key).await?);
+        }
+        Ok(uploaded)
+    }
+
+    /// Writes ordinary metadata first and the visibility marker last.
+    async fn put_metadata_batch(&self, batch: &MetadataBatch) -> Result<Vec<RemoteMeta>> {
+        let mut written = Vec::with_capacity(batch.total_len());
+        for entry in batch.entries() {
+            written.push(
+                self.put_small_versioned(entry.bytes.clone(), &entry.key)
+                    .await?,
+            );
+        }
+        if let Some(committed) = batch.committed() {
+            written.push(
+                self.put_small_versioned(committed.bytes.clone(), &committed.key)
+                    .await?,
+            );
+        }
+        Ok(written)
+    }
+
+    fn storage_identity(&self) -> Option<ProviderRootIdentity> {
+        None
+    }
+
+    fn operation_metrics(&self) -> StorageOperationMetrics {
+        StorageOperationMetrics::default()
+    }
 }
 
 pub use noland_rclone_adapter::EphemeralRcloneSession;
@@ -114,8 +202,13 @@ pub fn write_ephemeral_auth(run_root: &Path, auth: &EphemeralStorageAuth) -> Res
 pub fn shred_ephemeral_auth(run_root: &Path, operation_id: &str) -> Result<()> {
     let dir = run_root.join("storage").join(operation_id);
     if dir.exists() {
-        if let Ok(path) = dir.join("auth.json").canonicalize() {
-            let _ = std::fs::write(&path, vec![0u8; 64]);
+        for filename in ["auth.json", "rclone.conf", "session.json"] {
+            if let Ok(path) = dir.join(filename).canonicalize() {
+                let len = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len().min(1024 * 1024) as usize)
+                    .unwrap_or(64);
+                let _ = std::fs::write(&path, vec![0u8; len]);
+            }
         }
         std::fs::remove_dir_all(dir)?;
     }

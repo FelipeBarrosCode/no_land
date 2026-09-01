@@ -3,6 +3,7 @@
 pub mod backup;
 pub mod checkpoint;
 pub mod observer;
+pub mod operation_manager;
 pub mod reconcile;
 pub mod restore;
 pub mod rpc_handler;
@@ -71,6 +72,7 @@ pub struct StateAgent {
     pub hub: Arc<ObserverHub>,
     pub metrics: Arc<Metrics>,
     pub observer: observer::ObserverSupervisor,
+    pub operations: operation_manager::OperationManager,
     pub roots: Mutex<LogicalRootMap>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
 }
@@ -88,6 +90,7 @@ impl StateAgent {
             hub,
             metrics,
             observer: observer::ObserverSupervisor::new(),
+            operations: operation_manager::OperationManager::default(),
             roots: Mutex::new(roots),
             master_key: Mutex::new(None),
         })
@@ -98,13 +101,18 @@ impl StateAgent {
         if integrity != "ok" {
             return Err(StateError::Database(integrity));
         }
-        for op in self.db.unfinished_operations()? {
+        noland_storage::shred_all_ephemeral_sessions(&self.config.paths.run_root)?;
+        for mut op in self.db.unfinished_operations()? {
             tracing::warn!(
                 operation_id = %op.operation_id,
                 kind = %op.kind,
                 state = %op.state,
-                "unfinished operation after restart; marked for resume/fail"
+                "unfinished operation after restart; marking failed"
             );
+            op.state = BackupState::Failed.as_str().into();
+            op.updated_at = chrono::Utc::now();
+            op.last_error = Some("operation interrupted by state-agent restart".into());
+            self.db.upsert_operation(&op)?;
         }
         for event in noland_observer::bootstrap_from_procfs() {
             self.hub.inject_process(event);
@@ -170,6 +178,27 @@ impl StateAgent {
             let app_ids = self.db.open_session_app_ids()?;
             for app_id in &app_ids {
                 self.db.mark_dirty(app_id, None, true)?;
+                let known_roots = self.db.known_roots(Some(app_id))?;
+                if known_roots.is_empty() {
+                    self.db.mark_dirty_root(
+                        app_id,
+                        &self.config.home.to_string_lossy(),
+                        None,
+                        true,
+                    )?;
+                } else {
+                    for (_, _, root) in known_roots {
+                        self.db.mark_dirty_root(app_id, &root, None, true)?;
+                    }
+                }
+                for state in self.db.list_file_states(app_id, None)? {
+                    let _ = self.db.set_file_state_trust(
+                        app_id,
+                        &state.logical_root,
+                        &state.relative_path,
+                        FileStateTrust::VerifyRequired,
+                    )?;
+                }
             }
             self.observer.signal_loss(
                 "agent_queue",

@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Instant;
 
 use chrono::Utc;
 use noland_cas::{blake3_file, chunk_file};
@@ -9,13 +10,49 @@ use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_snapshot::{create_view, discard};
 use noland_state_core::*;
 use noland_storage::{
-    commit_bundle_with_index, shred_ephemeral_session, update_catalog_with_bundle,
-    write_ephemeral_session, LocalStorage, RcloneStorage, SharedStorageProvider,
+    commit_bundle_with_index, update_catalog_with_bundle, write_guarded_ephemeral_session,
+    LocalStorage, RcloneStorage, SharedStorageProvider,
 };
 use uuid::Uuid;
 
 use crate::reconcile::reconcile_app;
 use crate::StateAgent;
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn operation_metrics(op: &OperationRecord) -> OperationMetrics {
+    op.detail_json
+        .get("metrics")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
+}
+
+fn persist_operation(
+    agent: &StateAgent,
+    op: &mut OperationRecord,
+    state: BackupState,
+    metrics: &OperationMetrics,
+) -> Result<()> {
+    op.state = state.as_str().into();
+    op.updated_at = Utc::now();
+    let detail = op
+        .detail_json
+        .as_object_mut()
+        .expect("operation detail is always an object");
+    detail.insert("metrics".into(), serde_json::to_value(metrics)?);
+    agent.db.upsert_operation(op)?;
+    tracing::info!(
+        operation_id = %op.operation_id,
+        app_id = op.app_id.as_ref().map(AppId::as_str),
+        state = state.as_str(),
+        metrics = %serde_json::to_string(metrics).unwrap_or_default(),
+        "backup operation advanced"
+    );
+    Ok(())
+}
 
 pub async fn run_backup(
     agent: &StateAgent,
@@ -23,28 +60,48 @@ pub async fn run_backup(
     mode: BackupMode,
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
+    operation_id: Option<Uuid>,
 ) -> Result<BundleManifest> {
+    let total_started = Instant::now();
+    let op_id = operation_id.unwrap_or_else(Uuid::new_v4);
+    let mut op = agent
+        .db
+        .get_operation(op_id)?
+        .unwrap_or_else(|| OperationRecord {
+            operation_id: op_id,
+            kind: "backup".into(),
+            app_id: Some(app_id.clone()),
+            state: BackupState::Queued.as_str().into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_error: None,
+            detail_json: serde_json::json!({}),
+        });
+    if !op.detail_json.is_object() {
+        op.detail_json = serde_json::json!({});
+    }
+    let mut metrics = operation_metrics(&op);
+    persist_operation(agent, &mut op, BackupState::Discovering, &metrics)?;
+
     let identity = agent
         .db
         .get_app(app_id)?
         .ok_or_else(|| StateError::NotFound(app_id.to_string()))?;
-    let op_id = Uuid::new_v4();
-    let mut op = OperationRecord {
-        operation_id: op_id,
-        kind: "backup".into(),
-        app_id: Some(app_id.clone()),
-        state: BackupState::Discovering.as_str().into(),
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        last_error: None,
-        detail_json: serde_json::json!({}),
-    };
-    agent.db.upsert_operation(&op)?;
 
-    op.state = BackupState::Reconciling.as_str().into();
-    agent.db.upsert_operation(&op)?;
-    reconcile_app(agent, app_id)?;
+    let requires_reconciliation = agent
+        .db
+        .list_dirty_apps()?
+        .into_iter()
+        .any(|dirty| dirty.app_id == *app_id && dirty.requires_reconciliation);
+    if requires_reconciliation {
+        persist_operation(agent, &mut op, BackupState::Reconciling, &metrics)?;
+        let started = Instant::now();
+        let reconciled = reconcile_app(agent, app_id)?;
+        metrics.reconciliation_duration_ms = elapsed_ms(started);
+        metrics.num_files_scanned = metrics.num_files_scanned.saturating_add(reconciled as u64);
+    }
 
+    let planning_started = Instant::now();
     let classifier = Classifier::new(&agent.db, &agent.config.image_id);
     classifier.reclassify_app(app_id)?;
 
@@ -75,6 +132,7 @@ pub async fn run_backup(
         }
     }
 
+    metrics.num_candidate_paths = associations.len() as u64;
     if let Some((record, association)) = track_steam_appmanifest(agent, &identity, &roots)? {
         let path = PathBuf::from(&record.canonical_path);
         if !include_paths.iter().any(|included| included == &path) {
@@ -83,12 +141,14 @@ pub async fn run_backup(
         }
     }
 
-    op.state = BackupState::Snapshotting.as_str().into();
-    agent.db.upsert_operation(&op)?;
+    metrics.planning_duration_ms = elapsed_ms(planning_started);
+    persist_operation(agent, &mut op, BackupState::Snapshotting, &metrics)?;
+    let snapshot_started = Instant::now();
     let view = create_view(&agent.config.paths.snapshots, &include_paths, true)?;
+    metrics.snapshot_duration_ms = elapsed_ms(snapshot_started);
 
-    op.state = BackupState::Hashing.as_str().into();
-    agent.db.upsert_operation(&op)?;
+    persist_operation(agent, &mut op, BackupState::Hashing, &metrics)?;
+    let hashing_started = Instant::now();
 
     let mut manifest = BundleManifest::new(
         ManifestApp::from(&identity),
@@ -118,6 +178,10 @@ pub async fn run_backup(
         });
         validate_relative_path(&logical.relative_path).ok();
         let chunks = chunk_file(&mapping.staged)?;
+        metrics.num_files_rehashed = metrics.num_files_rehashed.saturating_add(1);
+        metrics.bytes_scanned = metrics.bytes_scanned.saturating_add(chunks.size);
+        metrics.bytes_hashed = metrics.bytes_hashed.saturating_add(chunks.size);
+        metrics.bytes_chunked = metrics.bytes_chunked.saturating_add(chunks.size);
         let file_hash = if chunks.file_hash.is_empty() {
             blake3_file(&mapping.staged)?
         } else {
@@ -126,7 +190,9 @@ pub async fn run_backup(
         for (meta, payload) in chunks.chunks.iter().zip(chunks.payloads.iter()) {
             if !agent.db.known_chunk(&meta.hash)? {
                 chunk_payloads.push((meta.hash.clone(), payload.clone()));
+                metrics.num_chunks_created = metrics.num_chunks_created.saturating_add(1);
             } else {
+                metrics.num_chunks_reused = metrics.num_chunks_reused.saturating_add(1);
                 noland_state_core::metrics::Metrics::inc(&agent.metrics.chunks_reused_total);
             }
         }
@@ -157,8 +223,9 @@ pub async fn run_backup(
         });
     }
 
-    op.state = BackupState::Packing.as_str().into();
-    agent.db.upsert_operation(&op)?;
+    metrics.hashing_duration_ms = elapsed_ms(hashing_started);
+    persist_operation(agent, &mut op, BackupState::Packing, &metrics)?;
+    let packing_started = Instant::now();
     let pack_dir = agent
         .config
         .paths
@@ -182,14 +249,17 @@ pub async fn run_backup(
             )?;
             noland_state_core::metrics::Metrics::inc(&agent.metrics.chunks_created_total);
         }
+        metrics.bytes_packed = metrics.bytes_packed.saturating_add(pack.bytes);
         noland_state_core::metrics::Metrics::add(
             &agent.metrics.pack_bytes_created_total,
             pack.bytes,
         );
     }
+    metrics.packing_duration_ms = elapsed_ms(packing_started);
 
-    op.state = BackupState::Uploading.as_str().into();
-    agent.db.upsert_operation(&op)?;
+    persist_operation(agent, &mut op, BackupState::Uploading, &metrics)?;
+    let storage_before = provider.operation_metrics();
+    let upload_started = Instant::now();
     agent.db.record_commit(
         manifest.commit_id,
         app_id,
@@ -199,8 +269,6 @@ pub async fn run_backup(
         CommitVisibility::Uploading,
     )?;
 
-    op.state = BackupState::Committing.as_str().into();
-    agent.db.upsert_operation(&op)?;
     let index_json = serde_json::to_vec(&pack_index)?;
     commit_bundle_with_index(
         provider,
@@ -211,17 +279,55 @@ pub async fn run_backup(
         Some(&agent.db),
     )
     .await?;
-    update_catalog_with_bundle(provider, master, &manifest, incremental).await?;
+    metrics.upload_duration_ms = elapsed_ms(upload_started);
+    metrics.num_manifest_writes = 1;
 
-    op.state = BackupState::Checkpointing.as_str().into();
-    agent.db.upsert_operation(&op)?;
+    persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
+    let commit_started = Instant::now();
+    update_catalog_with_bundle(provider, master, &manifest, incremental).await?;
+    metrics.commit_duration_ms = elapsed_ms(commit_started);
+    let storage_metrics = provider.operation_metrics().saturating_sub(storage_before);
+    metrics.bytes_uploaded = metrics
+        .bytes_uploaded
+        .saturating_add(storage_metrics.bytes_uploaded);
+    metrics.bytes_downloaded = metrics
+        .bytes_downloaded
+        .saturating_add(storage_metrics.bytes_downloaded);
+    metrics.num_rclone_invocations = metrics
+        .num_rclone_invocations
+        .saturating_add(storage_metrics.rclone_invocations);
+    metrics.num_remote_stat_calls = metrics
+        .num_remote_stat_calls
+        .saturating_add(storage_metrics.remote_stat_calls);
+    metrics.num_remote_list_calls = metrics
+        .num_remote_list_calls
+        .saturating_add(storage_metrics.remote_list_calls);
+    metrics.num_remote_mkdir_calls = metrics
+        .num_remote_mkdir_calls
+        .saturating_add(storage_metrics.remote_mkdir_calls);
+    metrics.num_remote_upload_calls = metrics
+        .num_remote_upload_calls
+        .saturating_add(storage_metrics.remote_upload_calls);
+    metrics.num_remote_download_calls = metrics
+        .num_remote_download_calls
+        .saturating_add(storage_metrics.remote_download_calls);
+
+    persist_operation(agent, &mut op, BackupState::Checkpointing, &metrics)?;
+    let checkpoint_started = Instant::now();
     let _ = crate::checkpoint::write_local_checkpoint(agent);
+    metrics.checkpoint_duration_ms = elapsed_ms(checkpoint_started);
 
     agent.db.clear_dirty(app_id)?;
     discard(&view)?;
-    op.state = BackupState::Completed.as_str().into();
-    op.updated_at = Utc::now();
-    agent.db.upsert_operation(&op)?;
+    metrics.total_duration_ms =
+        elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+    let detail = op
+        .detail_json
+        .as_object_mut()
+        .expect("operation detail is always an object");
+    detail.insert("bundle_id".into(), serde_json::json!(manifest.bundle_id));
+    detail.insert("commit_id".into(), serde_json::json!(manifest.commit_id));
+    persist_operation(agent, &mut op, BackupState::Completed, &metrics)?;
     Ok(manifest)
 }
 
@@ -319,7 +425,7 @@ pub async fn run_backup_to_local(
 ) -> Result<BundleManifest> {
     let storage = LocalStorage::new(cloud_root);
     storage.ensure_root().await?;
-    run_backup(agent, app_id, mode, &storage, master).await
+    run_backup(agent, app_id, mode, &storage, master, None).await
 }
 
 /// Backup using an ephemeral rclone session minted by the desktop adapter.
@@ -329,18 +435,30 @@ pub async fn run_backup_with_session(
     mode: BackupMode,
     session: &EphemeralRcloneSession,
     master: &MasterKey,
+    operation_id: Option<Uuid>,
 ) -> Result<BundleManifest> {
-    let config_path = write_ephemeral_session(&agent.config.paths.run_root, session)?;
+    let (config_path, _session_guard) =
+        write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let storage = RcloneStorage::from_session(session, &config_path);
-    let result = run_backup(agent, app_id, mode, &storage, master).await;
-    let _ = shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
-    result
+    run_backup(agent, app_id, mode, &storage, master, operation_id).await
 }
 
 pub async fn run_backup_all_with_session(
     agent: &StateAgent,
     mode: BackupMode,
     session: &EphemeralRcloneSession,
+    master: &MasterKey,
+) -> Result<Vec<BundleManifest>> {
+    let (config_path, _session_guard) =
+        write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
+    let storage = RcloneStorage::from_session(session, &config_path);
+    run_backup_all(agent, mode, &storage, master).await
+}
+
+async fn run_backup_all(
+    agent: &StateAgent,
+    mode: BackupMode,
+    provider: &dyn SharedStorageProvider,
     master: &MasterKey,
 ) -> Result<Vec<BundleManifest>> {
     let dirty = agent.db.list_dirty_apps()?;
@@ -358,8 +476,9 @@ pub async fn run_backup_all_with_session(
         targets = portable.into_iter().map(AppId).collect();
     }
     let mut out = Vec::new();
+    provider.ensure_root().await?;
     for app_id in targets {
-        match run_backup_with_session(agent, &app_id, mode, session, master).await {
+        match run_backup(agent, &app_id, mode, provider, master, None).await {
             Ok(manifest) => out.push(manifest),
             Err(StateError::NotFound(_)) => continue,
             Err(err) => return Err(err),

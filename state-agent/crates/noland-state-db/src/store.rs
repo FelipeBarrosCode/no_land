@@ -7,7 +7,7 @@ use noland_state_core::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::schema::MIGRATION_V1;
+use crate::schema::{MIGRATION_V1, MIGRATION_V2};
 use crate::SCHEMA_VERSION;
 
 pub struct StateDb {
@@ -46,7 +46,7 @@ impl StateDb {
         Ok(db)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))
@@ -61,17 +61,11 @@ impl StateDb {
     fn migrate(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute_batch(MIGRATION_V1).map_err(db_err)?;
-        let current: Option<i64> = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
-                row.get(0)
-            })
-            .optional()
-            .map_err(db_err)?
-            .flatten();
-        if current.unwrap_or(0) < SCHEMA_VERSION {
+        conn.execute_batch(MIGRATION_V2).map_err(db_err)?;
+        for version in 1..=SCHEMA_VERSION {
             conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-                params![SCHEMA_VERSION, now_secs()],
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, now_secs()],
             )
             .map_err(db_err)?;
         }
@@ -301,6 +295,19 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn get_path_by_id(&self, path_id: i64) -> Result<Option<PathRecord>> {
+        self.lock()?
+            .query_row(
+                r#"SELECT path_id, canonical_path, logical_root, relative_path, file_type,
+                          inode, mount_id, size, mtime_ns, mode, uid, gid, content_hash, last_scanned_at
+                   FROM paths WHERE path_id=?1"#,
+                params![path_id],
+                row_to_path,
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
     pub fn get_path_by_canonical(&self, canonical: &str) -> Result<Option<PathRecord>> {
         self.lock()?
             .query_row(
@@ -361,6 +368,44 @@ impl StateDb {
                    JOIN paths p ON p.path_id = a.path_id
                    WHERE a.app_id=?1
                    ORDER BY a.confidence DESC"#,
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![app_id.as_str()], |row| {
+                Ok((row_to_path(row)?, row_to_assoc_from(row, 14)?))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    pub fn likely_backup_associations(
+        &self,
+        app_id: &AppId,
+    ) -> Result<Vec<(PathRecord, PathAssociation)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT p.path_id, p.canonical_path, p.logical_root, p.relative_path, p.file_type,
+                          p.inode, p.mount_id, p.size, p.mtime_ns, p.mode, p.uid, p.gid,
+                          p.content_hash, p.last_scanned_at,
+                          a.path_id, a.app_id, a.confidence, a.persistence_class, a.semantic_role,
+                          a.evidence_json, a.first_seen_at, a.last_seen_at
+                   FROM path_associations a
+                   JOIN paths p ON p.path_id = a.path_id
+                   WHERE a.app_id=?1 AND (
+                       a.persistence_class IN ('PERSISTENT_STATE','SHARED_STATE')
+                       OR a.semantic_role IN ('USER_STATE','SECRET')
+                       OR a.confidence >= 0.70
+                       OR EXISTS (
+                           SELECT 1 FROM path_policies policy
+                           WHERE policy.canonical_path=p.canonical_path
+                             AND (policy.app_id IS NULL OR policy.app_id=a.app_id)
+                             AND policy.policy IN ('include','shared','secret','force-persistent')
+                       )
+                   )
+                   ORDER BY p.canonical_path"#,
             )
             .map_err(db_err)?;
         let rows = stmt

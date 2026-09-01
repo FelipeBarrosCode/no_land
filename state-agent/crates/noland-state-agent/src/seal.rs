@@ -3,8 +3,8 @@ use noland_crypto::MasterKey;
 use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_state_core::*;
 use noland_storage::{
-    commit_checkpoint, commit_seal, shred_ephemeral_session, write_ephemeral_session,
-    RcloneStorage, SharedStorageProvider,
+    commit_checkpoint, commit_seal, write_guarded_ephemeral_session, RcloneStorage,
+    SharedStorageProvider,
 };
 use uuid::Uuid;
 
@@ -57,7 +57,7 @@ pub async fn run_seal(
     agent.db.upsert_operation(&op)?;
     let mut commits = Vec::new();
     for dirty in agent.db.list_dirty_apps()? {
-        let manifest = run_backup(agent, &dirty.app_id, mode, provider, master).await?;
+        let manifest = run_backup(agent, &dirty.app_id, mode, provider, master, None).await?;
         commits.push(SealAppCommit {
             app_id: dirty.app_id,
             bundle_id: manifest.bundle_id,
@@ -109,9 +109,8 @@ pub async fn run_seal_with_session(
     master: &MasterKey,
     mode: BackupMode,
 ) -> Result<SealRecord> {
-    let config_path = write_ephemeral_session(&agent.config.paths.run_root, session)?;
+    let (config_path, _session_guard) =
+        write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let storage = RcloneStorage::from_session(session, &config_path);
-    let result = run_seal(agent, &storage, master, mode).await;
-    let _ = shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
-    result
+    run_seal(agent, &storage, master, mode).await
 }

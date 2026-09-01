@@ -321,7 +321,64 @@ impl<'a> AttributionEngine<'a> {
         };
         self.db.upsert_association(&assoc)?;
         if event.kind.is_mutation() && persistence_class != PersistenceClass::Ephemeral {
-            self.db.mark_dirty(&session.app_id, Some(path_id), false)?;
+            let requires_reconciliation = matches!(
+                event.kind,
+                FsEventKind::Rename | FsEventKind::Unlink | FsEventKind::Rmdir
+            );
+            self.db
+                .mark_dirty(&session.app_id, Some(path_id), requires_reconciliation)?;
+
+            let mutation_kind = match event.kind {
+                FsEventKind::Create | FsEventKind::Mkdir | FsEventKind::Symlink => {
+                    AppMutationKind::Create
+                }
+                FsEventKind::Rename => AppMutationKind::Rename,
+                FsEventKind::Unlink | FsEventKind::Rmdir => AppMutationKind::Delete,
+                FsEventKind::Chmod | FsEventKind::Chown => AppMutationKind::Metadata,
+                _ => AppMutationKind::Modify,
+            };
+            let mut provenance = assoc
+                .evidence
+                .iter()
+                .find(|evidence| evidence.kind.is_mutation())
+                .cloned();
+            if let Some(evidence) = provenance.as_mut() {
+                evidence.session_id = Some(session.session_id);
+            }
+            let mut mutation =
+                AppMutationRecord::new(session.app_id.clone(), canonical.clone(), mutation_kind);
+            mutation.observed_at = event.at;
+            mutation.session_id = Some(session.session_id);
+            mutation.provenance = provenance;
+            if event.kind == FsEventKind::Rename {
+                mutation.previous_path = Some(canonicalize_lossy(&event.path));
+            }
+            self.db.append_app_mutation(&mutation)?;
+
+            let dirty_root = Path::new(&canonical)
+                .parent()
+                .unwrap_or_else(|| Path::new(&canonical));
+            self.db.mark_dirty_root(
+                &session.app_id,
+                &dirty_root.to_string_lossy(),
+                logical
+                    .as_ref()
+                    .map(|logical| logical.logical_root.as_token())
+                    .as_deref(),
+                requires_reconciliation,
+            )?;
+            if let Some(logical) = logical.as_ref() {
+                let _ = self.db.set_file_state_trust(
+                    &session.app_id,
+                    &logical.logical_root.as_token(),
+                    &logical.relative_path,
+                    if mutation_kind == AppMutationKind::Delete {
+                        FileStateTrust::Missing
+                    } else {
+                        FileStateTrust::Dirty
+                    },
+                )?;
+            }
         }
         Ok(Some(assoc))
     }

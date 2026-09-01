@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, time::Instant};
 
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::EphemeralRcloneSession;
@@ -7,10 +7,58 @@ use noland_restore::{
 };
 use noland_state_core::*;
 use noland_storage::{
-    read_pack_index, shred_ephemeral_session, write_ephemeral_session, RcloneStorage,
+    read_pack_index, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
 };
 
 use crate::StateAgent;
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn persist_restore_failure(
+    agent: &StateAgent,
+    operation_id: uuid::Uuid,
+    metrics: &OperationMetrics,
+    error: &str,
+) -> Result<()> {
+    let Some(mut op) = agent.db.get_operation(operation_id)? else {
+        return Ok(());
+    };
+    op.state = RestoreState::Failed.as_str().into();
+    op.updated_at = chrono::Utc::now();
+    op.last_error = Some(error.to_string());
+    if !op.detail_json.is_object() {
+        op.detail_json = serde_json::json!({});
+    }
+    op.detail_json
+        .as_object_mut()
+        .expect("operation detail is an object")
+        .insert("metrics".into(), serde_json::to_value(metrics)?);
+    agent.db.upsert_operation(&op)
+}
+
+fn persist_restore_operation(
+    agent: &StateAgent,
+    operation_id: uuid::Uuid,
+    state: RestoreState,
+    metrics: &OperationMetrics,
+) -> Result<()> {
+    let Some(mut op) = agent.db.get_operation(operation_id)? else {
+        return Ok(());
+    };
+    op.state = state.as_str().into();
+    op.updated_at = chrono::Utc::now();
+    if !op.detail_json.is_object() {
+        op.detail_json = serde_json::json!({});
+    }
+    op.detail_json
+        .as_object_mut()
+        .expect("operation detail is an object")
+        .insert("metrics".into(), serde_json::to_value(metrics)?);
+    agent.db.upsert_operation(&op)?;
+    Ok(())
+}
 
 pub async fn run_restore_with_session(
     agent: &StateAgent,
@@ -19,14 +67,30 @@ pub async fn run_restore_with_session(
     mode: RestoreMode,
     session: &EphemeralRcloneSession,
     master: &MasterKey,
+    operation_id: uuid::Uuid,
 ) -> Result<()> {
-    let config_path = write_ephemeral_session(&agent.config.paths.run_root, session)?;
+    let total_started = Instant::now();
+    let mut metrics = OperationMetrics::default();
+    persist_restore_operation(
+        agent,
+        operation_id,
+        RestoreState::FetchingManifest,
+        &metrics,
+    )?;
+    let (config_path, _session_guard) =
+        write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let storage = RcloneStorage::from_session(session, &config_path);
+    let storage_before = storage.operation_metrics();
 
     // Dynamic roots such as Steam libraries may appear after the agent starts.
     // Refresh them before resolving the portable logical roots in the manifest.
-    agent.discover()?;
+    let discovery_started = Instant::now();
+    if let Err(error) = agent.discover() {
+        return Err(error);
+    }
+    metrics.discovery_duration_ms = elapsed_ms(discovery_started);
 
+    let manifest_started = Instant::now();
     let plan = prepare_restore(
         &storage,
         master,
@@ -36,8 +100,15 @@ pub async fn run_restore_with_session(
         mode,
     )
     .await;
+    metrics.manifest_duration_ms = elapsed_ms(manifest_started);
     let result = match plan {
         Ok(plan) => {
+            persist_restore_operation(
+                agent,
+                operation_id,
+                RestoreState::CheckingPrerequisites,
+                &metrics,
+            )?;
             let restore_result = async {
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
@@ -54,11 +125,39 @@ pub async fn run_restore_with_session(
 
                 ensure_steam_appmanifest(agent, manifest_app)?;
 
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::Downloading,
+                    &metrics,
+                )?;
+                let download_started = Instant::now();
                 let index = read_pack_index(&storage, master, app_id, bundle_id).await?;
                 download_and_verify(&storage, master, &plan, &index).await?;
+                metrics.download_duration_ms = elapsed_ms(download_started);
+
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::Materializing,
+                    &metrics,
+                )?;
+                let materialize_started = Instant::now();
                 let roots = agent.roots.lock().clone();
                 materialize_tree(&plan, &roots)?;
-                apply_restore(&plan, &roots, Some(&agent.db))
+                metrics.restore_materialize_duration_ms = elapsed_ms(materialize_started);
+
+                persist_restore_operation(
+                    agent,
+                    operation_id,
+                    RestoreState::CreatingRollbackPoint,
+                    &metrics,
+                )?;
+                let apply_started = Instant::now();
+                persist_restore_operation(agent, operation_id, RestoreState::Applying, &metrics)?;
+                let rollback = apply_restore(&plan, &roots, Some(&agent.db))?;
+                metrics.restore_apply_duration_ms = elapsed_ms(apply_started);
+                Ok(rollback)
             }
             .await;
 
@@ -78,7 +177,32 @@ pub async fn run_restore_with_session(
         }
         Err(error) => Err(error),
     };
-    let _ = shred_ephemeral_session(&agent.config.paths.run_root, &session.operation_id);
+    let storage_metrics = storage.operation_metrics().saturating_sub(storage_before);
+    metrics.bytes_downloaded = storage_metrics.bytes_downloaded;
+    metrics.bytes_uploaded = storage_metrics.bytes_uploaded;
+    metrics.num_rclone_invocations = storage_metrics.rclone_invocations;
+    metrics.num_remote_stat_calls = storage_metrics.remote_stat_calls;
+    metrics.num_remote_list_calls = storage_metrics.remote_list_calls;
+    metrics.num_remote_mkdir_calls = storage_metrics.remote_mkdir_calls;
+    metrics.num_remote_upload_calls = storage_metrics.remote_upload_calls;
+    metrics.num_remote_download_calls = storage_metrics.remote_download_calls;
+    metrics.total_duration_ms = elapsed_ms(total_started);
+    match &result {
+        Ok(()) => {
+            persist_restore_operation(agent, operation_id, RestoreState::Completed, &metrics)?;
+        }
+        Err(error) => {
+            if let Err(persist_error) =
+                persist_restore_failure(agent, operation_id, &metrics, &error.to_string())
+            {
+                tracing::warn!(
+                    %operation_id,
+                    %persist_error,
+                    "failed to persist restore failure metrics"
+                );
+            }
+        }
+    }
     result
 }
 
