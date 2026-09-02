@@ -1,10 +1,15 @@
-use std::{fs, path::PathBuf, time::Instant};
+use std::{
+    fs,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::{EphemeralRcloneSession, TransferTuning};
 use noland_restore::{
     apply_restore_to, cleanup_restore, download_and_verify_to, materialize_tree_to,
-    prepare_restore, DownloadJournal, DownloadOptions, DownloadReport, RestoreTarget,
+    prepare_restore, prune_local_pack_cache, DownloadJournal, DownloadOptions, DownloadReport,
+    PackCacheGcOptions, RestoreTarget,
 };
 use noland_state_core::*;
 use noland_storage::{
@@ -415,7 +420,24 @@ pub async fn run_restore_with_session(
             .await;
 
             match restore_result {
-                Ok(rollback) => cleanup_restore(&plan, rollback),
+                Ok(rollback) => {
+                    cleanup_restore(&plan, rollback)?;
+                    let mut gc = PackCacheGcOptions::new(20 * 1024 * 1024 * 1024, 4_096);
+                    gc.min_unused_age = Duration::from_secs(24 * 60 * 60);
+                    match prune_local_pack_cache(&plan.pack_cache, &gc) {
+                        Ok(report) => {
+                            progress.detail_json["pack_cache_gc"] = serde_json::json!({
+                                "packs_pruned": report.packs_pruned,
+                                "bytes_before": report.bytes_before,
+                                "bytes_after": report.bytes_after,
+                            });
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "local restore pack-cache GC failed");
+                        }
+                    }
+                    Ok(())
+                }
                 Err(error) => {
                     if let Err(cleanup_error) = cleanup_restore(&plan, None) {
                         tracing::warn!(

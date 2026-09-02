@@ -104,16 +104,7 @@ impl StateAgent {
         noland_storage::shred_all_ephemeral_sessions(&self.config.paths.run_root)?;
         for mut op in self.db.unfinished_operations()? {
             let journal = self.db.sync_journal_summary(op.operation_id)?;
-            let has_retry = op.detail_json.get("retry").is_some();
-            if let Some(retry) = op.detail_json.get("retry") {
-                if let (Some(method), Some(params)) = (
-                    retry.get("method").and_then(|value| value.as_str()),
-                    retry.get("params"),
-                ) {
-                    self.operations
-                        .remember_retry(op.operation_id, method, params);
-                }
-            }
+            let has_retry = matches!(op.kind.as_str(), "backup" | "restore");
             let resume_mode = if journal.completed_items > 0 && op.kind == "backup" {
                 "UPLOAD_JOURNAL"
             } else {
@@ -126,9 +117,9 @@ impl StateAgent {
                 resume_mode,
                 completed_journal_items = journal.completed_items,
                 retry_available = has_retry,
-                "unfinished operation after restart; marking failed for client resubmit"
+                "unfinished operation after restart; preserving it for retry"
             );
-            op.state = BackupState::Failed.as_str().into();
+            op.state = "INTERRUPTED".into();
             op.updated_at = chrono::Utc::now();
             op.last_error = Some(
                 "operation interrupted by state-agent restart; retry with a new session or resubmit the original request".into(),
@@ -148,14 +139,6 @@ impl StateAgent {
                 );
             }
             self.db.upsert_operation(&op)?;
-            let mut progress = OperationProgress::new("interrupted", journal.completed_items);
-            progress.message = op.last_error.clone();
-            progress.detail_json = serde_json::json!({
-                "resume_mode": resume_mode,
-                "completed_journal_items": journal.completed_items,
-            });
-            self.db
-                .set_operation_progress(op.operation_id, Some(&progress))?;
         }
         for event in noland_observer::bootstrap_from_procfs() {
             self.hub.inject_process(event);
@@ -312,7 +295,7 @@ mod tests {
     use noland_state_core::{ContentObjectKind, SyncDirection, SyncJournalEntry, SyncJournalState};
 
     #[test]
-    fn recover_marks_unfinished_operations_failed_with_retry_context() {
+    fn recover_preserves_unfinished_operations_as_interrupted() {
         let root = std::env::temp_dir().join(format!(
             "noland-recover-{}-{}",
             std::process::id(),
@@ -334,10 +317,9 @@ mod tests {
                 updated_at: Utc::now(),
                 last_error: None,
                 detail_json: serde_json::json!({
-                    "retry": {
-                        "method": "StartBackup",
-                        "params": {"app_id": "desktop:game", "mode": "personal_state"}
-                    }
+                    "app_id": "desktop:game",
+                    "mode": "personal_state",
+                    "performance_mode": "balanced"
                 }),
             })
             .unwrap();
@@ -349,11 +331,17 @@ mod tests {
         );
         entry.state = SyncJournalState::Completed;
         agent.db.upsert_sync_journal_entry(&entry).unwrap();
+        let mut progress = OperationProgress::new("uploading", 7);
+        progress.message = Some("uploading packs".into());
+        agent
+            .db
+            .set_operation_progress(operation_id, Some(&progress))
+            .unwrap();
 
         agent.recover().unwrap();
 
         let recovered = agent.db.get_operation(operation_id).unwrap().unwrap();
-        assert_eq!(recovered.state, BackupState::Failed.as_str());
+        assert_eq!(recovered.state, "INTERRUPTED");
         assert_eq!(
             recovered.detail_json["resume"]["mode"],
             serde_json::json!("UPLOAD_JOURNAL")
@@ -362,7 +350,14 @@ mod tests {
             recovered.detail_json["resume"]["retry_available"],
             serde_json::json!(true)
         );
-        assert!(agent.operations.retry_descriptor(operation_id).is_some());
+        let recovered_progress = agent
+            .db
+            .get_operation_progress(operation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered_progress.phase, "uploading");
+        assert_eq!(recovered_progress.completed_units, 7);
+
         let _ = std::fs::remove_dir_all(root);
     }
 }

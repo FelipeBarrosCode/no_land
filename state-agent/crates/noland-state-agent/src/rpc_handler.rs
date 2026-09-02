@@ -121,7 +121,8 @@ impl RpcHandler for AgentRpc {
                     app_id.clone(),
                     BackupState::Queued.as_str(),
                     json!({
-                        "session_operation": session.operation_id,
+                        "app_id": app_id_raw,
+                        "mode": mode.as_str(),
                         "performance_mode": performance.as_str(),
                     }),
                     retry_operation_id.is_some(),
@@ -409,8 +410,13 @@ impl RpcHandler for AgentRpc {
                     Some(app_id.clone()),
                     RestoreState::Queued.as_str(),
                     json!({
+                        "app_id": app_id.0.clone(),
+                        "mode": match mode {
+                            RestoreMode::CompleteApplication => "complete_application",
+                            RestoreMode::Custom => "custom",
+                            RestoreMode::PersonalState => "personal_state",
+                        },
                         "bundle_id": bundle_id,
-                        "session_operation": session.operation_id,
                     }),
                     retry_operation_id.is_some(),
                 )?;
@@ -523,12 +529,7 @@ impl RpcHandler for AgentRpc {
                         operation.state
                     )));
                 }
-                let descriptor = retry_descriptor_for(agent, operation_id)?.ok_or_else(|| {
-                    StateError::Invalid(format!(
-                        "retry context for operation {operation_id} is unavailable; resubmit the original request with a new session"
-                    ))
-                })?;
-                let reset_journal_entries = reset_retryable_journal_entries(agent, operation_id)?;
+                let descriptor = retry_descriptor_for(agent, &operation)?;
                 let mut params = descriptor.params;
                 overlay_retry_secrets(&mut params, &request.params)?;
                 let object = params.as_object_mut().ok_or_else(|| {
@@ -543,6 +544,7 @@ impl RpcHandler for AgentRpc {
                     "_retry_operation_id".into(),
                     serde_json::Value::String(operation_id.to_string()),
                 );
+                let reset_journal_entries = reset_retryable_journal_entries(agent, operation_id)?;
                 let retry_request = RpcRequest {
                     id: request.id.clone(),
                     method: descriptor.method,
@@ -781,29 +783,65 @@ fn overlay_retry_secrets(
 
 fn retry_descriptor_for(
     agent: &StateAgent,
-    operation_id: uuid::Uuid,
-) -> Result<Option<crate::operation_manager::RetryDescriptor>> {
-    if let Some(descriptor) = agent.operations.retry_descriptor(operation_id) {
-        return Ok(Some(descriptor));
-    }
-    let Some(operation) = agent.db.get_operation(operation_id)? else {
-        return Ok(None);
+    operation: &OperationRecord,
+) -> Result<crate::operation_manager::RetryDescriptor> {
+    let detail = &operation.detail_json;
+    let (method, params) = match operation.kind.as_str() {
+        "backup" => {
+            let app_id = detail
+                .get("app_id")
+                .and_then(|value| value.as_str())
+                .or_else(|| operation.app_id.as_ref().map(|app_id| app_id.0.as_str()))
+                .unwrap_or("*");
+            (
+                "StartBackup",
+                json!({
+                    "app_id": app_id,
+                    "mode": detail.get("mode").and_then(|value| value.as_str()).unwrap_or("personal_state"),
+                    "performance_mode": detail.get("performance_mode").and_then(|value| value.as_str()).unwrap_or("balanced"),
+                }),
+            )
+        }
+        "restore" => {
+            let app_id = detail
+                .get("app_id")
+                .and_then(|value| value.as_str())
+                .or_else(|| operation.app_id.as_ref().map(|app_id| app_id.0.as_str()))
+                .ok_or_else(|| StateError::Invalid("persisted restore app_id is missing".into()))?;
+            let bundle_id = detail
+                .get("bundle_id")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| {
+                    StateError::Invalid("persisted restore bundle_id is missing".into())
+                })?;
+            (
+                "StartRestore",
+                json!({
+                    "app_id": app_id,
+                    "mode": detail.get("mode").and_then(|value| value.as_str()).unwrap_or("personal_state"),
+                    "bundle_id": bundle_id,
+                }),
+            )
+        }
+        kind => {
+            return Err(StateError::Invalid(format!(
+                "operation {} of kind {kind} cannot be reconstructed for retry",
+                operation.operation_id
+            )))
+        }
     };
-    let Some(retry) = operation.detail_json.get("retry") else {
-        return Ok(None);
-    };
-    let method = retry
-        .get("method")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| StateError::Invalid("persisted retry method is missing".into()))?;
-    let params = retry
-        .get("params")
-        .cloned()
-        .ok_or_else(|| StateError::Invalid("persisted retry params are missing".into()))?;
     agent
         .operations
-        .remember_retry(operation_id, method, &params);
-    Ok(agent.operations.retry_descriptor(operation_id))
+        .remember_retry(operation.operation_id, method, &params);
+    agent
+        .operations
+        .retry_descriptor(operation.operation_id)
+        .ok_or_else(|| {
+            StateError::Invalid(format!(
+                "retry context for operation {} is unavailable",
+                operation.operation_id
+            ))
+        })
 }
 
 fn upsert_queued_operation(
@@ -972,12 +1010,15 @@ fn reset_retryable_journal_entries(agent: &StateAgent, operation_id: uuid::Uuid)
 fn is_terminal_state(state: &str) -> bool {
     matches!(
         state,
-        "COMPLETED" | "FAILED" | "CANCELLED" | "ROLLED_BACK" | "SEALED"
+        "COMPLETED" | "FAILED" | "CANCELLED" | "ROLLED_BACK" | "SEALED" | "INTERRUPTED"
     )
 }
 
 fn is_retryable_state(state: &str) -> bool {
-    matches!(state, "FAILED" | "CANCELLED" | "ROLLED_BACK")
+    matches!(
+        state,
+        "FAILED" | "CANCELLED" | "ROLLED_BACK" | "INTERRUPTED"
+    )
 }
 
 fn operation_metrics(agent: &StateAgent, operation: &OperationRecord) -> Result<OperationMetrics> {
@@ -1009,6 +1050,11 @@ fn performance_diagnostics(
     let mut bytes_downloaded = 0_u64;
     let mut files_rehashed = 0_u64;
     let mut files_skipped_fast_identity = 0_u64;
+    let mut planning_ms = 0_u64;
+    let mut hashing_ms = 0_u64;
+    let mut packing_ms = 0_u64;
+    let mut upload_ms = 0_u64;
+    let mut download_ms = 0_u64;
     let mut operation_values = Vec::with_capacity(operations.len());
     for operation in operations {
         match operation.state.as_str() {
@@ -1025,10 +1071,33 @@ fn performance_diagnostics(
         files_rehashed = files_rehashed.saturating_add(metrics.num_files_rehashed);
         files_skipped_fast_identity =
             files_skipped_fast_identity.saturating_add(metrics.num_files_skipped_fast_identity);
+        planning_ms = planning_ms.saturating_add(metrics.planning_duration_ms);
+        hashing_ms = hashing_ms.saturating_add(metrics.hashing_duration_ms);
+        packing_ms = packing_ms.saturating_add(metrics.packing_duration_ms);
+        upload_ms = upload_ms.saturating_add(metrics.upload_duration_ms);
+        download_ms = download_ms.saturating_add(metrics.download_duration_ms);
         operation_values.push(serialize_operation(agent, operation, false)?);
     }
     let sample_size = operation_values.len() as u64;
     let average_total_duration_ms = (sample_size > 0).then(|| total_duration_ms / sample_size);
+    let dominant_stage = [
+        ("planning", planning_ms),
+        ("hashing", hashing_ms),
+        ("packing", packing_ms),
+        ("upload", upload_ms),
+        ("download", download_ms),
+    ]
+    .into_iter()
+    .max_by_key(|(_, duration)| *duration)
+    .map(|(stage, _)| stage);
+    let upload_bytes_per_second =
+        (upload_ms > 0).then(|| bytes_uploaded.saturating_mul(1_000) / upload_ms.max(1));
+    let download_bytes_per_second =
+        (download_ms > 0).then(|| bytes_downloaded.saturating_mul(1_000) / download_ms.max(1));
+    let remote_transfer_is_dominant = upload_ms.saturating_add(download_ms)
+        > planning_ms
+            .saturating_add(hashing_ms)
+            .saturating_add(packing_ms);
     let running = agent
         .operations
         .running_snapshots()
@@ -1062,6 +1131,17 @@ fn performance_diagnostics(
             "bytes_downloaded": bytes_downloaded,
             "files_rehashed": files_rehashed,
             "files_skipped_fast_identity": files_skipped_fast_identity,
+            "stage_duration_ms": {
+                "planning": planning_ms,
+                "hashing": hashing_ms,
+                "packing": packing_ms,
+                "upload": upload_ms,
+                "download": download_ms,
+            },
+            "dominant_stage": dominant_stage,
+            "remote_transfer_is_dominant": remote_transfer_is_dominant,
+            "upload_bytes_per_second": upload_bytes_per_second,
+            "download_bytes_per_second": download_bytes_per_second,
         },
         "recent_operations": operation_values,
     }))

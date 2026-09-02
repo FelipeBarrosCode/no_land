@@ -3,6 +3,7 @@ use std::future::{poll_fn, Future};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::Poll;
+use std::time::{Duration, SystemTime};
 
 use noland_crypto::MasterKey;
 use noland_pack::{extract_chunk, PackIndexEntry};
@@ -16,6 +17,163 @@ use uuid::Uuid;
 use crate::{RestorePlan, RestorePriority, RestoreTarget};
 
 pub const DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS: usize = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackCacheGcOptions {
+    pub max_bytes: u64,
+    pub max_packs: usize,
+    pub min_unused_age: Duration,
+    /// Pack IDs currently used by callers that are not represented by a staged hard link.
+    pub protected_pack_ids: BTreeSet<String>,
+}
+
+impl PackCacheGcOptions {
+    pub fn new(max_bytes: u64, max_packs: usize) -> Self {
+        Self {
+            max_bytes,
+            max_packs,
+            min_unused_age: Duration::ZERO,
+            protected_pack_ids: BTreeSet::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PackCacheGcReport {
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub packs_before: usize,
+    pub packs_after: usize,
+    pub packs_pruned: usize,
+    pub markers_pruned: usize,
+}
+
+#[derive(Debug)]
+struct CachedPack {
+    path: PathBuf,
+    marker: PathBuf,
+    pack_id: String,
+    bytes: u64,
+    last_used: SystemTime,
+    in_use: bool,
+}
+
+/// Prunes the provider-neutral local restore pack cache to byte and pack-count budgets.
+///
+/// Packs are removed least-recently-used first. Verification marker modification times are
+/// the access clock. Partial files are ignored, and staged hard links plus explicitly protected
+/// pack IDs are never removed.
+pub fn prune_local_pack_cache(
+    cache_root: &Path,
+    options: &PackCacheGcOptions,
+) -> Result<PackCacheGcReport> {
+    let mut packs = Vec::new();
+    collect_cached_packs(cache_root, options, &mut packs)?;
+    packs.sort_by(|left, right| {
+        left.last_used
+            .cmp(&right.last_used)
+            .then_with(|| left.pack_id.cmp(&right.pack_id))
+    });
+
+    let mut report = PackCacheGcReport {
+        bytes_before: packs.iter().map(|pack| pack.bytes).sum(),
+        packs_before: packs.len(),
+        ..PackCacheGcReport::default()
+    };
+    let mut bytes = report.bytes_before;
+    let mut count = report.packs_before;
+    let now = SystemTime::now();
+
+    for pack in packs {
+        if bytes <= options.max_bytes && count <= options.max_packs {
+            break;
+        }
+        let old_enough = now
+            .duration_since(pack.last_used)
+            .map(|age| age >= options.min_unused_age)
+            .unwrap_or(false);
+        if pack.in_use || !old_enough {
+            continue;
+        }
+
+        // Remove the pack first: a marker without a pack is harmless, while the reverse could
+        // incorrectly retain verification state if marker removal succeeds but pack removal fails.
+        remove_file_if_present(&pack.path)?;
+        bytes = bytes.saturating_sub(pack.bytes);
+        count = count.saturating_sub(1);
+        report.packs_pruned += 1;
+        if pack.marker.is_file() {
+            remove_file_if_present(&pack.marker)?;
+            report.markers_pruned += 1;
+        }
+    }
+
+    report.bytes_after = bytes;
+    report.packs_after = count;
+    Ok(report)
+}
+
+fn collect_cached_packs(
+    directory: &Path,
+    options: &PackCacheGcOptions,
+    packs: &mut Vec<CachedPack>,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.is_dir() {
+            collect_cached_packs(&path, options, packs)?;
+            continue;
+        }
+        if !metadata.is_file() || path.extension().and_then(|value| value.to_str()) != Some("pack")
+        {
+            continue;
+        }
+        let Some(pack_id) = path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let marker = verified_marker_path(&path);
+        let marker_metadata = std::fs::metadata(&marker).ok();
+        let marker_bytes = marker_metadata
+            .as_ref()
+            .map(|value| value.len())
+            .unwrap_or(0);
+        let last_used = marker_metadata
+            .and_then(|value| value.modified().ok())
+            .or_else(|| metadata.modified().ok())
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        packs.push(CachedPack {
+            path,
+            marker,
+            in_use: options.protected_pack_ids.contains(&pack_id) || has_multiple_links(&metadata),
+            pack_id,
+            bytes: metadata.len().saturating_add(marker_bytes),
+            last_used,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    metadata.nlink() > 1
+}
+
+#[cfg(not(unix))]
+fn has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
 
 #[derive(Clone, Copy)]
 pub struct DownloadJournal<'a> {
@@ -489,6 +647,85 @@ mod tests {
     use std::task::{Context, Wake, Waker};
 
     use super::*;
+
+    #[test]
+    fn pack_cache_gc_prunes_lru_pack_and_marker_but_ignores_partials() {
+        let root = test_dir("gc-lru");
+        let old = cached_pack(&root, "aa-old", 7);
+        std::thread::sleep(Duration::from_millis(20));
+        let recent = cached_pack(&root, "bb-recent", 5);
+        let partial = root.join("cc.pack.restore.partial");
+        std::fs::write(&partial, b"in progress").unwrap();
+
+        let report = prune_local_pack_cache(&root, &PackCacheGcOptions::new(u64::MAX, 1)).unwrap();
+
+        assert_eq!(report.packs_before, 2);
+        assert_eq!(report.packs_after, 1);
+        assert_eq!(report.packs_pruned, 1);
+        assert_eq!(report.markers_pruned, 1);
+        assert!(!old.exists());
+        assert!(!verified_marker_path(&old).exists());
+        assert!(recent.exists());
+        assert!(partial.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pack_cache_gc_never_prunes_linked_or_explicitly_protected_packs() {
+        let root = test_dir("gc-in-use");
+        let linked = cached_pack(&root, "aa-linked", 8);
+        let staging = test_dir("gc-staging");
+        let staged = staging.join("staged.pack");
+        std::fs::hard_link(&linked, &staged).unwrap();
+        let protected = cached_pack(&root, "bb-protected", 8);
+        let removable = cached_pack(&root, "cc-removable", 8);
+        let mut options = PackCacheGcOptions::new(0, 0);
+        options.protected_pack_ids.insert("bb-protected".into());
+
+        let report = prune_local_pack_cache(&root, &options).unwrap();
+
+        assert_eq!(report.packs_pruned, 1);
+        assert!(linked.exists());
+        assert!(protected.exists());
+        assert!(!removable.exists());
+        // The unmet budget accurately reflects the two packs that could not be removed.
+        assert_eq!(report.packs_after, 2);
+        std::fs::remove_dir_all(root).unwrap();
+        std::fs::remove_dir_all(staging).unwrap();
+    }
+
+    #[test]
+    fn verification_record_refreshes_pack_lru_timestamp() {
+        let root = test_dir("gc-touch");
+        let pack = cached_pack(&root, "aa-touch", 4);
+        let marker = verified_marker_path(&pack);
+        let before = std::fs::metadata(&marker).unwrap().modified().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+
+        record_verified_chunks(&pack, "aa-touch", &[]).unwrap();
+
+        let after = std::fs::metadata(marker).unwrap().modified().unwrap();
+        assert!(after > before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn cached_pack(root: &Path, pack_id: &str, size: usize) -> PathBuf {
+        let path = root.join(&pack_id[..2]).join(format!("{pack_id}.pack"));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![0_u8; size]).unwrap();
+        record_verified_chunks(&path, pack_id, &[]).unwrap();
+        path
+    }
+
+    fn test_dir(label: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "noland-restore-{label}-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn bounded_runner_never_exceeds_limit() {

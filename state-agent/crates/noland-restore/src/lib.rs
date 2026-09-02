@@ -20,8 +20,8 @@ use noland_storage::{read_committed_manifest, SharedStorageProvider};
 use uuid::Uuid;
 
 pub use download::{
-    download_and_verify_to, DownloadJournal, DownloadOptions, DownloadReport,
-    DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
+    download_and_verify_to, prune_local_pack_cache, DownloadJournal, DownloadOptions,
+    DownloadReport, PackCacheGcOptions, PackCacheGcReport, DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
 };
 pub use planner::{
     embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
