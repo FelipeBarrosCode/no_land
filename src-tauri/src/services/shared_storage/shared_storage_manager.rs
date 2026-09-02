@@ -121,7 +121,7 @@ impl SharedStorageManager {
                 target_user,
                 &app_id,
                 &bundle_id,
-                "personal_state",
+                restore_mode_for_catalog_selection(),
             )
             .await?;
             if let Some(app) = catalog_by_app_id.get(&app_id) {
@@ -470,6 +470,7 @@ impl SharedStorageManager {
         // app is backed up in turn. Errors are captured (not propagated with `?`)
         // so the running-job guard and state update below always run.
         let run_all = app_ids.is_empty() || app_ids.iter().any(|id| id == "*");
+        let backup_mode = backup_mode_for_selection(run_all);
         let result: AppResult<()> = if run_all {
             Self::start_agent_backup(
                 context,
@@ -477,7 +478,7 @@ impl SharedStorageManager {
                 instance_id,
                 target_user,
                 "*",
-                "personal_state",
+                backup_mode,
                 performance_mode,
                 None,
             )
@@ -492,7 +493,7 @@ impl SharedStorageManager {
                     instance_id,
                     target_user,
                     app_id,
-                    "personal_state",
+                    backup_mode,
                     performance_mode,
                     None,
                 )
@@ -1093,6 +1094,18 @@ impl SharedStorageManager {
 
 /// Simple shell escaping for single-quoted strings.
 
+fn restore_mode_for_catalog_selection() -> &'static str {
+    "complete_application"
+}
+
+fn backup_mode_for_selection(run_all: bool) -> &'static str {
+    if run_all {
+        "personal_state"
+    } else {
+        "complete_application"
+    }
+}
+
 fn selected_app_ids(paths: &[String]) -> Vec<String> {
     let mut ids = Vec::new();
     for path in paths {
@@ -1424,7 +1437,17 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_steam_app_id_from_catalog, parse_catalog_selection, AgentCatalogAppRecord};
+    use super::{
+        backup_mode_for_selection, infer_steam_app_id_from_catalog, parse_catalog_selection,
+        restore_mode_for_catalog_selection, AgentCatalogAppRecord,
+    };
+
+    #[test]
+    fn selected_apps_use_complete_application_backup_mode() {
+        assert_eq!(backup_mode_for_selection(false), "complete_application");
+        assert_eq!(backup_mode_for_selection(true), "personal_state");
+        assert_eq!(restore_mode_for_catalog_selection(), "complete_application");
+    }
 
     #[test]
     fn parses_specific_catalog_bundle_selection() {

@@ -80,6 +80,16 @@ pub fn decide_path(ctx: PathDecisionContext<'_>) -> BackupDecision {
                 BackupDecision::Include
             } else if looks_like_cache(ctx.path) {
                 BackupDecision::Exclude
+            } else if matches!(
+                ctx.mode,
+                BackupMode::CompleteApplication | BackupMode::Custom
+            ) && ctx
+                .association
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == crate::evidence::EvidenceKind::ReadOnlyDependency)
+            {
+                BackupDecision::IncludeAsBaseOrOverlay
             } else {
                 BackupDecision::DeferAndReconcile
             }
@@ -104,5 +114,67 @@ pub fn infer_semantic_role(path: &Path, class: PersistenceClass) -> SemanticRole
         PersistenceClass::SharedState => SemanticRole::SharedRuntime,
         PersistenceClass::Ephemeral => SemanticRole::Cache,
         PersistenceClass::Unknown => SemanticRole::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::evidence::{Evidence, EvidenceKind};
+    use crate::identity::AppId;
+
+    fn external_dependency() -> PathAssociation {
+        PathAssociation {
+            app_id: AppId::desktop("portable-app"),
+            path_id: 1,
+            confidence: crate::confidence::CONF_DEPENDENCY,
+            evidence: vec![Evidence::new(EvidenceKind::ReadOnlyDependency)],
+            persistence_class: PersistenceClass::Unknown,
+            semantic_role: SemanticRole::Unknown,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn complete_application_includes_unknown_external_dependencies() {
+        let association = external_dependency();
+        let decide = |mode| {
+            decide_path(PathDecisionContext {
+                path: Path::new("/home/gamer/Downloads/portable-app.AppImage"),
+                association: &association,
+                mode,
+                matches_image_baseline: false,
+                reliable_reconstruction: false,
+                policy_override: None,
+            })
+        };
+
+        assert_eq!(
+            decide(BackupMode::PersonalState),
+            BackupDecision::DeferAndReconcile
+        );
+        assert_eq!(
+            decide(BackupMode::CompleteApplication),
+            BackupDecision::IncludeAsBaseOrOverlay
+        );
+    }
+
+    #[test]
+    fn complete_application_still_excludes_cache_dependencies() {
+        let association = external_dependency();
+        assert_eq!(
+            decide_path(PathDecisionContext {
+                path: Path::new("/home/gamer/.cache/portable-app/index"),
+                association: &association,
+                mode: BackupMode::CompleteApplication,
+                matches_image_baseline: false,
+                reliable_reconstruction: false,
+                policy_override: None,
+            }),
+            BackupDecision::Exclude
+        );
     }
 }

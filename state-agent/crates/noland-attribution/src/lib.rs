@@ -135,6 +135,7 @@ impl<'a> AttributionEngine<'a> {
                             Some(event.ppid),
                             Some(&exe.to_string_lossy()),
                         )?;
+                        self.associate_executable(event.pid, exe, &inherited)?;
                         return Ok(Some(inherited));
                     }
                     self.db.detach_pid(event.pid)?;
@@ -154,6 +155,7 @@ impl<'a> AttributionEngine<'a> {
                         Some(event.ppid),
                         Some(&exe.to_string_lossy()),
                     )?;
+                    self.associate_executable(event.pid, exe, &session)?;
                     return Ok(Some(session));
                 }
                 let source = infer_session_source(&identity, exe);
@@ -165,6 +167,7 @@ impl<'a> AttributionEngine<'a> {
                     }
                 }
                 self.db.insert_session(&session)?;
+                self.associate_executable(event.pid, exe, &session)?;
                 Ok(Some(session))
             }
             ProcessEventKind::Exit => {
@@ -180,6 +183,27 @@ impl<'a> AttributionEngine<'a> {
                 Ok(None)
             }
         }
+    }
+
+    fn associate_executable(
+        &mut self,
+        pid: i32,
+        executable: &Path,
+        session: &AppSession,
+    ) -> Result<()> {
+        if !executable.is_absolute() || !executable.is_file() {
+            return Ok(());
+        }
+        let event = FilesystemEvent {
+            kind: FsEventKind::Execve,
+            pid,
+            path: executable.to_path_buf(),
+            dest_path: None,
+            at: Utc::now(),
+            sampled: false,
+        };
+        self.ingest_fs_for_session(&event, session, None, None)?;
+        Ok(())
     }
 
     pub fn ingest_fs(&mut self, event: &FilesystemEvent) -> Result<Option<PathAssociation>> {
@@ -868,6 +892,7 @@ mod tests {
         let desktop = AppIdentity::new(AppId::desktop("desktop-shell"), "Desktop Shell");
         let mut pcsx2 = AppIdentity::new(AppId::desktop("pcsx2"), "PCSX2");
         let pcsx2_exe = home.join("PCSX2.AppImage");
+        std::fs::write(&pcsx2_exe, b"appimage").unwrap();
         pcsx2.canonical_executable = Some(pcsx2_exe.clone());
         db.upsert_app(&desktop).unwrap();
         db.upsert_app(&pcsx2).unwrap();
@@ -915,6 +940,19 @@ mod tests {
             db.session_for_pid(20).unwrap().unwrap().app_id,
             pcsx2.app_id
         );
+        let executable_record = db
+            .get_path_by_canonical(&home.join("PCSX2.AppImage").to_string_lossy())
+            .unwrap()
+            .expect("executed AppImage should be a member of its application group");
+        assert!(db
+            .associations_for_path(executable_record.path_id)
+            .unwrap()
+            .iter()
+            .any(|association| association.app_id == pcsx2.app_id
+                && association
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == EvidenceKind::ReadOnlyDependency)));
 
         let game_assoc = engine
             .ingest_ebpf_fs(&EbpfFilesystemFact {
