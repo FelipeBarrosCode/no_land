@@ -188,7 +188,6 @@ pub struct ProviderSelectOption {
     pub label: String,
 }
 
-
 // ─── Profile Reference (persisted in app state) ────────────
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use noland_state_core::Result;
 
-use crate::{Health, RemoteEntry, RemoteKey, RemoteMeta, SharedStorageProvider};
+use crate::{
+    transfer::local_storage_identity, Health, ProviderRootIdentity, RemoteEntry, RemoteKey,
+    RemoteMeta, SharedStorageProvider,
+};
 
 /// Filesystem-backed provider used by tests and as the local cache layout.
 pub struct LocalStorage {
@@ -33,7 +36,15 @@ impl SharedStorageProvider for LocalStorage {
 
     async fn ensure_root(&self) -> Result<()> {
         std::fs::create_dir_all(&self.root)?;
-        for child in ["catalog", "commits", "bundles", "objects", "packs", "checkpoints", "instances"] {
+        for child in [
+            "catalog",
+            "commits",
+            "bundles",
+            "objects",
+            "packs",
+            "checkpoints",
+            "instances",
+        ] {
             std::fs::create_dir_all(self.root.join(child))?;
         }
         Ok(())
@@ -122,5 +133,9 @@ impl SharedStorageProvider for LocalStorage {
             key: key.clone(),
             size: bytes.len() as u64,
         })
+    }
+
+    fn storage_identity(&self) -> Option<ProviderRootIdentity> {
+        Some(local_storage_identity(&self.root))
     }
 }

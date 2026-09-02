@@ -140,6 +140,11 @@ export interface ServerPreferences {
   geolocationCountryCode: string;
 }
 
+export interface OfferCountryAvailability {
+  code: string;
+  offerCount: number;
+}
+
 export interface OfferCandidate {
   id: number;
   hostId: number | null;
@@ -707,6 +712,8 @@ export interface ProfileReference {
   active?: boolean;
 }
 
+export type BackupPerformanceMode = "fast" | "balanced" | "full";
+
 export interface BackupStatusResponse {
   lastBackupStartedAt: string | null;
   lastBackupFinishedAt: string | null;
@@ -735,6 +742,22 @@ export interface SharedStorageSyncSelectionRequest {
   selectedPaths: string[];
 }
 
+export interface SharedStorageProgressEvent {
+  operationId: string;
+  instanceId: number;
+  kind: string;
+  state: string;
+  phase: string | null;
+  message: string | null;
+  completedUnits: number | null;
+  totalUnits: number | null;
+  unit: string | null;
+  fraction: number | null;
+  readyToLaunch: boolean;
+  cancelRequested: boolean;
+  cancellable: boolean;
+}
+
 export interface SunshineSetting {
   key: string;
   value: unknown;
@@ -750,84 +773,6 @@ export interface SunshineSettingsResponse {
   raw: Record<string, unknown>;
 }
 
-// ============================================================
-// Bundle Index + Restore types
-// ============================================================
-
-export interface BundleHost {
-  username: string;
-  home: string;
-  os: string;
-}
-
-export interface FolderBundle {
-  id: string;
-  label: string;
-  source: string;
-  target: string;
-  kind: string;
-  defaultSelected: boolean;
-}
-
-export interface AppBundle {
-  id: string;
-  name: string;
-  type: string;
-  confidence: number;
-  signals: string[];
-  folderBundles: FolderBundle[];
-}
-
-export interface BundleIndex {
-  schemaVersion: number;
-  generatedAt: string;
-  instanceId: number;
-  snapshotId: string;
-  host: BundleHost;
-  bundles: AppBundle[];
-}
-
-export interface RestoreRequest {
-  bundleId: string;
-  folderBundleIds: string[];
-  mode: string;
-}
-
-export interface RestoreDryRunItem {
-  folderBundleId: string;
-  label: string;
-  source: string;
-  target: string;
-  kind: string;
-  action: string;
-}
-
-export interface RestoreDryRunResult {
-  wouldRestore: RestoreDryRunItem[];
-  totalFilesEstimate: number;
-}
-
-export interface RestoreJobItem {
-  folderBundleId: string;
-  label: string;
-  source: string;
-  target: string;
-  kind: string;
-  status: string;
-  error: string | null;
-}
-
-export interface RestoreJob {
-  jobId: string;
-  instanceId: number;
-  bundleId: string;
-  mode: string;
-  status: string;
-  startedAt: string;
-  finishedAt: string | null;
-  items: RestoreJobItem[];
-  error: string | null;
-}
 
 // ============================================================
 // Microphone Passthrough types

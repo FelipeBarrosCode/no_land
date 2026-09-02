@@ -70,8 +70,8 @@ pub struct EncryptedBlob {
 }
 
 pub fn encrypt(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<EncryptedBlob> {
-    let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|e| StateError::Crypto(e.to_string()))?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key).map_err(|e| StateError::Crypto(e.to_string()))?;
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = XNonce::from_slice(&nonce_bytes);
@@ -91,8 +91,8 @@ pub fn encrypt(key: &[u8; 32], aad: &[u8], plaintext: &[u8]) -> Result<Encrypted
 }
 
 pub fn decrypt(key: &[u8; 32], aad: &[u8], blob: &EncryptedBlob) -> Result<Vec<u8>> {
-    let cipher = XChaCha20Poly1305::new_from_slice(key)
-        .map_err(|e| StateError::Crypto(e.to_string()))?;
+    let cipher =
+        XChaCha20Poly1305::new_from_slice(key).map_err(|e| StateError::Crypto(e.to_string()))?;
     cipher
         .decrypt(
             XNonce::from_slice(&blob.nonce),
@@ -138,7 +138,10 @@ mod tests {
         let master = MasterKey::generate();
         let keys = derive_keys(&master);
         let blob = encrypt(&keys.manifest, b"manifest", b"secret-save").unwrap();
-        assert_eq!(decrypt(&keys.manifest, b"manifest", &blob).unwrap(), b"secret-save");
+        assert_eq!(
+            decrypt(&keys.manifest, b"manifest", &blob).unwrap(),
+            b"secret-save"
+        );
         let other = MasterKey::generate();
         let other_keys = derive_keys(&other);
         assert!(decrypt(&other_keys.manifest, b"manifest", &blob).is_err());

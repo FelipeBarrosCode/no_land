@@ -320,6 +320,10 @@ impl VastInstance {
         .any(|state| status.contains(state))
     }
 
+    pub fn is_inactive(&self) -> bool {
+        self.status.trim().eq_ignore_ascii_case("inactive")
+    }
+
     pub fn is_vm_runtime(&self) -> bool {
         let runtime = self.image_runtype.trim().to_ascii_lowercase();
         runtime == "vm" || runtime == "kvm" || runtime == "qemu"
@@ -386,6 +390,19 @@ pub fn parse_geolocation(raw: &str) -> (String, String, String) {
     let country = segments.last().copied().unwrap_or_default().to_string();
 
     (city, region, country)
+}
+
+/// Extract the two-letter ISO country code from a Vast `geolocation` string.
+/// Vast bundles country names as the final comma-separated segment, e.g.
+/// `"Seychelles, SC"` or `"Montreal, Canada, CA"`.
+pub fn country_code_from_geolocation(raw: &str) -> Option<String> {
+    let segment = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .last()?
+        .to_uppercase();
+    (segment.len() == 2 && segment.chars().all(|ch| ch.is_ascii_alphabetic())).then_some(segment)
 }
 
 fn field_as_u64(value: &Value, keys: &[&str]) -> Option<u64> {

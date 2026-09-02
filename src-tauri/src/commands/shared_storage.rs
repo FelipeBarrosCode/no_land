@@ -642,7 +642,7 @@ async fn run_loopback_server(
     context: AppContext,
     port: u16,
     session_id: String,
-    _provider: StorageProvider,
+    provider: StorageProvider,
     _display_name: String,
     oauth_config: crate::services::shared_storage::oauth_flow::OAuthProviderConfig,
 ) -> Result<(), String> {
@@ -721,37 +721,53 @@ async fn run_loopback_server(
                 .await
                 {
                     Ok(token) => {
-                        let now = chrono::Utc::now().timestamp();
-                        let credentials = StorageCredential::OAuth2 {
-                            access_token: token.access_token.clone(),
-                            refresh_token: token.refresh_token.clone(),
-                            expires_at: now + token.expires_in.unwrap_or(3600),
-                        };
+                        let refresh_token = token
+                            .refresh_token
+                            .clone()
+                            .filter(|value| !value.trim().is_empty());
+                        if refresh_token.is_none() {
+                            outcome_message = format!(
+                                "{} did not provide a refresh token. Revoke Noland's existing authorization and reconnect so background transfers remain authorized.",
+                                provider.label()
+                            );
+                            let mut sessions = get_oauth_sessions().write().await;
+                            if let Some(s) = sessions.get_mut(&session_id) {
+                                s.status = OAuthSessionStatus::Failed(outcome_message.clone());
+                            }
+                        } else {
+                            let now = chrono::Utc::now().timestamp();
+                            let credentials = StorageCredential::OAuth2 {
+                                access_token: token.access_token.clone(),
+                                refresh_token,
+                                expires_at: now + token.expires_in.unwrap_or(3600),
+                            };
 
-                        get_profile_manager()
-                            .store_oauth_session_credentials(&context, &session_id, &credentials)
-                            .await
-                            .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
+                            get_profile_manager()
+                                .store_oauth_session_credentials(
+                                    &context,
+                                    &session_id,
+                                    &credentials,
+                                )
+                                .await
+                                .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
 
-                        let verify: Option<StorageCredential> = get_profile_manager()
-                            .retrieve_oauth_session_credentials(&context, &session_id)
-                            .await
-                            .map_err(|e| {
-                                format!("Verify persisted OAuth session credentials: {e}")
-                            })?;
-                        tracing::info!(
-                            "OAuth tokens stored for session {session_id}, verified: {}",
-                            verify.is_some()
-                        );
+                            let verify: Option<StorageCredential> = get_profile_manager()
+                                .retrieve_oauth_session_credentials(&context, &session_id)
+                                .await
+                                .map_err(|e| {
+                                    format!("Verify persisted OAuth session credentials: {e}")
+                                })?;
+                            tracing::info!(
+                                "OAuth tokens stored for session {session_id}, verified: {}",
+                                verify.is_some()
+                            );
 
-                        // Mark session as completed
-                        {
                             let mut sessions = get_oauth_sessions().write().await;
                             if let Some(s) = sessions.get_mut(&session_id) {
                                 s.status = OAuthSessionStatus::Completed;
                             }
+                            outcome_ok = true;
                         }
-                        outcome_ok = true;
                     }
                     Err(e) => {
                         tracing::warn!("OAuth token exchange failed for {session_id}: {e}");

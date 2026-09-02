@@ -254,6 +254,15 @@ pub struct OfferCandidate {
     pub has_avx: bool,
 }
 
+/// A two-letter geolocation code with the number of rentable offers Vast
+/// currently serves there. Used to constrain the server-picker country list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OfferCountryAvailability {
+    pub code: String,
+    pub offer_count: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceState {
@@ -886,10 +895,27 @@ pub struct SharedStorageObjectEntry {
     pub is_dir: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupPerformanceMode {
+    Fast,
+    #[default]
+    Balanced,
+    Full,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageSyncSelectionRequest {
     pub selected_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageBackupSelectionRequest {
+    pub selected_paths: Vec<String>,
+    #[serde(default)]
+    pub performance_mode: BackupPerformanceMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -914,104 +940,6 @@ pub struct SharedStorageProfileSecret {
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageOAuthSessionSecret {
     pub credentials: crate::models::application_bundle::StorageCredential,
-}
-
-// ============================================================
-// Bundle Index + Restore types
-// ============================================================
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundleIndex {
-    pub schema_version: u32,
-    pub generated_at: String,
-    pub instance_id: u64,
-    pub snapshot_id: String,
-    pub host: BundleHost,
-    pub bundles: Vec<AppBundle>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BundleHost {
-    pub username: String,
-    pub home: String,
-    pub os: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AppBundle {
-    pub id: String,
-    pub name: String,
-    #[serde(rename = "type")]
-    pub bundle_type: String,
-    pub confidence: f64,
-    pub signals: Vec<String>,
-    pub folder_bundles: Vec<FolderBundle>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct FolderBundle {
-    pub id: String,
-    pub label: String,
-    pub source: String,
-    pub target: String,
-    pub kind: String,
-    pub default_selected: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreRequest {
-    pub bundle_id: String,
-    pub folder_bundle_ids: Vec<String>,
-    pub mode: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreDryRunResult {
-    pub would_restore: Vec<RestoreDryRunItem>,
-    pub total_files_estimate: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreDryRunItem {
-    pub folder_bundle_id: String,
-    pub label: String,
-    pub source: String,
-    pub target: String,
-    pub kind: String,
-    pub action: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreJob {
-    pub job_id: String,
-    pub instance_id: u64,
-    pub bundle_id: String,
-    pub mode: String,
-    pub status: String,
-    pub started_at: String,
-    pub finished_at: Option<String>,
-    pub items: Vec<RestoreJobItem>,
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RestoreJobItem {
-    pub folder_bundle_id: String,
-    pub label: String,
-    pub source: String,
-    pub target: String,
-    pub kind: String,
-    pub status: String,
-    pub error: Option<String>,
 }
 
 // ============================================================
@@ -1223,7 +1151,26 @@ pub struct MicSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::MicQualityProfile;
+    use super::{BackupPerformanceMode, MicQualityProfile, SharedStorageBackupSelectionRequest};
+
+    #[test]
+    fn backup_performance_mode_defaults_to_balanced() {
+        let request: SharedStorageBackupSelectionRequest =
+            serde_json::from_str(r#"{"selectedPaths":["/apps/example"]}"#).unwrap();
+
+        assert_eq!(request.performance_mode, BackupPerformanceMode::Balanced);
+    }
+
+    #[test]
+    fn backup_performance_modes_use_provider_neutral_values() {
+        for (mode, expected) in [
+            (BackupPerformanceMode::Fast, r#""fast""#),
+            (BackupPerformanceMode::Balanced, r#""balanced""#),
+            (BackupPerformanceMode::Full, r#""full""#),
+        ] {
+            assert_eq!(serde_json::to_string(&mode).unwrap(), expected);
+        }
+    }
 
     #[test]
     fn mic_quality_profiles_use_frontend_camel_case() {

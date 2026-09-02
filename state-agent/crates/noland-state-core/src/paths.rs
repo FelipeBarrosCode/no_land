@@ -64,7 +64,9 @@ impl AgentPaths {
     }
 
     pub fn is_internal(&self, path: &Path) -> bool {
-        is_noland_internal(path) || path.starts_with(&self.state_root) || path.starts_with(&self.run_root)
+        is_noland_internal(path)
+            || path.starts_with(&self.state_root)
+            || path.starts_with(&self.run_root)
     }
 }
 
@@ -95,7 +97,9 @@ pub fn looks_like_lock_or_socket(path: &Path) -> bool {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
-            name.ends_with(".lock") || name.ends_with(".pid") || name.starts_with('.') && name.ends_with(".swp")
+            name.ends_with(".lock")
+                || name.ends_with(".pid")
+                || name.starts_with('.') && name.ends_with(".swp")
         }
     }
 }

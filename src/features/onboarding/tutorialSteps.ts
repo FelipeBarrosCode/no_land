@@ -1,6 +1,7 @@
 import {
   VAST_API_KEY_URL,
   VAST_BILLING_URL,
+  VAST_HOME_URL,
 } from "../../lib/constants";
 
 export interface TutorialStep {
@@ -25,7 +26,7 @@ export const tutorialSteps: TutorialStep[] = [
     description:
       "Head to Vast.ai next. That is where you rent the GPU machine that Noland Connect will prepare for you.",
     linkLabel: "Open Vast.ai",
-    linkUrl: VAST_API_KEY_URL,
+    linkUrl: VAST_HOME_URL,
   },
   {
     eyebrow: "Step 3",
@@ -33,7 +34,7 @@ export const tutorialSteps: TutorialStep[] = [
     description:
       "Make your Vast.ai account if you are new. It only takes a minute and unlocks server access.",
     linkLabel: "Open Vast.ai",
-    linkUrl: VAST_API_KEY_URL,
+    linkUrl: VAST_HOME_URL,
   },
   {
     eyebrow: "Step 4",

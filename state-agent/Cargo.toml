@@ -47,6 +47,7 @@ tokio = { version = "1.41", features = ["macros", "rt-multi-thread", "time", "pr
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+zstd = "0.13"
 
 noland-state-core = { path = "crates/noland-state-core" }
 noland-state-db = { path = "crates/noland-state-db" }

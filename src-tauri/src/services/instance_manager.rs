@@ -94,6 +94,14 @@ impl InstanceManager {
                 )));
             }
 
+            if instance.is_inactive() {
+                return Err(AppError::Provisioning(format!(
+                    "Instance {} is not available at this moment (status: {}). Please choose another server and try again.",
+                    instance_id,
+                    instance.status
+                )));
+            }
+
             if instance.ssh_ready() && is_usable_ssh_host(&instance.ssh_host) {
                 return Ok(instance);
             }

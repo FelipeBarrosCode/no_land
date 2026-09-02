@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::errors::{AppError, AppResult};
+use crate::models::app_state::BackupPerformanceMode;
 use crate::models::application_bundle::{
     SharedStorageProfile, SharedStorageStatus, StorageProvider,
 };
@@ -15,7 +16,7 @@ use crate::models::application_bundle::{
 use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
 
 use super::agent_handoff::AgentCatalogAppRecord;
-use super::bundle_indexer::BundleIndexer;
+
 use super::object_storage::StorageCredential;
 use super::provider_profiles::shared_profile_manager;
 
@@ -62,6 +63,7 @@ impl SharedStorageManager {
         instance_id: u64,
         target_user: &str,
         selected_paths: &[String],
+        performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
         let app_ids = selected_app_ids(selected_paths);
         let ids: Vec<String> = if app_ids.is_empty() {
@@ -69,7 +71,16 @@ impl SharedStorageManager {
         } else {
             app_ids
         };
-        Self::trigger_backup(context, remote, instance_id, target_user, &ids, "manual").await?;
+        Self::trigger_backup(
+            context,
+            remote,
+            instance_id,
+            target_user,
+            &ids,
+            "manual",
+            performance_mode,
+        )
+        .await?;
         Ok("Application-state backup completed".to_string())
     }
     pub async fn list_remote_objects(
@@ -86,7 +97,6 @@ impl SharedStorageManager {
         target_user: &str,
         selected_paths: &[String],
     ) -> AppResult<String> {
-        let _ = instance_id;
         if selected_paths.is_empty() {
             return Err(AppError::InvalidInput(
                 "Select at least one application bundle to restore.".into(),
@@ -107,10 +117,11 @@ impl SharedStorageManager {
             let result = Self::start_agent_restore(
                 context,
                 remote,
+                instance_id,
                 target_user,
                 &app_id,
                 &bundle_id,
-                "personal_state",
+                restore_mode_for_catalog_selection(),
             )
             .await?;
             if let Some(app) = catalog_by_app_id.get(&app_id) {
@@ -406,6 +417,7 @@ impl SharedStorageManager {
             target_user,
             &["*".to_string()],
             "manual",
+            BackupPerformanceMode::Balanced,
         )
         .await
     }
@@ -416,12 +428,14 @@ impl SharedStorageManager {
         target_user: &str,
         app_ids: &[String],
         trigger: &str,
+        performance_mode: BackupPerformanceMode,
     ) -> AppResult<()> {
         info!(
             event = "shared_storage_backup_start",
             instance_id = instance_id,
             target_user = target_user,
             trigger = trigger,
+            performance_mode = ?performance_mode,
             "Shared storage backup started"
         );
         // Concurrency guard
@@ -456,19 +470,31 @@ impl SharedStorageManager {
         // app is backed up in turn. Errors are captured (not propagated with `?`)
         // so the running-job guard and state update below always run.
         let run_all = app_ids.is_empty() || app_ids.iter().any(|id| id == "*");
+        let backup_mode = backup_mode_for_selection(run_all);
         let result: AppResult<()> = if run_all {
-            Self::start_agent_backup(context, remote, target_user, "*", "personal_state", None)
-                .await
-                .map(|_| ())
+            Self::start_agent_backup(
+                context,
+                remote,
+                instance_id,
+                target_user,
+                "*",
+                backup_mode,
+                performance_mode,
+                None,
+            )
+            .await
+            .map(|_| ())
         } else {
             let mut outcome: AppResult<()> = Ok(());
             for app_id in app_ids {
                 if let Err(err) = Self::start_agent_backup(
                     context,
                     remote,
+                    instance_id,
                     target_user,
                     app_id,
-                    "personal_state",
+                    backup_mode,
+                    performance_mode,
                     None,
                 )
                 .await
@@ -489,19 +515,6 @@ impl SharedStorageManager {
         let finished_at = chrono::Local::now().to_rfc3339();
         match result {
             Ok(()) => {
-                // Keep restore choices fresh in UI after each successful backup.
-                if let Err(error) =
-                    BundleIndexer::generate_and_upload(context, remote, instance_id, target_user)
-                        .await
-                {
-                    warn!(
-                        instance_id = instance_id,
-                        trigger = trigger,
-                        error = %error,
-                        "Backup succeeded but bundle indexing failed"
-                    );
-                }
-
                 context
                     .update_state(|state| {
                         state.shared_storage.last_backup_finished_at = Some(finished_at);
@@ -734,22 +747,20 @@ impl SharedStorageManager {
             return Ok(credentials);
         };
 
-        // Refresh when the access token is empty, the expiry is unset, or the
-        // token is within the refresh skew of expiring.
-        const REFRESH_SKEW_SECS: i64 = 60;
+        // Refresh well before a potentially multi-minute transfer begins. The
+        // minted rclone session also receives the refresh token so it can renew
+        // credentials if a large operation outlives the current access token.
+        const REFRESH_SKEW_SECS: i64 = 15 * 60;
         let now = chrono::Utc::now().timestamp();
         let needs_refresh = access_token.trim().is_empty()
             || *expires_at <= 0
             || *expires_at - now < REFRESH_SKEW_SECS;
 
         let Some(refresh) = refresh_token.as_ref().filter(|v| !v.trim().is_empty()) else {
-            if needs_refresh {
-                warn!(
-                    "OAuth token for '{}' is expired but no refresh token is stored; re-authentication required",
-                    profile.display_name
-                );
-            }
-            return Ok(credentials);
+            return Err(AppError::State(format!(
+                "Shared storage authorization for '{}' has no refresh token. Reconnect this provider before saving or syncing files.",
+                profile.display_name
+            )));
         };
 
         if !needs_refresh {
@@ -1083,6 +1094,18 @@ impl SharedStorageManager {
 
 /// Simple shell escaping for single-quoted strings.
 
+fn restore_mode_for_catalog_selection() -> &'static str {
+    "complete_application"
+}
+
+fn backup_mode_for_selection(run_all: bool) -> &'static str {
+    if run_all {
+        "personal_state"
+    } else {
+        "complete_application"
+    }
+}
+
 fn selected_app_ids(paths: &[String]) -> Vec<String> {
     let mut ids = Vec::new();
     for path in paths {
@@ -1414,7 +1437,17 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
 
 #[cfg(test)]
 mod tests {
-    use super::{infer_steam_app_id_from_catalog, parse_catalog_selection, AgentCatalogAppRecord};
+    use super::{
+        backup_mode_for_selection, infer_steam_app_id_from_catalog, parse_catalog_selection,
+        restore_mode_for_catalog_selection, AgentCatalogAppRecord,
+    };
+
+    #[test]
+    fn selected_apps_use_complete_application_backup_mode() {
+        assert_eq!(backup_mode_for_selection(false), "complete_application");
+        assert_eq!(backup_mode_for_selection(true), "personal_state");
+        assert_eq!(restore_mode_for_catalog_selection(), "complete_application");
+    }
 
     #[test]
     fn parses_specific_catalog_bundle_selection() {

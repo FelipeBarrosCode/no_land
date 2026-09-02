@@ -2,9 +2,12 @@ use crate::{adapter_for, AdapterCredential, AdapterInput, EphemeralRcloneSession
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenMode {
-    /// Include refresh tokens. Only for desktop-local rclone configs.
+    /// Include refresh tokens in a persistent desktop-local rclone config.
     Durable,
-    /// Access token only. Required for disposable remote instances.
+    /// Include refresh capability in a guarded, operation-scoped remote config.
+    /// The state agent must remove the config when the operation finishes.
+    Operation,
+    /// Access token only, suitable only for short-lived read-only uses.
     Ephemeral,
 }
 
@@ -43,6 +46,6 @@ fn strip_refresh_token(input: &mut AdapterInput) {
 
 impl TokenMode {
     pub fn is_ephemeral(self) -> bool {
-        self == TokenMode::Ephemeral
+        self != TokenMode::Durable
     }
 }

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use noland_crypto::{derive_keys, wrap_envelope, MasterKey};
-use noland_state_core::*;
 use noland_state_core::COMMITTED_MARKER;
+use noland_state_core::*;
 use noland_storage::{forbid_rclone_sync, LocalStorage, RemoteKey, SharedStorageProvider};
 use uuid::Uuid;
 
@@ -14,7 +14,10 @@ async fn incomplete_bundle_without_committed_is_invisible() {
     let bundle = Uuid::new_v4();
     let prefix = bundle_dir(&app, bundle);
     storage
-        .put_small_versioned(Bytes::from("not-a-manifest"), &RemoteKey::new(format!("{prefix}/manifest.enc")))
+        .put_small_versioned(
+            Bytes::from("not-a-manifest"),
+            &RemoteKey::new(format!("{prefix}/manifest.enc")),
+        )
         .await
         .unwrap();
     assert!(storage
@@ -72,9 +75,17 @@ async fn committed_catalog_only_after_marker() {
         shared_app_ids: vec![],
     });
     let prefix = bundle_dir(&manifest.app.app_id, manifest.bundle_id);
-    let enc = wrap_envelope(&keys.manifest, b"manifest", &serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let enc = wrap_envelope(
+        &keys.manifest,
+        b"manifest",
+        &serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
     storage
-        .put_small_versioned(Bytes::from(enc), &RemoteKey::new(format!("{prefix}/manifest.enc")))
+        .put_small_versioned(
+            Bytes::from(enc),
+            &RemoteKey::new(format!("{prefix}/manifest.enc")),
+        )
         .await
         .unwrap();
     let before = noland_storage::update_catalog_with_bundle(&storage, &master, &manifest, 0).await;

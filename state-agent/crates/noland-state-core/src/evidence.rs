@@ -248,17 +248,21 @@ pub fn score_evidence(evidence: &[Evidence]) -> (f32, ScoreBreakdown) {
         breakdown.user_state_prior += 0.10;
     }
 
-    if kinds
-        .iter()
-        .all(|k| matches!(k, EvidenceKind::ReadOnlyDependency | EvidenceKind::NameHeuristic))
-    {
+    if kinds.iter().all(|k| {
+        matches!(
+            k,
+            EvidenceKind::ReadOnlyDependency | EvidenceKind::NameHeuristic
+        )
+    }) {
         return (crate::confidence::CONF_DEPENDENCY, breakdown);
     }
 
-    if kinds
-        .iter()
-        .all(|k| matches!(k, EvidenceKind::NameHeuristic | EvidenceKind::SharedServiceMutation))
-    {
+    if kinds.iter().all(|k| {
+        matches!(
+            k,
+            EvidenceKind::NameHeuristic | EvidenceKind::SharedServiceMutation
+        )
+    }) {
         return (crate::confidence::CONF_AMBIENT, breakdown);
     }
 

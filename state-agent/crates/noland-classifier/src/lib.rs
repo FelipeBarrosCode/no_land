@@ -25,7 +25,9 @@ impl<'a> Classifier<'a> {
         assoc: &PathAssociation,
     ) -> Result<(PersistenceClass, SemanticRole)> {
         let path = Path::new(&record.canonical_path);
-        if is_noland_internal(path) || is_hard_volatile_root(path) || looks_like_lock_or_socket(path)
+        if is_noland_internal(path)
+            || is_hard_volatile_root(path)
+            || looks_like_lock_or_socket(path)
         {
             return Ok((PersistenceClass::Ephemeral, SemanticRole::Temp));
         }
@@ -36,11 +38,16 @@ impl<'a> Classifier<'a> {
             return Ok((PersistenceClass::PersistentState, SemanticRole::Secret));
         }
 
-        let baseline_hit = matches_baseline(self.db, &self.image_id, path, record.size.map(|s| s as u64))?;
+        let baseline_hit =
+            matches_baseline(self.db, &self.image_id, path, record.size.map(|s| s as u64))?;
         let pkg = package_owner(self.db, &self.image_id, path)?;
 
         let others = self.db.associations_for_path(record.path_id)?;
-        let shared = others.iter().filter(|a| a.confidence >= OWNERSHIP_CANDIDATE_MIN).count() > 1;
+        let shared = others
+            .iter()
+            .filter(|a| a.confidence >= OWNERSHIP_CANDIDATE_MIN)
+            .count()
+            > 1;
 
         let class = if baseline_hit && !assoc.evidence.iter().any(|e| e.kind.is_mutation()) {
             PersistenceClass::BaseImage
@@ -80,7 +87,12 @@ impl<'a> Classifier<'a> {
         Ok(n)
     }
 
-    pub fn decide(&self, record: &PathRecord, assoc: &PathAssociation, mode: BackupMode) -> Result<BackupDecision> {
+    pub fn decide(
+        &self,
+        record: &PathRecord,
+        assoc: &PathAssociation,
+        mode: BackupMode,
+    ) -> Result<BackupDecision> {
         let path = Path::new(&record.canonical_path);
         let (class, role) = self.classify_path(record, assoc)?;
         let mut assoc = assoc.clone();
@@ -102,9 +114,7 @@ impl<'a> Classifier<'a> {
                 record.size.map(|s| s as u64),
             )?,
             reliable_reconstruction: package_owner(self.db, &self.image_id, path)?.is_some()
-                || record
-                    .canonical_path
-                    .contains("/steamapps/common/"),
+                || record.canonical_path.contains("/steamapps/common/"),
             policy_override: policy,
         };
         Ok(decide_path(ctx))
@@ -145,7 +155,9 @@ mod tests {
         let app = AppIdentity::new(AppId::desktop("game"), "Game");
         db.upsert_app(&app).unwrap();
         let libc_id = db.upsert_path("/usr/lib/libc.so.6").unwrap();
-        let save_id = db.upsert_path("/home/gamer/.local/share/game/save.dat").unwrap();
+        let save_id = db
+            .upsert_path("/home/gamer/.local/share/game/save.dat")
+            .unwrap();
         let now = Utc::now();
         let libc_assoc = PathAssociation {
             app_id: app.app_id.clone(),
@@ -173,7 +185,10 @@ mod tests {
         db.upsert_association(&libc_assoc).unwrap();
         db.upsert_association(&save_assoc).unwrap();
         let clf = Classifier::new(&db, "img");
-        let libc_rec = db.get_path_by_canonical("/usr/lib/libc.so.6").unwrap().unwrap();
+        let libc_rec = db
+            .get_path_by_canonical("/usr/lib/libc.so.6")
+            .unwrap()
+            .unwrap();
         let save_rec = db
             .get_path_by_canonical("/home/gamer/.local/share/game/save.dat")
             .unwrap()
@@ -184,11 +199,13 @@ mod tests {
         assert_eq!(c2, PersistenceClass::PersistentState);
         assert_eq!(r2, SemanticRole::UserState);
         assert_eq!(
-            clf.decide(&libc_rec, &libc_assoc, BackupMode::PersonalState).unwrap(),
+            clf.decide(&libc_rec, &libc_assoc, BackupMode::PersonalState)
+                .unwrap(),
             BackupDecision::Exclude
         );
         assert_eq!(
-            clf.decide(&save_rec, &save_assoc, BackupMode::PersonalState).unwrap(),
+            clf.decide(&save_rec, &save_assoc, BackupMode::PersonalState)
+                .unwrap(),
             BackupDecision::Include
         );
     }

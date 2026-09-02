@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
-import type { OfferCandidate, ServerPreferences } from "../../lib/types";
+import type {
+  OfferCandidate,
+  OfferCountryAvailability,
+  ServerPreferences,
+} from "../../lib/types";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 
 interface Props {
@@ -13,6 +17,7 @@ interface Props {
   selectedOfferId: number | null;
   serverPreferences: ServerPreferences;
   storageGb: number;
+  availableCountries: OfferCountryAvailability[];
   searchingOffers: boolean;
   offersPage: number;
   offersHasNextPage: boolean;
@@ -36,60 +41,39 @@ interface Props {
 type CountryOption = {
   code: string;
   label: string;
+  offerCount: number | null;
 };
 
+/* Fallback shown while Vast availability is loading (or when it fails). */
 const FALLBACK_COUNTRIES: CountryOption[] = [
-  { code: "AU", label: "Australia" },
-  { code: "BR", label: "Brazil" },
-  { code: "CA", label: "Canada" },
-  { code: "FR", label: "France" },
-  { code: "DE", label: "Germany" },
-  { code: "IT", label: "Italy" },
-  { code: "JP", label: "Japan" },
-  { code: "NL", label: "Netherlands" },
-  { code: "NO", label: "Norway" },
-  { code: "PL", label: "Poland" },
-  { code: "SG", label: "Singapore" },
-  { code: "ES", label: "Spain" },
-  { code: "SE", label: "Sweden" },
-  { code: "GB", label: "United Kingdom" },
-  { code: "US", label: "United States" },
+  { code: "AU", label: "Australia", offerCount: null },
+  { code: "BR", label: "Brazil", offerCount: null },
+  { code: "CA", label: "Canada", offerCount: null },
+  { code: "FR", label: "France", offerCount: null },
+  { code: "DE", label: "Germany", offerCount: null },
+  { code: "IT", label: "Italy", offerCount: null },
+  { code: "JP", label: "Japan", offerCount: null },
+  { code: "NL", label: "Netherlands", offerCount: null },
+  { code: "NO", label: "Norway", offerCount: null },
+  { code: "PL", label: "Poland", offerCount: null },
+  { code: "SG", label: "Singapore", offerCount: null },
+  { code: "ES", label: "Spain", offerCount: null },
+  { code: "SE", label: "Sweden", offerCount: null },
+  { code: "GB", label: "United Kingdom", offerCount: null },
+  { code: "US", label: "United States", offerCount: null },
 ];
 
-const COUNTRY_OPTIONS = buildCountryOptions();
-
-function buildCountryOptions(): CountryOption[] {
+function countryLabel(code: string): string {
   try {
     const displayNames = new Intl.DisplayNames(["en"], { type: "region" });
-    const countries: CountryOption[] = [];
-
-    for (let first = 65; first <= 90; first += 1) {
-      for (let second = 65; second <= 90; second += 1) {
-        const code = String.fromCharCode(first, second);
-        const label = displayNames.of(code);
-        if (label && label !== code && !label.startsWith("Unknown Region")) {
-          countries.push({ code, label });
-        }
-      }
-    }
-
-    if (countries.length > 100) {
-      return countries.sort((left, right) =>
-        left.label.localeCompare(right.label),
-      );
+    const label = displayNames.of(code.toUpperCase());
+    if (label && label !== code.toUpperCase()) {
+      return label;
     }
   } catch {
-    // Older webviews use the stable fallback list below.
+    // Older webviews fall through to the raw code.
   }
-
-  return FALLBACK_COUNTRIES;
-}
-
-function resolveCountryName(code: string): string {
-  return (
-    COUNTRY_OPTIONS.find((item) => item.code === code.toUpperCase())?.label ??
-    code.toUpperCase()
-  );
+  return code.toUpperCase();
 }
 
 function formatSpeed(mbps: number): string {
@@ -118,6 +102,7 @@ export function ServerPickerModal({
   selectedOfferId,
   serverPreferences,
   storageGb,
+  availableCountries,
   searchingOffers,
   offersPage,
   offersHasNextPage,
@@ -132,10 +117,45 @@ export function ServerPickerModal({
   const [countryCode, setCountryCode] = useState(
     serverPreferences.geolocationCountryCode || "US",
   );
+  const [storageInput, setStorageInput] = useState(
+    String(serverPreferences.storageGb || ""),
+  );
+  const storageInputRef = useRef(storageInput);
+
+  const countryOptions = useMemo<CountryOption[]>(() => {
+    if (availableCountries.length === 0) {
+      return FALLBACK_COUNTRIES;
+    }
+    const mapped: CountryOption[] = availableCountries
+      .map(({ code, offerCount }) => ({
+        code: code.toUpperCase(),
+        label: countryLabel(code),
+        offerCount,
+      }))
+      .filter((option) => option.code.length === 2);
+    const current = (serverPreferences.geolocationCountryCode || "").toUpperCase();
+    if (current && !mapped.some((option) => option.code === current)) {
+      mapped.push({ code: current, label: countryLabel(current), offerCount: 0 });
+    }
+    return mapped.sort((left, right) => left.label.localeCompare(right.label));
+  }, [availableCountries, serverPreferences.geolocationCountryCode]);
 
   useEffect(() => {
     setCountryCode(serverPreferences.geolocationCountryCode || "US");
   }, [serverPreferences.geolocationCountryCode]);
+
+  useEffect(() => {
+    setStorageInput(String(serverPreferences.storageGb || ""));
+  }, [serverPreferences.storageGb]);
+
+  const commitStorageInput = () => {
+    const parsed = Number(storageInputRef.current);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return;
+    }
+    const clamped = Math.min(10000, Math.max(1, Math.round(parsed)));
+    onUpdateServerPreferences({ storageGb: clamped });
+  };
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -157,7 +177,7 @@ export function ServerPickerModal({
     await onManualLocationSave({
       city: "",
       region: "",
-      country: resolveCountryName(countryCode),
+      country: countryLabel(countryCode),
       latitude: 0,
       longitude: 0,
     });
@@ -208,9 +228,9 @@ export function ServerPickerModal({
           </p>
         )}
 
-        <div className="mb-4 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,0.8fr)_auto] md:items-end">
-          <label>
-            <span className="block pb-1 text-[1.2rem] text-[#b4c8de]">
+        <div className="mb-2 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,1fr)_minmax(10rem,0.7fr)_auto] md:items-end">
+          <label className="flex min-w-0 flex-col justify-end">
+            <span className="block pb-1 text-[1.2rem] leading-none text-[#b4c8de]">
               Country
             </span>
             <select
@@ -218,16 +238,41 @@ export function ServerPickerModal({
               value={countryCode}
               onChange={(event) => setCountryCode(event.target.value)}
             >
-              {COUNTRY_OPTIONS.map((option) => (
+              {countryOptions.map((option) => (
                 <option key={option.code} value={option.code}>
                   {option.label} ({option.code})
+                  {option.offerCount !== null
+                    ? ` · ${option.offerCount.toLocaleString()} offers`
+                    : ""}
                 </option>
               ))}
             </select>
           </label>
 
+          <label className="flex min-w-0 flex-col justify-end">
+            <span className="block pb-1 text-[1.2rem] leading-none text-[#b4c8de]">
+              Storage (GB)
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={10000}
+              step={1}
+              title="Minimum 30 GB · Maximum 10,000 GB"
+              className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
+              value={storageInput}
+              onChange={(event) => {
+                const raw = event.target.value;
+                setStorageInput(raw);
+                storageInputRef.current = raw;
+              }}
+              onBlur={commitStorageInput}
+            />
+          </label>
+
           <Button
             variant="secondary"
+            className="h-11"
             disabled={busy || searchingOffers || !countryCode}
             loading={searchingOffers}
             loadingText="Searching..."
@@ -235,8 +280,11 @@ export function ServerPickerModal({
           >
             Find Offers
           </Button>
-
         </div>
+
+        <p className="mb-3 text-[1.05rem] text-[#7fa8cc]">
+          Storage must be between 30 GB and 10,000 GB.
+        </p>
 
         <p className="mb-3 text-[1.05rem] text-[#9ec4df]" aria-live="polite">
           Showing {offers.length} returned offers on market page {offersPage}.
@@ -327,7 +375,15 @@ export function ServerPickerModal({
                     disabled={busy}
                     loading={busy && isSelected}
                     loadingText="Provisioning..."
-                    onClick={() => onSelectOffer(offer.id, storageGb)}
+                    onClick={() => {
+                      const parsed = Number(storageInputRef.current);
+                      const effectiveStorage =
+                        Number.isFinite(parsed) && parsed > 0
+                          ? Math.min(10000, Math.max(1, Math.round(parsed)))
+                          : storageGb;
+                      commitStorageInput();
+                      onSelectOffer(offer.id, effectiveStorage);
+                    }}
                   >
                     {isSelected ? "Provisioning" : "Select & Provision"}
                   </Button>

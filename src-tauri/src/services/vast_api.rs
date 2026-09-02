@@ -1,11 +1,14 @@
-use std::{collections::HashSet, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Instant,
+};
 
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
-    models::vast::{VastInstance, VastOffer, VastSshKey},
+    models::vast::{country_code_from_geolocation, VastInstance, VastOffer, VastSshKey},
 };
 
 #[derive(Debug, Clone)]
@@ -84,6 +87,51 @@ impl VastApiClient {
             merged.len()
         );
         Ok(merged)
+    }
+
+    /// Ask every bundle category, without a country filter, which two-letter
+    /// geolocation codes currently have rentable offers. This powers the
+    /// server-picker country dropdown so it only lists what Vast actually serves.
+    pub async fn available_geolocations(&self, limit: usize) -> AppResult<Vec<(String, usize)>> {
+        let categories = ["ondemand", "bid", "reserved"];
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut last_error: Option<AppError> = None;
+
+        for category in categories {
+            match self
+                .search_offers_for_category(0.8, limit, category, None, false, false, false)
+                .await
+            {
+                Ok(offers) => {
+                    for offer in offers {
+                        if let Some(code) = country_code_from_geolocation(&offer.raw_geolocation) {
+                            *counts.entry(code).or_default() += 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    warn!(
+                        "Vast available_geolocations category={} failed (continuing): {}",
+                        category, error
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        if counts.is_empty() {
+            if let Some(error) = last_error {
+                return Err(error);
+            }
+        }
+
+        let mut list: Vec<(String, usize)> = counts.into_iter().collect();
+        list.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        debug!(
+            "Vast available_geolocations returned {} countries",
+            list.len()
+        );
+        Ok(list)
     }
 
     async fn search_offers_for_category(

@@ -7,7 +7,7 @@ use noland_state_core::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::schema::MIGRATION_V1;
+use crate::schema::{MIGRATION_V1, MIGRATION_V2};
 use crate::SCHEMA_VERSION;
 
 pub struct StateDb {
@@ -20,9 +20,12 @@ impl StateDb {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(path).map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
-        conn.pragma_update(None, "synchronous", "NORMAL").map_err(db_err)?;
-        conn.pragma_update(None, "foreign_keys", "ON").map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(db_err)?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -32,8 +35,10 @@ impl StateDb {
 
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().map_err(db_err)?;
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(db_err)?;
-        conn.pragma_update(None, "foreign_keys", "ON").map_err(db_err)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(db_err)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(db_err)?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -41,7 +46,7 @@ impl StateDb {
         Ok(db)
     }
 
-    fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
+    pub(crate) fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
             .map_err(|_| StateError::Database("sqlite mutex poisoned".into()))
@@ -56,19 +61,11 @@ impl StateDb {
     fn migrate(&self) -> Result<()> {
         let conn = self.lock()?;
         conn.execute_batch(MIGRATION_V1).map_err(db_err)?;
-        let current: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_migrations",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(db_err)?
-            .flatten();
-        if current.unwrap_or(0) < SCHEMA_VERSION {
+        conn.execute_batch(MIGRATION_V2).map_err(db_err)?;
+        for version in 1..=SCHEMA_VERSION {
             conn.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-                params![SCHEMA_VERSION, now_secs()],
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
+                params![version, now_secs()],
             )
             .map_err(db_err)?;
         }
@@ -213,6 +210,50 @@ impl StateDb {
             .map_err(db_err)
     }
 
+    pub fn open_session_app_ids(&self) -> Result<Vec<AppId>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT app_id FROM app_sessions WHERE ended_at IS NULL")
+            .map_err(db_err)?;
+        let app_ids = stmt
+            .query_map([], |row| row.get::<_, String>(0).map(AppId))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(app_ids)
+    }
+
+    pub fn open_sessions(&self) -> Result<Vec<AppSession>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT session_id, app_id, root_pid, cgroup_path, source,
+                          started_at, ended_at, identity_confidence
+                   FROM app_sessions WHERE ended_at IS NULL
+                   ORDER BY started_at"#,
+            )
+            .map_err(db_err)?;
+        let sessions = stmt
+            .query_map([], row_to_session)
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(sessions)
+    }
+
+    pub fn session_pids(&self, session_id: Uuid) -> Result<Vec<i32>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT pid FROM session_pids WHERE session_id=?1 ORDER BY pid")
+            .map_err(db_err)?;
+        let pids = stmt
+            .query_map(params![session_id.to_string()], |row| row.get(0))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(pids)
+    }
+
     pub fn open_session_for_app(&self, app_id: &AppId) -> Result<Option<AppSession>> {
         self.lock()?
             .query_row(
@@ -285,6 +326,19 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn get_path_by_id(&self, path_id: i64) -> Result<Option<PathRecord>> {
+        self.lock()?
+            .query_row(
+                r#"SELECT path_id, canonical_path, logical_root, relative_path, file_type,
+                          inode, mount_id, size, mtime_ns, mode, uid, gid, content_hash, last_scanned_at
+                   FROM paths WHERE path_id=?1"#,
+                params![path_id],
+                row_to_path,
+            )
+            .optional()
+            .map_err(db_err)
+    }
+
     pub fn get_path_by_canonical(&self, canonical: &str) -> Result<Option<PathRecord>> {
         self.lock()?
             .query_row(
@@ -329,7 +383,10 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn associations_for_app(&self, app_id: &AppId) -> Result<Vec<(PathRecord, PathAssociation)>> {
+    pub fn associations_for_app(
+        &self,
+        app_id: &AppId,
+    ) -> Result<Vec<(PathRecord, PathAssociation)>> {
         let conn = self.lock()?;
         let mut stmt = conn
             .prepare(
@@ -342,6 +399,44 @@ impl StateDb {
                    JOIN paths p ON p.path_id = a.path_id
                    WHERE a.app_id=?1
                    ORDER BY a.confidence DESC"#,
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map(params![app_id.as_str()], |row| {
+                Ok((row_to_path(row)?, row_to_assoc_from(row, 14)?))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
+    }
+
+    pub fn likely_backup_associations(
+        &self,
+        app_id: &AppId,
+    ) -> Result<Vec<(PathRecord, PathAssociation)>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT p.path_id, p.canonical_path, p.logical_root, p.relative_path, p.file_type,
+                          p.inode, p.mount_id, p.size, p.mtime_ns, p.mode, p.uid, p.gid,
+                          p.content_hash, p.last_scanned_at,
+                          a.path_id, a.app_id, a.confidence, a.persistence_class, a.semantic_role,
+                          a.evidence_json, a.first_seen_at, a.last_seen_at
+                   FROM path_associations a
+                   JOIN paths p ON p.path_id = a.path_id
+                   WHERE a.app_id=?1 AND (
+                       a.persistence_class IN ('PERSISTENT_STATE','SHARED_STATE')
+                       OR a.semantic_role IN ('USER_STATE','SECRET')
+                       OR a.confidence >= 0.70
+                       OR EXISTS (
+                           SELECT 1 FROM path_policies policy
+                           WHERE policy.canonical_path=p.canonical_path
+                             AND (policy.app_id IS NULL OR policy.app_id=a.app_id)
+                             AND policy.policy IN ('include','shared','secret','force-persistent')
+                       )
+                   )
+                   ORDER BY p.canonical_path"#,
             )
             .map_err(db_err)?;
         let rows = stmt
@@ -371,7 +466,12 @@ impl StateDb {
         Ok(rows)
     }
 
-    pub fn mark_dirty(&self, app_id: &AppId, path_id: Option<i64>, requires_reconciliation: bool) -> Result<()> {
+    pub fn mark_dirty(
+        &self,
+        app_id: &AppId,
+        path_id: Option<i64>,
+        requires_reconciliation: bool,
+    ) -> Result<()> {
         let now = now_secs();
         self.lock()?
             .execute(
@@ -396,12 +496,28 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn clear_reconciliation_required(&self, app_id: &AppId) -> Result<()> {
+        self.lock()?
+            .execute(
+                "UPDATE dirty_apps SET requires_reconciliation=0 WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
+            .map_err(db_err)?;
+        Ok(())
+    }
+
     pub fn clear_dirty(&self, app_id: &AppId) -> Result<()> {
         self.lock()?
-            .execute("DELETE FROM dirty_apps WHERE app_id=?1", params![app_id.as_str()])
+            .execute(
+                "DELETE FROM dirty_apps WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
             .map_err(db_err)?;
         self.lock()?
-            .execute("DELETE FROM dirty_paths WHERE app_id=?1", params![app_id.as_str()])
+            .execute(
+                "DELETE FROM dirty_paths WHERE app_id=?1",
+                params![app_id.as_str()],
+            )
             .map_err(db_err)?;
         Ok(())
     }
@@ -590,7 +706,8 @@ impl StateDb {
         self.lock()?
             .query_row(
                 r#"SELECT commit_id, bundle_id, manifest_hash FROM bundle_commits
-                   WHERE app_id=?1 AND state='COMMITTED' ORDER BY committed_at DESC LIMIT 1"#,
+                   WHERE app_id=?1 AND state='COMMITTED'
+                   ORDER BY committed_at DESC, rowid DESC LIMIT 1"#,
                 params![app_id.as_str()],
                 |row| {
                     Ok((
@@ -724,7 +841,15 @@ impl StateDb {
                 r#"INSERT OR REPLACE INTO image_baseline (
                     image_id, canonical_path, file_type, size, mode, package_owner, baseline_hash
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)"#,
-                params![image_id, path, file_type, size, mode, package_owner, baseline_hash],
+                params![
+                    image_id,
+                    path,
+                    file_type,
+                    size,
+                    mode,
+                    package_owner,
+                    baseline_hash
+                ],
             )
             .map_err(db_err)?;
         Ok(())
@@ -825,7 +950,13 @@ impl StateDb {
             .transpose()
     }
 
-    pub fn insert_restore(&self, restore_id: Uuid, bundle_id: Uuid, app_id: &AppId, staging: &str) -> Result<()> {
+    pub fn insert_restore(
+        &self,
+        restore_id: Uuid,
+        bundle_id: Uuid,
+        app_id: &AppId,
+        staging: &str,
+    ) -> Result<()> {
         let now = now_secs();
         self.lock()?
             .execute(
@@ -844,7 +975,12 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn update_restore(&self, restore_id: Uuid, state: RestoreState, last_error: Option<&str>) -> Result<()> {
+    pub fn update_restore(
+        &self,
+        restore_id: Uuid,
+        state: RestoreState,
+        last_error: Option<&str>,
+    ) -> Result<()> {
         self.lock()?
             .execute(
                 "UPDATE restore_operations SET state=?2, updated_at=?3, last_error=?4 WHERE restore_id=?1",
@@ -983,9 +1119,24 @@ mod tests {
         assert_eq!(db.integrity_check().unwrap(), "ok");
         let app = AppIdentity::new(AppId::steam(42), "Test Game");
         db.upsert_app(&app).unwrap();
-        assert_eq!(db.get_app(&app.app_id).unwrap().unwrap().display_name, "Test Game");
+        assert_eq!(
+            db.get_app(&app.app_id).unwrap().unwrap().display_name,
+            "Test Game"
+        );
         let session = AppSession::new(app.app_id.clone(), 1001, SessionSource::Steam);
         db.insert_session(&session).unwrap();
+        db.attach_pid(session.session_id, 1002, Some(1001), Some("/test/child"))
+            .unwrap();
         assert!(db.session_for_pid(1001).unwrap().is_some());
+        let open_sessions = db.open_sessions().unwrap();
+        assert_eq!(open_sessions.len(), 1);
+        assert_eq!(open_sessions[0].session_id, session.session_id);
+        assert_eq!(
+            db.session_pids(session.session_id).unwrap(),
+            vec![1001, 1002]
+        );
+        db.end_session(session.session_id).unwrap();
+        assert!(db.open_sessions().unwrap().is_empty());
+        assert!(db.session_pids(session.session_id).unwrap().is_empty());
     }
 }

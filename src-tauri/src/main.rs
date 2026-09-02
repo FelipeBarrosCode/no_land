@@ -24,7 +24,7 @@ use services::{
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
     wireguard::normalize_wireguard_state_from_disk,
 };
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
 use tracing::{error, info, warn};
 use utils::logging::init_logging;
 
@@ -344,6 +344,15 @@ fn main() {
                 app_data_dir.join("software-artwork-cache.json"),
             );
             let context = AppContext::new(config, state_store, initial_state);
+            let mut shared_storage_progress = context.shared_storage_progress.subscribe();
+            let progress_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(event) = shared_storage_progress.recv().await {
+                    if let Err(error) = progress_handle.emit("shared-storage:progress", event) {
+                        warn!("failed to emit shared storage progress: {error}");
+                    }
+                }
+            });
             app.manage(context.clone());
             app.manage(artwork_service);
             app.manage(moonlight::platform::StreamWindowCloseState::default());
@@ -475,11 +484,12 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_app_state,
             complete_onboarding,
-            force_update_state_agent,
+            refresh_state_agent_index,
             refresh_ip_location,
             set_manual_location,
             set_os_location,
             search_offers,
+            list_available_offer_countries,
             select_offer,
             start_play_flow,
             resume_provisioning_existing_instance,
@@ -532,6 +542,7 @@ fn main() {
             sync_instance_from_shared_storage_selected,
             list_instance_exportable_storage_objects,
             save_instance_to_shared_storage_selected,
+            cancel_shared_storage_operation,
             get_instance_backup_status,
             setup_instance_backup_schedule,
             remove_instance_backup_schedule,
@@ -544,11 +555,8 @@ fn main() {
             reboot_instance_services,
             pause_instance,
             destroy_instance,
-            generate_bundle_index,
-            get_instance_restore_bundles,
-            dry_run_restore,
-            restore_bundle,
-            get_restore_job,
+
+
             get_instance_mic_config,
             update_instance_mic_settings,
             enable_instance_mic,

@@ -1,13 +1,38 @@
 //! Session correlation, installer transactions, and inspectable ownership.
 
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use noland_discovery::{fallback_exe_identity, resolve_identity_for_executable, SteamDiscovery};
+use noland_discovery::{
+    fallback_exe_identity, is_backup_candidate, resolve_identity_for_executable, SteamDiscovery,
+};
 use noland_observer::{self_excluded, ObserverHub};
 use noland_state_core::*;
 use noland_state_db::StateDb;
 use uuid::Uuid;
+
+const UNRESOLVED_TTL: Duration = Duration::from_secs(2);
+const UNRESOLVED_LIMIT: usize = 256;
+
+#[derive(Clone)]
+enum PendingFilesystemFact {
+    Legacy(FilesystemEvent),
+    Ebpf(EbpfFilesystemFact),
+}
+
+struct PendingFilesystemEvent {
+    fact: PendingFilesystemFact,
+    queued_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CgroupSessionBinding {
+    root_pid: i32,
+    dedicated: bool,
+    ambiguous: bool,
+}
 
 pub struct AttributionEngine<'a> {
     pub db: &'a StateDb,
@@ -15,6 +40,8 @@ pub struct AttributionEngine<'a> {
     pub agent_paths: AgentPaths,
     pub known_apps: Vec<AppIdentity>,
     pub steam: Option<SteamDiscovery>,
+    cgroup_sessions: HashMap<u64, CgroupSessionBinding>,
+    unresolved: VecDeque<PendingFilesystemEvent>,
 }
 
 impl<'a> AttributionEngine<'a> {
@@ -26,10 +53,42 @@ impl<'a> AttributionEngine<'a> {
             agent_paths,
             known_apps,
             steam: None,
+            cgroup_sessions: HashMap::new(),
+            unresolved: VecDeque::new(),
         }
     }
 
     pub fn ingest_process(&mut self, event: &ProcessEvent) -> Result<Option<AppSession>> {
+        let session = self.ingest_process_inner(event)?;
+        if event.kind != ProcessEventKind::Exit {
+            self.retry_unresolved()?;
+        }
+        Ok(session)
+    }
+
+    pub fn ingest_ebpf_process(&mut self, fact: &EbpfProcessFact) -> Result<Option<AppSession>> {
+        let event = fact.as_process_event();
+        let session = self.ingest_process_inner(&event)?;
+        if fact.cgroup_id != 0 {
+            if fact.kind == ProcessEventKind::Exit {
+                if let Some(session) = &session {
+                    self.remove_cgroup_session(fact.cgroup_id, session.root_pid);
+                }
+            } else if let Some(session) = &session {
+                self.record_cgroup_session(
+                    fact.cgroup_id,
+                    session.root_pid,
+                    fact.cgroup.as_deref().is_some_and(is_dedicated_cgroup),
+                );
+            }
+        }
+        if fact.kind != ProcessEventKind::Exit {
+            self.retry_unresolved()?;
+        }
+        Ok(session)
+    }
+
+    fn ingest_process_inner(&mut self, event: &ProcessEvent) -> Result<Option<AppSession>> {
         match event.kind {
             ProcessEventKind::Fork | ProcessEventKind::Clone => {
                 if let Some(parent) = self.db.session_for_pid(event.ppid)? {
@@ -48,29 +107,56 @@ impl<'a> AttributionEngine<'a> {
                 Ok(None)
             }
             ProcessEventKind::Exec => {
-                if let Some(existing) = self.db.session_for_pid(event.pid)? {
-                    return Ok(Some(existing));
+                let existing = self.db.session_for_pid(event.pid)?;
+                let parent = if existing.is_none() {
+                    self.db.session_for_pid(event.ppid)?
+                } else {
+                    None
+                };
+                let inherited = existing.or(parent);
+                let Some(exe) = event.executable.as_ref() else {
+                    return Ok(inherited);
+                };
+
+                let identity = self.resolve_identity(exe, event);
+                let identity_was_known = self
+                    .known_apps
+                    .iter()
+                    .any(|known| known.app_id == identity.app_id);
+
+                if let Some(inherited) = inherited {
+                    if inherited.app_id == identity.app_id
+                        || !identity_was_known
+                        || !is_backup_candidate(&identity)
+                    {
+                        self.db.attach_pid(
+                            inherited.session_id,
+                            event.pid,
+                            Some(event.ppid),
+                            Some(&exe.to_string_lossy()),
+                        )?;
+                        self.associate_executable(event.pid, exe, &inherited)?;
+                        return Ok(Some(inherited));
+                    }
+                    self.db.detach_pid(event.pid)?;
                 }
-                if let Some(parent) = self.db.session_for_pid(event.ppid)? {
+
+                if !is_backup_candidate(&identity) {
+                    return Ok(None);
+                }
+                self.db.upsert_app(&identity)?;
+                if !identity_was_known {
+                    self.known_apps.push(identity.clone());
+                }
+                if let Some(session) = self.db.open_session_for_app(&identity.app_id)? {
                     self.db.attach_pid(
-                        parent.session_id,
+                        session.session_id,
                         event.pid,
                         Some(event.ppid),
-                        event
-                            .executable
-                            .as_ref()
-                            .map(|p| p.to_string_lossy())
-                            .as_deref(),
+                        Some(&exe.to_string_lossy()),
                     )?;
-                    return Ok(Some(parent));
-                }
-                let Some(exe) = event.executable.as_ref() else {
-                    return Ok(None);
-                };
-                let identity = self.resolve_identity(exe, event);
-                self.db.upsert_app(&identity)?;
-                if !self.known_apps.iter().any(|a| a.app_id == identity.app_id) {
-                    self.known_apps.push(identity.clone());
+                    self.associate_executable(event.pid, exe, &session)?;
+                    return Ok(Some(session));
                 }
                 let source = infer_session_source(&identity, exe);
                 let mut session = AppSession::new(identity.app_id.clone(), event.pid, source);
@@ -81,6 +167,7 @@ impl<'a> AttributionEngine<'a> {
                     }
                 }
                 self.db.insert_session(&session)?;
+                self.associate_executable(event.pid, exe, &session)?;
                 Ok(Some(session))
             }
             ProcessEventKind::Exit => {
@@ -98,15 +185,66 @@ impl<'a> AttributionEngine<'a> {
         }
     }
 
-    pub fn ingest_fs(&self, event: &FilesystemEvent) -> Result<Option<PathAssociation>> {
-        if self_excluded(&event.path, &self.agent_paths) || is_hard_volatile_root(&event.path) {
+    fn associate_executable(
+        &mut self,
+        pid: i32,
+        executable: &Path,
+        session: &AppSession,
+    ) -> Result<()> {
+        if !executable.is_absolute() || !executable.is_file() {
+            return Ok(());
+        }
+        let event = FilesystemEvent {
+            kind: FsEventKind::Execve,
+            pid,
+            path: executable.to_path_buf(),
+            dest_path: None,
+            at: Utc::now(),
+            sampled: false,
+        };
+        self.ingest_fs_for_session(&event, session, None, None)?;
+        Ok(())
+    }
+
+    pub fn ingest_fs(&mut self, event: &FilesystemEvent) -> Result<Option<PathAssociation>> {
+        if self.event_is_excluded(event) {
             return Ok(None);
         }
-        let session = self.db.session_for_pid(event.pid)?;
-        let Some(session) = session else {
+        let Some(session) = self.db.session_for_pid(event.pid)? else {
+            self.queue_unresolved(PendingFilesystemFact::Legacy(event.clone()));
             return Ok(None);
         };
-        let canonical = canonicalize_lossy(&event.path);
+        self.ingest_fs_for_session(event, &session, None, None)
+    }
+
+    pub fn ingest_ebpf_fs(&mut self, fact: &EbpfFilesystemFact) -> Result<Option<PathAssociation>> {
+        if fact.io_result.is_some_and(|result| result < 0) {
+            return Ok(None);
+        }
+        let event = fact.as_filesystem_event();
+        if self.event_is_excluded(&event) {
+            return Ok(None);
+        }
+        let Some(session) = self.session_for_ebpf_fs(fact)? else {
+            self.queue_unresolved(PendingFilesystemFact::Ebpf(fact.clone()));
+            return Ok(None);
+        };
+        self.ingest_fs_for_session(&event, &session, fact.inode, fact.device)
+    }
+
+    fn ingest_fs_for_session(
+        &self,
+        event: &FilesystemEvent,
+        session: &AppSession,
+        inode: Option<u64>,
+        device: Option<u64>,
+    ) -> Result<Option<PathAssociation>> {
+        let observed_path = if event.kind == FsEventKind::Rename {
+            event.second_path().unwrap_or(&event.path)
+        } else {
+            &event.path
+        };
+        let canonical = canonicalize_lossy(observed_path);
         let path_id = self.db.upsert_path(&canonical)?;
         let logical = self.roots.classify(Path::new(&canonical));
         let mut record = PathRecord {
@@ -115,8 +253,8 @@ impl<'a> AttributionEngine<'a> {
             logical_root: logical.as_ref().map(|l| l.logical_root.as_token()),
             relative_path: logical.as_ref().map(|l| l.relative_path.clone()),
             file_type: Some("file".into()),
-            inode: None,
-            mount_id: None,
+            inode: inode.and_then(|value| i64::try_from(value).ok()),
+            mount_id: device.and_then(|value| i64::try_from(value).ok()),
             size: None,
             mtime_ns: None,
             mode: None,
@@ -141,13 +279,24 @@ impl<'a> AttributionEngine<'a> {
         let in_known_root = self.path_in_known_root(&session.app_id, Path::new(&canonical))?;
         match event.kind {
             FsEventKind::Create | FsEventKind::Mkdir => {
-                evidence.push(Evidence::new(EvidenceKind::DirectCgroupCreate).with_detail(canonical.clone()));
+                evidence.push(
+                    Evidence::new(EvidenceKind::DirectCgroupCreate).with_detail(canonical.clone()),
+                );
             }
             FsEventKind::Write | FsEventKind::Truncate => {
-                evidence.push(Evidence::new(EvidenceKind::DirectCgroupWrite).with_detail(canonical.clone()));
+                evidence.push(
+                    Evidence::new(EvidenceKind::DirectCgroupWrite).with_detail(canonical.clone()),
+                );
             }
             FsEventKind::Rename => {
-                evidence.push(Evidence::new(EvidenceKind::DirectCgroupRename));
+                let detail = event
+                    .second_path()
+                    .map(|target| format!("{} -> {}", event.path.display(), target.display()));
+                let mut rename = Evidence::new(EvidenceKind::DirectCgroupRename);
+                if let Some(detail) = detail {
+                    rename = rename.with_detail(detail);
+                }
+                evidence.push(rename);
             }
             FsEventKind::Unlink | FsEventKind::Rmdir => {
                 evidence.push(Evidence::new(EvidenceKind::DirectCgroupDelete));
@@ -192,7 +341,8 @@ impl<'a> AttributionEngine<'a> {
         }
 
         let (confidence, _breakdown) = score_evidence(&evidence);
-        let persistence_class = infer_initial_class(Path::new(&canonical), event.kind, in_known_root);
+        let persistence_class =
+            infer_initial_class(Path::new(&canonical), event.kind, in_known_root);
         let semantic_role = crate::infer_role(Path::new(&canonical), persistence_class);
         let now = Utc::now();
         let assoc = PathAssociation {
@@ -207,9 +357,183 @@ impl<'a> AttributionEngine<'a> {
         };
         self.db.upsert_association(&assoc)?;
         if event.kind.is_mutation() && persistence_class != PersistenceClass::Ephemeral {
-            self.db.mark_dirty(&session.app_id, Some(path_id), false)?;
+            let requires_reconciliation = matches!(
+                event.kind,
+                FsEventKind::Rename | FsEventKind::Unlink | FsEventKind::Rmdir
+            );
+            self.db
+                .mark_dirty(&session.app_id, Some(path_id), requires_reconciliation)?;
+
+            let mutation_kind = match event.kind {
+                FsEventKind::Create | FsEventKind::Mkdir | FsEventKind::Symlink => {
+                    AppMutationKind::Create
+                }
+                FsEventKind::Rename => AppMutationKind::Rename,
+                FsEventKind::Unlink | FsEventKind::Rmdir => AppMutationKind::Delete,
+                FsEventKind::Chmod | FsEventKind::Chown => AppMutationKind::Metadata,
+                _ => AppMutationKind::Modify,
+            };
+            let mut provenance = assoc
+                .evidence
+                .iter()
+                .find(|evidence| evidence.kind.is_mutation())
+                .cloned();
+            if let Some(evidence) = provenance.as_mut() {
+                evidence.session_id = Some(session.session_id);
+            }
+            let mut mutation =
+                AppMutationRecord::new(session.app_id.clone(), canonical.clone(), mutation_kind);
+            mutation.observed_at = event.at;
+            mutation.session_id = Some(session.session_id);
+            mutation.provenance = provenance;
+            if event.kind == FsEventKind::Rename {
+                mutation.previous_path = Some(canonicalize_lossy(&event.path));
+            }
+            self.db.append_app_mutation(&mutation)?;
+
+            let dirty_root = Path::new(&canonical)
+                .parent()
+                .unwrap_or_else(|| Path::new(&canonical));
+            self.db.mark_dirty_root(
+                &session.app_id,
+                &dirty_root.to_string_lossy(),
+                logical
+                    .as_ref()
+                    .map(|logical| logical.logical_root.as_token())
+                    .as_deref(),
+                requires_reconciliation,
+            )?;
+            if let Some(logical) = logical.as_ref() {
+                let _ = self.db.set_file_state_trust(
+                    &session.app_id,
+                    &logical.logical_root.as_token(),
+                    &logical.relative_path,
+                    if mutation_kind == AppMutationKind::Delete {
+                        FileStateTrust::Missing
+                    } else {
+                        FileStateTrust::Dirty
+                    },
+                )?;
+            }
         }
         Ok(Some(assoc))
+    }
+
+    fn event_is_excluded(&self, event: &FilesystemEvent) -> bool {
+        let path = if event.kind == FsEventKind::Rename {
+            event.second_path().unwrap_or(&event.path)
+        } else {
+            &event.path
+        };
+        self_excluded(path, &self.agent_paths) || is_hard_volatile_root(path)
+    }
+
+    fn session_for_ebpf_fs(&self, fact: &EbpfFilesystemFact) -> Result<Option<AppSession>> {
+        let mut direct_session = None;
+        for pid in [fact.tgid, fact.tid] {
+            if pid != 0 {
+                if let Some(session) = self.db.session_for_pid(pid)? {
+                    direct_session = Some(session);
+                    break;
+                }
+            }
+        }
+
+        if fact.cgroup_id != 0 {
+            if let Some(binding) = self.cgroup_sessions.get(&fact.cgroup_id) {
+                if binding.dedicated && !binding.ambiguous {
+                    if let Some(session) = self.db.session_for_pid(binding.root_pid)? {
+                        return Ok(Some(session));
+                    }
+                }
+            }
+        }
+        if direct_session.is_some() {
+            return Ok(direct_session);
+        }
+        if fact.ppid != 0 {
+            return self.db.session_for_pid(fact.ppid);
+        }
+        Ok(None)
+    }
+
+    fn record_cgroup_session(&mut self, cgroup_id: u64, root_pid: i32, dedicated: bool) {
+        self.cgroup_sessions
+            .entry(cgroup_id)
+            .and_modify(|binding| {
+                if binding.root_pid != root_pid {
+                    binding.ambiguous = true;
+                    binding.dedicated = false;
+                } else {
+                    binding.dedicated |= dedicated;
+                }
+            })
+            .or_insert(CgroupSessionBinding {
+                root_pid,
+                dedicated,
+                ambiguous: false,
+            });
+    }
+
+    fn remove_cgroup_session(&mut self, cgroup_id: u64, root_pid: i32) {
+        if self
+            .cgroup_sessions
+            .get(&cgroup_id)
+            .is_some_and(|binding| binding.root_pid == root_pid && !binding.ambiguous)
+        {
+            self.cgroup_sessions.remove(&cgroup_id);
+        }
+    }
+
+    fn queue_unresolved(&mut self, fact: PendingFilesystemFact) {
+        self.drop_expired_unresolved();
+        if self.unresolved.len() == UNRESOLVED_LIMIT {
+            self.unresolved.pop_front();
+        }
+        self.unresolved.push_back(PendingFilesystemEvent {
+            fact,
+            queued_at: Instant::now(),
+        });
+    }
+
+    fn drop_expired_unresolved(&mut self) {
+        while self
+            .unresolved
+            .front()
+            .is_some_and(|pending| pending.queued_at.elapsed() > UNRESOLVED_TTL)
+        {
+            self.unresolved.pop_front();
+        }
+    }
+
+    fn retry_unresolved(&mut self) -> Result<()> {
+        self.drop_expired_unresolved();
+        let mut remaining = VecDeque::new();
+        while let Some(pending) = self.unresolved.pop_front() {
+            let result = match &pending.fact {
+                PendingFilesystemFact::Legacy(event) => self
+                    .db
+                    .session_for_pid(event.pid)?
+                    .map(|session| self.ingest_fs_for_session(event, &session, None, None))
+                    .transpose()?,
+                PendingFilesystemFact::Ebpf(fact) => self
+                    .session_for_ebpf_fs(fact)?
+                    .map(|session| {
+                        let event = fact.as_filesystem_event();
+                        self.ingest_fs_for_session(&event, &session, fact.inode, fact.device)
+                    })
+                    .transpose()?,
+            };
+            if result.is_none() {
+                remaining.push_back(pending);
+            }
+        }
+        self.unresolved = remaining;
+        Ok(())
+    }
+
+    pub fn unresolved_len(&self) -> usize {
+        self.unresolved.len()
     }
 
     pub fn bind_manual(&self, app_id: &AppId, path: &Path) -> Result<PathAssociation> {
@@ -312,7 +636,11 @@ impl<'a> AttributionEngine<'a> {
     }
 }
 
-pub fn infer_initial_class(path: &Path, kind: FsEventKind, in_known_root: bool) -> PersistenceClass {
+pub fn infer_initial_class(
+    path: &Path,
+    kind: FsEventKind,
+    in_known_root: bool,
+) -> PersistenceClass {
     if looks_like_cache(path) || looks_like_lock_or_socket(path) || is_hard_volatile_root(path) {
         return PersistenceClass::Ephemeral;
     }
@@ -338,6 +666,10 @@ fn policy_role(path: &Path, class: PersistenceClass) -> SemanticRole {
 
 fn names_match(a: &str, b: &str) -> bool {
     noland_discovery::names_equivalent(a, b)
+}
+
+fn is_dedicated_cgroup(path: &str) -> bool {
+    path.split('/').any(|component| component == "noland") && path.contains("/apps/")
 }
 
 fn infer_session_source(identity: &AppIdentity, exe: &Path) -> SessionSource {
@@ -387,6 +719,14 @@ pub fn process_hub_events(engine: &mut AttributionEngine<'_>, hub: &ObserverHub)
             }
             noland_observer::QueuedEvent::Filesystem(ev) => {
                 engine.ingest_fs(&ev)?;
+                n += 1;
+            }
+            noland_observer::QueuedEvent::EbpfProcess(fact) => {
+                engine.ingest_ebpf_process(&fact)?;
+                n += 1;
+            }
+            noland_observer::QueuedEvent::EbpfFilesystem(fact) => {
+                engine.ingest_ebpf_fs(&fact)?;
                 n += 1;
             }
         }
@@ -444,7 +784,7 @@ mod tests {
         db.upsert_app(&app).unwrap();
         let session = AppSession::new(app.app_id.clone(), 42, SessionSource::DesktopEntry);
         db.insert_session(&session).unwrap();
-        let engine = AttributionEngine::new(&db, roots, paths);
+        let mut engine = AttributionEngine::new(&db, roots, paths);
         let write = FilesystemEvent {
             kind: FsEventKind::Write,
             pid: 42,
@@ -469,5 +809,278 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
         let _ = Metrics::default();
         let _ = Arc::new(());
+    }
+
+    #[test]
+    fn ebpf_attribution_prefers_cgroup_then_falls_back_to_session_pid() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-cgroup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let cgroup_path = home.join("state/cgroup.dat");
+        let fallback_path = home.join("state/fallback.dat");
+        std::fs::write(&cgroup_path, b"cgroup").unwrap();
+        std::fs::write(&fallback_path, b"fallback").unwrap();
+
+        let app_a = AppIdentity::new(AppId::desktop("app-a"), "App A");
+        let app_b = AppIdentity::new(AppId::desktop("app-b"), "App B");
+        db.upsert_app(&app_a).unwrap();
+        db.upsert_app(&app_b).unwrap();
+        let session_a = AppSession::new(app_a.app_id.clone(), 101, SessionSource::DesktopEntry);
+        let session_b = AppSession::new(app_b.app_id.clone(), 202, SessionSource::DesktopEntry);
+        db.insert_session(&session_a).unwrap();
+        db.insert_session(&session_b).unwrap();
+
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+        engine
+            .ingest_ebpf_process(&EbpfProcessFact {
+                kind: ProcessEventKind::Exec,
+                tgid: 202,
+                tid: 202,
+                cgroup_id: 77,
+                cgroup: Some("/noland/apps/app-b/session".into()),
+                source: ObservationSource::Ebpf,
+                ..EbpfProcessFact::default()
+            })
+            .unwrap();
+
+        let cgroup_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 101,
+                tid: 101,
+                cgroup_id: 77,
+                path: cgroup_path,
+                inode: Some(123),
+                device: Some(45),
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(cgroup_assoc.app_id, app_b.app_id);
+
+        let fallback_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 101,
+                tid: 101,
+                cgroup_id: 999,
+                path: fallback_path,
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(fallback_assoc.app_id, app_a.app_id);
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn known_app_exec_splits_from_shared_desktop_session() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-shared-cgroup-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let iso = home.join("state/vice-city.iso");
+        let desktop_file = home.join("state/desktop-state");
+        let unknown_file = home.join("state/unknown-desktop-state");
+        std::fs::write(&iso, b"game").unwrap();
+        std::fs::write(&desktop_file, b"desktop").unwrap();
+        std::fs::write(&unknown_file, b"unknown").unwrap();
+
+        let desktop = AppIdentity::new(AppId::desktop("desktop-shell"), "Desktop Shell");
+        let mut pcsx2 = AppIdentity::new(AppId::desktop("pcsx2"), "PCSX2");
+        let pcsx2_exe = home.join("PCSX2.AppImage");
+        std::fs::write(&pcsx2_exe, b"appimage").unwrap();
+        pcsx2.canonical_executable = Some(pcsx2_exe.clone());
+        db.upsert_app(&desktop).unwrap();
+        db.upsert_app(&pcsx2).unwrap();
+        let desktop_session = AppSession::new(
+            desktop.app_id.clone(),
+            10,
+            SessionSource::ExecutableDiscovery,
+        );
+        db.insert_session(&desktop_session).unwrap();
+
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+        let shared_cgroup = "/system.slice/noland-desktop.service";
+
+        engine
+            .ingest_ebpf_process(&EbpfProcessFact {
+                kind: ProcessEventKind::Fork,
+                tgid: 20,
+                tid: 20,
+                ppid: 10,
+                cgroup_id: 77,
+                cgroup: Some(shared_cgroup.into()),
+                source: ObservationSource::Ebpf,
+                ..EbpfProcessFact::default()
+            })
+            .unwrap();
+        let pcsx2_session = engine
+            .ingest_ebpf_process(&EbpfProcessFact {
+                kind: ProcessEventKind::Exec,
+                tgid: 20,
+                tid: 20,
+                ppid: 10,
+                cgroup_id: 77,
+                cgroup: Some(shared_cgroup.into()),
+                executable: Some(pcsx2_exe),
+                comm: Some("PCSX2".into()),
+                source: ObservationSource::Ebpf,
+                ..EbpfProcessFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(pcsx2_session.app_id, pcsx2.app_id);
+        assert_eq!(
+            db.session_for_pid(20).unwrap().unwrap().app_id,
+            pcsx2.app_id
+        );
+        let executable_record = db
+            .get_path_by_canonical(&home.join("PCSX2.AppImage").to_string_lossy())
+            .unwrap()
+            .expect("executed AppImage should be a member of its application group");
+        assert!(db
+            .associations_for_path(executable_record.path_id)
+            .unwrap()
+            .iter()
+            .any(|association| association.app_id == pcsx2.app_id
+                && association
+                    .evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == EvidenceKind::ReadOnlyDependency)));
+
+        let game_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Read,
+                tgid: 20,
+                tid: 20,
+                ppid: 10,
+                cgroup_id: 77,
+                path: iso,
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(game_assoc.app_id, pcsx2.app_id);
+
+        let desktop_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 10,
+                tid: 10,
+                cgroup_id: 77,
+                path: desktop_file,
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(desktop_assoc.app_id, desktop.app_id);
+
+        let unknown_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 30,
+                tid: 30,
+                cgroup_id: 77,
+                path: unknown_file,
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap();
+        assert!(
+            unknown_assoc.is_none(),
+            "a shared desktop cgroup must not supply application identity"
+        );
+        assert!(db.session_for_pid(30).unwrap().is_none());
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn unresolved_fs_fact_retries_after_its_process_fact() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-queued-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let save = home.join("state/queued-save.dat");
+        std::fs::write(&save, b"queued").unwrap();
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+
+        assert!(engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 404,
+                tid: 405,
+                cgroup_id: 88,
+                path: save.clone(),
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(engine.unresolved_len(), 1);
+
+        let session = engine
+            .ingest_ebpf_process(&EbpfProcessFact {
+                kind: ProcessEventKind::Exec,
+                tgid: 404,
+                tid: 404,
+                ppid: 1,
+                cgroup_id: 88,
+                executable: Some(PathBuf::from("/opt/queued-app")),
+                comm: Some("queued-app".into()),
+                source: ObservationSource::Ebpf,
+                ..EbpfProcessFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(engine.unresolved_len(), 0);
+        let path_id = db.upsert_path(&canonicalize_lossy(&save)).unwrap();
+        assert!(db
+            .associations_for_path(path_id)
+            .unwrap()
+            .iter()
+            .any(|association| association.app_id == session.app_id));
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn rename_attributes_the_second_path() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-rename-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(home.join("state")).unwrap();
+        let old_path = home.join("state/old-name");
+        let second_path = home.join("state/new-name");
+
+        let app = AppIdentity::new(AppId::desktop("rename-app"), "Rename App");
+        db.upsert_app(&app).unwrap();
+        let session = AppSession::new(app.app_id.clone(), 303, SessionSource::DesktopEntry);
+        db.insert_session(&session).unwrap();
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+
+        let assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Rename,
+                tgid: 303,
+                tid: 303,
+                path: old_path,
+                second_path: Some(second_path.clone()),
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap()
+            .unwrap();
+        let expected_path_id = db.upsert_path(&canonicalize_lossy(&second_path)).unwrap();
+        assert_eq!(assoc.path_id, expected_path_id);
+        std::fs::remove_dir_all(home).ok();
     }
 }

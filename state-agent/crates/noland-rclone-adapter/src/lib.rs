@@ -12,10 +12,12 @@ use serde::{Deserialize, Serialize};
 mod config;
 mod providers;
 mod session;
+mod tuning;
 
 pub use config::{RcloneRemoteConfig, RcloneRoot};
 pub use providers::{adapter_for, Dispatcher};
 pub use session::{session_from_input, TokenMode};
+pub use tuning::{classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
@@ -178,8 +180,8 @@ pub trait RcloneProviderAdapter: Send + Sync {
     }
 }
 
-/// Ready-to-hand-off session. Contains a complete rclone.conf and no
-/// long-lived refresh token when built with [`TokenMode::Ephemeral`].
+/// Ready-to-hand-off session containing a complete rclone.conf. Operation
+/// sessions may include refresh capability and must remain guarded and temporary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EphemeralRcloneSession {
     pub operation_id: String,
@@ -189,6 +191,21 @@ pub struct EphemeralRcloneSession {
     pub root: String,
     pub config_ini: String,
     pub expires_at_unix: i64,
+}
+
+impl EphemeralRcloneSession {
+    pub fn storage_identity(&self) -> ProviderRootIdentity {
+        ProviderRootIdentity::new(
+            &self.provider,
+            &self.backend_type,
+            &self.remote_name,
+            &self.root,
+        )
+    }
+
+    pub fn root_cache_key(&self) -> String {
+        self.storage_identity().cache_key()
+    }
 }
 
 impl Drop for EphemeralRcloneSession {

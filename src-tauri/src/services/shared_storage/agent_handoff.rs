@@ -8,8 +8,9 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::app_state::SharedStorageObjectEntry;
-use crate::services::app_context::AppContext;
+use crate::models::app_state::{BackupPerformanceMode, SharedStorageObjectEntry};
+use crate::models::events::SharedStorageProgressEvent;
+use crate::services::app_context::{ActiveAgentOperation, AppContext};
 use crate::services::remote_exec::RemoteExec;
 use crate::services::shared_storage::agent_runtime::{call_agent_raw, ensure_state_agent};
 use crate::services::shared_storage::provider_profiles::shared_profile_manager;
@@ -82,22 +83,65 @@ impl SharedStorageManager {
     pub async fn start_agent_backup(
         context: &AppContext,
         remote: &RemoteExec,
+        instance_id: u64,
         target_user: &str,
         app_id: &str,
         mode: &str,
+        performance_mode: BackupPerformanceMode,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
-        call_agent_raw(
+        if let Some(operation_id) =
+            find_interrupted_operation(remote, "backup", Some(app_id), None).await?
+        {
+            let queued = call_agent_raw(
+                remote,
+                "RetryOperation",
+                json!({
+                    "operation_id": operation_id,
+                    "session": session,
+                    "master_key_hex": hex,
+                }),
+            )
+            .await?;
+            let operation_id = queued
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(operation_id.as_str());
+            return wait_for_agent_operation(
+                context,
+                remote,
+                instance_id,
+                operation_id,
+                "backup",
+                Duration::from_secs(2 * 60 * 60),
+            )
+            .await;
+        }
+        let queued = call_agent_raw(
             remote,
             "StartBackup",
             json!({
                 "app_id": app_id,
                 "mode": mode,
+                "performance_mode": performance_mode,
                 "session": session,
                 "master_key_hex": hex,
             }),
+        )
+        .await?;
+        let operation_id = queued
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AppError::State("state-agent backup returned no operation_id".into()))?;
+        wait_for_agent_operation(
+            context,
+            remote,
+            instance_id,
+            operation_id,
+            "backup",
+            Duration::from_secs(2 * 60 * 60),
         )
         .await
     }
@@ -145,13 +189,41 @@ impl SharedStorageManager {
     pub async fn start_agent_restore(
         context: &AppContext,
         remote: &RemoteExec,
+        instance_id: u64,
         target_user: &str,
         app_id: &str,
         bundle_id: &str,
         mode: &str,
     ) -> AppResult<serde_json::Value> {
         let (session, hex) = Self::prepare_agent_operation(context, remote, target_user).await?;
-        call_agent_raw(
+        if let Some(operation_id) =
+            find_interrupted_operation(remote, "restore", Some(app_id), Some(bundle_id)).await?
+        {
+            let queued = call_agent_raw(
+                remote,
+                "RetryOperation",
+                json!({
+                    "operation_id": operation_id,
+                    "session": session,
+                    "master_key_hex": hex,
+                }),
+            )
+            .await?;
+            let operation_id = queued
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(operation_id.as_str());
+            return wait_for_agent_operation(
+                context,
+                remote,
+                instance_id,
+                operation_id,
+                "restore",
+                Duration::from_secs(2 * 60 * 60),
+            )
+            .await;
+        }
+        let queued = call_agent_raw(
             remote,
             "StartRestore",
             json!({
@@ -161,6 +233,21 @@ impl SharedStorageManager {
                 "session": session,
                 "master_key_hex": hex,
             }),
+        )
+        .await?;
+        let operation_id = queued
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                AppError::State("state-agent restore returned no operation_id".into())
+            })?;
+        wait_for_agent_operation(
+            context,
+            remote,
+            instance_id,
+            operation_id,
+            "restore",
+            Duration::from_secs(2 * 60 * 60),
         )
         .await
     }
@@ -225,6 +312,211 @@ impl SharedStorageManager {
             .await?;
         Ok(hex::encode(key))
     }
+}
+
+async fn find_interrupted_operation(
+    remote: &RemoteExec,
+    kind: &str,
+    app_id: Option<&str>,
+    bundle_id: Option<&str>,
+) -> AppResult<Option<String>> {
+    let recent = call_agent_raw(remote, "ListRecentOperations", json!({"limit": 100})).await?;
+    let operations = recent
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for operation in operations {
+        if operation.get("kind").and_then(serde_json::Value::as_str) != Some(kind)
+            || operation.get("state").and_then(serde_json::Value::as_str) != Some("INTERRUPTED")
+        {
+            continue;
+        }
+        let detail = operation.get("detail_json");
+        let persisted_app = operation
+            .get("app_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                detail
+                    .and_then(|value| value.get("app_id"))
+                    .and_then(serde_json::Value::as_str)
+            });
+        let app_matches = match app_id {
+            Some("*") | Some("_all") => persisted_app.is_none(),
+            Some(expected) => persisted_app == Some(expected),
+            None => true,
+        };
+        let bundle_matches = bundle_id.is_none_or(|expected| {
+            detail
+                .and_then(|value| value.get("bundle_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(expected)
+        });
+        if app_matches && bundle_matches {
+            return Ok(operation
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string));
+        }
+    }
+    Ok(None)
+}
+
+async fn wait_for_agent_operation(
+    context: &AppContext,
+    remote: &RemoteExec,
+    instance_id: u64,
+    operation_id: &str,
+    kind: &str,
+    timeout: Duration,
+) -> AppResult<serde_json::Value> {
+    {
+        let mut active = context.active_agent_operation.write().await;
+        *active = Some(ActiveAgentOperation {
+            instance_id,
+            operation_id: operation_id.to_string(),
+            kind: kind.to_string(),
+        });
+    }
+    let result = tokio::time::timeout(timeout, async {
+        loop {
+            let status = call_agent_raw(
+                remote,
+                "GetOperationStatus",
+                json!({"operation_id": operation_id}),
+            )
+            .await?;
+            emit_operation_progress(context, instance_id, kind, operation_id, &status);
+            let ready_to_launch = status
+                .get("progress")
+                .and_then(|progress| progress.get("detail_json"))
+                .and_then(|detail| detail.get("ready_to_launch_reached"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            if ready_to_launch {
+                return Ok(status);
+            }
+            match status
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("UNKNOWN")
+            {
+                "COMPLETED" | "SEALED" | "ROLLED_BACK" => return Ok(status),
+                "FAILED" => {
+                    let error = status
+                        .get("last_error")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("state-agent operation failed");
+                    return Err(AppError::Provisioning(error.to_string()));
+                }
+                "CANCELLED" => {
+                    return Err(AppError::State(format!(
+                        "state-agent operation {operation_id} was cancelled"
+                    )));
+                }
+                _ => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    })
+    .await
+    .map_err(|_| {
+        AppError::Command(format!(
+            "timed out waiting for state-agent operation {operation_id}"
+        ))
+    });
+    {
+        let mut active = context.active_agent_operation.write().await;
+        if active
+            .as_ref()
+            .is_some_and(|operation| operation.operation_id == operation_id)
+        {
+            *active = None;
+        }
+    }
+    result?
+}
+
+fn emit_operation_progress(
+    context: &AppContext,
+    instance_id: u64,
+    kind: &str,
+    operation_id: &str,
+    status: &serde_json::Value,
+) {
+    let progress = status.get("progress");
+    let phase = progress
+        .and_then(|value| value.get("phase"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let message = progress
+        .and_then(|value| value.get("message"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            status
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    let completed_units = progress
+        .and_then(|value| value.get("completed_units"))
+        .and_then(serde_json::Value::as_u64);
+    let total_units = progress
+        .and_then(|value| value.get("total_units"))
+        .and_then(serde_json::Value::as_u64);
+    let unit = progress
+        .and_then(|value| value.get("unit"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let fraction = match (completed_units, total_units) {
+        (Some(completed), Some(total)) if total > 0 => {
+            Some((completed as f64 / total as f64).clamp(0.0, 1.0))
+        }
+        _ => None,
+    };
+    let ready_to_launch = phase.as_deref() == Some("READY_TO_LAUNCH")
+        || progress
+            .and_then(|value| value.get("detail_json"))
+            .and_then(|value| value.get("ready_to_launch_reached"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        || progress
+            .and_then(|value| value.get("detail_json"))
+            .and_then(|value| value.get("milestones"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|milestones| {
+                milestones
+                    .iter()
+                    .any(|value| value.as_str() == Some("READY_TO_LAUNCH"))
+            });
+    let state = status
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("UNKNOWN")
+        .to_string();
+    let cancel_requested = status
+        .get("cancel_requested")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let running = status
+        .get("running")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    context.emit_shared_storage_progress(SharedStorageProgressEvent {
+        operation_id: operation_id.to_string(),
+        instance_id,
+        kind: kind.to_string(),
+        state,
+        phase,
+        message,
+        completed_units,
+        total_units,
+        unit,
+        fraction,
+        ready_to_launch,
+        cancel_requested,
+        cancellable: running && !cancel_requested,
+    });
 }
 
 fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>> {

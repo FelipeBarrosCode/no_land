@@ -11,3 +11,4 @@ noland-state-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+zstd.workspace = true
