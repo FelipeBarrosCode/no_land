@@ -68,13 +68,33 @@ impl EventQueue {
                     .is_some_and(|(kind, _, _)| kind.is_read() && !kind.is_mutation())
             }) {
                 inner.events.remove(pos);
+                inner.last_write.clear();
                 inner.dropped += 1;
                 inner.loss_detected = true;
                 Metrics::inc(&self.metrics.filesystem_events_dropped_total);
-            } else if inner.events.pop_front().is_some() {
+            } else if let Some(pos) = inner
+                .events
+                .iter()
+                .position(|queued| filesystem_identity(queued).is_some())
+            {
+                inner.events.remove(pos);
+                inner.last_write.clear();
                 inner.dropped += 1;
                 inner.loss_detected = true;
                 Metrics::inc(&self.metrics.filesystem_events_dropped_total);
+            } else if is_process_event(&event) {
+                // A process fact is more valuable than an older process fact only when
+                // no filesystem telemetry remains to evict.
+                inner.events.pop_front();
+                inner.dropped += 1;
+                inner.loss_detected = true;
+            } else {
+                // Preserve the process identity stream. The incoming filesystem event
+                // is deliberately discarded instead of orphaning later file facts.
+                inner.dropped += 1;
+                inner.loss_detected = true;
+                Metrics::inc(&self.metrics.filesystem_events_dropped_total);
+                return;
             }
         }
         let write_key = filesystem_identity(&event).and_then(|(kind, path, _)| {
@@ -116,6 +136,10 @@ impl EventQueue {
     }
 }
 
+fn is_process_event(event: &QueuedEvent) -> bool {
+    matches!(event, QueuedEvent::Process(_) | QueuedEvent::EbpfProcess(_))
+}
+
 fn filesystem_identity(
     event: &QueuedEvent,
 ) -> Option<(FsEventKind, &std::path::Path, chrono::DateTime<chrono::Utc>)> {
@@ -148,6 +172,29 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed),
             7
         );
+    }
+
+    #[test]
+    fn preserves_process_identity_when_filesystem_telemetry_saturates_queue() {
+        let q = EventQueue::new(2, Arc::new(Metrics::default()));
+        q.push(QueuedEvent::Process(crate::process_exec(
+            42,
+            1,
+            "/home/user/Game.AppImage",
+        )));
+        for path in ["/home/user/a", "/home/user/b", "/home/user/c"] {
+            q.push(QueuedEvent::Filesystem(FilesystemEvent {
+                kind: FsEventKind::Write,
+                pid: 42,
+                path: PathBuf::from(path),
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            }));
+        }
+        let events = q.drain();
+        assert!(events.iter().any(is_process_event));
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

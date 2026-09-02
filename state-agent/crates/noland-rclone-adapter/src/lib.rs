@@ -180,8 +180,8 @@ pub trait RcloneProviderAdapter: Send + Sync {
     }
 }
 
-/// Ready-to-hand-off session. Contains a complete rclone.conf and no
-/// long-lived refresh token when built with [`TokenMode::Ephemeral`].
+/// Ready-to-hand-off session containing a complete rclone.conf. Operation
+/// sessions may include refresh capability and must remain guarded and temporary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EphemeralRcloneSession {
     pub operation_id: String,

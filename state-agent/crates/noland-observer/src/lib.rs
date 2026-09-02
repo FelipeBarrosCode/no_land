@@ -188,10 +188,38 @@ pub fn bootstrap_from_procfs() -> Vec<ProcessEvent> {
     }
 }
 
+/// Best-effort resolved files currently held open by a live process.
+/// Used only to recover dependency evidence after observer loss.
+pub fn open_files_from_procfs(pid: i32) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::open_files(pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     use std::fs;
+
+    pub fn open_files(pid: i32) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return Vec::new();
+        };
+        let mut paths = entries
+            .flatten()
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|path| path.is_absolute() && path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
 
     pub fn scan_proc() -> Vec<ProcessEvent> {
         let mut events = Vec::new();

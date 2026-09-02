@@ -223,6 +223,37 @@ impl StateDb {
         Ok(app_ids)
     }
 
+    pub fn open_sessions(&self) -> Result<Vec<AppSession>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT session_id, app_id, root_pid, cgroup_path, source,
+                          started_at, ended_at, identity_confidence
+                   FROM app_sessions WHERE ended_at IS NULL
+                   ORDER BY started_at"#,
+            )
+            .map_err(db_err)?;
+        let sessions = stmt
+            .query_map([], row_to_session)
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(sessions)
+    }
+
+    pub fn session_pids(&self, session_id: Uuid) -> Result<Vec<i32>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT pid FROM session_pids WHERE session_id=?1 ORDER BY pid")
+            .map_err(db_err)?;
+        let pids = stmt
+            .query_map(params![session_id.to_string()], |row| row.get(0))
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(pids)
+    }
+
     pub fn open_session_for_app(&self, app_id: &AppId) -> Result<Option<AppSession>> {
         self.lock()?
             .query_row(
@@ -1094,6 +1125,18 @@ mod tests {
         );
         let session = AppSession::new(app.app_id.clone(), 1001, SessionSource::Steam);
         db.insert_session(&session).unwrap();
+        db.attach_pid(session.session_id, 1002, Some(1001), Some("/test/child"))
+            .unwrap();
         assert!(db.session_for_pid(1001).unwrap().is_some());
+        let open_sessions = db.open_sessions().unwrap();
+        assert_eq!(open_sessions.len(), 1);
+        assert_eq!(open_sessions[0].session_id, session.session_id);
+        assert_eq!(
+            db.session_pids(session.session_id).unwrap(),
+            vec![1001, 1002]
+        );
+        db.end_session(session.session_id).unwrap();
+        assert!(db.open_sessions().unwrap().is_empty());
+        assert!(db.session_pids(session.session_id).unwrap().is_empty());
     }
 }

@@ -140,9 +140,21 @@ impl<'a> AttributionEngine<'a> {
                     self.db.detach_pid(event.pid)?;
                 }
 
+                if !is_backup_candidate(&identity) {
+                    return Ok(None);
+                }
                 self.db.upsert_app(&identity)?;
                 if !identity_was_known {
                     self.known_apps.push(identity.clone());
+                }
+                if let Some(session) = self.db.open_session_for_app(&identity.app_id)? {
+                    self.db.attach_pid(
+                        session.session_id,
+                        event.pid,
+                        Some(event.ppid),
+                        Some(&exe.to_string_lossy()),
+                    )?;
+                    return Ok(Some(session));
                 }
                 let source = infer_session_source(&identity, exe);
                 let mut session = AppSession::new(identity.app_id.clone(), event.pid, source);
@@ -405,7 +417,7 @@ impl<'a> AttributionEngine<'a> {
 
         if fact.cgroup_id != 0 {
             if let Some(binding) = self.cgroup_sessions.get(&fact.cgroup_id) {
-                if !binding.ambiguous && (binding.dedicated || direct_session.is_none()) {
+                if binding.dedicated && !binding.ambiguous {
                     if let Some(session) = self.db.session_for_pid(binding.root_pid)? {
                         return Ok(Some(session));
                     }
@@ -848,8 +860,10 @@ mod tests {
         std::fs::create_dir_all(home.join("state")).unwrap();
         let iso = home.join("state/vice-city.iso");
         let desktop_file = home.join("state/desktop-state");
+        let unknown_file = home.join("state/unknown-desktop-state");
         std::fs::write(&iso, b"game").unwrap();
         std::fs::write(&desktop_file, b"desktop").unwrap();
+        std::fs::write(&unknown_file, b"unknown").unwrap();
 
         let desktop = AppIdentity::new(AppId::desktop("desktop-shell"), "Desktop Shell");
         let mut pcsx2 = AppIdentity::new(AppId::desktop("pcsx2"), "PCSX2");
@@ -930,6 +944,23 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(desktop_assoc.app_id, desktop.app_id);
+
+        let unknown_assoc = engine
+            .ingest_ebpf_fs(&EbpfFilesystemFact {
+                kind: FsEventKind::Write,
+                tgid: 30,
+                tid: 30,
+                cgroup_id: 77,
+                path: unknown_file,
+                source: ObservationSource::Ebpf,
+                ..EbpfFilesystemFact::default()
+            })
+            .unwrap();
+        assert!(
+            unknown_assoc.is_none(),
+            "a shared desktop cgroup must not supply application identity"
+        );
+        assert!(db.session_for_pid(30).unwrap().is_none());
         std::fs::remove_dir_all(home).ok();
     }
 

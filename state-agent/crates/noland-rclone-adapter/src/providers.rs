@@ -352,8 +352,13 @@ mod tests {
         );
         assert_eq!(ephemeral.root, "Noland Shared Storage");
 
+        let operation = session_from_input(&input, "op", TokenMode::Operation).unwrap();
+        assert!(operation.config_ini.contains("1//refresh"));
+        assert!(TokenMode::Operation.is_ephemeral());
+
         let durable = session_from_input(&input, "op", TokenMode::Durable).unwrap();
         assert!(durable.config_ini.contains("1//refresh"));
+        assert!(!TokenMode::Durable.is_ephemeral());
     }
 
     #[test]

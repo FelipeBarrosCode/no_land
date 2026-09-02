@@ -616,9 +616,10 @@ impl RpcHandler for AgentRpc {
                 Ok(json!({"reconciled": n}))
             }
             "RefreshIndex" => {
-                let processed_events = agent.process_events()?;
                 let generation = agent.observer.loss_generation();
                 agent.discover()?;
+                let live_process_recovery = agent.reconcile_live_processes()?;
+                let processed_events = agent.process_events()?;
 
                 let candidates = noland_discovery::filter_backup_candidates(agent.db.list_apps()?);
                 let candidate_ids = candidates
@@ -649,6 +650,7 @@ impl RpcHandler for AgentRpc {
                     "paths_reconciled": reconciled_paths,
                     "excluded_flags_cleared": excluded_flags_cleared,
                     "processed_events": processed_events,
+                    "live_process_recovery": live_process_recovery,
                     "loss_state_cleared": loss_state_cleared,
                 }))
             }

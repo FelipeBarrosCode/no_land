@@ -746,22 +746,20 @@ impl SharedStorageManager {
             return Ok(credentials);
         };
 
-        // Refresh when the access token is empty, the expiry is unset, or the
-        // token is within the refresh skew of expiring.
-        const REFRESH_SKEW_SECS: i64 = 60;
+        // Refresh well before a potentially multi-minute transfer begins. The
+        // minted rclone session also receives the refresh token so it can renew
+        // credentials if a large operation outlives the current access token.
+        const REFRESH_SKEW_SECS: i64 = 15 * 60;
         let now = chrono::Utc::now().timestamp();
         let needs_refresh = access_token.trim().is_empty()
             || *expires_at <= 0
             || *expires_at - now < REFRESH_SKEW_SECS;
 
         let Some(refresh) = refresh_token.as_ref().filter(|v| !v.trim().is_empty()) else {
-            if needs_refresh {
-                warn!(
-                    "OAuth token for '{}' is expired but no refresh token is stored; re-authentication required",
-                    profile.display_name
-                );
-            }
-            return Ok(credentials);
+            return Err(AppError::State(format!(
+                "Shared storage authorization for '{}' has no refresh token. Reconnect this provider before saving or syncing files.",
+                profile.display_name
+            )));
         };
 
         if !needs_refresh {
