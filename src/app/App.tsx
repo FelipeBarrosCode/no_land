@@ -10,7 +10,7 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
-import { forceUpdateStateAgent } from "../lib/backend";
+import { refreshStateAgentIndex } from "../lib/backend";
 
 function RootRoute() {
   const appState = useAppStore((state) => state.appState);
@@ -70,7 +70,9 @@ function RootRoute() {
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
-  const generateBundleIndex = useAppStore((state) => state.generateBundleIndex);
+  const loadAvailableOfferCountries = useAppStore(
+    (state) => state.loadAvailableOfferCountries,
+  );
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
     (state) => state.setEmbeddedMoonlightPipelineEnabled,
@@ -133,6 +135,7 @@ function RootRoute() {
       blockingAction={blockingAction}
       vastWalletSummary={vastWalletSummary}
       onSearchOffers={discoverOffers}
+      onLoadAvailableOfferCountries={loadAvailableOfferCountries}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
       onManualLocationSave={saveManualLocation}
@@ -163,14 +166,10 @@ function RootRoute() {
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
       onRefreshIndexing={async (instanceId?: number) => {
-        if (instanceId) {
-          try {
-            await forceUpdateStateAgent(instanceId);
-          } catch (e) {
-            console.error("Failed to force update state agent", e);
-          }
+        if (!instanceId) {
+          return;
         }
-        await generateBundleIndex();
+        await refreshStateAgentIndex(instanceId);
       }}
     />
   );
@@ -291,6 +290,9 @@ export function App() {
   const clearError = useAppStore((state) => state.clearError);
   const blockingAction = useAppStore((state) => state.blockingAction);
   const isBlocking = useAppStore((state) => state.isBlocking);
+  const cancelSharedStorageOperation = useAppStore(
+    (state) => state.cancelSharedStorageOperation,
+  );
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
@@ -405,7 +407,16 @@ export function App() {
       )}
 
       {isBlocking && blockingAction && (
-        <BlockingLoaderOverlay action={blockingAction} />
+        <BlockingLoaderOverlay
+          action={blockingAction}
+          onCancel={
+            blockingAction.instanceId != null
+              ? () => {
+                  void cancelSharedStorageOperation(blockingAction.instanceId as number);
+                }
+              : undefined
+          }
+        />
       )}
 
       <HashRouter>

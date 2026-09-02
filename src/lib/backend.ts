@@ -17,14 +17,13 @@ import type {
   SharedStorageTestResult,
   ProviderDefinition,
   ProfileReference,
+  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageProgressEvent,
   SunshineSettingsResponse,
-  BundleIndex,
-  RestoreRequest,
-  RestoreDryRunResult,
-  RestoreJob,
+
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
   MicSidecarMetrics,
@@ -48,6 +47,7 @@ import type {
   LaunchSoftwareJob,
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
+  OfferCountryAvailability,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -81,6 +81,12 @@ export async function searchOffers(
   pageSize = 24,
 ): Promise<OfferCandidate[]> {
   return invokeSafe<OfferCandidate[]>("search_offers", { page, pageSize });
+}
+
+export async function listAvailableOfferCountries(): Promise<
+  OfferCountryAvailability[]
+> {
+  return invokeSafe<OfferCountryAvailability[]>("list_available_offer_countries");
 }
 
 export async function selectOffer(
@@ -601,13 +607,34 @@ export async function listInstanceExportableStorageObjects(instanceId: number) {
   );
 }
 
+export async function subscribeSharedStorageProgress(
+  callback: (event: SharedStorageProgressEvent) => void,
+): Promise<() => void> {
+  const unlisten = await listen<SharedStorageProgressEvent>(
+    "shared-storage:progress",
+    ({ payload }) => {
+      callback(payload);
+    },
+  );
+  return () => {
+    unlisten();
+  };
+}
+
+export async function cancelSharedStorageOperation(
+  instanceId: number,
+): Promise<string> {
+  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId });
+}
+
 export async function saveInstanceToSharedStorageSelected(
   instanceId: number,
   selectedPaths: string[],
+  performanceMode: BackupPerformanceMode = "balanced",
 ): Promise<string> {
   return invokeSafe<string>("save_instance_to_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths },
+    payload: { selectedPaths, performanceMode },
   });
 }
 
@@ -695,38 +722,7 @@ export async function destroyInstance(instanceId: number): Promise<void> {
   return invokeSafe<void>("destroy_instance", { instanceId });
 }
 
-export async function generateBundleIndex(): Promise<void> {
-  return invokeSafe<void>("generate_bundle_index");
-}
 
-export async function getInstanceRestoreBundles(
-  instanceId: number,
-): Promise<BundleIndex> {
-  return invokeSafe<BundleIndex>("get_instance_restore_bundles", {
-    instanceId,
-  });
-}
-
-export async function dryRunRestore(
-  instanceId: number,
-  payload: RestoreRequest,
-): Promise<RestoreDryRunResult> {
-  return invokeSafe<RestoreDryRunResult>("dry_run_restore", {
-    instanceId,
-    payload,
-  });
-}
-
-export async function restoreBundle(
-  instanceId: number,
-  payload: RestoreRequest,
-): Promise<RestoreJob> {
-  return invokeSafe<RestoreJob>("restore_bundle", { instanceId, payload });
-}
-
-export async function getRestoreJob(jobId: string): Promise<RestoreJob> {
-  return invokeSafe<RestoreJob>("get_restore_job", { jobId });
-}
 
 export async function getInstanceMicConfig(
   instanceId: number,
@@ -865,6 +861,34 @@ export async function listMicrophones(
   return request;
 }
 
-export async function forceUpdateStateAgent(instanceId: number) {
-  return invokeSafe<void>("force_update_state_agent", { instanceId });
+export interface StateAgentIndexRefreshResult {
+  appsReconciled: number;
+  pathsReconciled: number;
+  excludedFlagsCleared: number;
+  processedEvents: number;
+  lossStateCleared: boolean;
+}
+
+interface RawStateAgentIndexRefreshResult {
+  apps_reconciled: number;
+  paths_reconciled: number;
+  excluded_flags_cleared: number;
+  processed_events: number;
+  loss_state_cleared: boolean;
+}
+
+export async function refreshStateAgentIndex(
+  instanceId: number,
+): Promise<StateAgentIndexRefreshResult> {
+  const result = await invokeSafe<RawStateAgentIndexRefreshResult>(
+    "refresh_state_agent_index",
+    { instanceId },
+  );
+  return {
+    appsReconciled: result.apps_reconciled,
+    pathsReconciled: result.paths_reconciled,
+    excludedFlagsCleared: result.excluded_flags_cleared,
+    processedEvents: result.processed_events,
+    lossStateCleared: result.loss_state_cleared,
+  };
 }

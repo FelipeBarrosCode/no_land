@@ -44,7 +44,12 @@ pub fn load_baseline(db: &StateDb, manifest: &BaselineManifest) -> Result<()> {
     Ok(())
 }
 
-pub fn matches_baseline(db: &StateDb, image_id: &str, path: &Path, size: Option<u64>) -> Result<bool> {
+pub fn matches_baseline(
+    db: &StateDb,
+    image_id: &str,
+    path: &Path,
+    size: Option<u64>,
+) -> Result<bool> {
     let Some((baseline_size, _, _)) = db.baseline_entry(image_id, &path.to_string_lossy())? else {
         return Ok(false);
     };

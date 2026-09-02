@@ -42,3 +42,21 @@ impl ProvisioningEvent {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageProgressEvent {
+    pub operation_id: String,
+    pub instance_id: u64,
+    pub kind: String,
+    pub state: String,
+    pub phase: Option<String>,
+    pub message: Option<String>,
+    pub completed_units: Option<u64>,
+    pub total_units: Option<u64>,
+    pub unit: Option<String>,
+    pub fraction: Option<f64>,
+    pub ready_to_launch: bool,
+    pub cancel_requested: bool,
+    pub cancellable: bool,
+}

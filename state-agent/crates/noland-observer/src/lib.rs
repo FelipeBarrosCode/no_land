@@ -4,9 +4,12 @@
 //! `ebpf` feature is later enabled). Tests and non-Linux hosts use an
 //! injectable observer so attribution can be proven without kernel probes.
 
+pub mod abi;
+mod bpf;
 mod cgroup;
 mod queue;
 
+pub use bpf::{BpfFeature, BpfObserver, BpfObserverConfig, CgroupObservationMode};
 pub use cgroup::{CgroupResolver, DedicatedCgroup};
 pub use queue::{EventQueue, QueuedEvent};
 
@@ -54,16 +57,38 @@ impl ObserverHub {
     }
 
     pub fn inject_fs(&self, event: FilesystemEvent) {
-        let mode = self.mode();
-        if mode == ObservationMode::SteadyState && event.kind.is_read() && !event.kind.is_mutation()
-        {
-            // Sample / suppress repetitive read-only events in steady state.
-            if event.sampled {
-                return;
-            }
+        if self.suppress_read(event.kind, event.sampled) {
+            return;
         }
         Metrics::inc(&self.metrics.filesystem_events_total);
         self.queue.push(QueuedEvent::Filesystem(event));
+    }
+
+    pub fn inject_ebpf_process(&self, fact: EbpfProcessFact) {
+        Metrics::inc(&self.metrics.process_events_total);
+        self.processes.apply(&fact.as_process_event());
+        self.queue.push(QueuedEvent::EbpfProcess(fact));
+    }
+
+    pub fn inject_ebpf_fs(&self, fact: EbpfFilesystemFact) {
+        if self.suppress_read(fact.kind, fact.sampled) {
+            return;
+        }
+        Metrics::inc(&self.metrics.filesystem_events_total);
+        self.queue.push(QueuedEvent::EbpfFilesystem(fact));
+    }
+
+    fn suppress_read(&self, kind: FsEventKind, sampled: bool) -> bool {
+        self.mode() == ObservationMode::SteadyState
+            && kind.is_read()
+            && !kind.is_mutation()
+            && sampled
+    }
+
+    /// Marks the observation stream incomplete. Kernel ring-buffer loss and
+    /// malformed ABI records flow through the same recovery signal as queue loss.
+    pub fn report_loss(&self, count: u64) {
+        self.queue.report_loss(count);
     }
 
     pub fn drain(&self) -> Vec<QueuedEvent> {
@@ -163,10 +188,38 @@ pub fn bootstrap_from_procfs() -> Vec<ProcessEvent> {
     }
 }
 
+/// Best-effort resolved files currently held open by a live process.
+/// Used only to recover dependency evidence after observer loss.
+pub fn open_files_from_procfs(pid: i32) -> Vec<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::open_files(pid)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Vec::new()
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
     use std::fs;
+
+    pub fn open_files(pid: i32) -> Vec<PathBuf> {
+        let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return Vec::new();
+        };
+        let mut paths = entries
+            .flatten()
+            .filter_map(|entry| fs::read_link(entry.path()).ok())
+            .filter(|path| path.is_absolute() && path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
 
     pub fn scan_proc() -> Vec<ProcessEvent> {
         let mut events = Vec::new();
@@ -179,11 +232,10 @@ mod linux {
                 continue;
             };
             let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-            let ppid = stat
-                .as_deref()
-                .and_then(parse_ppid)
-                .unwrap_or(1);
-            let exe = fs::read_link(format!("/proc/{pid}/exe")).ok();
+            let ppid = stat.as_deref().and_then(parse_ppid).unwrap_or(1);
+            let exe = fs::read_link(format!("/proc/{pid}/exe"))
+                .ok()
+                .and_then(|exe| process_executable(pid, Some(exe)));
             let comm = fs::read_to_string(format!("/proc/{pid}/comm"))
                 .ok()
                 .map(|s| s.trim().to_string());
@@ -215,6 +267,7 @@ mod linux {
     /// Linux process connector (NETLINK_CONNECTOR / CN_IDX_PROC) is the
     /// event-driven primary path. The socket is opened when the agent starts
     /// on Linux; failures fall back to a restart-gap + reconciliation.
+    #[allow(dead_code)]
     pub fn open_proc_connector() -> std::io::Result<std::net::UdpSocket> {
         // Placeholder: real netlink bind is implemented in the agent runtime
         // when deployed on the disposable Linux instance. Tests never take
@@ -224,6 +277,39 @@ mod linux {
             "proc connector is only fully bound in the Linux runtime",
         ))
     }
+}
+
+pub(crate) fn process_executable(_pid: i32, kernel_executable: Option<PathBuf>) -> Option<PathBuf> {
+    let kernel_executable = kernel_executable?;
+    if !kernel_executable
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .contains("/tmp/.mount_")
+    {
+        return Some(kernel_executable);
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(cmdline) = std::fs::read(format!("/proc/{_pid}/cmdline")) {
+            if let Some(appimage) = appimage_argv0(&cmdline) {
+                return Some(appimage);
+            }
+        }
+    }
+    Some(kernel_executable)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn appimage_argv0(cmdline: &[u8]) -> Option<PathBuf> {
+    let argv0 = cmdline.split(|byte| *byte == 0).next()?;
+    let argv0 = std::str::from_utf8(argv0).ok()?;
+    let path = PathBuf::from(argv0);
+    let is_appimage = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("appimage"));
+    (path.is_absolute() && is_appimage).then_some(path)
 }
 
 pub fn now_event_time() -> chrono::DateTime<Utc> {
@@ -258,5 +344,20 @@ pub fn process_exec(pid: i32, ppid: i32, exe: impl Into<PathBuf>) -> ProcessEven
         argv_hash: None,
         comm,
         at: Utc::now(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_absolute_appimage_argv0() {
+        assert_eq!(
+            appimage_argv0(b"/home/gamer/PCSX2.AppImage\0--fullscreen\0"),
+            Some(PathBuf::from("/home/gamer/PCSX2.AppImage"))
+        );
+        assert_eq!(appimage_argv0(b"relative.AppImage\0"), None);
+        assert_eq!(appimage_argv0(b"/usr/bin/pcsx2-qt\0"), None);
     }
 }

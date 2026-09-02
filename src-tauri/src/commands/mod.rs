@@ -29,13 +29,12 @@ use crate::{
     mic_client::device_list::MicrophoneDevice,
     models::{
         app_state::{
-            BackupStatusResponse, BundleIndex, ConnectionProvider, EdidMode, InstanceMicConfig,
+            BackupStatusResponse, ConnectionProvider, EdidMode, InstanceMicConfig,
             InstanceMicRuntimeStatus, LocationSource, ManualLocationInput, MicQualityProfile,
             MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OnboardingPayload,
             OrchestrationState, PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary,
-            RestoreDryRunResult, RestoreJob, RestoreRequest, ServerPreferencesUpdate, SetupStage,
-            SharedStorageInstanceStatus, SharedStorageSettingsResponse,
-            SharedStorageSettingsUpdate,
+            ServerPreferencesUpdate, SetupStage, SharedStorageInstanceStatus,
+            SharedStorageSettingsResponse, SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
         vast::VastInstance,
@@ -82,9 +81,10 @@ use crate::{
         reboot_helper::RebootHelperService,
         remote_display::{ApplyDisplayModeResult, InstanceDisplayStatus, RemoteDisplayService},
         remote_exec::RemoteExec,
-        shared_storage::bundle_indexer::BundleIndexer,
-        shared_storage::bundle_restore::BundleRestoreService,
-        shared_storage::shared_storage_manager::SharedStorageManager,
+        shared_storage::{
+            agent_runtime::{call_agent_raw, ensure_state_agent},
+            shared_storage_manager::SharedStorageManager,
+        },
         sleep_inhibit::SleepInhibitService,
         ssh_keys::SshKeyService,
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
@@ -1626,6 +1626,37 @@ pub async fn search_offers(
         .await?;
 
     Ok(paged)
+}
+
+#[tauri::command]
+pub async fn list_available_offer_countries(
+    context: State<'_, AppContext>,
+) -> Result<Vec<crate::models::app_state::OfferCountryAvailability>, FrontendError> {
+    let state_snapshot = context.state.read().await.clone();
+    if state_snapshot.credentials.vast_api_key.trim().is_empty() {
+        return Err(AppError::InvalidInput(
+            "Missing Vast.ai API key. Complete onboarding first.".to_string(),
+        )
+        .into());
+    }
+
+    let vast = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        state_snapshot.credentials.vast_api_key.clone(),
+    );
+    let countries = vast
+        .available_geolocations(context.config.offers_search_limit)
+        .await?
+        .into_iter()
+        .map(
+            |(code, offer_count)| crate::models::app_state::OfferCountryAvailability {
+                code,
+                offer_count,
+            },
+        )
+        .collect();
+    Ok(countries)
 }
 
 #[tauri::command]
@@ -3588,15 +3619,26 @@ pub async fn list_instance_exportable_storage_objects(
 pub async fn save_instance_to_shared_storage_selected(
     context: State<'_, AppContext>,
     instance_id: u64,
-    payload: crate::models::app_state::SharedStorageSyncSelectionRequest,
+    payload: crate::models::app_state::SharedStorageBackupSelectionRequest,
 ) -> Result<String, FrontendError> {
     InstanceLifecycleService::save_instance_to_shared_storage_selected(
         context.inner(),
         instance_id,
         payload.selected_paths,
+        payload.performance_mode,
     )
     .await
     .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn cancel_shared_storage_operation(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<String, FrontendError> {
+    InstanceLifecycleService::cancel_shared_storage_operation(context.inner(), instance_id)
+        .await
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -3982,78 +4024,6 @@ pub async fn reboot_instance_services(
     .await;
     InstanceLifecycleService::release_lock(instance_id).await;
     result.map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn generate_bundle_index(context: State<'_, AppContext>) -> Result<(), FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    let instance_id = {
-        let state = context.state.read().await;
-        state.instance.instance_id.ok_or_else(|| {
-            AppError::InvalidInput("No active instance. Start provisioning first.".to_string())
-        })?
-    };
-    BundleIndexer::generate_and_upload(context.inner(), &remote, instance_id, &target_user)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn get_instance_restore_bundles(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-) -> Result<BundleIndex, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::list_bundles(context.inner(), &remote, instance_id, &target_user)
-        .await
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn dry_run_restore(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-    payload: RestoreRequest,
-) -> Result<RestoreDryRunResult, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::dry_run_restore(
-        context.inner(),
-        &remote,
-        instance_id,
-        &target_user,
-        payload,
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn restore_bundle(
-    context: State<'_, AppContext>,
-    instance_id: u64,
-    payload: RestoreRequest,
-) -> Result<RestoreJob, FrontendError> {
-    let remote = build_remote_exec_from_state(context.inner()).await?;
-    let target_user = context.config.audio_target_user.clone();
-    BundleRestoreService::restore_bundle(
-        context.inner(),
-        &remote,
-        instance_id,
-        &target_user,
-        payload,
-    )
-    .await
-    .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn get_restore_job(job_id: String) -> Result<RestoreJob, FrontendError> {
-    BundleRestoreService::get_job(&job_id)
-        .await
-        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -4814,10 +4784,10 @@ pub async fn moonlight_get_session_state(
 }
 
 #[tauri::command]
-pub async fn force_update_state_agent(
+pub async fn refresh_state_agent_index(
     context: State<'_, AppContext>,
     instance_id: u64,
-) -> Result<(), FrontendError> {
+) -> Result<serde_json::Value, FrontendError> {
     let api_key = {
         let state = context.state.read().await;
         state.credentials.vast_api_key.clone()
@@ -4840,12 +4810,9 @@ pub async fn force_update_state_agent(
     .await
     .map_err(|e| crate::errors::AppError::State(e.to_string()))?;
 
-    // Kill the remote agent and its socket
-    let _ = remote.ssh(
-        "systemctl stop noland-state-agent && rm -f /run/noland/state-agent.sock",
-        std::time::Duration::from_secs(10),
-    );
-
-    // `ensure_state_agent` will now automatically upload and recompile it when the next command runs!
-    Ok(())
+    let target_user = context.config.audio_target_user.clone();
+    ensure_state_agent(&remote, &target_user).await?;
+    call_agent_raw(&remote, "RefreshIndex", serde_json::json!({}))
+        .await
+        .map_err(Into::into)
 }

@@ -187,6 +187,93 @@ pub enum DeletionKind {
     Force,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct OperationMetrics {
+    pub total_duration_ms: u64,
+    pub discovery_duration_ms: u64,
+    pub reconciliation_duration_ms: u64,
+    pub snapshot_duration_ms: u64,
+    pub planning_duration_ms: u64,
+    pub hashing_duration_ms: u64,
+    pub chunking_duration_ms: u64,
+    pub packing_duration_ms: u64,
+    pub upload_duration_ms: u64,
+    pub download_duration_ms: u64,
+    pub manifest_duration_ms: u64,
+    pub commit_duration_ms: u64,
+    pub checkpoint_duration_ms: u64,
+    pub restore_materialize_duration_ms: u64,
+    pub restore_apply_duration_ms: u64,
+    pub validation_duration_ms: u64,
+
+    pub num_candidate_paths: u64,
+    pub num_dirty_paths: u64,
+    pub num_dirty_roots: u64,
+    pub num_files_scanned: u64,
+    pub num_files_skipped_fast_identity: u64,
+    pub num_files_rehashed: u64,
+    pub num_files_uploaded: u64,
+    pub num_files_downloaded: u64,
+    pub num_files_reused_local: u64,
+
+    pub bytes_scanned: u64,
+    pub bytes_hashed: u64,
+    pub bytes_chunked: u64,
+    pub bytes_packed: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+    pub bytes_reused_local: u64,
+
+    pub num_chunks_created: u64,
+    pub num_chunks_reused: u64,
+    pub num_small_files_packed: u64,
+
+    pub num_rclone_invocations: u64,
+    pub num_remote_stat_calls: u64,
+    pub num_remote_list_calls: u64,
+    pub num_remote_mkdir_calls: u64,
+    pub num_remote_upload_calls: u64,
+    pub num_remote_download_calls: u64,
+    pub num_manifest_writes: u64,
+
+    pub num_local_cas_hits: u64,
+    pub num_remote_index_hits: u64,
+    pub num_remote_unknown_objects: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationProgress {
+    pub phase: String,
+    pub completed_units: u64,
+    pub total_units: Option<u64>,
+    pub unit: Option<String>,
+    pub message: Option<String>,
+    #[serde(default)]
+    pub detail_json: serde_json::Value,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl OperationProgress {
+    pub fn new(phase: impl Into<String>, completed_units: u64) -> Self {
+        Self {
+            phase: phase.into(),
+            completed_units,
+            total_units: None,
+            unit: None,
+            message: None,
+            detail_json: serde_json::json!({}),
+            updated_at: Utc::now(),
+        }
+    }
+
+    pub fn fraction(&self) -> Option<f64> {
+        self.total_units
+            .filter(|total| *total > 0)
+            .map(|total| (self.completed_units as f64 / total as f64).clamp(0.0, 1.0))
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperationRecord {
     pub operation_id: Uuid,

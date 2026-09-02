@@ -72,12 +72,7 @@ pub fn import_checkpoint(agent: &StateAgent, checkpoint: &LearnedStateCheckpoint
             app_id: assoc.app_id.clone(),
             path_id,
             confidence: assoc.confidence,
-            evidence: assoc
-                .evidence
-                .iter()
-                .copied()
-                .map(Evidence::new)
-                .collect(),
+            evidence: assoc.evidence.iter().copied().map(Evidence::new).collect(),
             persistence_class: assoc.persistence_class,
             semantic_role: assoc.semantic_role,
             first_seen_at: checkpoint.created_at,

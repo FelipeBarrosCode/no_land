@@ -21,7 +21,7 @@ pub fn mint_ephemeral_session(
     operation_id: &str,
 ) -> AppResult<EphemeralRcloneSession> {
     let input = to_input(provider, credentials, fields, bucket, prefix, remote_name)?;
-    session_from_input(&input, operation_id, TokenMode::Ephemeral)
+    session_from_input(&input, operation_id, TokenMode::Operation)
         .map_err(|e| AppError::InvalidInput(e.to_string()))
 }
 

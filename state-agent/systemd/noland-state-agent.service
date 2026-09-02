@@ -17,9 +17,15 @@ StateDirectoryMode=0750
 Environment=NOLAND_HOME=/home/user
 Environment=NOLAND_STATE_ROOT=/var/lib/noland/state
 Environment=NOLAND_RUN_ROOT=/run/noland
+Environment=NOLAND_BPF_OBJECT=/usr/local/lib/noland/noland_observer.bpf.o
+# The eBPF observer uses only the split Linux 5.8+ tracing capabilities.
+# Unsupported kernels must use degraded mode instead of broader privileges.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON
+AmbientCapabilities=CAP_BPF CAP_PERFMON
+NoNewPrivileges=true
+LimitMEMLOCK=infinity
 # Never expose the tracker RPC on a network socket.
 # Control stays on the existing authenticated Noland instance channel.
-NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=false
 ReadWritePaths=/var/lib/noland /run/noland

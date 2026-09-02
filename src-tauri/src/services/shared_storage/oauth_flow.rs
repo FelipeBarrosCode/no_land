@@ -172,17 +172,9 @@ pub async fn exchange_code(
         .text()
         .await
         .map_err(|e| format!("Failed reading response: {e}"))?;
-    tracing::info!(
-        "OAuth token response body: {}",
-        &raw_body[..raw_body.len().min(200)]
-    );
 
-    let token: OAuthTokenResponse = serde_json::from_str(&raw_body).map_err(|e| {
-        format!(
-            "Failed to parse token response: {e}. Body: {}",
-            &raw_body[..raw_body.len().min(500)]
-        )
-    })?;
+    let token: OAuthTokenResponse = serde_json::from_str(&raw_body)
+        .map_err(|e| format!("Failed to parse OAuth token response: {e}"))?;
 
     // Check if the response contains an error
     if token.error.is_some() {

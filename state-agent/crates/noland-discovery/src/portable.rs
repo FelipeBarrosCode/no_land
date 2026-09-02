@@ -10,6 +10,13 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
     "sunshine",
     "noland",
     "systemd",
+    "startplasma",
+    "kdeinit",
+    "kioslave",
+    "xsettingsd",
+    "dbus-run-session",
+    "xdg-desktop-portal",
+    "xdg-document-portal",
     "htop",
     "konsole",
     "kate",
@@ -67,10 +74,17 @@ mod tests {
         let vice_city = AppIdentity::new(AppId::desktop("vice-city"), "Vice City");
         let kate = AppIdentity::new(AppId::desktop("org.kde.kate"), "Kate");
         let dolphin = AppIdentity::new(AppId::desktop("org.kde.dolphin"), "Dolphin");
+        let plasma = AppIdentity::new(AppId("exe:startplasma-x11:abc".into()), "startplasma-x11");
+        let portal = AppIdentity::new(
+            AppId("exe:xdg-desktop-portal:abc".into()),
+            "xdg-desktop-portal",
+        );
         assert!(is_backup_candidate(&steam));
         assert!(is_backup_candidate(&pcsx2));
         assert!(is_backup_candidate(&vice_city));
         assert!(!is_backup_candidate(&kate));
         assert!(!is_backup_candidate(&dolphin));
+        assert!(!is_backup_candidate(&plasma));
+        assert!(!is_backup_candidate(&portal));
     }
 }

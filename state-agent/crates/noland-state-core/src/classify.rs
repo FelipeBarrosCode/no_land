@@ -102,6 +102,33 @@ impl BackupMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupPerformanceMode {
+    Fast,
+    #[default]
+    Balanced,
+    Full,
+}
+
+impl BackupPerformanceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Balanced => "balanced",
+            Self::Full => "full",
+        }
+    }
+
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "fast" => Self::Fast,
+            "full" => Self::Full,
+            _ => Self::Balanced,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupDecision {

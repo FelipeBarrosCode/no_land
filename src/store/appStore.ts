@@ -6,6 +6,7 @@ import {
   getRentedInstances,
   getProvisioningLogs,
   searchOffers,
+  listAvailableOfferCountries,
   selectOffer,
   setManualLocation,
   setupWireguardClient,
@@ -15,6 +16,8 @@ import {
   startPlayExistingInstance,
   startPlayFlow,
   subscribeProvisioningEvents,
+  subscribeSharedStorageProgress,
+  cancelSharedStorageOperation,
   verifyWireguard,
   getSetupStatus,
   verifySunshine,
@@ -38,11 +41,8 @@ import {
   resetInstanceSunshineSettings,
   rebootInstanceServices,
   destroyInstance,
-  generateBundleIndex,
-  getInstanceRestoreBundles,
-  dryRunRestore,
-  restoreBundle,
-  getRestoreJob,
+
+
   getInstanceMicConfig,
   updateInstanceMicSettings,
   enableInstanceMic,
@@ -80,6 +80,7 @@ import type {
   ManualLocationInput,
   MoonlightPreferences,
   OfferCandidate,
+  OfferCountryAvailability,
   OnboardingPayload,
   PlatformCredentialsUpdate,
   IgdbCredentialsUpdate,
@@ -90,14 +91,13 @@ import type {
   SshCredentialsUpdate,
   SharedStorageSettingsUpdate,
   SharedStorageSettingsResponse,
+  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageProgressEvent,
   SunshineSettingsResponse,
-  BundleIndex,
-  RestoreDryRunResult,
-  RestoreJob,
-  RestoreRequest,
+
   InstanceMicConfig,
   InstanceMicRuntimeStatus,
   MicSessionResponse,
@@ -146,6 +146,9 @@ interface AppStore {
   discoverOffers: (page?: number) => Promise<void>;
   nextOffersPage: () => Promise<void>;
   previousOffersPage: () => Promise<void>;
+  loadAvailableOfferCountries: () => Promise<
+    OfferCountryAvailability[] | null
+  >;
   chooseOffer: (offerId: number, storageGb: number) => Promise<boolean>;
   startPlay: () => Promise<void>;
   resumeProvisioningExisting: (instanceId: number) => Promise<string | null>;
@@ -239,7 +242,9 @@ interface AppStore {
   saveInstanceStorageSelected: (
     instanceId: number,
     selectedPaths: string[],
+    performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
+  cancelSharedStorageOperation: (instanceId: number) => Promise<void>;
   listExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
@@ -283,19 +288,7 @@ interface AppStore {
   ) => Promise<void>;
   rebootInstanceServices: (instanceId: number) => Promise<string | null>;
   destroyInstance: (instanceId: number) => Promise<void>;
-  bundleIndex: BundleIndex | null;
-  restoreJob: RestoreJob | null;
-  generateBundleIndex: () => Promise<void>;
-  loadRestoreBundles: (instanceId: number) => Promise<void>;
-  runDryRunRestore: (
-    instanceId: number,
-    payload: RestoreRequest,
-  ) => Promise<RestoreDryRunResult | null>;
-  runRestoreBundle: (
-    instanceId: number,
-    payload: RestoreRequest,
-  ) => Promise<RestoreJob | null>;
-  pollRestoreJob: (jobId: string) => Promise<void>;
+
   micConfig: InstanceMicConfig | null;
   micStatus: InstanceMicRuntimeStatus | null;
   micSession: MicSessionResponse | null;
@@ -632,6 +625,51 @@ function getProvisioningProgress(state: OrchestrationState): number | null {
   return ((index + 1) / PROVISIONING_ORDER.length) * 100;
 }
 
+const SHARED_STORAGE_ACTION_KEYS = new Set([
+  "instance.storage.export",
+  "instance.storage.sync",
+]);
+
+function applySharedStorageProgress(
+  event: SharedStorageProgressEvent,
+  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+) {
+  set((state) => {
+    if (
+      !state.blockingAction ||
+      !SHARED_STORAGE_ACTION_KEYS.has(state.blockingAction.key)
+    ) {
+      return {};
+    }
+    const percent =
+      typeof event.fraction === "number"
+        ? Math.round(event.fraction * 100)
+        : null;
+    const units =
+      event.completedUnits != null && event.totalUnits != null
+        ? `${event.completedUnits}/${event.totalUnits}${event.unit ? ` ${event.unit}` : ""}`
+        : null;
+    const phaseLabel = event.readyToLaunch
+      ? "Ready to launch"
+      : event.phase
+        ? event.phase.replace(/_/g, " ")
+        : event.state;
+    return {
+      blockingAction: {
+        ...state.blockingAction,
+        label: phaseLabel,
+        detail: [event.message, units].filter(Boolean).join(" · ") || state.blockingAction.detail,
+        progress: percent,
+        mode: percent == null ? "indeterminate" : "determinate",
+        cancellable: event.cancellable,
+        cancelRequested: event.cancelRequested,
+        operationId: event.operationId,
+        instanceId: event.instanceId,
+      },
+    };
+  });
+}
+
 function createBlockingAction(
   state: AppStore,
   next: Omit<BlockingActionState, "startedAt"> & { startedAt?: number },
@@ -801,8 +839,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     launchingSoftwareAppId: null,
     softwareArtwork: {},
     softwareArtworkLoading: {},
-    bundleIndex: null,
-    restoreJob: null,
+
     micConfig: null,
     micStatus: null,
     micSession: null,
@@ -855,6 +892,9 @@ export const useAppStore = create<AppStore>((set, get) => {
         provisioningEventQueue = provisioningEventQueue
           .then(() => applyProvisioningEventState(event, set))
           .catch(() => undefined);
+      });
+      await subscribeSharedStorageProgress((event) => {
+        applySharedStorageProgress(event, set);
       });
 
       set({ _eventsBound: true });
@@ -933,6 +973,15 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
 
       await state.discoverOffers(state.offersPage - 1);
+    },
+
+    loadAvailableOfferCountries: async () => {
+      try {
+        return await listAvailableOfferCountries();
+      } catch (error) {
+        console.error("Failed to load available offer countries", error);
+        return null;
+      }
     },
 
     chooseOffer: async (offerId, storageGb) => {
@@ -1666,20 +1715,6 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         const status = await triggerInstanceBackup();
 
-        // Refresh bundle index immediately so restore UI reflects selectable bundles
-        // from the latest backup without requiring a manual "Generate Index" action.
-        const currentState = get().appState;
-        const activeInstanceId = currentState?.instance.instanceId;
-        if (activeInstanceId) {
-          try {
-            const index = await getInstanceRestoreBundles(activeInstanceId);
-            set({ backupStatus: status, bundleIndex: index, busy: false });
-            return;
-          } catch {
-            // Backup succeeded even if index retrieval fails; keep success status.
-          }
-        }
-
         set({ backupStatus: status, busy: false });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
@@ -1749,7 +1784,11 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    saveInstanceStorageSelected: async (instanceId, selectedPaths) => {
+    saveInstanceStorageSelected: async (
+      instanceId,
+      selectedPaths,
+      performanceMode,
+    ) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
@@ -1758,9 +1797,31 @@ export const useAppStore = create<AppStore>((set, get) => {
           blocking: true,
         },
         async () =>
-          await saveInstanceToSharedStorageSelected(instanceId, selectedPaths),
+          await saveInstanceToSharedStorageSelected(
+            instanceId,
+            selectedPaths,
+            performanceMode,
+          ),
         null,
       );
+    },
+
+    cancelSharedStorageOperation: async (instanceId) => {
+      try {
+        await cancelSharedStorageOperation(instanceId);
+        set((state) => ({
+          blockingAction: state.blockingAction
+            ? {
+                ...state.blockingAction,
+                cancelRequested: true,
+                cancellable: false,
+                detail: "Cancel requested. Waiting for the state agent to stop.",
+              }
+            : null,
+        }));
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
     },
 
     listExportableStorageObjects: async (instanceId) => {
@@ -2042,74 +2103,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       );
     },
 
-    generateBundleIndex: async () => {
-      await runBusyTask(
-        {
-          key: "restore.index.generate",
-          label: "Generating restore index",
-          detail: "Scanning backup metadata so bundles can be restored.",
-          blocking: true,
-        },
-        async () => {
-          await generateBundleIndex();
-        },
-        undefined,
-      );
-    },
 
-    loadRestoreBundles: async (instanceId) => {
-      await runInstanceTask(
-        {
-          key: "restore.index.load",
-          label: "Loading restore bundles",
-          detail: "Fetching indexed backup bundles for this instance.",
-        },
-        async () => {
-          const index = await getInstanceRestoreBundles(instanceId);
-          set({ bundleIndex: index });
-        },
-        undefined,
-      );
-    },
-
-    runDryRunRestore: async (instanceId, payload) => {
-      return await runInstanceTask(
-        {
-          key: "restore.dry_run",
-          label: "Running restore dry run",
-          detail:
-            "Previewing which files would be restored before making changes.",
-        },
-        async () => await dryRunRestore(instanceId, payload),
-        null,
-      );
-    },
-
-    runRestoreBundle: async (instanceId, payload) => {
-      return await runInstanceTask(
-        {
-          key: "restore.run",
-          label: "Restoring backup bundle",
-          detail: "Copying the selected backup data back onto the instance.",
-          blocking: true,
-        },
-        async () => {
-          const job = await restoreBundle(instanceId, payload);
-          set({ restoreJob: job });
-          return job;
-        },
-        null,
-      );
-    },
-
-    pollRestoreJob: async (jobId) => {
-      try {
-        const job = await getRestoreJob(jobId);
-        set({ restoreJob: job });
-      } catch (error) {
-        set({ error: mapError(error) });
-      }
-    },
 
     loadMicConfig: async (instanceId) => {
       set({ instanceActionRunning: true, error: null });

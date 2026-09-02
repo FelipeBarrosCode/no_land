@@ -1,6 +1,6 @@
 use crate::{
-    AdapterCredential, AdapterError, AdapterInput, ProviderKind, Result, RcloneProviderAdapter,
-    RcloneRemoteConfig,
+    AdapterCredential, AdapterError, AdapterInput, ProviderKind, RcloneProviderAdapter,
+    RcloneRemoteConfig, Result,
 };
 
 pub fn adapter_for(kind: ProviderKind) -> Box<dyn RcloneProviderAdapter> {
@@ -200,10 +200,7 @@ impl RcloneProviderAdapter for Dispatcher {
                 }
                 Ok(cfg)
             }
-            (
-                ProviderKind::Webdav,
-                AdapterCredential::UsernamePassword { username, password },
-            ) => {
+            (ProviderKind::Webdav, AdapterCredential::UsernamePassword { username, password }) => {
                 let url = fields
                     .get("url")
                     .cloned()
@@ -241,7 +238,11 @@ fn oauth_config(name: String, backend: &str, input: &AdapterInput) -> Result<Rcl
         return Err(AdapterError::Invalid("OAuth credentials required".into()));
     };
     let mut cfg = RcloneRemoteConfig::new(name, backend);
-    if let Some(client_id) = input.fields.get("client_id").filter(|v| !v.trim().is_empty()) {
+    if let Some(client_id) = input
+        .fields
+        .get("client_id")
+        .filter(|v| !v.trim().is_empty())
+    {
         cfg = cfg.entry("client_id", client_id);
     }
     if let Some(client_secret) = input
@@ -351,8 +352,13 @@ mod tests {
         );
         assert_eq!(ephemeral.root, "Noland Shared Storage");
 
+        let operation = session_from_input(&input, "op", TokenMode::Operation).unwrap();
+        assert!(operation.config_ini.contains("1//refresh"));
+        assert!(TokenMode::Operation.is_ephemeral());
+
         let durable = session_from_input(&input, "op", TokenMode::Durable).unwrap();
         assert!(durable.config_ini.contains("1//refresh"));
+        assert!(!TokenMode::Durable.is_ephemeral());
     }
 
     #[test]

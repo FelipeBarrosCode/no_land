@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
-import type { SharedStorageObjectEntry } from "../../lib/types";
+import type {
+  BackupPerformanceMode,
+  SharedStorageObjectEntry,
+} from "../../lib/types";
 
 interface Props {
   open: boolean;
@@ -10,7 +13,10 @@ interface Props {
   instanceId: number | null;
   onClose: () => void;
   onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
-  onConfirmExport: (selectedPaths: string[]) => Promise<void>;
+  onConfirmExport: (
+    selectedPaths: string[],
+    performanceMode: BackupPerformanceMode,
+  ) => Promise<void>;
   onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
 
@@ -43,6 +49,8 @@ export function SharedStorageExportModal({
   const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
+  const [performanceMode, setPerformanceMode] =
+    useState<BackupPerformanceMode>("balanced");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
   const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
@@ -59,6 +67,7 @@ export function SharedStorageExportModal({
       startedAt: Date.now()
     });
     setSelectedPaths([]);
+    setPerformanceMode("balanced");
     void onLoadObjects(instanceId)
       .then((result) => {
         if (!active) return;
@@ -130,8 +139,29 @@ export function SharedStorageExportModal({
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
         </ModalBody>
-        <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
-          <p className="text-[1.1rem] text-[#9ec0e4]">Selected: {selectedPaths.length}</p>
+        <div className="shrink-0 flex flex-wrap items-end justify-between gap-3 border-t-2 border-[#3e4270] px-5 py-4">
+          <div className="flex items-end gap-4">
+            <label className="flex flex-col gap-1">
+              <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+                Backup performance
+              </span>
+              <select
+                className="h-10 border border-[#3f476c] bg-[#0b0f23] px-3 text-[1.15rem] text-[#dff8ff] outline-none focus:border-neon-cyan"
+                value={performanceMode}
+                disabled={busy || loading}
+                onChange={(event) =>
+                  setPerformanceMode(event.target.value as BackupPerformanceMode)
+                }
+              >
+                <option value="fast">Fast — prioritize completion time</option>
+                <option value="balanced">Balanced — recommended default</option>
+                <option value="full">Full — maximum backup processing</option>
+              </select>
+            </label>
+            <p className="pb-2 text-[1.1rem] text-[#9ec0e4]">
+              Selected: {selectedPaths.length}
+            </p>
+          </div>
           <div className="flex items-center gap-2">
             {onRefreshIndexing && (
               <Button
@@ -177,7 +207,7 @@ export function SharedStorageExportModal({
                   progress: null,
                   startedAt: Date.now()
                 });
-                await onConfirmExport(selectedPaths);
+                await onConfirmExport(selectedPaths, performanceMode);
                 setPendingAction(null);
               }}
             >

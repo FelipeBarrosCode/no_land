@@ -51,7 +51,12 @@ impl RcloneRoot {
         if self.root.trim().is_empty() {
             format!("{}:{}", self.remote_name, key)
         } else {
-            format!("{}:{}/{}", self.remote_name, self.root.trim_matches('/'), key)
+            format!(
+                "{}:{}/{}",
+                self.remote_name,
+                self.root.trim_matches('/'),
+                key
+            )
         }
     }
 }

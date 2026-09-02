@@ -19,6 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "starting noland-state-agent"
     );
     let agent = Arc::new(StateAgent::boot(config)?);
+    agent.start_observer();
     agent.recover()?;
     agent.discover()?;
     agent.spawn_background();
