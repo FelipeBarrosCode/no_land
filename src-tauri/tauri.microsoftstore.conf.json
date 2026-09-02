@@ -9,7 +9,13 @@
       "binaries/ssh-keygen-*-pc-windows-msvc.exe",
       "binaries/ssh-runtime/**/*",
       "../vm-cloud-mic-agent/Cargo.toml",
-      "../vm-cloud-mic-agent/src/**/*"
+      "../vm-cloud-mic-agent/src/**/*",
+      "../state-agent/Cargo.toml",
+      "../state-agent/Cargo.lock",
+      "../state-agent/rust-toolchain.toml",
+      "../state-agent/crates/**/*",
+      "../state-agent/scripts/**/*",
+      "../state-agent/systemd/**/*"
     ],
     "windows": {
       "webviewInstallMode": {

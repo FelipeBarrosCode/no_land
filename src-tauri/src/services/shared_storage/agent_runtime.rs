@@ -1,8 +1,9 @@
 //! Deploy and start noland-state-agent on the remote disposable instance.
 
+use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::errors::{AppError, AppResult};
@@ -21,12 +22,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         return Ok(());
     }
 
-    let local_src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../state-agent");
-    if !local_src.join("Cargo.toml").exists() {
-        return Err(AppError::Provisioning(
-            "state-agent workspace is missing next to src-tauri; cannot deploy the tracker.".into(),
-        ));
-    }
+    let local_src = find_state_agent_source_dir()?;
 
     let stamp = chrono::Utc::now().timestamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
@@ -104,6 +100,84 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     }
 
     wait_for_bootstrap(remote, &remote_status, &remote_log).await
+}
+
+fn find_state_agent_source_dir() -> AppResult<PathBuf> {
+    if let Ok(explicit) = env::var("NOLAND_STATE_AGENT_SOURCE_DIR") {
+        let candidate = PathBuf::from(explicit.trim());
+        if is_state_agent_source_dir(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    let workspace_candidate = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../state-agent");
+    if is_state_agent_source_dir(&workspace_candidate) {
+        return Ok(workspace_candidate);
+    }
+
+    let relative_candidates = [
+        "state-agent",
+        "resources/state-agent",
+        "Resources/state-agent",
+        "resources/_up_/state-agent",
+        "Resources/_up_/state-agent",
+        "../Resources/state-agent",
+        "../resources/state-agent",
+        "../Resources/_up_/state-agent",
+        "../resources/_up_/state-agent",
+        "usr/lib/noland-connect/resources/state-agent",
+        "usr/lib/noland-connect/resources/_up_/state-agent",
+    ];
+
+    for seed in state_agent_source_search_seeds() {
+        for relative in relative_candidates {
+            let candidate = seed.join(relative);
+            if is_state_agent_source_dir(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    Err(AppError::Provisioning(
+        "Could not find the bundled state-agent source directory. Reinstall this app or set NOLAND_STATE_AGENT_SOURCE_DIR to a valid source tree."
+            .into(),
+    ))
+}
+
+fn is_state_agent_source_dir(path: &Path) -> bool {
+    path.join("Cargo.toml").is_file()
+        && path.join("crates/noland-state-agent/Cargo.toml").is_file()
+        && path.join("systemd/noland-state-agent.service").is_file()
+}
+
+fn state_agent_source_search_seeds() -> Vec<PathBuf> {
+    let mut seeds = Vec::new();
+
+    if let Ok(current_exe) = env::current_exe() {
+        if let Some(exe_dir) = current_exe.parent() {
+            push_path_ancestors(exe_dir, 6, &mut seeds);
+        }
+    }
+
+    if let Ok(cwd) = env::current_dir() {
+        push_path_ancestors(&cwd, 4, &mut seeds);
+    }
+
+    seeds
+}
+
+fn push_path_ancestors(start: &Path, levels: usize, output: &mut Vec<PathBuf>) {
+    let mut current = Some(start);
+    for _ in 0..levels {
+        let Some(path) = current else {
+            break;
+        };
+        let candidate = path.to_path_buf();
+        if !output.contains(&candidate) {
+            output.push(candidate);
+        }
+        current = path.parent();
+    }
 }
 
 async fn wait_for_bootstrap(

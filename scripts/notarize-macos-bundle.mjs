@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -102,6 +102,7 @@ function rebuildDmg(app, dmg, volumeName) {
   const stagedApp = join(tempRoot, basename(app));
   try {
     run('ditto', [app, stagedApp]);
+    symlinkSync('/Applications', join(tempRoot, 'Applications'), 'dir');
     createDmgWithRetry(tempRoot, tempDmg, volumeName);
     copyFileSync(tempDmg, dmg);
   } finally {
