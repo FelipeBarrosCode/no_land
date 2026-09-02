@@ -1,4 +1,7 @@
-use crate::errors::{AppError, AppResult};
+use crate::errors::AppResult;
+
+#[cfg(target_os = "macos")]
+use crate::errors::AppError;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {

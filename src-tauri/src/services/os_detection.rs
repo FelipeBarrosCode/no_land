@@ -2,6 +2,9 @@ use std::{env, path::PathBuf};
 
 use crate::utils::managed_binaries::locate_bundled_binary;
 
+#[cfg(target_os = "linux")]
+use crate::utils::managed_binaries::is_executable_file;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsKind {
     Macos,
@@ -75,6 +78,20 @@ impl OsDetection {
         } else {
             "/dev/null"
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn command_exists(&self, command: &str) -> bool {
+        let command_path = std::path::Path::new(command);
+        if command_path.components().count() > 1 {
+            return is_executable_file(command_path);
+        }
+
+        let Some(path) = env::var_os("PATH") else {
+            return false;
+        };
+
+        env::split_paths(&path).any(|directory| is_executable_file(&directory.join(command)))
     }
 
     pub fn managed_binary_target_triple(&self) -> &'static str {
