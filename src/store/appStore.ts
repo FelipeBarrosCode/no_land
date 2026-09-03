@@ -15,6 +15,7 @@ import {
   resumeProvisioningExistingInstance,
   startPlayExistingInstance,
   startPlayFlow,
+  stopProvisioningAfterCurrentStage as stopProvisioningAfterCurrentStageCommand,
   subscribeProvisioningEvents,
   subscribeSharedStorageProgress,
   cancelSharedStorageOperation,
@@ -134,6 +135,7 @@ interface AppStore {
   blockingAction: BlockingActionState | null;
   isBlocking: boolean;
   provisioningModalDismissed: boolean;
+  provisioningStopRequested: boolean;
   error: string | null;
   _eventsBound: boolean;
   vastWalletSummary: VastWalletSummary | null;
@@ -141,6 +143,7 @@ interface AppStore {
   bindEvents: () => Promise<void>;
   dismissProvisioningModal: () => void;
   reopenProvisioningModal: () => void;
+  stopProvisioningAfterCurrentStage: () => Promise<void>;
   runOnboarding: (payload: OnboardingPayload) => Promise<void>;
   saveManualLocation: (payload: ManualLocationInput) => Promise<void>;
   discoverOffers: (page?: number) => Promise<void>;
@@ -558,6 +561,20 @@ async function applyProvisioningEventState(
         : {}),
     };
 
+    if (
+      state.provisioningStopRequested &&
+      (event.state === "Idle" || event.state === "Error")
+    ) {
+      // The backend finished (or aborted) the pipeline after a stop request.
+      // Clear the blocking modal and the stop flag so the app settles back
+      // into a normal state.
+      updates.busy = false;
+      updates.blockingAction = null;
+      updates.isBlocking = false;
+      updates.provisioningStopRequested = false;
+      return updates;
+    }
+
     if (event.isError || PROVISIONING_INTERACTIVE_STATES.has(event.state)) {
       updates.busy = false;
       if (state.blockingAction?.key === "provisioning.flow") {
@@ -578,6 +595,7 @@ async function applyProvisioningEventState(
         "Preparing your instance",
       progress: getProvisioningProgress(event.state),
       mode: "determinate",
+      stage: event.state,
     });
 
     return updates;
@@ -819,6 +837,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     blockingAction: null,
     isBlocking: false,
     provisioningModalDismissed: false,
+    provisioningStopRequested: false,
     error: null,
     _eventsBound: false,
     vastWalletSummary: null,
@@ -904,6 +923,19 @@ export const useAppStore = create<AppStore>((set, get) => {
     dismissProvisioningModal: () => set({ provisioningModalDismissed: true }),
 
     reopenProvisioningModal: () => set({ provisioningModalDismissed: false }),
+
+    stopProvisioningAfterCurrentStage: async () => {
+      if (get().provisioningStopRequested) {
+        return;
+      }
+
+      set({ provisioningStopRequested: true, error: null });
+      try {
+        await stopProvisioningAfterCurrentStageCommand();
+      } catch (error) {
+        set({ provisioningStopRequested: false, error: mapError(error) });
+      }
+    },
 
     runOnboarding: async (payload) => {
       await runBusyTask(
@@ -1621,6 +1653,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => {
           await disconnectSharedStorageProfile(profileId);
           await get().loadSharedStorageProfiles();
+          set({ sharedStorageTestResult: null });
         },
         undefined,
       );

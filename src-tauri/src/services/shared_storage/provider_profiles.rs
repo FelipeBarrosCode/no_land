@@ -46,10 +46,16 @@ impl SharedStorageProfileManager {
             Uuid::new_v4().to_string().replace('-', "")[..12].to_string()
         );
 
+        // One shared repository key covers every provider, so switching or
+        // disconnecting a provider never breaks decryption of existing data.
+        let repository_key_hex = ensure_repository_key(context).await?;
+
         let stored = SharedStorageProfileSecret {
             credentials: credentials.clone(),
             provider_fields: provider_fields.clone(),
-            repository_key_hex: hex::encode(generate_repository_key()),
+            // Kept for backward compatibility with profiles persisted before
+            // the shared key was hoisted to the credential state root.
+            repository_key_hex: repository_key_hex,
         };
 
         context
@@ -134,12 +140,23 @@ impl SharedStorageProfileManager {
         profile: &SharedStorageProfile,
     ) -> AppResult<[u8; 32]> {
         let state = context.load_state().await;
-        let key_hex = state
-            .shared_storage_credentials
-            .profiles
-            .get(&profile.id)
-            .map(|stored| stored.repository_key_hex.clone())
-            .ok_or_else(|| AppError::NotFound("Repository key not found in state".to_string()))?;
+        let credentials = &state.shared_storage_credentials;
+
+        // Prefer the app-wide shared key. Fall back to the per-profile key
+        // for installations that persisted their key before the shared slot
+        // existed.
+        let key_hex = if !credentials.repository_key_hex.is_empty() {
+            credentials.repository_key_hex.clone()
+        } else {
+            credentials
+                .profiles
+                .get(&profile.id)
+                .map(|stored| stored.repository_key_hex.clone())
+                .filter(|key| !key.is_empty())
+                .ok_or_else(|| {
+                    AppError::NotFound("Repository key not found in state".to_string())
+                })?
+        };
 
         let key_bytes: [u8; 32] = hex::decode(&key_hex)
             .map_err(|e| AppError::State(format!("Invalid repository key: {e}")))?
@@ -154,39 +171,19 @@ impl SharedStorageProfileManager {
         context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<()> {
+        // Hoist the shared repository key out of this profile (if it was not
+        // migrated to the shared slot yet) so deleting the provider never
+        // removes the ability to decrypt existing repository data.
+        ensure_repository_key(context).await?;
+
         context
             .update_state(|state| {
-                if let Some(stored) = state.shared_storage_credentials.profiles.get_mut(&profile.id) {
-                    // Overwrite the credentials with blank ones, but keep the repository_key_hex
-                    match &mut stored.credentials {
-                        crate::models::application_bundle::StorageCredential::OAuth2 { access_token, refresh_token, expires_at } => {
-                            *access_token = String::new();
-                            *refresh_token = None;
-                            *expires_at = 0;
-                        }
-                        crate::models::application_bundle::StorageCredential::S3 { access_key_id, secret_access_key, session_token } => {
-                            *access_key_id = String::new();
-                            *secret_access_key = String::new();
-                            *session_token = None;
-                        }
-                        crate::models::application_bundle::StorageCredential::BackblazeB2 { key_id, application_key } => {
-                            *key_id = String::new();
-                            *application_key = String::new();
-                        }
-                        crate::models::application_bundle::StorageCredential::UsernamePassword { username, password } => {
-                            *username = String::new();
-                            *password = String::new();
-                        }
-                        crate::models::application_bundle::StorageCredential::SshKey { username, private_key, passphrase } => {
-                            *username = String::new();
-                            *private_key = String::new();
-                            *passphrase = None;
-                        }
-                        crate::models::application_bundle::StorageCredential::ServiceAccount { json } => {
-                            *json = String::new();
-                        }
-                    }
-                }
+                // Fully delete the stored credential entry (including the
+                // OAuth token material for OAuth-backed profiles).
+                state
+                    .shared_storage_credentials
+                    .profiles
+                    .remove(&profile.id);
             })
             .await?;
         Ok(())
@@ -246,4 +243,49 @@ fn generate_repository_key() -> [u8; 32] {
     use rand_core::RngCore;
     rand_core::OsRng.fill_bytes(&mut key);
     key
+}
+
+/// Returns the single app-wide repository key, creating it on first use.
+///
+/// The key is shared across all storage providers: it encrypts the repository
+/// contents regardless of which provider session was used to upload them, so
+/// disconnecting a provider must never delete it.
+///
+/// For state files created before the shared slot existed, the first
+/// per-profile key is adopted as the shared key so existing data stays
+/// decryptable.
+async fn ensure_repository_key(context: &AppContext) -> AppResult<String> {
+    let existing_key = {
+        let state = context.load_state().await;
+        if !state
+            .shared_storage_credentials
+            .repository_key_hex
+            .is_empty()
+        {
+            return Ok(state.shared_storage_credentials.repository_key_hex.clone());
+        }
+        state
+            .shared_storage_credentials
+            .profiles
+            .values()
+            .find_map(|stored| {
+                (!stored.repository_key_hex.is_empty()).then(|| stored.repository_key_hex.clone())
+            })
+    };
+
+    let key = existing_key.unwrap_or_else(|| hex::encode(generate_repository_key()));
+
+    context
+        .update_state(|state| {
+            if state
+                .shared_storage_credentials
+                .repository_key_hex
+                .is_empty()
+            {
+                state.shared_storage_credentials.repository_key_hex = key.clone();
+            }
+        })
+        .await?;
+
+    Ok(key)
 }

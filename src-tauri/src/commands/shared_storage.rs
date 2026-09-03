@@ -190,13 +190,31 @@ pub async fn disconnect_shared_storage_profile(
     }
 
     context
-        .update_state(|_| {
-            // No-op for now: we keep it in the list so the UI still knows it exists.
-            // Future work will add a 'status' field to ProfileReference.
+        .update_state(|state| {
+            let was_active = state
+                .shared_storage_profiles
+                .iter()
+                .any(|profile| profile.id == profile_id && profile.active);
+
+            // Delete the profile completely: its UI reference and any
+            // remaining credential/session artifacts.
+            state
+                .shared_storage_credentials
+                .profiles
+                .remove(&profile_id);
+            state
+                .shared_storage_profiles
+                .retain(|profile| profile.id != profile_id);
+
+            if was_active {
+                if let Some(first) = state.shared_storage_profiles.first_mut() {
+                    first.active = true;
+                }
+            }
         })
         .await?;
 
-    info!("Shared storage profile disconnected: {profile_id}");
+    info!("Shared storage profile disconnected and deleted: {profile_id}");
     Ok(())
 }
 

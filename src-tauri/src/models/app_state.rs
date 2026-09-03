@@ -925,6 +925,11 @@ pub struct SharedStorageCredentialState {
     pub profiles: HashMap<String, SharedStorageProfileSecret>,
     #[serde(default)]
     pub oauth_sessions: HashMap<String, SharedStorageOAuthSessionSecret>,
+    /// App-wide repository key shared across all storage providers. It is
+    /// independent of any single provider session, so disconnecting a
+    /// provider never removes the ability to decrypt existing backups.
+    #[serde(default)]
+    pub repository_key_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

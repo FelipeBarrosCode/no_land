@@ -492,6 +492,7 @@ fn main() {
             list_available_offer_countries,
             select_offer,
             start_play_flow,
+            stop_provisioning_after_current_stage,
             resume_provisioning_existing_instance,
             start_play_existing_instance,
             get_instance_launch_library,
