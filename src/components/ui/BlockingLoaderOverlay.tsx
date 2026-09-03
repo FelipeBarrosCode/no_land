@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ModalFrame } from "./ModalFrame";
 
@@ -15,6 +15,7 @@ export interface BlockingActionState {
   cancelRequested?: boolean;
   operationId?: string | null;
   instanceId?: number | null;
+  stage?: string | null;
 }
 
 interface Props {
@@ -22,6 +23,8 @@ interface Props {
   inline?: boolean;
   className?: string;
   onCancel?: () => void;
+  onStopProvisioning?: () => void;
+  stopRequested?: boolean;
 }
 
 function formatElapsed(startedAt: number, now: number): string {
@@ -42,8 +45,12 @@ export function BlockingLoaderOverlay({
   inline = false,
   className,
   onCancel,
+  onStopProvisioning,
+  stopRequested = false,
 }: Props) {
   const [now, setNow] = useState(() => Date.now());
+  const stageRef = useRef<string | null | undefined>(action.stage);
+  const [stageStartedAt, setStageStartedAt] = useState(() => action.startedAt);
   const progress =
     action.mode === "determinate" && typeof action.progress === "number"
       ? Math.max(0, Math.min(100, action.progress))
@@ -54,18 +61,44 @@ export function BlockingLoaderOverlay({
     return () => window.clearInterval(intervalId);
   }, []);
 
+  useEffect(() => {
+    if (stageRef.current !== action.stage) {
+      stageRef.current = action.stage;
+      setStageStartedAt(Date.now());
+    }
+  }, [action.stage]);
+
+  const showStopControl = action.key === "provisioning.flow";
+  const showInstanceInactiveWarning =
+    showStopControl &&
+    action.stage === "WaitingForInstance" &&
+    now - stageStartedAt >= 10 * 60 * 1000;
+
   const content = (
     <div
       aria-busy="true"
       aria-live="polite"
       className={clsx(
-        "w-full p-6 text-left",
+        "relative w-full p-6 text-left",
         inline
           ? "glass-panel pixel-frame max-w-none shadow-[0_0_30px_rgba(68,214,255,0.2)]"
           : "min-h-0 flex-1 overflow-y-auto",
         className
       )}
     >
+      {showStopControl && onStopProvisioning && (
+        <button
+          type="button"
+          onClick={onStopProvisioning}
+          disabled={stopRequested}
+          aria-label="Stop provisioning"
+          title="Stop provisioning after the current step finishes"
+          className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center border border-[#3f476c] bg-[#10152f] text-[18px] leading-none text-[#cfe7ff] transition hover:border-[#ff8ca2] hover:text-[#ffc1cf] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          ×
+        </button>
+      )}
+
       <div className="flex items-start gap-4">
         <div
           aria-hidden="true"
@@ -78,6 +111,21 @@ export function BlockingLoaderOverlay({
           </p>
           <h2 className="mt-1 font-display text-base text-white md:text-lg">{action.label}</h2>
           {action.detail && <p className="mt-2 text-[1.25rem] leading-[1.08] text-[#c6dbf4]">{action.detail}</p>}
+
+          {showInstanceInactiveWarning && (
+            <div className="mt-4 border border-[#ffd76b] bg-[#4a3c12] p-3 text-[1.05rem] leading-snug text-[#ffe9a8]">
+              This step is taking longer than expected. The instance might be
+              inactive. You can stop provisioning and start again with a
+              different server.
+            </div>
+          )}
+
+          {showStopControl && stopRequested && (
+            <div className="mt-4 border border-neon-cyan bg-[#0e2840] p-3 text-[1.05rem] leading-snug text-[#cfe7ff]">
+              Stop requested. Noland will finish the current step, then stop
+              before starting the next one.
+            </div>
+          )}
 
           <div className="mt-4">
             <div className="h-3 overflow-hidden border border-[#3f476c] bg-[#0b0f23] shadow-[inset_0_0_0_2px_#121731]">

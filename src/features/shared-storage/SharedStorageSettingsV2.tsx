@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
@@ -60,6 +60,11 @@ export function SharedStorageSettingsV2({
   const [bucket, setBucket] = useState<string | null>(null);
   const [prefix, setPrefix] = useState<string | null>(null);
 
+  // Track the end of an OAuth session so completing authorization can land on
+  // the connected-provider card instead of bouncing back to the initial form.
+  const prevOauthSessionIdRef = useRef<string | null>(oauthSessionId);
+  const [oauthJustCompleted, setOauthJustCompleted] = useState(false);
+
   // Read the global store error so we can surface it contextually inside
   // the OAuth panel.  The global error banner is easy to miss; showing the
   // message right next to the "Complete Authorization" button makes it
@@ -71,6 +76,30 @@ export function SharedStorageSettingsV2({
     void onLoadProviders();
     void onLoadProfiles();
   }, [onLoadProviders, onLoadProfiles]);
+
+  useEffect(() => {
+    const hadActiveSession = prevOauthSessionIdRef.current !== null;
+    prevOauthSessionIdRef.current = oauthSessionId;
+
+    if (hadActiveSession && oauthSessionId === null && !storeError) {
+      // The OAuth token exchange finished without an error. Wait for the
+      // refreshed profile list before switching to the connected card.
+      setOauthJustCompleted(true);
+    }
+  }, [oauthSessionId, storeError]);
+
+  useEffect(() => {
+    if (!oauthJustCompleted || profiles.length === 0) {
+      return;
+    }
+
+    setOauthJustCompleted(false);
+    setSelectedProvider(null);
+    setFormValues({});
+    setBucket(null);
+    setPrefix(null);
+    setDisplayName("");
+  }, [oauthJustCompleted, profiles]);
 
   const connectedProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
   const selectedProviderFields = selectedProvider?.fields ?? [];

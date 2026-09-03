@@ -1724,6 +1724,15 @@ pub async fn start_play_flow(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn stop_provisioning_after_current_stage(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<(), FrontendError> {
+    OrchestrationService::request_stop_after_current_stage(app, context.inner().clone()).await?;
+    Ok(())
+}
+
 fn setup_stage_for_orchestration_state(state: OrchestrationState) -> Option<SetupStage> {
     match state {
         OrchestrationState::WireGuardConfigGenerated => Some(SetupStage::WireguardConfigGenerated),
