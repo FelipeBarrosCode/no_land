@@ -337,6 +337,12 @@ export function App() {
   const oauthSessionId = useAppStore((state) => state.oauthSessionId);
   const beginOauthFlow = useAppStore((state) => state.beginOauthFlow);
   const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
+  const provisioningStopRequested = useAppStore(
+    (state) => state.provisioningStopRequested,
+  );
+  const stopProvisioningAfterCurrentStage = useAppStore(
+    (state) => state.stopProvisioningAfterCurrentStage,
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -416,6 +422,12 @@ export function App() {
                 }
               : undefined
           }
+          onStopProvisioning={
+            blockingAction.key === "provisioning.flow"
+              ? () => void stopProvisioningAfterCurrentStage()
+              : undefined
+          }
+          stopRequested={provisioningStopRequested}
         />
       )}
 

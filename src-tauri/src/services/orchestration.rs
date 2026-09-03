@@ -274,6 +274,29 @@ impl OrchestrationService {
         });
     }
 
+    /// Signals the running orchestration flow to stop once the current step
+    /// finishes. Stage-boundary cancellation checks (`ensure_not_cancelled`)
+    /// abort the pipeline before the next step starts.
+    pub async fn request_stop_after_current_stage(
+        app: AppHandle,
+        context: AppContext,
+    ) -> AppResult<()> {
+        context.cancel_requested.store(true, Ordering::SeqCst);
+
+        let current_state = context.load_state().await.orchestration_state;
+        emit_transition(
+            &app,
+            &context,
+            current_state,
+            "Stop requested. Finishing the current step before stopping provisioning.",
+            None,
+            false,
+        )
+        .await;
+
+        Ok(())
+    }
+
     pub async fn resume_if_needed(app: &AppHandle, context: &AppContext) {
         let initial_state = context.state.read().await.clone();
         let active_instance_id = initial_state.instance.instance_id;

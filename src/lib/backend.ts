@@ -100,6 +100,10 @@ export async function startPlayFlow(): Promise<void> {
   await invokeSafe<void>("start_play_flow");
 }
 
+export async function stopProvisioningAfterCurrentStage(): Promise<void> {
+  await invokeSafe<void>("stop_provisioning_after_current_stage");
+}
+
 export async function resumeProvisioningExistingInstance(
   instanceId: number,
 ): Promise<string> {
