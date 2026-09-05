@@ -1,14 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::Instant,
-};
+use std::{collections::HashSet, time::Instant};
 
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
 
 use crate::{
     errors::{AppError, AppResult},
-    models::vast::{country_code_from_geolocation, VastInstance, VastOffer, VastSshKey},
+    models::vast::{VastInstance, VastOffer, VastSshKey},
 };
 
 #[derive(Debug, Clone)]
@@ -36,6 +33,7 @@ impl VastApiClient {
         &self,
         min_reliability: f64,
         limit: usize,
+        storage_gb: u32,
         geolocation_country_code: Option<&str>,
         require_verified: bool,
         require_datacenter: bool,
@@ -51,6 +49,7 @@ impl VastApiClient {
                 .search_offers_for_category(
                     min_reliability,
                     limit,
+                    storage_gb,
                     category,
                     geolocation_country_code,
                     require_verified,
@@ -89,55 +88,11 @@ impl VastApiClient {
         Ok(merged)
     }
 
-    /// Ask every bundle category, without a country filter, which two-letter
-    /// geolocation codes currently have rentable offers. This powers the
-    /// server-picker country dropdown so it only lists what Vast actually serves.
-    pub async fn available_geolocations(&self, limit: usize) -> AppResult<Vec<(String, usize)>> {
-        let categories = ["ondemand", "bid", "reserved"];
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        let mut last_error: Option<AppError> = None;
-
-        for category in categories {
-            match self
-                .search_offers_for_category(0.8, limit, category, None, false, false, false)
-                .await
-            {
-                Ok(offers) => {
-                    for offer in offers {
-                        if let Some(code) = country_code_from_geolocation(&offer.raw_geolocation) {
-                            *counts.entry(code).or_default() += 1;
-                        }
-                    }
-                }
-                Err(error) => {
-                    warn!(
-                        "Vast available_geolocations category={} failed (continuing): {}",
-                        category, error
-                    );
-                    last_error = Some(error);
-                }
-            }
-        }
-
-        if counts.is_empty() {
-            if let Some(error) = last_error {
-                return Err(error);
-            }
-        }
-
-        let mut list: Vec<(String, usize)> = counts.into_iter().collect();
-        list.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-        debug!(
-            "Vast available_geolocations returned {} countries",
-            list.len()
-        );
-        Ok(list)
-    }
-
     async fn search_offers_for_category(
         &self,
         min_reliability: f64,
         limit: usize,
+        storage_gb: u32,
         category: &str,
         geolocation_country_code: Option<&str>,
         require_verified: bool,
@@ -154,12 +109,13 @@ impl VastApiClient {
             "gpu_arch": { "eq": "nvidia" },
             "vms_enabled": { "eq": true },
             "num_gpus": { "eq": 1 },
+            "allocated_storage": storage_gb.max(30),
             "order": [["dph_total", "asc"]]
         });
 
         if let Some(country_code) = geolocation_country_code {
             let trimmed = country_code.trim();
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("GLOBAL") {
                 payload["geolocation"] = json!({ "in": [trimmed.to_uppercase()] });
             }
         }

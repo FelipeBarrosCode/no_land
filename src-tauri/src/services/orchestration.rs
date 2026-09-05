@@ -595,6 +595,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                             state.instance.ssh_port = existing.ssh_port;
                             state.instance.ssh_user = context.config.ssh_user.clone();
                             state.instance.ssh_command = existing.ssh_command.clone();
+                            state.instance.hourly_price = existing.hourly_price;
+                            state.instance.compute_hourly_price = existing.compute_hourly_price;
+                            state.instance.storage_hourly_price = existing.storage_hourly_price;
                         })
                         .await?;
 
@@ -636,6 +639,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             state.instance.ssh_port = instance.ssh_port;
             state.instance.ssh_user = context.config.ssh_user.clone();
             state.instance.ssh_command = instance.ssh_command.clone();
+            state.instance.hourly_price = instance.hourly_price;
+            state.instance.compute_hourly_price = instance.compute_hourly_price;
+            state.instance.storage_hourly_price = instance.storage_hourly_price;
         })
         .await?;
 
@@ -737,6 +743,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             state.instance.ssh_host = instance.ssh_host.clone();
             state.instance.ssh_port = instance.ssh_port;
             state.instance.ssh_command = instance.ssh_command.clone();
+            state.instance.hourly_price = instance.hourly_price;
+            state.instance.compute_hourly_price = instance.compute_hourly_price;
+            state.instance.storage_hourly_price = instance.storage_hourly_price;
         })
         .await?;
 
@@ -1706,6 +1715,9 @@ async fn run_existing_instance_orchestration(
             state.instance.ssh_port = instance.ssh_port;
             state.instance.ssh_user = context.config.ssh_user.clone();
             state.instance.ssh_command = instance.ssh_command.clone();
+            state.instance.hourly_price = instance.hourly_price;
+            state.instance.compute_hourly_price = instance.compute_hourly_price;
+            state.instance.storage_hourly_price = instance.storage_hourly_price;
         })
         .await?;
 
@@ -3377,9 +3389,14 @@ async fn ensure_server_record(
     let status = status.to_string();
 
     // Get ssh_command from current instance state
-    let ssh_command = {
+    let (ssh_command, hourly_price, compute_hourly_price, storage_hourly_price) = {
         let snapshot = context.state.read().await;
-        snapshot.instance.ssh_command.clone()
+        (
+            snapshot.instance.ssh_command.clone(),
+            snapshot.instance.hourly_price,
+            snapshot.instance.compute_hourly_price,
+            snapshot.instance.storage_hourly_price,
+        )
     };
 
     context
@@ -3408,6 +3425,15 @@ async fn ensure_server_record(
             }
             if !ssh_command.is_empty() {
                 record.ssh_command = ssh_command.clone();
+            }
+            if hourly_price > 0.0 {
+                record.hourly_price = hourly_price;
+            }
+            if compute_hourly_price > 0.0 {
+                record.compute_hourly_price = compute_hourly_price;
+            }
+            if storage_hourly_price > 0.0 {
+                record.storage_hourly_price = storage_hourly_price;
             }
             record.last_state = state;
             record.last_error = None;

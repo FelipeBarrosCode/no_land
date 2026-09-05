@@ -140,6 +140,9 @@ impl InstanceLifecycleService {
                     record.ssh_host = instance.ssh_host.clone();
                     record.ssh_port = instance.ssh_port;
                     record.ssh_command = instance.ssh_command.clone();
+                    record.hourly_price = instance.hourly_price;
+                    record.compute_hourly_price = instance.compute_hourly_price;
+                    record.storage_hourly_price = instance.storage_hourly_price;
 
                     if !instance.wireguard_host_ip.trim().is_empty() {
                         record.wireguard_server_ip = instance.wireguard_host_ip.trim().to_string();

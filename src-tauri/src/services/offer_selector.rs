@@ -58,6 +58,8 @@ impl OfferSelector {
                     internet_down_mbps: offer.internet_down_mbps,
                     internet_up_mbps: offer.internet_up_mbps,
                     hourly_price: offer.hourly_price,
+                    compute_hourly_price: offer.compute_hourly_price,
+                    storage_hourly_price: offer.storage_hourly_price,
                     available_storage_gb: offer.available_storage_gb,
                     estimated_distance_km: distance,
                     score,

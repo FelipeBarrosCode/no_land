@@ -237,6 +237,10 @@ pub struct OfferCandidate {
     #[serde(default)]
     pub internet_up_mbps: f64,
     pub hourly_price: f64,
+    #[serde(default)]
+    pub compute_hourly_price: f64,
+    #[serde(default)]
+    pub storage_hourly_price: f64,
     pub available_storage_gb: u32,
     pub estimated_distance_km: f64,
     pub score: f64,
@@ -274,6 +278,12 @@ pub struct InstanceState {
     pub ssh_user: String,
     #[serde(default)]
     pub ssh_command: String,
+    #[serde(default)]
+    pub hourly_price: f64,
+    #[serde(default)]
+    pub compute_hourly_price: f64,
+    #[serde(default)]
+    pub storage_hourly_price: f64,
 }
 
 impl Default for InstanceState {
@@ -286,6 +296,9 @@ impl Default for InstanceState {
             ssh_port: 22,
             ssh_user: "root".to_string(),
             ssh_command: String::new(),
+            hourly_price: 0.0,
+            compute_hourly_price: 0.0,
+            storage_hourly_price: 0.0,
         }
     }
 }
@@ -636,6 +649,12 @@ pub struct ProvisionedServerState {
     #[serde(default)]
     pub ssh_command: String,
     #[serde(default)]
+    pub hourly_price: f64,
+    #[serde(default)]
+    pub compute_hourly_price: f64,
+    #[serde(default)]
+    pub storage_hourly_price: f64,
+    #[serde(default)]
     pub wireguard_server_ip: String,
     #[serde(default)]
     pub wireguard_client_ip: String,
@@ -704,6 +723,9 @@ impl ProvisionedServerState {
             ssh_port: 22,
             status: "unknown".to_string(),
             ssh_command: String::new(),
+            hourly_price: 0.0,
+            compute_hourly_price: 0.0,
+            storage_hourly_price: 0.0,
             wireguard_server_ip: String::new(),
             wireguard_client_ip: String::new(),
             wireguard_server_public_key: String::new(),

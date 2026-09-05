@@ -716,7 +716,7 @@ export function DashboardScreen({
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Price/hour
+                    Est. total/hour
                   </p>
                   <p>${appState.selectedOffer.hourlyPrice.toFixed(3)}</p>
                 </div>
