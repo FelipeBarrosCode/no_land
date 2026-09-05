@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
+import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
@@ -11,6 +14,7 @@ import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
+import { checkForGitHubUpdate, type AppUpdateInfo } from "../lib/updateChecker";
 
 function RootRoute() {
   const appState = useAppStore((state) => state.appState);
@@ -260,6 +264,82 @@ function ProvisioningRoute() {
   );
 }
 
+function UpdateAvailableModal({
+  update,
+  onDismiss,
+}: {
+  update: AppUpdateInfo;
+  onDismiss: () => void;
+}) {
+  const [opening, setOpening] = useState(false);
+  const releaseDate = update.publishedAt
+    ? new Date(update.publishedAt).toLocaleDateString()
+    : null;
+
+  async function openDownload() {
+    setOpening(true);
+    try {
+      await openUrl(update.releaseUrl);
+      onDismiss();
+    } finally {
+      setOpening(false);
+    }
+  }
+
+  return (
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-xl" zIndexClassName="z-[120]">
+      <div className="flex shrink-0 items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
+        <div>
+          <h2
+            className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
+            data-text="Update Available"
+          >
+            Update Available
+          </h2>
+          <p className="text-[1.15rem] leading-none text-[#b4c8de]">
+            Noland Connect {update.latestVersion} is ready to download.
+          </p>
+        </div>
+        <Button variant="ghost" onClick={onDismiss}>
+          Later
+        </Button>
+      </div>
+
+      <ModalBody className="px-5 py-4">
+        <Card className="text-[1.2rem] text-[#c6dbf4]">
+          <div className="grid gap-2">
+            <p>
+              Current version: <span className="text-[#9ad9ff]">{update.currentVersion}</span>
+            </p>
+            <p>
+              New version: <span className="text-neon-lime">{update.latestVersion}</span>
+            </p>
+            {releaseDate && <p>Published: {releaseDate}</p>}
+          </div>
+
+          <div className="mt-4 max-h-48 overflow-y-auto whitespace-pre-wrap border border-[#3e4270] bg-[#070b1b] p-3 text-[1.05rem] leading-snug text-[#b4c8de]">
+            {update.releaseNotes}
+          </div>
+        </Card>
+
+        <div className="mt-4 flex justify-end gap-3">
+          <Button variant="ghost" onClick={onDismiss}>
+            Skip for now
+          </Button>
+          <Button
+            variant="secondary"
+            loading={opening}
+            loadingText="Opening..."
+            onClick={openDownload}
+          >
+            Download Update
+          </Button>
+        </div>
+      </ModalBody>
+    </ModalFrame>
+  );
+}
+
 function BootScreen() {
   return (
     <main className="crt-surface flex min-h-dvh items-center justify-center bg-hero-glow px-4">
@@ -283,6 +363,7 @@ function BootScreen() {
 export function App() {
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [windowLabelResolved, setWindowLabelResolved] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const initialize = useAppStore((state) => state.initialize);
   const bindEvents = useAppStore((state) => state.bindEvents);
   const loading = useAppStore((state) => state.loading);
@@ -383,6 +464,29 @@ export function App() {
     void bindEvents();
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
 
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
+
+    let cancelled = false;
+    async function checkForUpdate() {
+      try {
+        const update = await checkForGitHubUpdate();
+        if (!cancelled && update) {
+          setAvailableUpdate(update);
+        }
+      } catch (error) {
+        console.warn("Update check failed", error);
+      }
+    }
+
+    void checkForUpdate();
+    return () => {
+      cancelled = true;
+    };
+  }, [windowLabel, windowLabelResolved]);
+
   if (!windowLabelResolved) {
     return <BootScreen />;
   }
@@ -410,6 +514,13 @@ export function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {availableUpdate && (
+        <UpdateAvailableModal
+          update={availableUpdate}
+          onDismiss={() => setAvailableUpdate(null)}
+        />
       )}
 
       {isBlocking && blockingAction && (

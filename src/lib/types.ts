@@ -164,6 +164,8 @@ export interface OfferCandidate {
   internetDownMbps: number;
   internetUpMbps: number;
   hourlyPrice: number;
+  computeHourlyPrice: number;
+  storageHourlyPrice: number;
   availableStorageGb: number;
   estimatedDistanceKm: number;
   score: number;
@@ -183,6 +185,9 @@ export interface InstanceState {
   sshPort: number;
   sshUser: string;
   sshCommand: string;
+  hourlyPrice: number;
+  computeHourlyPrice: number;
+  storageHourlyPrice: number;
 }
 
 export interface WireGuardState {
@@ -271,6 +276,9 @@ export interface ProvisionedServerState {
   sshPort: number;
   status: string;
   sshCommand: string;
+  hourlyPrice: number;
+  computeHourlyPrice: number;
+  storageHourlyPrice: number;
   wireguardServerIp: string;
   wireguardClientIp: string;
   wireguardServerPublicKey: string;

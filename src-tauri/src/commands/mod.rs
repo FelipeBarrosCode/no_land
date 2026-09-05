@@ -12,6 +12,7 @@ pub use self::shared_storage::{
 };
 
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -31,10 +32,11 @@ use crate::{
         app_state::{
             BackupStatusResponse, ConnectionProvider, EdidMode, InstanceMicConfig,
             InstanceMicRuntimeStatus, LocationSource, ManualLocationInput, MicQualityProfile,
-            MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OnboardingPayload,
-            OrchestrationState, PersistedAppState, PostWireGuardSetupState, RentedInstanceSummary,
-            ServerPreferencesUpdate, SetupStage, SharedStorageInstanceStatus,
-            SharedStorageSettingsResponse, SharedStorageSettingsUpdate,
+            MicSessionResponse, MicSettingsUpdate, MoonlightPreferences, OfferCandidate,
+            OnboardingPayload, OrchestrationState, PersistedAppState, PostWireGuardSetupState,
+            RentedInstanceSummary, ServerPreferences, ServerPreferencesUpdate, SetupStage,
+            SharedStorageInstanceStatus, SharedStorageSettingsResponse,
+            SharedStorageSettingsUpdate,
         },
         events::ProvisioningEvent,
         vast::VastInstance,
@@ -1531,16 +1533,24 @@ pub async fn search_offers(
         context.config.vast_base_url.clone(),
         state_snapshot.credentials.vast_api_key.clone(),
     );
+    let country_code = state_snapshot
+        .server_preferences
+        .geolocation_country_code
+        .trim()
+        .to_string();
+    let geolocation_country_code =
+        if country_code.is_empty() || country_code.eq_ignore_ascii_case("GLOBAL") {
+            None
+        } else {
+            Some(country_code.as_str())
+        };
+
     let offers = vast
         .search_offers(
             state_snapshot.server_preferences.min_reliability,
             fetch_limit,
-            Some(
-                state_snapshot
-                    .server_preferences
-                    .geolocation_country_code
-                    .as_str(),
-            ),
+            state_snapshot.server_preferences.storage_gb,
+            geolocation_country_code,
             state_snapshot.server_preferences.require_verified,
             state_snapshot.server_preferences.require_datacenter,
             state_snapshot.server_preferences.require_avx,
@@ -1552,59 +1562,9 @@ pub async fn search_offers(
     };
     let ranked = selector.rank_offers(offers, &state_snapshot.location);
 
-    // Apply price and verification filters
     let filtered: Vec<_> = ranked
         .into_iter()
-        .filter(|offer| {
-            // Price filter
-            let price_ok = if state_snapshot.server_preferences.max_hourly_price > 0.0 {
-                offer.hourly_price <= state_snapshot.server_preferences.max_hourly_price
-                    && offer.hourly_price >= state_snapshot.server_preferences.min_hourly_price
-            } else {
-                offer.hourly_price >= state_snapshot.server_preferences.min_hourly_price
-            };
-
-            // Verification filter
-            let verified_ok =
-                !state_snapshot.server_preferences.require_verified || offer.is_verified;
-
-            // Datacenter filter
-            let datacenter_ok =
-                !state_snapshot.server_preferences.require_datacenter || offer.is_datacenter;
-
-            // Offer type/category filter
-            let offer_type = offer.offer_type.to_ascii_lowercase();
-            let type_ok = match offer_type.as_str() {
-                "on-demand" | "ondemand" => state_snapshot.server_preferences.include_on_demand,
-                "interruptible" | "bid" => state_snapshot.server_preferences.include_interruptible,
-                "reserved" => state_snapshot.server_preferences.include_reserved,
-                _ => state_snapshot.server_preferences.include_on_demand,
-            };
-
-            let static_ip_ok =
-                !state_snapshot.server_preferences.require_static_ip || offer.has_static_ip;
-            let avx_ok = !state_snapshot.server_preferences.require_avx || offer.has_avx;
-            let gpu_count_ok = offer.gpu_count == 1;
-            let gpu_ram_ok = (offer.gpu_ram_mb as f64 / 1024.0)
-                >= state_snapshot.server_preferences.min_gpu_ram_gb as f64;
-            let cpu_cores_ok = offer.cpu_cores >= state_snapshot.server_preferences.min_cpu_cores;
-            let down_ok =
-                offer.internet_down_mbps >= state_snapshot.server_preferences.min_inet_down_mbps;
-            let up_ok =
-                offer.internet_up_mbps >= state_snapshot.server_preferences.min_inet_up_mbps;
-
-            price_ok
-                && verified_ok
-                && datacenter_ok
-                && type_ok
-                && static_ip_ok
-                && avx_ok
-                && gpu_count_ok
-                && gpu_ram_ok
-                && cpu_cores_ok
-                && down_ok
-                && up_ok
-        })
+        .filter(|offer| offer_matches_server_preferences(offer, &state_snapshot.server_preferences))
         .collect();
 
     let paged = filtered
@@ -1628,6 +1588,49 @@ pub async fn search_offers(
     Ok(paged)
 }
 
+fn offer_matches_server_preferences(
+    offer: &OfferCandidate,
+    preferences: &ServerPreferences,
+) -> bool {
+    let price_ok = if preferences.max_hourly_price > 0.0 {
+        offer.hourly_price <= preferences.max_hourly_price
+            && offer.hourly_price >= preferences.min_hourly_price
+    } else {
+        offer.hourly_price >= preferences.min_hourly_price
+    };
+
+    let verified_ok = !preferences.require_verified || offer.is_verified;
+    let datacenter_ok = !preferences.require_datacenter || offer.is_datacenter;
+
+    let offer_type = offer.offer_type.to_ascii_lowercase();
+    let type_ok = match offer_type.as_str() {
+        "on-demand" | "ondemand" => preferences.include_on_demand,
+        "interruptible" | "bid" => preferences.include_interruptible,
+        "reserved" => preferences.include_reserved,
+        _ => preferences.include_on_demand,
+    };
+
+    let static_ip_ok = !preferences.require_static_ip || offer.has_static_ip;
+    let avx_ok = !preferences.require_avx || offer.has_avx;
+    let gpu_count_ok = offer.gpu_count == 1;
+    let gpu_ram_ok = (offer.gpu_ram_mb as f64 / 1024.0) >= preferences.min_gpu_ram_gb as f64;
+    let cpu_cores_ok = offer.cpu_cores >= preferences.min_cpu_cores;
+    let down_ok = offer.internet_down_mbps >= preferences.min_inet_down_mbps;
+    let up_ok = offer.internet_up_mbps >= preferences.min_inet_up_mbps;
+
+    price_ok
+        && verified_ok
+        && datacenter_ok
+        && type_ok
+        && static_ip_ok
+        && avx_ok
+        && gpu_count_ok
+        && gpu_ram_ok
+        && cpu_cores_ok
+        && down_ok
+        && up_ok
+}
+
 #[tauri::command]
 pub async fn list_available_offer_countries(
     context: State<'_, AppContext>,
@@ -1645,9 +1648,35 @@ pub async fn list_available_offer_countries(
         context.config.vast_base_url.clone(),
         state_snapshot.credentials.vast_api_key.clone(),
     );
-    let countries = vast
-        .available_geolocations(context.config.offers_search_limit)
-        .await?
+    let offers = vast
+        .search_offers(
+            state_snapshot.server_preferences.min_reliability,
+            context.config.offers_search_limit,
+            state_snapshot.server_preferences.storage_gb,
+            None,
+            state_snapshot.server_preferences.require_verified,
+            state_snapshot.server_preferences.require_datacenter,
+            state_snapshot.server_preferences.require_avx,
+        )
+        .await?;
+
+    let selector = OfferSelector {
+        scoring: context.config.scoring.clone(),
+    };
+    let ranked = selector.rank_offers(offers, &state_snapshot.location);
+    let mut counts = BTreeMap::<String, usize>::new();
+
+    for offer in ranked
+        .iter()
+        .filter(|offer| offer_matches_server_preferences(offer, &state_snapshot.server_preferences))
+    {
+        let code = offer.country.trim().to_uppercase();
+        if code.len() == 2 && code.chars().all(|ch| ch.is_ascii_alphabetic()) {
+            *counts.entry(code).or_default() += 1;
+        }
+    }
+
+    let mut countries = counts
         .into_iter()
         .map(
             |(code, offer_count)| crate::models::app_state::OfferCountryAvailability {
@@ -1655,7 +1684,14 @@ pub async fn list_available_offer_countries(
                 offer_count,
             },
         )
-        .collect();
+        .collect::<Vec<_>>();
+    countries.sort_by(|left, right| {
+        right
+            .offer_count
+            .cmp(&left.offer_count)
+            .then_with(|| left.code.cmp(&right.code))
+    });
+
     Ok(countries)
 }
 
@@ -2879,6 +2915,8 @@ pub async fn regenerate_edid(
         "regenerate_edid resolved profile: width={} height={} refresh_hz={} source='{}'",
         width, height, refresh_hz, source_label
     );
+    let mut effective_width = width;
+    let mut effective_height = height;
     let mut effective_refresh_hz = refresh_hz;
     let generated_edid = match generate_headless_edid_base64(width, height, refresh_hz) {
         Ok(edid) => edid,
@@ -2886,17 +2924,24 @@ pub async fn regenerate_edid(
             effective_refresh_hz = 60;
             source_label = "Auto-Detected (EDID refresh limited to 60 Hz)".to_string();
             generate_headless_edid_base64(width, height, 60).or_else(|_| {
+                effective_width = 3840;
+                effective_height = 2160;
                 source_label =
                     "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string();
-                generate_headless_edid_base64(3840, 2160, 60)
+                generate_headless_edid_base64(effective_width, effective_height, 60)
             })?
         }
         Err(_) if payload.mode == EdidMode::AutoDetect => {
             effective_refresh_hz = 60;
+            effective_width = 3840;
+            effective_height = 2160;
             source_label =
                 "Fallback 3840x2160@60 (native timing is not EDID-compatible)".to_string();
-            generate_headless_edid_base64(3840, 2160, 60)
-                .or_else(|_| generate_headless_edid_base64(1920, 1080, 60))?
+            generate_headless_edid_base64(effective_width, effective_height, 60).or_else(|_| {
+                effective_width = 1920;
+                effective_height = 1080;
+                generate_headless_edid_base64(effective_width, effective_height, 60)
+            })?
         }
         Err(error) => return Err(error.into()),
     };
@@ -2907,6 +2952,12 @@ pub async fn regenerate_edid(
             state.sunshine.edid_refresh_rate_hz = effective_refresh_hz;
             state.sunshine.headless_edid_base64 = generated_edid.clone();
             state.sunshine.edid_source_label = source_label.clone();
+            if payload.mode != EdidMode::Manual {
+                state.moonlight_preferences.width = effective_width;
+                state.moonlight_preferences.height = effective_height;
+                state.moonlight_preferences.fps = effective_refresh_hz;
+                state.moonlight_preferences.refresh_rate_mode = effective_refresh_hz.to_string();
+            }
             state.last_error = None;
         })
         .await?;
@@ -3384,11 +3435,17 @@ pub(crate) async fn sync_instance_connection_internal(
             record.ssh_host = instance.ssh_host.clone();
             record.ssh_port = instance.ssh_port;
             record.ssh_command = instance.ssh_command.clone();
+            record.hourly_price = instance.hourly_price;
+            record.compute_hourly_price = instance.compute_hourly_price;
+            record.storage_hourly_price = instance.storage_hourly_price;
             state.instance.instance_id = Some(instance.id);
             state.instance.status = instance.status.clone();
             state.instance.ssh_host = instance.ssh_host.clone();
             state.instance.ssh_port = instance.ssh_port;
             state.instance.ssh_command = instance.ssh_command.clone();
+            state.instance.hourly_price = instance.hourly_price;
+            state.instance.compute_hourly_price = instance.compute_hourly_price;
+            state.instance.storage_hourly_price = instance.storage_hourly_price;
         })
         .await?;
 

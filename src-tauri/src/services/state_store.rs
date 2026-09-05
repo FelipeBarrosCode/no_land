@@ -40,7 +40,7 @@ impl JsonStateStore {
 
     fn migrate_value(&self, raw_value: Value) -> AppResult<PersistedAppState> {
         let mut baseline = serde_json::to_value(PersistedAppState::default())?;
-        merge_json(&mut baseline, &raw_value);
+        reconcile_json(&mut baseline, &raw_value);
 
         let mut migrated: PersistedAppState = serde_json::from_value(baseline)?;
         for server in &mut migrated.provisioned_servers {
@@ -171,21 +171,46 @@ impl StateStore for JsonStateStore {
     }
 }
 
-fn merge_json(target: &mut Value, source: &Value) {
+fn reconcile_json(target: &mut Value, source: &Value) {
     match (target, source) {
         (Value::Object(target_map), Value::Object(source_map)) => {
             for (key, source_value) in source_map {
                 match target_map.get_mut(key) {
-                    Some(target_value) => merge_json(target_value, source_value),
+                    Some(target_value) => reconcile_json(target_value, source_value),
                     None => {
+                        // Preserve unknown top-level fields when saving later, but never let
+                        // unknown fields influence typed deserialization of PersistedAppState.
                         target_map.insert(key.clone(), source_value.clone());
                     }
                 }
             }
         }
-        (target_slot, source_value) => {
+        (Value::Array(target_array), Value::Array(source_array)) => {
+            if let Some(template) = target_array.first().cloned() {
+                *target_array = source_array
+                    .iter()
+                    .map(|source_item| {
+                        let mut item = template.clone();
+                        reconcile_json(&mut item, source_item);
+                        item
+                    })
+                    .collect();
+            } else {
+                *target_array = source_array.clone();
+            }
+        }
+        (target_slot @ Value::Null, source_value) => {
             *target_slot = source_value.clone();
         }
+        (target_slot @ Value::Bool(_), source_value @ Value::Bool(_))
+        | (target_slot @ Value::Number(_), source_value @ Value::Number(_))
+        | (target_slot @ Value::String(_), source_value @ Value::String(_)) => {
+            *target_slot = source_value.clone();
+        }
+        // If an older or manually edited state file has the wrong shape for a
+        // known field, keep the current default for that field instead of making
+        // the whole state fail to deserialize and resetting the user.
+        _ => {}
     }
 }
 
@@ -275,11 +300,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_state_is_backed_up_and_replaced() {
-        let path = temp_state_path("recover-incompatible");
+    async fn incompatible_state_fields_are_reconciled_without_resetting_user_state() {
+        let path = temp_state_path("reconcile-incompatible");
         fs::write(
             &path,
-            serde_json::to_vec(&json!({ "moonlightPreferences": { "width": "invalid" } })).unwrap(),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "onboardingCompleted": true,
+                "credentials": {
+                    "appUsername": "felipe",
+                    "appPassword": "secret",
+                    "vastApiKey": "vast-key"
+                },
+                "moonlightPreferences": {
+                    "width": "invalid",
+                    "height": 1664
+                },
+                "serverPreferences": {
+                    "storageGb": "bad",
+                    "templateHash": "abc123"
+                }
+            }))
+            .unwrap(),
         )
         .await
         .unwrap();
@@ -287,15 +329,20 @@ mod tests {
         let store = JsonStateStore::new(path.clone(), 3);
         let recovered = store.load_state().await.unwrap();
 
+        assert!(recovered.onboarding_completed);
+        assert_eq!(recovered.credentials.app_username, "felipe");
+        assert_eq!(recovered.credentials.vast_api_key, "vast-key");
+        assert_eq!(recovered.version, 3);
         assert_eq!(
             recovered.moonlight_preferences.width,
             PersistedAppState::default().moonlight_preferences.width
         );
-        assert!(
-            serde_json::from_slice::<serde_json::Value>(&fs::read(path).await.unwrap())
-                .unwrap()
-                .is_object()
+        assert_eq!(recovered.moonlight_preferences.height, 1664);
+        assert_eq!(
+            recovered.server_preferences.storage_gb,
+            PersistedAppState::default().server_preferences.storage_gb
         );
+        assert_eq!(recovered.server_preferences.template_hash, "abc123");
     }
 
     #[tokio::test]

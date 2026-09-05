@@ -22,6 +22,8 @@ pub struct VastOffer {
     pub internet_down_mbps: f64,
     pub internet_up_mbps: f64,
     pub hourly_price: f64,
+    pub compute_hourly_price: f64,
+    pub storage_hourly_price: f64,
     pub available_storage_gb: u32,
     pub raw_geolocation: String,
     pub time_remaining_hours: f64,
@@ -113,11 +115,9 @@ impl VastOffer {
                 .or_else(|| value.get("net_up"))
                 .and_then(Value::as_f64)
                 .unwrap_or_default(),
-            hourly_price: value
-                .get("dph_total")
-                .or_else(|| value.get("discounted_dph_total"))
-                .and_then(Value::as_f64)
-                .unwrap_or_default(),
+            hourly_price: estimated_offer_hourly_price(value),
+            compute_hourly_price: compute_hourly_price(value),
+            storage_hourly_price: storage_hourly_price(value),
             available_storage_gb: value
                 .get("disk_space")
                 .and_then(Value::as_f64)
@@ -203,6 +203,12 @@ pub struct VastInstance {
     pub ssh_command: String,
     pub public_ip: String,
     pub gpu_name: String,
+    #[serde(default)]
+    pub hourly_price: f64,
+    #[serde(default)]
+    pub compute_hourly_price: f64,
+    #[serde(default)]
+    pub storage_hourly_price: f64,
     #[serde(default)]
     pub image_runtype: String,
     #[serde(default)]
@@ -292,6 +298,9 @@ impl VastInstance {
                 .and_then(Value::as_str)
                 .unwrap_or("Unknown GPU")
                 .to_string(),
+            hourly_price: authoritative_instance_hourly_price(value),
+            compute_hourly_price: compute_hourly_price(value),
+            storage_hourly_price: storage_hourly_price(value),
             image_runtype,
             hosting_type,
         })
@@ -392,17 +401,87 @@ pub fn parse_geolocation(raw: &str) -> (String, String, String) {
     (city, region, country)
 }
 
-/// Extract the two-letter ISO country code from a Vast `geolocation` string.
-/// Vast bundles country names as the final comma-separated segment, e.g.
-/// `"Seychelles, SC"` or `"Montreal, Canada, CA"`.
-pub fn country_code_from_geolocation(raw: &str) -> Option<String> {
-    let segment = raw
-        .split(',')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .last()?
-        .to_uppercase();
-    (segment.len() == 2 && segment.chars().all(|ch| ch.is_ascii_alphabetic())).then_some(segment)
+fn estimated_offer_hourly_price(value: &Value) -> f64 {
+    first_positive_number(
+        value,
+        &[
+            "/search/discountedTotalPerHour",
+            "discounted_dph_total",
+            "/search/totalHour",
+            "dph_total",
+            "dph_total_adj",
+        ],
+    )
+    .or_else(|| summed_compute_and_storage(value))
+    .unwrap_or_default()
+}
+
+fn authoritative_instance_hourly_price(value: &Value) -> f64 {
+    first_positive_number(
+        value,
+        &[
+            "dph_total",
+            "/search/discountedTotalPerHour",
+            "discounted_dph_total",
+            "/search/totalHour",
+            "dph_total_adj",
+        ],
+    )
+    .or_else(|| summed_compute_and_storage(value))
+    .or_else(|| first_positive_number(value, &["/instance/totalHour"]))
+    .unwrap_or_default()
+}
+
+fn compute_hourly_price(value: &Value) -> f64 {
+    first_positive_number(
+        value,
+        &[
+            "/search/gpuCostPerHour",
+            "dph_base",
+            "/instance/gpuCostPerHour",
+        ],
+    )
+    .unwrap_or_default()
+}
+
+fn storage_hourly_price(value: &Value) -> f64 {
+    first_positive_number(
+        value,
+        &[
+            "/search/diskHour",
+            "storage_total_cost",
+            "/instance/diskHour",
+        ],
+    )
+    .or_else(|| {
+        let storage_cost_per_gb_month = number_at(value, "storage_cost")?;
+        let disk_space_gb = number_at(value, "disk_space")?;
+        Some((storage_cost_per_gb_month * disk_space_gb) / (30.0 * 24.0))
+            .filter(|price| price.is_finite() && *price > 0.0)
+    })
+    .unwrap_or_default()
+}
+
+fn summed_compute_and_storage(value: &Value) -> Option<f64> {
+    let compute = compute_hourly_price(value);
+    let storage = storage_hourly_price(value);
+    (compute > 0.0 || storage > 0.0).then_some(compute + storage)
+}
+
+fn first_positive_number(value: &Value, paths: &[&str]) -> Option<f64> {
+    paths.iter().find_map(|path| {
+        number_at(value, path).filter(|number| number.is_finite() && *number > 0.0)
+    })
+}
+
+fn number_at(value: &Value, path: &str) -> Option<f64> {
+    let raw = if path.starts_with('/') {
+        value.pointer(path)
+    } else {
+        value.get(path)
+    }?;
+
+    raw.as_f64().or_else(|| raw.as_str()?.trim().parse().ok())
 }
 
 fn field_as_u64(value: &Value, keys: &[&str]) -> Option<u64> {
@@ -880,5 +959,88 @@ pub fn region_to_code(full_name: &str) -> String {
         _ if normalized.len() <= 3 => full_name.to_ascii_uppercase(),
         // Otherwise return original
         _ => full_name.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VastInstance, VastOffer};
+    use serde_json::json;
+
+    #[test]
+    fn offer_prefers_effective_discounted_search_total() {
+        let offer = VastOffer::from_value(&json!({
+            "id": 123,
+            "dph_base": 0.40,
+            "storage_total_cost": 0.0021,
+            "dph_total": 0.4021,
+            "discounted_dph_total": 0.3921,
+            "search": {
+                "gpuCostPerHour": 0.40,
+                "diskHour": 0.0021,
+                "totalHour": 0.4021,
+                "discountTotalHour": 0.01,
+                "discountedTotalPerHour": 0.3921
+            }
+        }))
+        .expect("offer should parse");
+
+        assert!((offer.hourly_price - 0.3921).abs() < f64::EPSILON);
+        assert!((offer.compute_hourly_price - 0.40).abs() < f64::EPSILON);
+        assert!((offer.storage_hourly_price - 0.0021).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn offer_ignores_zero_discounted_total_and_uses_dph_total() {
+        let offer = VastOffer::from_value(&json!({
+            "id": 123,
+            "dph_base": 0.40,
+            "storage_total_cost": 0.0021,
+            "dph_total": 0.4021,
+            "discounted_dph_total": 0,
+            "search": {
+                "gpuCostPerHour": 0.40,
+                "diskHour": 0.0021,
+                "totalHour": 0.4021,
+                "discountTotalHour": 0,
+                "discountedTotalPerHour": 0
+            }
+        }))
+        .expect("offer should parse");
+
+        assert!((offer.hourly_price - 0.4021).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn instance_uses_authoritative_dph_total_not_storage_only_instance_total() {
+        let instance = VastInstance::from_value(&json!({
+            "id": 883,
+            "actual_status": "running",
+            "ssh_host": "ssh2281.vast.ai",
+            "ssh_port": 10882,
+            "public_ipaddr": "63.135.50.11",
+            "gpu_name": "RTX A5000",
+            "dph_base": 1.0,
+            "dph_total": 1.0020740740740741,
+            "storage_total_cost": 0.002074074074074074,
+            "search": {
+                "gpuCostPerHour": 1.0,
+                "diskHour": 0.002074074074074074,
+                "totalHour": 1.0020740740740741,
+                "discountTotalHour": 0,
+                "discountedTotalPerHour": 1.0020740740740741
+            },
+            "instance": {
+                "gpuCostPerHour": 0,
+                "diskHour": 0.002074074074074074,
+                "totalHour": 0.002074074074074074,
+                "discountTotalPerHour": 0.002074074074074074
+            }
+        }))
+        .expect("instance should parse");
+
+        assert!((instance.hourly_price - 1.0020740740740741).abs() < f64::EPSILON);
+        assert!((instance.compute_hourly_price - 1.0).abs() < f64::EPSILON);
+        assert!((instance.storage_hourly_price - 0.002074074074074074).abs() < f64::EPSILON);
     }
 }

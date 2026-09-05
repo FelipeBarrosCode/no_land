@@ -147,8 +147,7 @@ fn main() {
                     &format!("Failed loading persisted state; deleting and recreating it: {error}"),
                 ),
             };
-            let mut detected_stream_defaults = detect_client_display_for_provisioning()
-                .map(|(width, height, _)| (width, height));
+            let mut detected_stream_defaults = detect_client_display_for_provisioning();
 
             let mut state_changed = false;
             if initial_state
@@ -275,13 +274,32 @@ fn main() {
                     candidate_refresh,
                 ) {
                     Ok(edid) => {
-                        generated = Some((edid, candidate_source));
+                        generated = Some((
+                            edid,
+                            candidate_source,
+                            candidate_width,
+                            candidate_height,
+                            candidate_refresh,
+                        ));
                         break;
                     }
                     Err(error) => last_generation_error = Some(error),
                 }
             }
-            if let Some((generated_edid, generated_source)) = generated {
+            let mut effective_stream_width = width;
+            let mut effective_stream_height = height;
+            let mut effective_stream_refresh_hz = refresh_hz;
+            if let Some((
+                generated_edid,
+                generated_source,
+                generated_width,
+                generated_height,
+                generated_refresh_hz,
+            )) = generated
+            {
+                effective_stream_width = generated_width;
+                effective_stream_height = generated_height;
+                effective_stream_refresh_hz = generated_refresh_hz;
                 if initial_state.sunshine.headless_edid_base64 != generated_edid
                     || initial_state.sunshine.edid_source_label != generated_source
                 {
@@ -311,7 +329,30 @@ fn main() {
             }
 
             if detected_stream_defaults.is_none() {
-                detected_stream_defaults = Some((width, height));
+                detected_stream_defaults = Some((
+                    effective_stream_width,
+                    effective_stream_height,
+                    effective_stream_refresh_hz,
+                ));
+            }
+
+            if initial_state.sunshine.edid_mode != crate::models::app_state::EdidMode::Manual {
+                let desired_refresh = effective_stream_refresh_hz
+                    .clamp(EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ);
+                let desired_refresh_mode = desired_refresh.to_string();
+                if initial_state.moonlight_preferences.width != effective_stream_width
+                    || initial_state.moonlight_preferences.height != effective_stream_height
+                    || initial_state.moonlight_preferences.fps != desired_refresh
+                    || initial_state.moonlight_preferences.refresh_rate_mode != desired_refresh_mode
+                    || initial_state.sunshine.edid_refresh_rate_hz != desired_refresh
+                {
+                    initial_state.moonlight_preferences.width = effective_stream_width;
+                    initial_state.moonlight_preferences.height = effective_stream_height;
+                    initial_state.moonlight_preferences.fps = desired_refresh;
+                    initial_state.moonlight_preferences.refresh_rate_mode = desired_refresh_mode;
+                    initial_state.sunshine.edid_refresh_rate_hz = desired_refresh;
+                    state_changed = true;
+                }
             }
 
             if state_changed {
@@ -361,7 +402,7 @@ fn main() {
                 app_data_dir.clone(),
             );
             if moonlight_bootstrap_created {
-                if let Some((default_stream_width, default_stream_height)) = detected_stream_defaults {
+                if let Some((default_stream_width, default_stream_height, _)) = detected_stream_defaults {
                     if let Err(error) = moonlight_manager.repository.update(|configuration| {
                         let video = &mut configuration.defaults.video;
                         video.width = default_stream_width;
