@@ -1,7 +1,7 @@
 //! Deploy and start noland-state-agent on the remote disposable instance.
 
 use std::env;
-use std::fs::OpenOptions;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -26,27 +26,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
 
     let stamp = chrono::Utc::now().timestamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
-    let status = std::process::Command::new("tar")
-        .env("COPYFILE_DISABLE", "1")
-        .args([
-            "--no-xattrs",
-            "-czf",
-            &local_tar.display().to_string(),
-            "--exclude",
-            "target",
-            "--exclude",
-            ".git",
-            "-C",
-            &local_src.display().to_string(),
-            ".",
-        ])
-        .status()
-        .map_err(|e| AppError::Command(format!("tar state-agent: {e}")))?;
-    if !status.success() {
-        return Err(AppError::Command(
-            "failed to pack state-agent sources".into(),
-        ));
-    }
+    pack_state_agent_sources(&local_src, &local_tar)?;
 
     let remote_tar = format!("/tmp/noland-state-agent-{stamp}.tar.gz");
     {
@@ -117,6 +97,9 @@ fn find_state_agent_source_dir() -> AppResult<PathBuf> {
 
     let relative_candidates = [
         "state-agent",
+        "_up_/state-agent",
+        "../state-agent",
+        "../../state-agent",
         "resources/state-agent",
         "Resources/state-agent",
         "resources/_up_/state-agent",
@@ -127,6 +110,9 @@ fn find_state_agent_source_dir() -> AppResult<PathBuf> {
         "../resources/_up_/state-agent",
         "usr/lib/noland-connect/resources/state-agent",
         "usr/lib/noland-connect/resources/_up_/state-agent",
+        "usr/lib/noland-connect/_up_/state-agent",
+        "lib/noland-connect/resources/state-agent",
+        "lib/noland-connect/resources/_up_/state-agent",
     ];
 
     for seed in state_agent_source_search_seeds() {
@@ -153,9 +139,16 @@ fn is_state_agent_source_dir(path: &Path) -> bool {
 fn state_agent_source_search_seeds() -> Vec<PathBuf> {
     let mut seeds = Vec::new();
 
+    if let Ok(resource_dir) = env::var("NOLAND_TAURI_RESOURCE_DIR") {
+        let candidate = PathBuf::from(resource_dir.trim());
+        if !candidate.as_os_str().is_empty() {
+            push_path_ancestors(&candidate, 4, &mut seeds);
+        }
+    }
+
     if let Ok(current_exe) = env::current_exe() {
         if let Some(exe_dir) = current_exe.parent() {
-            push_path_ancestors(exe_dir, 6, &mut seeds);
+            push_path_ancestors(exe_dir, 8, &mut seeds);
         }
     }
 
@@ -164,6 +157,69 @@ fn state_agent_source_search_seeds() -> Vec<PathBuf> {
     }
 
     seeds
+}
+
+fn pack_state_agent_sources(source_dir: &Path, archive_path: &Path) -> AppResult<()> {
+    let archive_file = File::create(archive_path)
+        .map_err(|error| AppError::Command(format!("create state-agent archive: {error}")))?;
+    let encoder = flate2::write::GzEncoder::new(archive_file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+
+    append_archive_dir(&mut archive, source_dir, source_dir)?;
+    archive
+        .finish()
+        .map_err(|error| AppError::Command(format!("finish state-agent archive: {error}")))?;
+    Ok(())
+}
+
+fn append_archive_dir(
+    archive: &mut tar::Builder<flate2::write::GzEncoder<File>>,
+    root: &Path,
+    current: &Path,
+) -> AppResult<()> {
+    for entry in fs::read_dir(current)
+        .map_err(|error| AppError::Command(format!("read state-agent source dir: {error}")))?
+    {
+        let entry = entry.map_err(|error| {
+            AppError::Command(format!("read state-agent source entry: {error}"))
+        })?;
+        let path = entry.path();
+        let relative = path.strip_prefix(root).map_err(|error| {
+            AppError::Command(format!("resolve state-agent archive path: {error}"))
+        })?;
+
+        if should_skip_state_agent_archive_path(relative) {
+            continue;
+        }
+
+        let file_type = entry.file_type().map_err(|error| {
+            AppError::Command(format!("inspect state-agent source entry: {error}"))
+        })?;
+        if file_type.is_dir() {
+            archive
+                .append_dir(relative, &path)
+                .map_err(|error| AppError::Command(format!("archive state-agent dir: {error}")))?;
+            append_archive_dir(archive, root, &path)?;
+        } else if file_type.is_file() {
+            archive
+                .append_path_with_name(&path, relative)
+                .map_err(|error| {
+                    AppError::Command(format!(
+                        "archive state-agent file {}: {error}",
+                        path.display()
+                    ))
+                })?;
+        }
+    }
+
+    Ok(())
+}
+
+fn should_skip_state_agent_archive_path(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        let name = component.as_os_str().to_string_lossy();
+        matches!(name.as_ref(), "target" | ".git" | ".DS_Store")
+    })
 }
 
 fn push_path_ancestors(start: &Path, levels: usize, output: &mut Vec<PathBuf>) {
@@ -373,6 +429,84 @@ pub async fn call_agent_raw(
 }
 
 struct TempFileGuard(PathBuf);
+
+#[cfg(test)]
+mod tests {
+    use super::{is_state_agent_source_dir, pack_state_agent_sources};
+    use flate2::read::GzDecoder;
+    use std::{fs, path::PathBuf};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "noland-state-agent-runtime-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn create_minimal_source_tree(root: &PathBuf) {
+        fs::create_dir_all(root.join("crates/noland-state-agent/src")).unwrap();
+        fs::create_dir_all(root.join("systemd")).unwrap();
+        fs::create_dir_all(root.join("target/debug")).unwrap();
+        fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+        fs::write(
+            root.join("crates/noland-state-agent/Cargo.toml"),
+            "[package]\nname = \"noland-state-agent\"\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("crates/noland-state-agent/src/main.rs"),
+            "fn main() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("systemd/noland-state-agent.service"),
+            "[Service]\n",
+        )
+        .unwrap();
+        fs::write(root.join("target/debug/large-build-output"), "skip me\n").unwrap();
+    }
+
+    #[test]
+    fn recognizes_minimal_state_agent_source_tree() {
+        let root = temp_dir("recognizes-source");
+        create_minimal_source_tree(&root);
+
+        assert!(is_state_agent_source_dir(&root));
+    }
+
+    #[test]
+    fn packs_sources_without_platform_tar_and_excludes_target() {
+        let root = temp_dir("pack-source");
+        create_minimal_source_tree(&root);
+        let archive_path = root.with_extension("tar.gz");
+
+        pack_state_agent_sources(&root, &archive_path).unwrap();
+
+        let archive_file = fs::File::open(&archive_path).unwrap();
+        let decoder = GzDecoder::new(archive_file);
+        let mut archive = tar::Archive::new(decoder);
+        let entries = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap().path().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert!(entries.iter().any(|path| path == "Cargo.toml"));
+        assert!(entries
+            .iter()
+            .any(|path| path == "crates/noland-state-agent/Cargo.toml"));
+        assert!(entries
+            .iter()
+            .any(|path| path == "systemd/noland-state-agent.service"));
+        assert!(!entries.iter().any(|path| path.starts_with("target/")));
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_file(&archive_path);
+    }
+}
 
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
