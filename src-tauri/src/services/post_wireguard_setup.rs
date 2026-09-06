@@ -303,13 +303,23 @@ pub async fn verify_wireguard_connection(
     let application_reachability =
         tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
     let result = match tunnel_verification {
-        Ok(detail) => ReachabilityResult {
+        Ok(_) if application_reachability.reachable => ReachabilityResult {
             reachable: true,
             host: TUNNEL_HOST.to_string(),
             checked_ports: REACHABILITY_PORTS.to_vec(),
             reachable_ports: application_reachability.reachable_ports,
-            error: (!application_reachability.reachable).then_some(format!(
-                "{detail}. The tunnel is healthy; Sunshine ports are not ready yet and will be checked during streaming setup."
+            error: None,
+        },
+        Ok(detail) => ReachabilityResult {
+            reachable: false,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: Vec::new(),
+            error: Some(format!(
+                "{detail}. WireGuard handshaked, but no Sunshine TCP port was reachable over the tunnel: {}",
+                application_reachability
+                    .error
+                    .unwrap_or_else(|| "10.77.0.1 did not accept TCP on the expected ports".to_string())
             )),
         },
         Err(error) => ReachabilityResult {
@@ -367,7 +377,7 @@ pub async fn verify_wireguard_connection(
             SetupStage::WireguardWaitingForActivation,
             OrchestrationState::WireGuardWaitingForActivation,
             "wireguard_unreachable",
-            "We could not reach 10.77.0.1 yet. Make sure the managed tunnel is active, then retry activation or verification.",
+            "We could not reach Sunshine over 10.77.0.1 yet. The WireGuard handshake alone is not enough; retry activation after the local tunnel can pass TCP traffic.",
             result.error.clone(),
             true,
         )

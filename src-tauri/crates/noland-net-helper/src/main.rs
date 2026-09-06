@@ -465,6 +465,7 @@ fn windows_adapter_has_route(interface_name: &str, route: &str) -> bool {
 fn install_windows_allowed_ip_routes(
     interface_name: &str,
     allowed_ips: &[IpNetwork],
+    gateway: Ipv4Addr,
 ) -> Result<WindowsRouteGuard> {
     let mut installed: Vec<String> = Vec::new();
     for network in allowed_ips {
@@ -480,7 +481,7 @@ fn install_windows_allowed_ip_routes(
             .args(["interface", "ipv4", "add", "route"])
             .arg(format!("prefix={route}"))
             .arg(format!("interface={interface_name}"))
-            .arg("nexthop=0.0.0.0")
+            .arg(format!("nexthop={gateway}"))
             .arg("store=active")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -636,8 +637,11 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
     )?;
 
     #[cfg(target_os = "windows")]
-    let _windows_routes =
-        install_windows_allowed_ip_routes(&interface_name, &tunnel_config.allowed_ips)?;
+    let _windows_routes = install_windows_allowed_ip_routes(
+        &interface_name,
+        &tunnel_config.allowed_ips,
+        tunnel_config.server_address,
+    )?;
 
     let gotatun_tun =
         TunDevice::from_tun_device(async_tun).context("failed attaching GotaTun to TUN adapter")?;
