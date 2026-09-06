@@ -86,6 +86,8 @@ struct RuntimeStatus {
     endpoint: String,
     #[serde(default)]
     config_fingerprint: String,
+    #[serde(default)]
+    listen_port: u16,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -106,6 +108,7 @@ impl RuntimeStatus {
             allowed_ips: Vec::new(),
             endpoint: String::new(),
             config_fingerprint,
+            listen_port: 0,
             latest_handshake_age_secs: None,
             rx_bytes: 0,
             tx_bytes: 0,
@@ -113,6 +116,60 @@ impl RuntimeStatus {
             error: None,
         }
     }
+}
+
+/// Probe whether a UDP port can be bound on both wildcard IPv4 and IPv6 the way
+/// GotaTun does (IPv4 first, then IPv6). Windows refuses binds inside
+/// Hyper-V/WinNAT excluded port ranges with WSAEACCES even for administrators,
+/// so probing is the only reliable availability check.
+#[cfg(target_os = "windows")]
+fn udp_port_probe_ok(port: u16) -> bool {
+    let v4 = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port));
+    if v4.is_err() {
+        return false;
+    }
+    drop(v4);
+    std::net::UdpSocket::bind((std::net::Ipv6Addr::UNSPECIFIED, port)).is_ok()
+}
+
+/// Resolve the listen port the embedded GotaTun engine should actually use on
+/// Windows.
+///
+/// The configured `ListenPort` may sit inside a Windows excluded port range
+/// (Hyper-V/WinNAT reserves ranges dynamically, e.g. for Docker Desktop), or be
+/// held by another process. In those cases Windows fails the bind with
+/// WSAEACCES (os error 10013) even for elevated processes, so GotaTun would
+/// abort. If no `ListenPort` is configured, keep `0` so GotaTun asks the OS
+/// for an ephemeral UDP source port. Otherwise walk upward from the configured
+/// port for the first bindable candidate; as a last resort return 0 so GotaTun
+/// picks a random port with its own IPv6-conflict retries. The WireGuard server
+/// learns the client port from the handshake, so a different local port is
+/// harmless.
+///
+/// On non-Windows platforms the configured port is used unchanged.
+#[cfg(target_os = "windows")]
+fn resolve_effective_listen_port(configured: u16) -> u16 {
+    if configured == 0 {
+        return 0;
+    }
+
+    if udp_port_probe_ok(configured) {
+        return configured;
+    }
+
+    let start = u32::from(configured);
+    for offset in 0..64u32 {
+        let candidate = (start + offset) % 65536;
+        if candidate == 0 {
+            continue;
+        }
+        let port = candidate as u16;
+        if port != configured && udp_port_probe_ok(port) {
+            return port;
+        }
+    }
+
+    0
 }
 
 #[cfg(target_os = "windows")]
@@ -408,6 +465,7 @@ fn windows_adapter_has_route(interface_name: &str, route: &str) -> bool {
 fn install_windows_allowed_ip_routes(
     interface_name: &str,
     allowed_ips: &[IpNetwork],
+    gateway: Ipv4Addr,
 ) -> Result<WindowsRouteGuard> {
     let mut installed: Vec<String> = Vec::new();
     for network in allowed_ips {
@@ -423,7 +481,7 @@ fn install_windows_allowed_ip_routes(
             .args(["interface", "ipv4", "add", "route"])
             .arg(format!("prefix={route}"))
             .arg(format!("interface={interface_name}"))
-            .arg("nexthop=0.0.0.0")
+            .arg(format!("nexthop={gateway}"))
             .arg("store=active")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -518,6 +576,17 @@ async fn run(args: Args) -> Result<()> {
 
 async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -> Result<()> {
     let tunnel_config = parse_tunnel_config(&args.config_path)?;
+    #[cfg(target_os = "windows")]
+    let effective_listen_port = resolve_effective_listen_port(tunnel_config.listen_port);
+    #[cfg(not(target_os = "windows"))]
+    let effective_listen_port = tunnel_config.listen_port;
+    #[cfg(target_os = "windows")]
+    if effective_listen_port != tunnel_config.listen_port {
+        eprintln!(
+            "noland-net-helper: configured ListenPort {} is unavailable (excluded port range or held by another process), using {} instead",
+            tunnel_config.listen_port, effective_listen_port
+        );
+    }
     let mut tun_config = tun::Configuration::default();
 
     #[cfg(not(target_os = "macos"))]
@@ -546,7 +615,9 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         let wintun_path = args.wintun_path.as_ref().ok_or_else(|| {
             anyhow!("the Windows GotaTun runtime requires the bundled wintun.dll path")
         })?;
-        ensure_windows_gotatun_firewall_rule(tunnel_config.listen_port)?;
+        if effective_listen_port != 0 {
+            ensure_windows_gotatun_firewall_rule(effective_listen_port)?;
+        }
         tun_config.platform_config(|platform| {
             platform.wintun_file(wintun_path.as_os_str());
         });
@@ -562,12 +633,15 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
     let _windows_address = configure_windows_adapter_address(
         &interface_name,
         tunnel_config.client_address,
-        tunnel_config.client_prefix,
+        tunnel_config.client_prefix.min(24),
     )?;
 
     #[cfg(target_os = "windows")]
-    let _windows_routes =
-        install_windows_allowed_ip_routes(&interface_name, &tunnel_config.allowed_ips)?;
+    let _windows_routes = install_windows_allowed_ip_routes(
+        &interface_name,
+        &tunnel_config.allowed_ips,
+        tunnel_config.server_address,
+    )?;
 
     let gotatun_tun =
         TunDevice::from_tun_device(async_tun).context("failed attaching GotaTun to TUN adapter")?;
@@ -584,7 +658,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         .udp_recv_buffer_size(7 * 1024 * 1024)
         .udp_send_buffer_size(7 * 1024 * 1024)
         .with_ip(gotatun_tun)
-        .with_listen_port(tunnel_config.listen_port)
+        .with_listen_port(effective_listen_port)
         .with_peer(peer)
         .build()
         .await
@@ -605,6 +679,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
             .collect(),
         endpoint: tunnel_config.endpoint.to_string(),
         config_fingerprint: config_fingerprint.to_string(),
+        listen_port: effective_listen_port,
         latest_handshake_age_secs: None,
         rx_bytes: 0,
         tx_bytes: 0,
@@ -1165,6 +1240,8 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{config_fingerprint, owner_lock_path, parse_tunnel_config, prefix_to_netmask};
+    #[cfg(target_os = "windows")]
+    use super::{resolve_effective_listen_port, udp_port_probe_ok};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use std::{fs, net::Ipv4Addr};
 
@@ -1224,6 +1301,32 @@ mod tests {
         let legacy_runtime = root.join("47458589").join("gotatun-runtime");
         assert_eq!(owner_lock_path(&global_runtime), root.join("owner.lock"));
         assert_eq!(owner_lock_path(&legacy_runtime), root.join("owner.lock"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn listen_port_resolver_skips_ports_held_by_other_sockets() {
+        // Hold a UDP port without SO_REUSEADDR, mirroring the exclusive holder
+        // case that makes Windows fail GotaTun binds with WSAEACCES.
+        let blocker = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        let held_port = blocker.local_addr().unwrap().port();
+        assert!(!udp_port_probe_ok(held_port));
+
+        let resolved = resolve_effective_listen_port(held_port);
+        assert_ne!(resolved, held_port);
+        assert!(udp_port_probe_ok(resolved));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn listen_port_resolver_keeps_available_configured_port() {
+        let resolved = resolve_effective_listen_port(51820);
+        if udp_port_probe_ok(51820) {
+            assert_eq!(resolved, 51820);
+        } else {
+            assert_ne!(resolved, 51820);
+            assert!(udp_port_probe_ok(resolved));
+        }
     }
 
     #[test]

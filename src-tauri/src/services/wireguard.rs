@@ -106,6 +106,8 @@ struct GotatunRuntimeStatus {
     endpoint: String,
     #[serde(default)]
     config_fingerprint: String,
+    #[serde(default)]
+    listen_port: u16,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -564,14 +566,41 @@ fn wait_for_managed_gotatun_start(
 ) -> AppResult<()> {
     let status_path = gotatun_status_path(config_path);
     let started = Instant::now();
+    let mut next_log_at = Duration::ZERO;
+    info!(
+        config = %config_path.display(),
+        status = %status_path.display(),
+        launch_id = %expected_launch_id,
+        "Waiting for elevated Noland GotaTun helper to publish runtime status"
+    );
     while started.elapsed() < Duration::from_secs(GOTATUN_HELPER_READY_TIMEOUT_SECS) {
+        let elapsed = started.elapsed();
         if let Some(status) = load_gotatun_runtime_status(&status_path) {
+            if elapsed >= next_log_at {
+                info!(
+                    elapsed_secs = elapsed.as_secs(),
+                    pid = status.pid,
+                    active = status.active,
+                    listen_port = status.listen_port,
+                    status_launch_id = %status.launch_id,
+                    status_config = %status.config_path,
+                    error = ?status.error,
+                    "Observed managed GotaTun runtime status while waiting for startup"
+                );
+                next_log_at = elapsed + Duration::from_secs(5);
+            }
             if status.updated_at_unix >= launched_at
                 && status.config_path == config_path.display().to_string()
                 && status.config_fingerprint == expected_fingerprint
                 && status.launch_id == expected_launch_id
             {
                 if status.active {
+                    info!(
+                        pid = status.pid,
+                        listen_port = status.listen_port,
+                        endpoint = %status.endpoint,
+                        "Managed GotaTun helper is active; waiting for WireGuard handshake next"
+                    );
                     return Ok(());
                 }
                 if let Some(error) = status.error.filter(|value| !value.trim().is_empty()) {
@@ -580,6 +609,13 @@ fn wait_for_managed_gotatun_start(
                     )));
                 }
             }
+        } else if elapsed >= next_log_at {
+            info!(
+                elapsed_secs = elapsed.as_secs(),
+                status = %status_path.display(),
+                "Managed GotaTun status file has not appeared yet; approve the Windows elevation prompt if it is visible"
+            );
+            next_log_at = elapsed + Duration::from_secs(5);
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -651,6 +687,10 @@ fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
 }
 
 fn replace_managed_gotatun_tunnel(config_path: &Path, success_message: &str) -> AppResult<String> {
+    info!(
+        config = %config_path.display(),
+        "Preparing managed GotaTun tunnel replacement"
+    );
     remember_active_gotatun_config(config_path);
     stop_legacy_managed_gotatun_helpers(config_path)?;
     request_managed_gotatun_stop(config_path)?;
@@ -658,9 +698,21 @@ fn replace_managed_gotatun_tunnel(config_path: &Path, success_message: &str) -> 
     let expected_fingerprint = config_fingerprint(config_path)?;
     let launch_id = uuid::Uuid::new_v4().to_string();
     let launched_at = gotatun_runtime_unix_timestamp();
+    info!(
+        config = %config_path.display(),
+        endpoint = %format!("{}:{}", expected.endpoint_host, expected.endpoint_port),
+        server_ip = %expected.server_ip,
+        allowed_ips = %expected.allowed_ips,
+        launch_id = %launch_id,
+        "Launching elevated managed GotaTun helper"
+    );
     launch_managed_gotatun_helper(config_path, &launch_id)?;
     wait_for_managed_gotatun_start(config_path, launched_at, &expected_fingerprint, &launch_id)?;
-    wait_for_local_tunnel_health(&expected, Duration::from_secs(25), Duration::from_secs(1))?;
+    // PersistentKeepalive is 25s, so give the first handshake several
+    // keepalive cycles plus margin. Freshly provisioned servers can take a
+    // while to answer the first initiation (NAT/endpoint learning, ufw
+    // reloads), and WireGuard backs off between retries.
+    wait_for_local_tunnel_health(&expected, Duration::from_secs(120), Duration::from_secs(2))?;
     Ok(success_message.to_string())
 }
 
@@ -735,10 +787,10 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
         .is_some_and(|age| age <= 180);
     if !handshake_recent {
         let _ = can_ping_tunnel_host(&expected.server_ip);
-        return Err(AppError::Command(format!(
+        return repair_stale_runtime(&format!(
             "The managed GotaTun helper is active with the correct config, but the peer has not completed a recent WireGuard handshake for {}.",
             expected.server_ip
-        )));
+        ));
     }
 
     Ok(format!(
@@ -1027,12 +1079,22 @@ exit 0"#
         let server_config =
             self.render_server_config(&server_private, &client_public, server_listen_port);
         let server_tunnel_host = strip_cidr(&self.defaults.server_tunnel_ip);
+        #[cfg(target_os = "windows")]
+        let client_listen_port = 0;
+        #[cfg(not(target_os = "windows"))]
+        let client_listen_port = self.defaults.client_listen_port;
+        #[cfg(target_os = "windows")]
+        info!(
+            configured = self.defaults.client_listen_port,
+            "Omitting WireGuard client ListenPort on Windows so the embedded GotaTun helper can use an OS-assigned UDP source port"
+        );
         let client_config = self.render_client_config(
             &client_private,
             &server_public,
             endpoint_host,
             endpoint_port,
             &format!("{server_tunnel_host}/32"),
+            client_listen_port,
         );
 
         self.setup_queue_management_persistent(remote).await?;
@@ -1551,12 +1613,18 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         endpoint_host: &str,
         endpoint_port: u16,
         allowed_ips: &str,
+        client_listen_port: u16,
     ) -> String {
+        let listen_port_line = if client_listen_port == 0 {
+            String::new()
+        } else {
+            format!("ListenPort = {client_listen_port}\n")
+        };
         format!(
-            "[Interface]\nAddress = {}\nPrivateKey = {}\nListenPort = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
+            "[Interface]\nAddress = {}\nPrivateKey = {}\n{}MTU = {}\n\n[Peer]\nPublicKey = {}\nEndpoint = {}:{}\nAllowedIPs = {}\nPersistentKeepalive = {}\n",
             self.defaults.client_tunnel_ip,
             client_private,
-            self.defaults.client_listen_port,
+            listen_port_line,
             self.defaults.tunnel_mtu,
             server_public,
             endpoint_host,
@@ -2365,43 +2433,62 @@ fn collect_local_wireguard_runtime_state(
         .unwrap_or_default())
 }
 
-fn local_tunnel_runtime_matches_expected(
-    runtime: &LocalWireGuardRuntimeState,
-    expected: &ExpectedLocalTunnel,
-) -> bool {
-    !runtime.interface_name.trim().is_empty()
-        && runtime.peer_public_key == expected.peer_public_key
-        && normalize_allowed_ips(&runtime.allowed_ips)
-            == normalize_allowed_ips(&expected.allowed_ips)
-}
-
-fn local_tunnel_runtime_is_healthy(expected: &ExpectedLocalTunnel) -> bool {
-    let Ok(runtime) = collect_local_wireguard_runtime_state(Some(&expected.peer_public_key)) else {
-        return false;
-    };
-
-    if !local_tunnel_runtime_matches_expected(&runtime, expected) {
-        return false;
-    }
-
-    if has_recent_handshake(&runtime.latest_handshake) {
-        return true;
-    }
-
-    let _ = can_ping_tunnel_host(&expected.server_ip);
-    false
-}
-
 fn wait_for_local_tunnel_health(
     expected: &ExpectedLocalTunnel,
     timeout: Duration,
     poll_interval: Duration,
 ) -> AppResult<()> {
     let started = Instant::now();
+    let mut next_log_at = Duration::ZERO;
+    info!(
+        server_ip = %expected.server_ip,
+        endpoint = %format!("{}:{}", expected.endpoint_host, expected.endpoint_port),
+        timeout_secs = timeout.as_secs(),
+        "Waiting for first recent WireGuard handshake through managed GotaTun"
+    );
     while started.elapsed() < timeout {
-        if local_tunnel_runtime_is_healthy(expected) {
-            return Ok(());
+        let elapsed = started.elapsed();
+        match collect_local_wireguard_runtime_state(Some(&expected.peer_public_key)) {
+            Ok(runtime) => {
+                let peer_matches = runtime.peer_public_key == expected.peer_public_key;
+                let allowed_ips_match = normalize_allowed_ips(&runtime.allowed_ips)
+                    == normalize_allowed_ips(&expected.allowed_ips);
+                let handshake_recent = has_recent_handshake(&runtime.latest_handshake);
+                if peer_matches && allowed_ips_match && handshake_recent {
+                    info!(
+                        elapsed_secs = elapsed.as_secs(),
+                        interface = %runtime.interface_name,
+                        latest_handshake = %runtime.latest_handshake,
+                        "Managed GotaTun WireGuard handshake is healthy"
+                    );
+                    return Ok(());
+                }
+                if elapsed >= next_log_at {
+                    info!(
+                        elapsed_secs = elapsed.as_secs(),
+                        remaining_secs = timeout.saturating_sub(elapsed).as_secs(),
+                        interface = %runtime.interface_name,
+                        expected_peer_match = peer_matches,
+                        expected_allowed_ips_match = allowed_ips_match,
+                        latest_handshake = %runtime.latest_handshake,
+                        "Managed GotaTun helper is running; waiting for WireGuard peer handshake"
+                    );
+                    next_log_at = elapsed + Duration::from_secs(10);
+                }
+            }
+            Err(error) => {
+                if elapsed >= next_log_at {
+                    info!(
+                        elapsed_secs = elapsed.as_secs(),
+                        remaining_secs = timeout.saturating_sub(elapsed).as_secs(),
+                        %error,
+                        "Managed GotaTun runtime status is not readable yet while waiting for handshake"
+                    );
+                    next_log_at = elapsed + Duration::from_secs(10);
+                }
+            }
         }
+        let _ = can_ping_tunnel_host(&expected.server_ip);
         std::thread::sleep(poll_interval);
     }
 

@@ -233,9 +233,12 @@ function stageManagedBinaryCopy(sourcePath, destinationPath, options = {}) {
       && existsSync(destinationPath)
       && (error?.code === 'EBUSY' || error?.code === 'EPERM');
     if (windowsBusyCopy) {
-      console.warn(
-        `Keeping existing staged ${label} because Windows has it locked: ${destinationPath}`,
-      );
+      const message = `Cannot stage updated ${label} because Windows has it locked: ${destinationPath}`;
+      if (label.includes('GotaTun') || label.includes('net-helper')) {
+        console.warn(`${message}; keeping the existing staged copy. Local dev runs use the freshly built helper via NOLAND_NET_HELPER_BIN, so this stale staged copy will not be used.`);
+        return;
+      }
+      console.warn(`${message}; keeping the existing staged copy.`);
       return;
     }
     throw error;
