@@ -199,19 +199,11 @@ function parseOtoolDependencyLine(line) {
 }
 
 function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
-  const runtimeDir = findFirstPath(
-    root,
-    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'ssh-runtime',
-  );
-  if (!runtimeDir || !readdirSync(runtimeDir).some((name) => name.includes('.so'))) {
-    fail(`Missing bundled OpenSSH shared-library closure in ${label}`);
-  }
-
   verifyLinuxLinkage(root, targetTriple, label);
-  const sshEnv = linuxSshRuntimeEnv(root, targetTriple);
   const cleanEnv = cleanLinuxRuntimeEnv();
   const ssh = findRequiredSidecar(root, targetTriple, 'ssh');
-  run(ssh, ['-V'], { env: sshEnv });
+  verifyLinuxSystemToolWrapper(ssh, 'ssh', label);
+  run(ssh, ['-V'], { env: cleanEnv });
 
   const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
   withExtractedTemp('noland-helper-check-', (tempRoot) => {
@@ -248,7 +240,6 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
 
 function verifyLinuxLinkage(root, targetTriple, label) {
   const cleanEnv = cleanLinuxRuntimeEnv();
-  const sshEnv = linuxSshRuntimeEnv(root, targetTriple);
   const appExecutable = findLinuxAppExecutable(root);
   const seeds = [
     appExecutable,
@@ -262,14 +253,19 @@ function verifyLinuxLinkage(root, targetTriple, label) {
     const kind = runCapture('file', ['-b', path]);
     if (!kind.stdout.includes('ELF')) continue;
     const name = basename(path);
-    const usesSshRuntime = /^(?:ssh|scp|ssh-keygen)(?:-|$)/u.test(name);
-    const linkage = runCapture('ldd', [path], { env: usesSshRuntime ? sshEnv : cleanEnv, allowFailure: true });
+    const wrappedTool = linuxWrappedToolNameForSidecar(name);
+    if (wrappedTool) {
+      verifyLinuxSystemToolWrapper(path, wrappedTool, label);
+      continue;
+    }
+    const linkage = runCapture('ldd', [path], { env: cleanEnv, allowFailure: true });
     if (linkage.status !== 0 || /not found/u.test(linkage.stdout) || /not found/u.test(linkage.stderr)) {
       fail(`Unresolved Linux runtime dependencies in ${label}: ${path}\n${linkage.stdout}\n${linkage.stderr}`);
     }
   }
 
   verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv);
+  verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label);
 }
 
 function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv) {
@@ -334,6 +330,38 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
   }
 }
 
+function verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label) {
+  const gstreamerRoot = join(root, 'usr', 'lib', productName, 'binaries', 'gstreamer', targetTriple);
+  const forbidden = [
+    /^libglib-2\.0\.so/u,
+    /^libgobject-2\.0\.so/u,
+    /^libgio-2\.0\.so/u,
+    /^libgmodule-2\.0\.so/u,
+    /^libgthread-2\.0\.so/u,
+    /^libatk-1\.0\.so/u,
+    /^libatk-bridge-2\.0\.so/u,
+    /^libatspi\.so/u,
+    /^libgtk-3\.so/u,
+    /^libgdk-3\.so/u,
+    /^libwebkit2gtk/u,
+    /^libjavascriptcoregtk/u,
+    /^libpango/u,
+    /^libcairo/u,
+  ];
+  const offenders = [];
+  for (const libDir of [join(gstreamerRoot, 'lib'), join(gstreamerRoot, 'lib64')]) {
+    if (!existsSync(libDir)) continue;
+    for (const entry of readdirSync(libDir, { withFileTypes: true })) {
+      if ((entry.isFile() || entry.isSymbolicLink()) && forbidden.some((pattern) => pattern.test(entry.name))) {
+        offenders.push(join(libDir, entry.name));
+      }
+    }
+  }
+  if (offenders.length > 0) {
+    fail(`Linux bundle contains distro-owned desktop platform libraries in ${label}. These can break Ubuntu/Zorin LTS with GLib symbol lookup errors; use system GTK/AT-SPI/GLib instead.\n${offenders.join('\n')}`);
+  }
+}
+
 function cleanLinuxRuntimeEnv() {
   const env = { ...process.env };
   for (const name of ['LD_LIBRARY_PATH', 'NOLAND_GSTREAMER_ROOT', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SYSTEM_PATH_1_0', 'GST_PLUGIN_SCANNER_1_0']) {
@@ -342,16 +370,18 @@ function cleanLinuxRuntimeEnv() {
   return env;
 }
 
-function linuxSshRuntimeEnv(root, targetTriple) {
-  const runtimeDir = findFirstPath(
-    root,
-    (path) => basename(path) === targetTriple && basename(dirname(path)) === 'ssh-runtime',
-  );
-  const env = cleanLinuxRuntimeEnv();
-  if (runtimeDir) {
-    env.LD_LIBRARY_PATH = runtimeDir;
+function linuxWrappedToolNameForSidecar(name) {
+  if (/^ssh-keygen(?:-|$)/u.test(name)) return 'ssh-keygen';
+  if (/^ssh(?:-|$)/u.test(name)) return 'ssh';
+  if (/^scp(?:-|$)/u.test(name)) return 'scp';
+  return null;
+}
+
+function verifyLinuxSystemToolWrapper(path, expectedTool, label) {
+  const content = runCapture('sed', ['-n', '1,3p', path], { allowFailure: true });
+  if (content.status !== 0 || !content.stdout.includes(`exec /usr/bin/${expectedTool}`)) {
+    fail(`Linux ${expectedTool} sidecar must be a system wrapper in ${label}, not a copied build-host binary: ${path}`);
   }
-  return env;
 }
 
 function findLinuxAppExecutable(root) {

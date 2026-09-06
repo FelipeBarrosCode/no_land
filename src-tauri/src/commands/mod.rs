@@ -65,9 +65,11 @@ use crate::{
     },
     services::{
         app_context::AppContext,
+        diagnostics::{write_diagnostic_report, DiagnosticReportResponse},
         display_profile::{
             build_display_profile, DisplayModeSpec, DisplayProfile, DisplayProfileSource,
         },
+        health_check::{run_system_health_report, SystemHealthReport},
         instance_lifecycle::InstanceLifecycleService,
         location::LocationService,
         mic_passthrough::MicPassthroughService,
@@ -407,6 +409,42 @@ fn local_environment_check(_attempt_install: bool) -> LocalEnvironmentCheck {
 #[tauri::command]
 pub async fn local_environment_preflight() -> Result<LocalEnvironmentCheck, FrontendError> {
     Ok(local_environment_check(false))
+}
+
+#[tauri::command]
+pub async fn system_health_check(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+) -> Result<SystemHealthReport, FrontendError> {
+    Ok(run_system_health_report(&app, context.inner()).await)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticReportInput {
+    pub reason: Option<String>,
+    pub frontend_error: Option<String>,
+}
+
+#[tauri::command]
+pub async fn export_diagnostic_report(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    input: Option<DiagnosticReportInput>,
+) -> Result<DiagnosticReportResponse, FrontendError> {
+    let input = input.unwrap_or(DiagnosticReportInput {
+        reason: None,
+        frontend_error: None,
+    });
+    write_diagnostic_report(
+        &app,
+        context.inner(),
+        input.reason,
+        input.frontend_error,
+        None,
+    )
+    .await
+    .map_err(Into::into)
 }
 
 fn moonlight_frontend_error(error: crate::moonlight::domain::MoonlightError) -> FrontendError {

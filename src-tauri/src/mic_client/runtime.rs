@@ -168,6 +168,11 @@ fn gstreamer_root_candidate_paths(current_exe: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+pub fn resolve_gstreamer_root_for_current_exe() -> Option<PathBuf> {
+    let current_exe = std::env::current_exe().ok()?;
+    resolve_gstreamer_root(&current_exe)
+}
+
 fn resolve_gstreamer_root(current_exe: &Path) -> Option<PathBuf> {
     gstreamer_root_candidate_paths(current_exe)
         .into_iter()
@@ -459,7 +464,10 @@ fn configure_linux_gstreamer_command(command: &mut Command, current_exe: &Path) 
             lib_dir.join("gstreamer-1.0").join("gst-plugin-scanner"),
         ];
 
-        prepend_env_path(command, "LD_LIBRARY_PATH", &lib_dir, ":");
+        // Do not inherit LD_LIBRARY_PATH into the mic sidecar. The bundled
+        // GStreamer runtime is sanitized to exclude GLib/GTK/AT-SPI, and the OS
+        // loader should resolve those distro-owned libraries from the system.
+        command.env("LD_LIBRARY_PATH", lib_dir.as_os_str());
         command.env("GST_PLUGIN_SYSTEM_PATH_1_0", plugin_dir.as_os_str());
         command.env("GST_PLUGIN_PATH_1_0", plugin_dir.as_os_str());
         if let Some(scanner) = scanner_candidates.into_iter().find(|path| path.is_file()) {

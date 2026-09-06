@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
@@ -14,6 +14,7 @@ import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
+import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
 import { checkForGitHubUpdate, type AppUpdateInfo } from "../lib/updateChecker";
 
 function RootRoute() {
@@ -77,6 +78,11 @@ function RootRoute() {
   const loadAvailableOfferCountries = useAppStore(
     (state) => state.loadAvailableOfferCountries,
   );
+  const systemHealth = useAppStore((state) => state.systemHealth);
+  const healthChecking = useAppStore((state) => state.healthChecking);
+  const lastDiagnosticReport = useAppStore((state) => state.lastDiagnosticReport);
+  const refreshSystemHealth = useAppStore((state) => state.refreshSystemHealth);
+  const exportCrashReport = useAppStore((state) => state.exportCrashReport);
 
   const setEmbeddedMoonlightPipelineEnabled = useAppStore(
     (state) => state.setEmbeddedMoonlightPipelineEnabled,
@@ -140,6 +146,11 @@ function RootRoute() {
       vastWalletSummary={vastWalletSummary}
       onSearchOffers={discoverOffers}
       onLoadAvailableOfferCountries={loadAvailableOfferCountries}
+      systemHealth={systemHealth}
+      healthChecking={healthChecking}
+      lastDiagnosticReport={lastDiagnosticReport}
+      onRefreshSystemHealth={refreshSystemHealth}
+      onExportCrashReport={exportCrashReport}
       onNextOffersPage={nextOffersPage}
       onPreviousOffersPage={previousOffersPage}
       onManualLocationSave={saveManualLocation}
@@ -360,15 +371,28 @@ function BootScreen() {
   );
 }
 
+const AUTO_GITHUB_ISSUES_STORAGE_KEY = "noland.autoGithubIssues";
+
 export function App() {
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [windowLabelResolved, setWindowLabelResolved] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [autoGithubIssuesEnabled, setAutoGithubIssuesEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem(AUTO_GITHUB_ISSUES_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const lastAutoIssueErrorRef = useRef<string | null>(null);
   const initialize = useAppStore((state) => state.initialize);
   const bindEvents = useAppStore((state) => state.bindEvents);
   const loading = useAppStore((state) => state.loading);
   const error = useAppStore((state) => state.error);
   const clearError = useAppStore((state) => state.clearError);
+  const exportCrashReport = useAppStore((state) => state.exportCrashReport);
+  const lastDiagnosticReport = useAppStore((state) => state.lastDiagnosticReport);
+  const systemHealth = useAppStore((state) => state.systemHealth);
   const blockingAction = useAppStore((state) => state.blockingAction);
   const isBlocking = useAppStore((state) => state.isBlocking);
   const cancelSharedStorageOperation = useAppStore(
@@ -469,6 +493,31 @@ export function App() {
       return;
     }
 
+    const handleWindowError = (event: ErrorEvent) => {
+      const details = `${event.message}\n${event.filename}:${event.lineno}:${event.colno}\n${event.error?.stack ?? ""}`.trim();
+      void exportCrashReport("frontend.window-error", details);
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason instanceof Error
+        ? `${event.reason.name}: ${event.reason.message}\n${event.reason.stack ?? ""}`
+        : JSON.stringify(event.reason, null, 2);
+      void exportCrashReport("frontend.unhandled-rejection", reason);
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, [exportCrashReport, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
+
     let cancelled = false;
     async function checkForUpdate() {
       try {
@@ -486,6 +535,46 @@ export function App() {
       cancelled = true;
     };
   }, [windowLabel, windowLabelResolved]);
+
+  async function openCrashIssue(reason: string, errorMessage?: string | null) {
+    const report = await exportCrashReport(reason, errorMessage ?? undefined);
+    if (!report) {
+      return;
+    }
+    await openUrl(
+      buildDiagnosticIssueUrl({
+        report,
+        reason,
+        error: errorMessage,
+        health: systemHealth,
+      }),
+    );
+  }
+
+  function toggleAutoGithubIssues() {
+    setAutoGithubIssuesEnabled((enabled) => {
+      const next = !enabled;
+      try {
+        window.localStorage.setItem(AUTO_GITHUB_ISSUES_STORAGE_KEY, String(next));
+      } catch {
+        // Ignore storage failures; keep the in-memory toggle for this session.
+      }
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!autoGithubIssuesEnabled || !error) {
+      return;
+    }
+
+    if (lastAutoIssueErrorRef.current === error) {
+      return;
+    }
+
+    lastAutoIssueErrorRef.current = error;
+    void openCrashIssue("auto-error", error);
+  }, [autoGithubIssuesEnabled, error]);
 
   if (!windowLabelResolved) {
     return <BootScreen />;
@@ -505,14 +594,36 @@ export function App() {
         <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
           <div className="flex items-start justify-between gap-3">
             <p className="break-words break-all">{error}</p>
-            <button
-              className="font-display text-[10px] uppercase tracking-[0.12em] shrink-0"
-              onClick={clearError}
-              type="button"
-            >
-              Dismiss
-            </button>
+            <div className="flex shrink-0 flex-col items-end gap-2">
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={() => void openCrashIssue("error-toast", error)}
+                type="button"
+              >
+                GitHub issue
+              </button>
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={toggleAutoGithubIssues}
+                type="button"
+                title="Automatically open a prefilled GitHub issue whenever a new app error appears."
+              >
+                Auto issue: {autoGithubIssuesEnabled ? "on" : "off"}
+              </button>
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={clearError}
+                type="button"
+              >
+                Dismiss
+              </button>
+            </div>
           </div>
+          {lastDiagnosticReport && (
+            <p className="mt-2 break-all text-[0.95rem] text-[#ffc1cf]">
+              Report: {lastDiagnosticReport.path}
+            </p>
+          )}
         </div>
       )}
 

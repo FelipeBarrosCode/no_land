@@ -86,6 +86,10 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     wait_for_bootstrap(remote, &remote_status, &remote_log).await
 }
 
+pub fn locate_state_agent_source_dir() -> AppResult<PathBuf> {
+    find_state_agent_source_dir()
+}
+
 fn find_state_agent_source_dir() -> AppResult<PathBuf> {
     if let Ok(explicit) = env::var("NOLAND_STATE_AGENT_SOURCE_DIR") {
         let candidate = PathBuf::from(explicit.trim());

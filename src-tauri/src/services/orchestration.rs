@@ -23,6 +23,7 @@ use crate::{
 use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
+    health_check::run_system_health_report,
     instance_manager::InstanceManager,
     moonlight::detect_client_display_for_provisioning,
     nvidia_headless::NvidiaHeadlessService,
@@ -193,6 +194,29 @@ impl OrchestrationService {
 
         *guard = true;
         drop(guard);
+
+        let health = run_system_health_report(&app, &context).await;
+        if !health.ok {
+            let failed = health
+                .probes
+                .iter()
+                .filter(|probe| {
+                    matches!(
+                        probe.status,
+                        crate::services::health_check::HealthProbeStatus::Failed
+                    )
+                })
+                .map(|probe| format!("{}: {}", probe.label, probe.summary))
+                .collect::<Vec<_>>()
+                .join("; ");
+            {
+                let mut guard = context.orchestration_guard.lock().await;
+                *guard = false;
+            }
+            return Err(AppError::Provisioning(format!(
+                "Local health check failed before provisioning: {failed}"
+            )));
+        }
 
         context.cancel_requested.store(false, Ordering::SeqCst);
         Self::spawn_run(app, context, request);
