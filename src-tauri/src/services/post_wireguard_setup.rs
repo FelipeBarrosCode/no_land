@@ -24,20 +24,25 @@ use super::{
     app_context::AppContext,
     remote_exec::RemoteExec,
     ssh_keys::SshKeyService,
-    wireguard::{setup_local_wireguard_client, verify_managed_gotatun_tunnel},
+    wireguard::{
+        reconnect_local_wireguard_client, setup_local_wireguard_client,
+        verify_managed_gotatun_tunnel,
+    },
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
 const SUNSHINE_API_PORT: u16 = 47990;
 const REACHABILITY_PORTS: [u16; 3] = [47990, 47989, 47984];
 
-const SUNSHINE_API_READY_RETRIES: usize = 15;
-const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SUNSHINE_API_READY_RETRIES: usize = 60;
+const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
-const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(60);
+const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
 const SUNSHINE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const SUNSHINE_PIN_SUBMISSION_ATTEMPTS: usize = 3;
 const SUNSHINE_PIN_RETRY_DELAY: Duration = Duration::from_millis(350);
+const SUNSHINE_VERIFY_HTTP_ATTEMPTS: usize = 5;
+const SUNSHINE_VERIFY_HTTP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 fn sunshine_http_client() -> AppResult<reqwest::Client> {
     reqwest::Client::builder()
@@ -442,7 +447,41 @@ pub async fn verify_sunshine_api(
     }
 
     let client = sunshine_http_client()?;
-    let response = sunshine_config_response(&client, &moonlight_host, &username, &password).await;
+    let config_path = active_wireguard_config_path(context).await?;
+    let mut tunnel_reconnected = false;
+    let mut response =
+        sunshine_config_response(&client, &moonlight_host, &username, &password).await;
+    for attempt in 1..=SUNSHINE_VERIFY_HTTP_ATTEMPTS {
+        if let Err(error) = &response {
+            info!(attempt, %error, "Sunshine API request failed; checking managed tunnel");
+            if !tunnel_reconnected {
+                match verify_managed_gotatun_tunnel(&config_path) {
+                    Ok(detail) => {
+                        info!(%detail, "Managed tunnel healthy while Sunshine request failed")
+                    }
+                    Err(tunnel_error) => {
+                        warn!(%tunnel_error, "Managed tunnel unhealthy during Sunshine verification; reconnecting");
+                        tunnel_reconnected = true;
+                        match reconnect_local_wireguard_client(&config_path) {
+                            Ok(detail) => {
+                                info!(%detail, "Managed tunnel reconnected during Sunshine verification")
+                            }
+                            Err(reconnect_error) => {
+                                warn!(%reconnect_error, "Managed tunnel reconnect failed during Sunshine verification")
+                            }
+                        }
+                    }
+                }
+            }
+            if attempt < SUNSHINE_VERIFY_HTTP_ATTEMPTS {
+                sleep(SUNSHINE_VERIFY_HTTP_POLL_INTERVAL).await;
+                response =
+                    sunshine_config_response(&client, &moonlight_host, &username, &password).await;
+            }
+        } else {
+            break;
+        }
+    }
 
     let result = match response {
         Ok(response) if response.status.is_success() => SunshineVerificationResult {
@@ -551,6 +590,60 @@ pub async fn setup_moonlight_sunshine(
         .await?;
         return Err(AppError::Provisioning(error));
     }
+
+    let config_path = active_wireguard_config_path(context).await?;
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Checking managed tunnel before Sunshine setup",
+        Some(format!(
+            "Verifying local GotaTun helper for {} before contacting Sunshine.",
+            config_path.display()
+        )),
+        false,
+    )
+    .await;
+
+    let tunnel_status = match verify_managed_gotatun_tunnel(&config_path) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            warn!(%error, "Managed tunnel was not healthy before Sunshine setup; reconnecting");
+            reconnect_local_wireguard_client(&config_path).and_then(|message| {
+                verify_managed_gotatun_tunnel(&config_path)
+                    .map(|status| format!("{message} {status}"))
+            })
+        }
+    };
+
+    let tunnel_status = match tunnel_status {
+        Ok(status) => status,
+        Err(error) => {
+            set_setup_failure(
+                context,
+                SetupStage::WireguardWaitingForActivation,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "managed_tunnel_not_running",
+                "The managed GotaTun tunnel is not running locally.",
+                Some(format!(
+                    "Noland could not verify or restart the local GotaTun helper before Sunshine setup: {error}"
+                )),
+                true,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardConnected,
+        "Managed tunnel ready for Sunshine",
+        Some(tunnel_status),
+        false,
+    )
+    .await;
 
     context
         .update_state(|state| {
@@ -1072,6 +1165,8 @@ async fn repair_sunshine_auth_state(
             .clone()
     };
     let client = sunshine_http_client()?;
+    let config_path = active_wireguard_config_path(context).await?;
+    let mut tunnel_reconnected = false;
     for attempt in 1..=SUNSHINE_API_READY_RETRIES {
         match sunshine_config_response(
             &client,
@@ -1109,6 +1204,39 @@ async fn repair_sunshine_auth_state(
             }
             Err(error) => {
                 info!(attempt, %error, "Sunshine API not reachable yet after restart");
+                // The API request rides over the managed tunnel. A connection-level
+                // failure usually means the tunnel itself lapsed (handshake expiry or
+                // a NAT rebinding window), not that Sunshine is down. Verify the tunnel
+                // and reconnect it before spending the rest of the retry budget on a
+                // dead path.
+                if !best_effort && !tunnel_reconnected {
+                    match verify_managed_gotatun_tunnel(&config_path) {
+                        Ok(detail) => {
+                            info!(%detail, "Managed tunnel healthy while Sunshine is warming up");
+                        }
+                        Err(tunnel_error) => {
+                            warn!(
+                                %tunnel_error,
+                                "Managed tunnel unhealthy during Sunshine readiness; reconnecting"
+                            );
+                            tunnel_reconnected = true;
+                            match reconnect_local_wireguard_client(&config_path) {
+                                Ok(detail) => {
+                                    info!(
+                                        %detail,
+                                        "Managed tunnel reconnected during Sunshine readiness"
+                                    );
+                                }
+                                Err(reconnect_error) => {
+                                    warn!(
+                                        %reconnect_error,
+                                        "Managed tunnel reconnect failed; continuing Sunshine retries"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 if !best_effort && attempt == SUNSHINE_API_READY_RETRIES {
                     return Err(AppError::Provisioning(format!(
                         "Sunshine did not become ready after restart: {error}"

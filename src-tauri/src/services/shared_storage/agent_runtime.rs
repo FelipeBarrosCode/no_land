@@ -44,9 +44,13 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     let remote_log = format!("/tmp/noland-bootstrap-agent-{stamp}.log");
     let remote_status = format!("/tmp/noland-bootstrap-agent-{stamp}.status");
     let bootstrap = include_str!("../../../../state-agent/scripts/bootstrap-remote.sh");
+    // Windows checkouts (core.autocrlf=true) keep these scripts CRLF in the working
+    // tree, and the bytes are embedded verbatim at compile time. bash on the remote
+    // instance rejects `set -euo pipefail\r`, so normalize before shipping.
+    let normalized_bootstrap = bootstrap.replace("\r\n", "\n").replace('\r', "\n");
     let encoded_script = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        bootstrap.as_bytes(),
+        normalized_bootstrap.as_bytes(),
     );
     let sudo = remote.sudo_prefix();
     let worker = format!(

@@ -50,11 +50,24 @@ if (process.platform === 'darwin' && mode === 'build') {
   console.log('[tauri-with-mic-sidecar] Deferring macOS notarization until after bundle fix/signing completes');
 }
 
-const managedNetHelper = findManagedTool(
-  'noland-net-helper',
-  target,
-  'NOLAND_NET_HELPER_BIN',
-);
+const devNetHelper = mode === 'dev'
+  ? join(
+      repoRoot,
+      'src-tauri',
+      '.native-deps',
+      'net-helper-target',
+      target,
+      'debug',
+      process.platform === 'win32' ? 'noland-net-helper.exe' : 'noland-net-helper',
+    )
+  : undefined;
+const managedNetHelper = devNetHelper && existsSync(devNetHelper)
+  ? devNetHelper
+  : findManagedTool(
+      'noland-net-helper',
+      target,
+      'NOLAND_NET_HELPER_BIN',
+    );
 if (managedNetHelper) {
   tauriEnv.NOLAND_NET_HELPER_BIN = managedNetHelper;
 }
