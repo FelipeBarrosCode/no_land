@@ -12,7 +12,10 @@ use tracing::{info, warn};
 use crate::{
     errors::{AppError, AppResult},
     models::{
-        app_state::{BackupPerformanceMode, ProvisionedServerState},
+        app_state::{
+            BackupPerformanceMode, InstanceState, MoonlightState, OrchestrationState,
+            PostWireGuardSetupState, ProvisionedServerState, WireGuardState,
+        },
         vast::VastInstance,
     },
 };
@@ -162,7 +165,7 @@ impl InstanceLifecycleService {
         context: &AppContext,
         owned_instance_ids: &HashSet<u64>,
     ) -> AppResult<()> {
-        let (removed_records, should_clear_active_instance) = {
+        let (removed_records, should_clear_active_instance, should_clear_post_wireguard_setup) = {
             let state = context.state.read().await;
             let removed = state
                 .provisioned_servers
@@ -175,7 +178,12 @@ impl InstanceLifecycleService {
                 .instance_id
                 .map(|instance_id| !owned_instance_ids.contains(&instance_id))
                 .unwrap_or(false);
-            (removed, clear_active)
+            let clear_post_wireguard = state
+                .post_wireguard_setup
+                .current_instance_id
+                .map(|instance_id| !owned_instance_ids.contains(&instance_id))
+                .unwrap_or(false);
+            (removed, clear_active, clear_post_wireguard)
         };
 
         for record in &removed_records {
@@ -196,9 +204,19 @@ impl InstanceLifecycleService {
             remove_local_wireguard_config(config_path)?;
         }
 
-        if removed_records.is_empty() && !should_clear_active_instance {
+        if removed_records.is_empty()
+            && !should_clear_active_instance
+            && !should_clear_post_wireguard_setup
+        {
             return Ok(());
         }
+
+        info!(
+            removed_instances = removed_records.len(),
+            clear_active_instance = should_clear_active_instance,
+            clear_post_wireguard_setup = should_clear_post_wireguard_setup,
+            "Reconciling local instance state against Vast.ai owned instances"
+        );
 
         context
             .update_state(|state| {
@@ -207,9 +225,15 @@ impl InstanceLifecycleService {
                     .retain(|record| owned_instance_ids.contains(&record.instance_id));
 
                 if should_clear_active_instance {
-                    state.instance = crate::models::app_state::InstanceState::default();
-                    state.wireguard = crate::models::app_state::WireGuardState::default();
-                    state.moonlight.host_address.clear();
+                    state.instance = InstanceState::default();
+                    state.wireguard = WireGuardState::default();
+                    state.moonlight = MoonlightState::default();
+                    state.selected_offer = None;
+                    state.orchestration_state = OrchestrationState::Idle;
+                }
+
+                if should_clear_post_wireguard_setup {
+                    state.post_wireguard_setup = PostWireGuardSetupState::default();
                 }
             })
             .await?;

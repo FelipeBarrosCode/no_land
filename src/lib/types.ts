@@ -540,6 +540,33 @@ export interface FrontendError {
   retryable: boolean;
 }
 
+export type HealthProbeStatus = "ok" | "warning" | "failed";
+
+export interface HealthProbe {
+  id: string;
+  label: string;
+  category: string;
+  status: HealthProbeStatus;
+  summary: string;
+  details: string | null;
+  fixHint: string | null;
+}
+
+export interface SystemHealthReport {
+  ok: boolean;
+  checkedAtUnix: number;
+  os: string;
+  arch: string;
+  summary: string;
+  probes: HealthProbe[];
+}
+
+export interface DiagnosticReportResponse {
+  path: string;
+  summary: string;
+  reportMarkdown: string;
+}
+
 export interface MoonlightCodecSupport {
   h264: boolean;
   hevc: boolean;

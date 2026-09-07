@@ -48,6 +48,8 @@ import type {
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
   OfferCountryAvailability,
+  SystemHealthReport,
+  DiagnosticReportResponse,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -209,6 +211,19 @@ export async function stopLocalSleepPrevention(): Promise<string> {
 
 export async function getProvisioningLogs(): Promise<ProvisioningEvent[]> {
   return invokeSafe<ProvisioningEvent[]>("get_provisioning_logs");
+}
+
+export async function runSystemHealthCheck(): Promise<SystemHealthReport> {
+  return invokeSafe<SystemHealthReport>("system_health_check");
+}
+
+export async function exportDiagnosticReport(input?: {
+  reason?: string;
+  frontendError?: string;
+}): Promise<DiagnosticReportResponse> {
+  return invokeSafe<DiagnosticReportResponse>("export_diagnostic_report", {
+    input: input ?? null,
+  });
 }
 
 

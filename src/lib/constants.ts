@@ -6,6 +6,8 @@ export const VAST_BILLING_URL = `https://cloud.vast.ai/billing/?ref_id=${VAST_RE
 export const VAST_API_KEY_URL = `https://cloud.vast.ai/manage-keys/?tab=api-keys&ref_id=${VAST_REFERRAL_ID}`;
 export const VAST_LOGIN_URL = VAST_HOME_URL;
 
+export const GITHUB_NEW_ISSUE_URL = "https://github.com/FelipeBarrosCode/no_land/issues/new";
+
 export const PROVISIONING_ORDER = [
   "GeneratingSshKey",
   "UploadingSshKeyToVast",
