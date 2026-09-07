@@ -97,6 +97,9 @@ export interface CredentialsState {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+  vastAccountEmail: string;
+  vastApiKeyId: number | null;
+  vastApiKeyAvailable: boolean;
   twitchClientId: string;
   twitchClientSecret: string;
 }
@@ -475,6 +478,11 @@ export interface VastWalletSummary {
   lastUpdatedAt: string | null;
 }
 
+export interface VastAccountConnectionDetails {
+  accountEmail: string;
+  apiKeyId: number;
+}
+
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;
@@ -511,6 +519,12 @@ export interface OnboardingPayload {
   appUsername: string;
   appPassword: string;
   vastApiKey: string;
+}
+
+export interface OnboardingInput {
+  appUsername: string;
+  appPassword: string;
+  vastMasterKey: string;
 }
 
 export interface ManualLocationInput {

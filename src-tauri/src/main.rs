@@ -22,6 +22,7 @@ use services::{
     ssh_keys::normalize_ssh_state_from_disk,
     state_store::{JsonStateStore, StateStore},
     sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
+    vast_credentials::load_managed_api_key,
     wireguard::normalize_wireguard_state_from_disk,
 };
 use tauri::{Emitter, Manager, WindowEvent};
@@ -150,6 +151,29 @@ fn main() {
                     &format!("Failed loading persisted state; deleting and recreating it: {error}"),
                 ),
             };
+            initial_state.credentials.vast_api_key_available = false;
+            if initial_state.credentials.vast_api_key_id.is_some() {
+                match load_managed_api_key() {
+                    Ok(Some(api_key)) => {
+                        initial_state.credentials.vast_api_key = api_key;
+                        initial_state.credentials.vast_api_key_available = true;
+                        info!(
+                            api_key_id = ?initial_state.credentials.vast_api_key_id,
+                            "Loaded managed Vast.ai credential from the OS credential vault"
+                        );
+                    }
+                    Ok(None) => warn!(
+                        api_key_id = ?initial_state.credentials.vast_api_key_id,
+                        "Managed Vast.ai key metadata exists, but the OS credential vault has no matching key; reconnect the Vast account"
+                    ),
+                    Err(error) => warn!(
+                        api_key_id = ?initial_state.credentials.vast_api_key_id,
+                        %error,
+                        "Could not load the managed Vast.ai credential from the OS credential vault"
+                    ),
+                }
+            }
+
             let mut detected_stream_defaults = detect_client_display_for_provisioning();
 
             let mut state_changed = false;
@@ -561,6 +585,8 @@ fn main() {
             get_provisioning_logs,
             get_rented_instances,
             get_vast_wallet_summary,
+            connect_vast_account,
+            disconnect_vast_account,
             update_vast_api_key,
             update_platform_credentials,
             update_server_preferences,

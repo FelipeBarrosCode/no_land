@@ -7,6 +7,7 @@ This folder is the source of truth for how Noland Connect works end-to-end.
 - `docs/architecture.md`: system layout, module boundaries, and runtime model
 - `docs/flows.md`: onboarding, provisioning, post-WireGuard setup, reboot, lifecycle, backup, mic
 - `docs/shared-storage-high-level.md`: high-level shared storage flow, diagrams, and tools/components used
+- `docs/vast-account-connection.md`: Vast.ai managed scoped-key connection, permissions, security, and referral flow
 - `docs/schemas.md`: persisted state schema, event schema, and key data contracts
 - `docs/api-reference.md`: frontend/backend command surface and grouping
 - `docs/configuration.md`: environment variables, defaults, and tuning knobs

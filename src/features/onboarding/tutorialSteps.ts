@@ -1,7 +1,7 @@
 import {
   VAST_API_KEY_URL,
   VAST_BILLING_URL,
-  VAST_HOME_URL,
+  VAST_REFERRAL_URL,
 } from "../../lib/constants";
 
 export interface TutorialStep {
@@ -26,15 +26,15 @@ export const tutorialSteps: TutorialStep[] = [
     description:
       "Head to Vast.ai next. That is where you rent the GPU machine that Noland Connect will prepare for you.",
     linkLabel: "Open Vast.ai",
-    linkUrl: VAST_HOME_URL,
+    linkUrl: VAST_REFERRAL_URL,
   },
   {
     eyebrow: "Step 3",
     title: "Create your Vast.ai account",
     description:
-      "Make your Vast.ai account if you are new. It only takes a minute and unlocks server access.",
-    linkLabel: "Open Vast.ai",
-    linkUrl: VAST_HOME_URL,
+      "Make your Vast.ai account with the Noland referral link if you are new. It only takes a minute and unlocks server access.",
+    linkLabel: "Create Vast.ai account",
+    linkUrl: VAST_REFERRAL_URL,
   },
   {
     eyebrow: "Step 4",
@@ -46,9 +46,9 @@ export const tutorialSteps: TutorialStep[] = [
   },
   {
     eyebrow: "Step 5",
-    title: "Get your API key",
+    title: "Get your master API key",
     description:
-      "Copy your Vast.ai API key. Noland Connect uses it to find servers, start them, and manage the setup for you.",
+      "Copy a Vast.ai master API key. Noland uses it once to create a dedicated managed key for finding and starting servers.",
     linkLabel: "Manage Vast.ai keys",
     linkUrl: VAST_API_KEY_URL,
   },
@@ -56,7 +56,7 @@ export const tutorialSteps: TutorialStep[] = [
     eyebrow: "Step 6",
     title: "Return to Noland",
     description:
-      "After billing and API key setup, return to Noland Connect and paste your Vast.ai API key into onboarding.",
+      "After billing and key setup, return to Noland Connect and paste the master API key once to connect your account.",
   },
   {
     eyebrow: "Step 7",

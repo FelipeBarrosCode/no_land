@@ -401,6 +401,10 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
+  const connectVastAccount = useAppStore((state) => state.connectVastAccount);
+  const disconnectVastAccount = useAppStore(
+    (state) => state.disconnectVastAccount,
+  );
 
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
@@ -677,6 +681,8 @@ export function App() {
                   onBeginOauthFlow={beginOauthFlow}
                   onCompleteOauthFlow={completeOauthFlow}
                   onSaveApiKey={saveVastApiKey}
+                  onConnectVastAccount={connectVastAccount}
+                  onDisconnectVastAccount={disconnectVastAccount}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveIgdbCredentials={saveIgdbCredentials}
                   onSaveServerPreferences={saveServerPreferences}

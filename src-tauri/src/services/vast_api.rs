@@ -13,11 +13,38 @@ pub struct VastWalletSummary {
     pub balance_usd: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct VastAccountIdentity {
+    pub email: String,
+    pub balance_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct VastCreatedApiKey {
+    pub id: u64,
+    pub key: String,
+}
+
 #[derive(Clone)]
 pub struct VastApiClient {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
+}
+
+fn noland_scoped_api_key_payload() -> Value {
+    json!({
+        "name": "Noland Connect",
+        "permissions": {
+            "api": {
+                "misc": {},
+                "user_read": {},
+                "user_write": {},
+                "instance_read": {},
+                "instance_write": {}
+            }
+        }
+    })
 }
 
 impl VastApiClient {
@@ -361,6 +388,89 @@ impl VastApiClient {
         Ok(keys)
     }
 
+    pub async fn get_account_identity(&self) -> AppResult<VastAccountIdentity> {
+        let url = format!(
+            "{}/api/v0/users/current/",
+            self.base_url.trim_end_matches('/')
+        );
+        let started = Instant::now();
+        let response = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| map_send_error("GET", &url, error))?;
+        let body = parse_response(response, "GET", &url, started).await?;
+        let email = body
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::Api(
+                    "Vast.ai validated the API key but did not return an account email".to_string(),
+                )
+            })?
+            .to_string();
+
+        Ok(VastAccountIdentity {
+            email,
+            balance_usd: extract_wallet_balance_usd(&body),
+        })
+    }
+
+    pub async fn create_noland_scoped_api_key(&self) -> AppResult<VastCreatedApiKey> {
+        let url = format!(
+            "{}/api/v0/auth/apikeys/",
+            self.base_url.trim_end_matches('/')
+        );
+        let payload = noland_scoped_api_key_payload();
+        let started = Instant::now();
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| map_send_error("POST", &url, error))?;
+        let body = parse_response(response, "POST", &url, started).await?;
+        let id = body.get("id").and_then(Value::as_u64).ok_or_else(|| {
+            AppError::Api("Vast.ai did not return the created API key ID".to_string())
+        })?;
+        let key = body
+            .get("key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                AppError::Api(
+                    "Vast.ai did not return the one-time value for the created API key".to_string(),
+                )
+            })?
+            .to_string();
+
+        Ok(VastCreatedApiKey { id, key })
+    }
+
+    pub async fn delete_api_key(&self, api_key_id: u64) -> AppResult<()> {
+        let url = format!(
+            "{}/api/v0/auth/apikeys/{api_key_id}/",
+            self.base_url.trim_end_matches('/')
+        );
+        let started = Instant::now();
+        let response = self
+            .http
+            .delete(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .map_err(|error| map_send_error("DELETE", &url, error))?;
+        let _ = parse_response(response, "DELETE", &url, started).await?;
+        Ok(())
+    }
+
     pub async fn get_wallet_summary(&self) -> AppResult<VastWalletSummary> {
         let url = format!(
             "{}/api/v0/users/current/",
@@ -608,7 +718,11 @@ async fn parse_response(
 
     let parsed = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
 
-    let response_body_excerpt = abbreviate_text(&parsed.to_string());
+    let response_body_excerpt = if url.contains("/api/v0/auth/apikeys/") {
+        "[redacted API-key response]".to_string()
+    } else {
+        abbreviate_text(&parsed.to_string())
+    };
 
     if !status.is_success() {
         let detail = parsed
@@ -668,4 +782,30 @@ fn abbreviate_text(raw: &str) -> String {
     let mut output = raw.chars().take(MAX_CHARS).collect::<String>();
     output.push_str("... <truncated>");
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::noland_scoped_api_key_payload;
+
+    #[test]
+    fn managed_key_payload_uses_only_required_permission_categories() {
+        assert_eq!(
+            noland_scoped_api_key_payload(),
+            json!({
+                "name": "Noland Connect",
+                "permissions": {
+                    "api": {
+                        "misc": {},
+                        "user_read": {},
+                        "user_write": {},
+                        "instance_read": {},
+                        "instance_write": {}
+                    }
+                }
+            })
+        );
+    }
 }

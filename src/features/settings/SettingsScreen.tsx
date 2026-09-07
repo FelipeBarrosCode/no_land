@@ -18,11 +18,13 @@ import type {
   ServerPreferencesUpdate,
   SharedStorageTestResult,
   SshCredentialsUpdate,
+  VastAccountConnectionDetails,
 } from "../../lib/types";
 import {
   VAST_API_KEY_URL,
   VAST_BILLING_URL,
   VAST_LOGIN_URL,
+  VAST_REFERRAL_URL,
 } from "../../lib/constants";
 
 type SettingsSection =
@@ -82,6 +84,10 @@ interface Props {
   ) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
+  onConnectVastAccount: (
+    masterKey: string,
+  ) => Promise<VastAccountConnectionDetails | null>;
+  onDisconnectVastAccount: () => Promise<void>;
   onSavePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
@@ -207,6 +213,8 @@ export function SettingsScreen({
   onBeginOauthFlow,
   onCompleteOauthFlow,
   onSaveApiKey,
+  onConnectVastAccount,
+  onDisconnectVastAccount,
   onSavePlatformCredentials,
   onSaveIgdbCredentials,
   onSaveServerPreferences,
@@ -216,6 +224,7 @@ export function SettingsScreen({
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
+  const [vastMasterKey, setVastMasterKey] = useState("");
   const [platformUsername, setPlatformUsername] = useState(
     appState.credentials.appUsername,
   );
@@ -325,6 +334,26 @@ export function SettingsScreen({
       window.open(url, "_blank", "noopener,noreferrer");
     }
   }
+
+  async function handleConnectVastAccount() {
+    const connection = await onConnectVastAccount(vastMasterKey.trim());
+    if (connection) {
+      setVastMasterKey("");
+    }
+  }
+
+  const vastAccountEmail = appState.credentials.vastAccountEmail?.trim();
+  const vastApiKeyId = appState.credentials.vastApiKeyId;
+  const hasManagedVastConnection = vastApiKeyId != null;
+  const hasConfiguredVastApiKey =
+    appState.credentials.vastApiKey.trim().length > 0;
+  const hasVastCredential = appState.credentials.vastApiKeyAvailable;
+  const managedVastCredentialMissing =
+    hasManagedVastConnection && !hasVastCredential;
+  const hasVastConnection = hasVastCredential;
+  const hasVastAccountRecord = Boolean(
+    hasManagedVastConnection || hasConfiguredVastApiKey || vastAccountEmail,
+  );
 
   const profilePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
@@ -463,64 +492,173 @@ export function SettingsScreen({
       </div>
 
       <div className="mt-4 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.05rem] text-[#b4d7f4]">
-        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Vast.ai Links
-        </h3>
-        <p className="mt-2 leading-snug">
-          Use your normal browser for Vast.ai account access. Log in there, manage billing, create an API key, and then paste that API key into Noland.
-        </p>
-        <div className="mt-3 flex flex-wrap gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+              Vast.ai Account
+            </h3>
+            <p className="mt-2 leading-snug">
+              Connect once with a master API key. Noland creates and stores a
+              dedicated managed API key for this app.
+            </p>
+          </div>
+          <span
+            className={`border px-2 py-1 font-display text-[9px] uppercase tracking-[0.12em] ${
+              managedVastCredentialMissing
+                ? "border-[#ffcf70]/60 text-[#ffcf70]"
+                : hasVastConnection
+                  ? "border-neon-lime/60 text-neon-lime"
+                  : "border-[#59617e] text-[#9da9c6]"
+            }`}
+          >
+            {managedVastCredentialMissing
+              ? "Needs reconnect"
+              : hasVastConnection
+                ? "Connected"
+                : "Not connected"}
+          </span>
+        </div>
+
+        {hasVastAccountRecord ? (
+          <div className="mt-4 grid gap-2 rounded border border-[#364363] bg-[#0a1024]/70 p-3 md:grid-cols-2">
+            <div>
+              <p className="font-display text-[9px] uppercase tracking-[0.12em] text-[#7897b7]">
+                Account
+              </p>
+              <p className="mt-1 break-all text-[1.15rem] text-white">
+                {vastAccountEmail || "Connected Vast.ai account"}
+              </p>
+            </div>
+            <div>
+              <p className="font-display text-[9px] uppercase tracking-[0.12em] text-[#7897b7]">
+                Credential Mode
+              </p>
+              <p className="mt-1 text-[1.15rem] text-white">
+                {vastApiKeyId != null
+                  ? managedVastCredentialMissing
+                    ? `Managed key #${vastApiKeyId} (credential missing)`
+                    : `Managed key #${vastApiKeyId}`
+                  : hasConfiguredVastApiKey
+                    ? "Manual API key"
+                    : "Credential unavailable"}
+              </p>
+            </div>
+          </div>
+        ) : null}
+
+        {managedVastCredentialMissing ? (
+          <p className="mt-3 rounded border border-[#ffcf70]/40 bg-[#241d0d] p-3 text-[1.05rem] text-[#ffdd91]">
+            The managed key metadata is still available, but its secret is missing
+            from the OS credential vault. Reconnect to create a replacement, then
+            revoke the old key from Vast.ai if it remains listed.
+          </p>
+        ) : null}
+
+        <div className="mt-4 grid gap-3">
+          <InputField
+            label={
+              hasManagedVastConnection
+                ? "New Master API Key (Reconnect)"
+                : "Master API Key"
+            }
+            value={vastMasterKey}
+            type="password"
+            autoComplete="off"
+            placeholder="Paste once to create a managed key"
+            onChange={(event) => setVastMasterKey(event.target.value)}
+          />
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={busy || vastMasterKey.trim().length < 16}
+              loading={busy}
+              loadingText={
+                hasManagedVastConnection ? "Reconnecting..." : "Connecting..."
+              }
+              onClick={() => void handleConnectVastAccount()}
+            >
+              {hasManagedVastConnection ? "Reconnect Account" : "Connect Account"}
+            </Button>
+            {hasVastAccountRecord ? (
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => void onDisconnectVastAccount()}
+              >
+                {hasManagedVastConnection ? "Disconnect & Revoke" : "Remove Manual Key"}
+              </Button>
+            ) : null}
+          </div>
+          <p className="text-[1rem] text-[#8fb4d4]">
+            The master key is used only for the connection request and is not
+            retained by the frontend.
+          </p>
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-3 border-t border-[#35506e] pt-4">
           <Button
             variant="secondary"
             disabled={busy}
+            onClick={() => void openExternalUrl(VAST_REFERRAL_URL)}
+          >
+            Create Vast.ai Account
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy}
             onClick={() => void openExternalUrl(VAST_LOGIN_URL)}
           >
-            Open Vast.ai Login
+            Vast.ai Login
           </Button>
           <Button
             variant="ghost"
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_BILLING_URL)}
           >
-            Open Vast.ai Billing
+            Billing
           </Button>
           <Button
             variant="ghost"
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
           >
-            Open API Key Page
-          </Button>
-        </div>
-        <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
-          <p>Use the normal browser pages above, then save the API key here.</p>
-
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3">
-        <InputField
-          label="Vast API Key"
-          value={apiKey}
-          type="password"
-          onChange={(event) => setApiKey(event.target.value)}
-        />
-        <div className="flex flex-wrap gap-3">
-          <Button
-            disabled={busy || apiKey.trim().length < 16}
-            onClick={() => onSaveApiKey(apiKey.trim())}
-          >
-            Save API Key
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={busy}
-            onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
-          >
-            Open API Key Page
+            Manage Keys
           </Button>
         </div>
       </div>
+
+      <details className="mt-4 rounded-md border border-[#3b4067] bg-[#0b1024] p-4 text-[#a8bed6]">
+        <summary className="cursor-pointer font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+          Advanced: configure an API key manually
+        </summary>
+        <p className="mt-3 text-[1.05rem] leading-snug">
+          Use this fallback when managed account connection is unavailable. The
+          key is stored in the local app state rather than as a remotely revocable
+          Noland-managed key.
+        </p>
+        <div className="mt-4 grid gap-3">
+          <InputField
+            label="Vast API Key"
+            value={apiKey}
+            type="password"
+            onChange={(event) => setApiKey(event.target.value)}
+          />
+          <div className="flex flex-wrap gap-3">
+            <Button
+              disabled={busy || apiKey.trim().length < 16}
+              onClick={() => onSaveApiKey(apiKey.trim())}
+            >
+              Save Manual API Key
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={busy}
+              onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
+            >
+              Open API Key Page
+            </Button>
+          </div>
+        </div>
+      </details>
     </Card>
   );
 

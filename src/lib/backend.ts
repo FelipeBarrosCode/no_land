@@ -40,6 +40,7 @@ import type {
   SetupStage,
   SunshineVerificationResult,
   VastWalletSummary,
+  VastAccountConnectionDetails,
   DisplayModeSpec,
   InstanceDisplayStatus,
   ApplyDisplayModeResult,
@@ -237,6 +238,17 @@ export async function updateVastApiKey(
   return invokeSafe<PersistedAppState>("update_vast_api_key", { apiKey });
 }
 
+export async function connectVastAccount(
+  masterKey: string,
+): Promise<VastAccountConnectionDetails> {
+  return invokeSafe<VastAccountConnectionDetails>("connect_vast_account", {
+    masterKey,
+  });
+}
+
+export async function disconnectVastAccount(): Promise<void> {
+  await invokeSafe<void>("disconnect_vast_account");
+}
 
 export async function getVastWalletSummary(): Promise<VastWalletSummary> {
   return invokeSafe<VastWalletSummary>("get_vast_wallet_summary");

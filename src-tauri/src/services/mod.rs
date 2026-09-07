@@ -27,4 +27,5 @@ pub mod ssh_keys;
 pub mod state_store;
 pub mod sunshine;
 pub mod vast_api;
+pub mod vast_credentials;
 pub mod wireguard;

@@ -33,6 +33,19 @@ pub struct PersistedAppState {
     pub last_error: Option<String>,
 }
 
+impl PersistedAppState {
+    /// Returns state suitable for serialization across the Tauri IPC boundary.
+    /// Managed Vast.ai secrets stay in backend memory and the OS credential vault.
+    pub fn into_frontend_safe(mut self) -> Self {
+        self.credentials.vast_api_key_available = self.credentials.vast_api_key_available
+            || !self.credentials.vast_api_key.trim().is_empty();
+        if self.credentials.vast_api_key_id.is_some() {
+            self.credentials.vast_api_key.clear();
+        }
+        self
+    }
+}
+
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
@@ -68,6 +81,12 @@ pub struct CredentialsState {
     pub app_password: String,
     pub vast_api_key: String,
     #[serde(default)]
+    pub vast_account_email: String,
+    #[serde(default)]
+    pub vast_api_key_id: Option<u64>,
+    #[serde(default)]
+    pub vast_api_key_available: bool,
+    #[serde(default)]
     pub twitch_client_id: String,
     #[serde(default)]
     pub twitch_client_secret: String,
@@ -79,6 +98,9 @@ impl Default for CredentialsState {
             app_username: String::new(),
             app_password: String::new(),
             vast_api_key: String::new(),
+            vast_account_email: String::new(),
+            vast_api_key_id: None,
+            vast_api_key_available: false,
             twitch_client_id: String::new(),
             twitch_client_secret: String::new(),
         }

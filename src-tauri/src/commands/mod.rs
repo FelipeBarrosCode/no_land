@@ -93,6 +93,7 @@ use crate::{
         ssh_keys::SshKeyService,
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
+        vast_credentials::{delete_managed_api_key, load_managed_api_key, store_managed_api_key},
         wireguard::{
             locate_noland_net_helper_binary, locate_wintun_library,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
@@ -1406,7 +1407,7 @@ async fn start_embedded_stream_for_host(
 pub async fn get_app_state(
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
-    Ok(context.load_state().await)
+    Ok(context.load_state().await.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -1414,10 +1415,26 @@ pub async fn complete_onboarding(
     payload: OnboardingPayload,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
-    validate_onboarding_payload(&payload)?;
+    let current_state = context.load_state().await;
+    let vast_api_key = if payload.vast_api_key.trim().is_empty() {
+        if current_state.credentials.vast_api_key_id.is_some()
+            && !current_state.credentials.vast_api_key.trim().is_empty()
+        {
+            current_state.credentials.vast_api_key.clone()
+        } else {
+            return Err(AppError::InvalidInput(
+                "Connect a Vast.ai account before completing onboarding".to_string(),
+            )
+            .into());
+        }
+    } else {
+        payload.vast_api_key.trim().to_string()
+    };
+
+    validate_onboarding_payload(&payload, &vast_api_key)?;
     info!(
         "onboarding submitted with api key {}",
-        redact_secret(&payload.vast_api_key)
+        redact_secret(&vast_api_key)
     );
 
     let app_data_root = context
@@ -1430,7 +1447,7 @@ pub async fn complete_onboarding(
     let vast = VastApiClient::new(
         context.http_client.clone(),
         context.config.vast_base_url.clone(),
-        payload.vast_api_key.clone(),
+        vast_api_key.clone(),
     );
 
     let ssh_service = SshKeyService::new("nolandConnectSSH");
@@ -1438,7 +1455,6 @@ pub async fn complete_onboarding(
     let uploaded = ssh_service
         .upload_public_key_if_missing(&vast, &key_paths.public_key_path)
         .await?;
-    let current_state = context.load_state().await;
     let existing_edid = current_state.sunshine.headless_edid_base64.clone();
     let edid_mode = current_state.sunshine.edid_mode;
     let edid_refresh = current_state
@@ -1463,7 +1479,7 @@ pub async fn complete_onboarding(
             state.onboarding_completed = true;
             state.credentials.app_username = payload.app_username.clone();
             state.credentials.app_password = payload.app_password.clone();
-            state.credentials.vast_api_key = payload.vast_api_key.clone();
+            state.credentials.vast_api_key = vast_api_key.clone();
             state.ssh.key_name = "nolandConnectSSH".to_string();
             state.ssh.private_key_path = key_paths.private_key_path.display().to_string();
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
@@ -1478,7 +1494,7 @@ pub async fn complete_onboarding(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -1495,7 +1511,7 @@ pub async fn refresh_ip_location(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -1510,7 +1526,7 @@ pub async fn set_manual_location(
             state.last_error = None;
         })
         .await?;
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -1527,7 +1543,7 @@ pub async fn set_os_location(
             state.last_error = None;
         })
         .await?;
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -1762,7 +1778,7 @@ pub async fn select_offer(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -2461,6 +2477,164 @@ pub async fn get_vast_wallet_summary(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VastAccountConnectionDetails {
+    pub account_email: String,
+    pub api_key_id: u64,
+}
+
+#[tauri::command]
+pub async fn connect_vast_account(
+    master_key: String,
+    context: State<'_, AppContext>,
+) -> Result<VastAccountConnectionDetails, FrontendError> {
+    let master_key = master_key.trim().to_string();
+    if master_key.len() < 16 {
+        return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
+    }
+
+    let previous_state = context.load_state().await;
+    let previous_managed_key = if previous_state.credentials.vast_api_key_id.is_some() {
+        if previous_state.credentials.vast_api_key.trim().is_empty() {
+            load_managed_api_key()?
+        } else {
+            Some(previous_state.credentials.vast_api_key.clone())
+        }
+    } else {
+        None
+    };
+
+    let master_client = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        master_key.clone(),
+    );
+    let master_identity = master_client.get_account_identity().await?;
+    let created_key = master_client.create_noland_scoped_api_key().await?;
+
+    let scoped_client = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        created_key.key.clone(),
+    );
+    let scoped_identity = match scoped_client.get_account_identity().await {
+        Ok(identity) if identity.email == master_identity.email => identity,
+        Ok(_) => {
+            let _ = master_client.delete_api_key(created_key.id).await;
+            return Err(AppError::Authentication.into());
+        }
+        Err(error) => {
+            let _ = master_client.delete_api_key(created_key.id).await;
+            return Err(error.into());
+        }
+    };
+
+    if let Err(error) = store_managed_api_key(&created_key.key) {
+        let _ = master_client.delete_api_key(created_key.id).await;
+        return Err(error.into());
+    }
+
+    let update_result = context
+        .update_state(|state| {
+            state.credentials.vast_api_key = created_key.key.clone();
+            state.credentials.vast_account_email = scoped_identity.email.clone();
+            state.credentials.vast_api_key_id = Some(created_key.id);
+            state.credentials.vast_api_key_available = true;
+            state.last_error = None;
+        })
+        .await;
+
+    if let Err(error) = update_result {
+        {
+            let mut state = context.state.write().await;
+            *state = previous_state.clone();
+        }
+        if let Some(previous_key) = previous_managed_key.as_deref() {
+            let _ = store_managed_api_key(previous_key);
+        } else {
+            let _ = delete_managed_api_key();
+        }
+        let _ = master_client.delete_api_key(created_key.id).await;
+        return Err(error.into());
+    }
+
+    if let Some(previous_id) = previous_state.credentials.vast_api_key_id {
+        if previous_id != created_key.id {
+            if let Some(previous_key) = previous_managed_key.as_deref() {
+                let previous_client = VastApiClient::new(
+                    context.http_client.clone(),
+                    context.config.vast_base_url.clone(),
+                    previous_key.to_string(),
+                );
+                if let Err(error) = previous_client.delete_api_key(previous_id).await {
+                    warn!(
+                        previous_api_key_id = previous_id,
+                        %error,
+                        "Connected the replacement Vast.ai key but could not revoke the previous Noland key"
+                    );
+                }
+            } else {
+                warn!(
+                    previous_api_key_id = previous_id,
+                    "Connected the replacement Vast.ai key, but the previous key was missing locally and must be revoked from the Vast.ai Keys page"
+                );
+            }
+        }
+    }
+
+    info!(
+        api_key_id = created_key.id,
+        account_email = %scoped_identity.email,
+        balance_available = scoped_identity.balance_usd.is_some(),
+        "Connected Vast.ai account with a managed scoped API key"
+    );
+
+    Ok(VastAccountConnectionDetails {
+        account_email: scoped_identity.email,
+        api_key_id: created_key.id,
+    })
+}
+
+#[tauri::command]
+pub async fn disconnect_vast_account(context: State<'_, AppContext>) -> Result<(), FrontendError> {
+    let snapshot = context.load_state().await;
+    if let Some(api_key_id) = snapshot.credentials.vast_api_key_id {
+        let api_key = if snapshot.credentials.vast_api_key.trim().is_empty() {
+            load_managed_api_key()?.ok_or_else(|| {
+                AppError::State(
+                    "The managed Vast.ai key is missing from the OS credential vault. Revoke the Noland Connect key from the Vast.ai Keys page, then use the advanced manual-key option if needed."
+                        .to_string(),
+                )
+            })?
+        } else {
+            snapshot.credentials.vast_api_key.clone()
+        };
+        let client = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        client.delete_api_key(api_key_id).await?;
+    }
+
+    if let Err(error) = delete_managed_api_key() {
+        warn!(%error, "Vast.ai key was revoked remotely, but local credential-vault cleanup failed");
+    }
+
+    context
+        .update_state(|state| {
+            state.credentials.vast_api_key.clear();
+            state.credentials.vast_account_email.clear();
+            state.credentials.vast_api_key_id = None;
+            state.credentials.vast_api_key_available = false;
+            state.last_error = None;
+        })
+        .await?;
+
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn update_vast_api_key(
     api_key: String,
@@ -2471,14 +2645,64 @@ pub async fn update_vast_api_key(
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
 
+    let manual_client = VastApiClient::new(
+        context.http_client.clone(),
+        context.config.vast_base_url.clone(),
+        trimmed.clone(),
+    );
+    let identity = manual_client.get_account_identity().await?;
+
+    let previous = context.load_state().await;
+    let previous_managed_credential =
+        if let Some(managed_key_id) = previous.credentials.vast_api_key_id {
+            let managed_key = if previous.credentials.vast_api_key.trim().is_empty() {
+                load_managed_api_key()?
+            } else {
+                Some(previous.credentials.vast_api_key.clone())
+            };
+            Some((managed_key_id, managed_key))
+        } else {
+            None
+        };
+
+    // Persist the validated manual credential before revoking the old managed
+    // key. A local write failure must not destroy the last working credential.
     let next_state = context
         .update_state(|state| {
             state.credentials.vast_api_key = trimmed;
+            state.credentials.vast_account_email = identity.email.clone();
+            state.credentials.vast_api_key_id = None;
+            state.credentials.vast_api_key_available = true;
             state.last_error = None;
         })
         .await?;
 
-    Ok(next_state)
+    if let Some((managed_key_id, managed_key)) = previous_managed_credential {
+        if let Some(managed_key) = managed_key {
+            let managed_client = VastApiClient::new(
+                context.http_client.clone(),
+                context.config.vast_base_url.clone(),
+                managed_key,
+            );
+            if let Err(error) = managed_client.delete_api_key(managed_key_id).await {
+                warn!(
+                    api_key_id = managed_key_id,
+                    %error,
+                    "Switched to a manual Vast.ai key, but the previous managed key could not be revoked"
+                );
+            }
+        } else {
+            warn!(
+                api_key_id = managed_key_id,
+                "Switched to a manual Vast.ai key, but the previous managed key was missing locally and must be revoked from the Vast.ai Keys page"
+            );
+        }
+        if let Err(error) = delete_managed_api_key() {
+            warn!(%error, "Could not clean the old managed Vast.ai key from the credential vault while switching to a manual key");
+        }
+    }
+
+    Ok(next_state.into_frontend_safe())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -2515,7 +2739,7 @@ pub async fn update_platform_credentials(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -2592,7 +2816,7 @@ pub async fn update_server_preferences(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -2613,7 +2837,7 @@ pub async fn update_moonlight_preferences(
         next_state.moonlight_preferences.show_input_debug_hud != 0,
     );
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -2642,7 +2866,7 @@ pub async fn set_instance_moonlight_pipeline_enabled(
             state.last_error = None;
         })
         .await?;
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[tauri::command]
@@ -3009,7 +3233,7 @@ pub async fn regenerate_edid(
         generated_edid.len()
     );
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3045,10 +3269,13 @@ pub async fn update_ssh_credentials(
         })
         .await?;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
-fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), FrontendError> {
+fn validate_onboarding_payload(
+    payload: &OnboardingPayload,
+    vast_api_key: &str,
+) -> Result<(), FrontendError> {
     if payload.app_username.trim().len() < 3 {
         return Err(
             AppError::InvalidInput("Username must have at least 3 characters".to_string()).into(),
@@ -3059,7 +3286,7 @@ fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), Fronte
             AppError::InvalidInput("Password must have at least 6 characters".to_string()).into(),
         );
     }
-    if payload.vast_api_key.trim().len() < 16 {
+    if vast_api_key.trim().len() < 16 {
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
 
@@ -3628,7 +3855,7 @@ pub async fn save_shared_storage_settings(
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
     SharedStorageManager::save_settings(context.inner(), payload).await?;
-    Ok(context.load_state().await)
+    Ok(context.load_state().await.into_frontend_safe())
 }
 
 #[tauri::command]

@@ -161,7 +161,7 @@ pub async fn update_igdb_credentials(
         .update_config(resolve_igdb_config(context.inner(), &next_state))
         .await;
 
-    Ok(next_state)
+    Ok(next_state.into_frontend_safe())
 }
 
 async fn run_launch(

@@ -7,20 +7,21 @@ import {
   VAST_API_KEY_URL,
   VAST_BILLING_URL,
   VAST_LOGIN_URL,
+  VAST_REFERRAL_URL,
 } from "../../lib/constants";
-import type { OnboardingPayload } from "../../lib/types";
+import type { OnboardingInput } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
 
 interface Props {
   busy: boolean;
-  onSubmit: (payload: OnboardingPayload) => Promise<void>;
+  onSubmit: (payload: OnboardingInput) => Promise<void>;
 }
 
 interface FormState {
   appUsername: string;
   appPassword: string;
-  vastApiKey: string;
+  vastMasterKey: string;
 }
 
 export function OnboardingScreen({ busy, onSubmit }: Props) {
@@ -30,12 +31,12 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
   const [form, setForm] = useState<FormState>({
     appUsername: "",
     appPassword: "",
-    vastApiKey: "",
+    vastMasterKey: "",
   });
   const [touched, setTouched] = useState<Record<keyof FormState, boolean>>({
     appUsername: false,
     appPassword: false,
-    vastApiKey: false,
+    vastMasterKey: false,
   });
 
 
@@ -45,8 +46,10 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
         form.appUsername.trim().length < 3 ? "Use at least 3 characters" : "",
       appPassword:
         form.appPassword.length < 6 ? "Use at least 6 characters" : "",
-      vastApiKey:
-        form.vastApiKey.trim().length < 16 ? "API key seems too short" : "",
+      vastMasterKey:
+        form.vastMasterKey.trim().length < 16
+          ? "Master API key seems too short"
+          : "",
     };
   }, [form]);
 
@@ -56,7 +59,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     setTouched({
       appUsername: true,
       appPassword: true,
-      vastApiKey: true,
+      vastMasterKey: true,
     });
     if (hasErrors) {
       return;
@@ -65,7 +68,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
     await onSubmit({
       appUsername: form.appUsername.trim(),
       appPassword: form.appPassword,
-      vastApiKey: form.vastApiKey.trim(),
+      vastMasterKey: form.vastMasterKey.trim(),
     });
   }
 
@@ -87,6 +90,10 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
 
   async function openLoginPage() {
     await openExternalUrl(VAST_LOGIN_URL);
+  }
+
+  async function openReferralSignup() {
+    await openExternalUrl(VAST_REFERRAL_URL);
   }
 
   function openTutorial() {
@@ -124,17 +131,10 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 Noland Connect Terminal
               </h1>
               <p className="text-[1.4rem] leading-[1.15] text-[#b4c8de]">
-                Add your local credentials and{" "}
-                <a
-                  className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
-                  href={VAST_API_KEY_URL}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Vast.ai API key
-                </a>
-                . We will generate an SSH key pair, prepare the remote machine,
-                and handle the connection flow during provisioning.
+                Add your local credentials, then connect your Vast.ai account
+                with a master API key. Noland creates a dedicated managed key,
+                generates an SSH key pair, and handles the connection flow during
+                provisioning.
               </p>
             </div>
 
@@ -148,11 +148,18 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               Vast.ai Account Setup
             </p>
             <p className="mt-2 leading-snug">
-              Use your normal browser to log in to Vast.ai, add billing, and create an API key. Then paste that API key into Noland below.
+              New to Vast.ai? Sign up with the Noland referral link, add billing, and create a master API key. Paste it once below so Noland can create a dedicated managed key for this app.
             </p>
             <div className="mt-3 flex flex-wrap gap-3">
-              <Button variant="secondary" disabled={busy} onClick={() => void openLoginPage()}>
-                Open Vast.ai Login
+              <Button
+                variant="secondary"
+                disabled={busy}
+                onClick={() => void openReferralSignup()}
+              >
+                Create Vast.ai Account
+              </Button>
+              <Button variant="ghost" disabled={busy} onClick={() => void openLoginPage()}>
+                Existing Account Login
               </Button>
               <Button variant="ghost" disabled={busy} onClick={() => void openBillingPage()}>
                 Open Vast.ai Billing
@@ -162,7 +169,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               </Button>
             </div>
             <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
-              <p>Sign in in your normal browser, then come back here and paste the API key.</p>
+              <p>The master key is used for this connection request only; Noland stores the managed API key created for the app.</p>
 
             </div>
           </div>
@@ -214,19 +221,25 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                   >
                     Vast.ai
                   </a>{" "}
-                  API Key
+                  Master API Key
                 </span>
               }
               type="password"
-              placeholder="vast_xxxxx"
-              value={form.vastApiKey}
+              placeholder="Paste your Vast.ai master API key"
+              value={form.vastMasterKey}
+              autoComplete="off"
               onChange={(event) =>
-                setForm((prev) => ({ ...prev, vastApiKey: event.target.value }))
+                setForm((prev) => ({
+                  ...prev,
+                  vastMasterKey: event.target.value,
+                }))
               }
               onBlur={() =>
-                setTouched((prev) => ({ ...prev, vastApiKey: true }))
+                setTouched((prev) => ({ ...prev, vastMasterKey: true }))
               }
-              error={touched.vastApiKey ? errors.vastApiKey : undefined}
+              error={
+                touched.vastMasterKey ? errors.vastMasterKey : undefined
+              }
             />
           </div>
 
@@ -236,12 +249,12 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               type="button"
               onClick={openApiKeyPage}
             >
-              Get your Vast.ai API key
+              Get your Vast.ai master key
             </button>
             <Button
               disabled={busy}
               loading={busy}
-              loadingText="Configuring..."
+              loadingText="Connecting..."
               onClick={submitForm}
               className="px-8"
             >

@@ -147,7 +147,16 @@ impl StateStore for JsonStateStore {
             Err(error) => return Err(error),
         };
 
-        let next_value = serde_json::to_value(state)?;
+        let mut persisted_state = state.clone();
+        // Availability is computed from backend memory for IPC responses. Never
+        // persist it because the OS vault may change while the app is stopped.
+        persisted_state.credentials.vast_api_key_available = false;
+        if persisted_state.credentials.vast_api_key_id.is_some() {
+            // Managed Vast credentials live in the OS credential vault. Keep the
+            // key available in memory for API calls, but never write it to JSON.
+            persisted_state.credentials.vast_api_key.clear();
+        }
+        let next_value = serde_json::to_value(&persisted_state)?;
         let next_map = match next_value {
             Value::Object(map) => map,
             _ => {
@@ -343,6 +352,72 @@ mod tests {
             PersistedAppState::default().server_preferences.storage_gb
         );
         assert_eq!(recovered.server_preferences.template_hash, "abc123");
+    }
+
+    #[test]
+    fn frontend_state_reports_managed_key_availability_without_exposing_secret() {
+        let mut state = PersistedAppState::default();
+        state.credentials.vast_api_key = "vast-managed-secret".to_string();
+        state.credentials.vast_api_key_id = Some(42);
+
+        let frontend_state = state.into_frontend_safe();
+
+        assert!(frontend_state.credentials.vast_api_key_available);
+        assert!(frontend_state.credentials.vast_api_key.is_empty());
+        assert_eq!(frontend_state.credentials.vast_api_key_id, Some(42));
+    }
+
+    #[test]
+    fn frontend_state_reports_missing_managed_vault_credential() {
+        let mut state = PersistedAppState::default();
+        state.credentials.vast_api_key_id = Some(42);
+
+        let frontend_state = state.into_frontend_safe();
+
+        assert!(!frontend_state.credentials.vast_api_key_available);
+        assert!(frontend_state.credentials.vast_api_key.is_empty());
+        assert_eq!(frontend_state.credentials.vast_api_key_id, Some(42));
+    }
+
+    #[tokio::test]
+    async fn managed_vast_api_key_is_not_persisted_to_json() {
+        let path = temp_state_path("managed-vast-key-redaction");
+        let store = JsonStateStore::new(path.clone(), 1);
+        let mut state = PersistedAppState::default();
+        state.credentials.vast_api_key = "vast-managed-secret".to_string();
+        state.credentials.vast_account_email = "user@example.com".to_string();
+        state.credentials.vast_api_key_id = Some(42);
+        state.credentials.vast_api_key_available = true;
+
+        store.save_state(&state).await.unwrap();
+
+        let root: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
+        let credentials = root.get("credentials").unwrap();
+        assert_eq!(
+            credentials
+                .get("vastApiKey")
+                .and_then(|value| value.as_str()),
+            Some("")
+        );
+        assert_eq!(
+            credentials
+                .get("vastAccountEmail")
+                .and_then(|value| value.as_str()),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            credentials
+                .get("vastApiKeyId")
+                .and_then(|value| value.as_u64()),
+            Some(42)
+        );
+        assert_eq!(
+            credentials
+                .get("vastApiKeyAvailable")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
     }
 
     #[tokio::test]

@@ -2,6 +2,8 @@ import { create } from "zustand";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
+  connectVastAccount as connectVastAccountCommand,
+  disconnectVastAccount as disconnectVastAccountCommand,
   getAppState,
   getRentedInstances,
   getProvisioningLogs,
@@ -84,7 +86,7 @@ import type {
   MoonlightPreferences,
   OfferCandidate,
   OfferCountryAvailability,
-  OnboardingPayload,
+  OnboardingInput,
   PlatformCredentialsUpdate,
   IgdbCredentialsUpdate,
   PersistedAppState,
@@ -114,6 +116,7 @@ import type {
   SetupStage,
   SunshineVerificationResult,
   VastWalletSummary,
+  VastAccountConnectionDetails,
   ProviderDefinition,
   ProfileReference,
   SharedStorageProfile,
@@ -151,7 +154,7 @@ interface AppStore {
   dismissProvisioningModal: () => void;
   reopenProvisioningModal: () => void;
   stopProvisioningAfterCurrentStage: () => Promise<void>;
-  runOnboarding: (payload: OnboardingPayload) => Promise<void>;
+  runOnboarding: (payload: OnboardingInput) => Promise<void>;
   saveManualLocation: (payload: ManualLocationInput) => Promise<void>;
   discoverOffers: (page?: number) => Promise<void>;
   nextOffersPage: () => Promise<void>;
@@ -181,6 +184,10 @@ interface AppStore {
   clearLaunchLibrary: () => void;
   loadRentedInstances: () => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
+  connectVastAccount: (
+    masterKey: string,
+  ) => Promise<VastAccountConnectionDetails | null>;
+  disconnectVastAccount: () => Promise<void>;
   refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
   savePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
@@ -922,7 +929,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         let vastWalletSummary: VastWalletSummary | null = null;
         if (
           appState.onboardingCompleted &&
-          appState.credentials.vastApiKey.trim().length > 0
+          appState.credentials.vastApiKeyAvailable
         ) {
           const [instances, wallet] = await Promise.all([
             getRentedInstances(),
@@ -995,7 +1002,12 @@ export const useAppStore = create<AppStore>((set, get) => {
           blocking: true,
         },
         async () => {
-          const appState = await completeOnboarding(payload);
+          await connectVastAccountCommand(payload.vastMasterKey);
+          const appState = await completeOnboarding({
+            appUsername: payload.appUsername,
+            appPassword: payload.appPassword,
+            vastApiKey: "",
+          });
           const rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(
             await getRentedInstances(),
           );
@@ -1302,6 +1314,54 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
+    connectVastAccount: async (masterKey) => {
+      return runBusyTask(
+        {
+          key: "vast.account.connect",
+          label: "Connecting Vast.ai account",
+          detail: "Creating a managed API key for Noland Connect.",
+          blocking: true,
+        },
+        async () => {
+          const connection = await connectVastAccountCommand(masterKey);
+          const appState = await getAppState();
+          const [rentedInstances, vastWalletSummary] = await Promise.all([
+            getRentedInstances(),
+            getVastWalletSummaryCommand().catch(() => null),
+          ]);
+          set({
+            appState,
+            rentedInstances: await enrichRentedInstancesWithEmbeddedStatus(
+              rentedInstances,
+            ),
+            vastWalletSummary,
+          });
+          return connection;
+        },
+        null,
+      );
+    },
+
+    disconnectVastAccount: async () => {
+      await runBusyTask(
+        {
+          key: "vast.account.disconnect",
+          label: "Disconnecting Vast.ai account",
+          detail: "Removing Noland Connect's managed Vast.ai credentials.",
+          blocking: true,
+        },
+        async () => {
+          await disconnectVastAccountCommand();
+          const appState = await getAppState();
+          set({
+            appState,
+            rentedInstances: [],
+            vastWalletSummary: null,
+          });
+        },
+        undefined,
+      );
+    },
 
     refreshVastWalletSummary: async () => {
       return runBusyTask(
