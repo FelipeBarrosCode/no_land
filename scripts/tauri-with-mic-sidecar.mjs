@@ -15,7 +15,8 @@ const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
 const windowsTargetConfig = resolveWindowsTargetConfig(target, tauriArgsWithTarget);
-const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsTargetConfig];
+const linuxBundleConfig = resolveLinuxBundleConfig(target, tauriArgsWithTarget);
+const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsTargetConfig, ...linuxBundleConfig];
 const tauriCliArgs = tauriArgsPrepared;
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsPrepared];
 let nativeEnv = buildNativeEnv(target);
@@ -207,6 +208,10 @@ function readTarget(args) {
   return undefined;
 }
 
+function hasArg(args, name) {
+  return args.some((arg) => arg === name || arg.startsWith(`${name}=`));
+}
+
 function hasConfigPath(args, configPath) {
   for (let i = 0; i < args.length; i += 1) {
     if (args[i] === '--config' && args[i + 1]) {
@@ -223,6 +228,26 @@ function hasConfigPath(args, configPath) {
     }
   }
   return false;
+}
+
+function resolveLinuxBundleConfig(targetTriple, args) {
+  if (!targetTriple?.includes('linux') || mode !== 'build') {
+    return [];
+  }
+  if (hasArg(args, '--bundles')) {
+    return [];
+  }
+
+  // Do not produce AppImage by default for the Linux desktop client.
+  // WebKitGTK/GIO loads host modules at runtime; AppImage also injects bundled
+  // usr/lib into the loader path, which can mix incompatible GLib/GIO/libcurl
+  // stacks on Ubuntu/Zorin LTS and crash with undefined symbols such as:
+  //   g_task_set_static_name
+  //   g_assertion_message_cmpint
+  //   nghttp2_option_set_no_rfc9113_leading_and_trailing_ws_validation
+  // Native packages keep GTK/WebKit/GIO on the distro side as one compatible set.
+  console.log('[tauri-with-mic-sidecar] Linux build defaults to deb,rpm bundles; AppImage is disabled to avoid host/bundled GLib-GIO collisions.');
+  return ['--bundles', 'deb,rpm'];
 }
 
 function resolveWindowsTargetConfig(targetTriple, args) {

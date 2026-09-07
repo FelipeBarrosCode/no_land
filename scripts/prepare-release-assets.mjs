@@ -115,7 +115,10 @@ console.log(`[prepare-release-assets] Prepared ${publishedAssets.length} publish
 
 function shouldPublish(relativePath, baseName) {
   if (baseName.endsWith('.dmg')) return true;
-  if (baseName.endsWith('.AppImage')) return true;
+  // AppImage is intentionally not published for the Linux client right now.
+  // WebKitGTK/GIO can load host modules while AppImage injects bundled usr/lib,
+  // causing GLib/GIO/libcurl symbol mismatches on Ubuntu/Zorin LTS.
+  if (baseName.endsWith('.AppImage')) return false;
   if (baseName.endsWith('.deb')) return true;
   if (baseName.endsWith('.rpm')) return true;
   if (baseName.endsWith('.msi')) return true;

@@ -86,8 +86,33 @@ const LINUX_SYSTEM_LIBRARY_PATTERNS = [
   /^libpng16\.so/u,
   /^libwayland-/u,
   /^libxkbcommon\.so/u,
+  /^libxkbcommon-x11/u,
   /^libX/u,
   /^libxcb/u,
+  /^libxshmfence/u,
+
+  // Hardware/audio/driver-integration libraries must come from the host distro.
+  // Bundling a closure built on the CI runner interposes driver-loader/daemon
+  // client libraries on user systems and breaks Mesa/NVIDIA/VA-API/PipeWire in
+  // exactly the way the bundled GTK/GLib closure broke Zorin LTS startup.
+  /^libudev\.so/u,
+  /^libgudev/u,
+  /^libva/u,
+  /^libvdpau/u,
+  /^libdrm/u,
+  /^libgbm/u,
+  /^libGL\.so/u,
+  /^libGLX/u,
+  /^libEGL/u,
+  /^libGLESv/u,
+  /^libOpenGL\.so/u,
+  /^libglapi/u,
+  /^libopengl\.so/u,
+  /^libpipewire/u,
+  /^libspa/u,
+  /^libpulse/u,
+  /^libasound/u,
+  /^libjack/u,
 ];
 
 if (!target) {
