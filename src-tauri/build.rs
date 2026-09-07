@@ -374,10 +374,9 @@ fn main() {
         ] {
             println!("cargo:rustc-link-lib={library}");
         }
-        // Tauri installs Linux resources under /usr/lib/<productName>. Use an
-        // inherited DT_RPATH so transitive GStreamer/plugin dependencies resolve
-        // from the bundled closure before Rust can configure the runtime.
-        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+        // Tauri installs Linux resources under /usr/lib/<productName>. Keep the
+        // bundled GStreamer directories as a RUNPATH fallback, allowing the
+        // distro's compatible GStreamer stack to satisfy WebKitGTK first.
         println!(
             "cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/Noland Connect/binaries/gstreamer/{target}/lib"
         );
