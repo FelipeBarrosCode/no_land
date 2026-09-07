@@ -2383,6 +2383,7 @@ pub async fn get_rented_instances(
         }
     };
 
+    let state = context.state.read().await.clone();
     let mut instances = instances_source
         .into_iter()
         .filter(|instance| {
