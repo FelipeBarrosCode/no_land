@@ -48,6 +48,18 @@
       "../state-agent/scripts/**/*",
       "../state-agent/systemd/**/*"
     ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "openssh-client",
+          "xdg-utils",
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2"
+        ]
+      }
+    },
     "macOS": {
       "minimumSystemVersion": "12.0",
       "frameworks": [

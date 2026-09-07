@@ -23,6 +23,7 @@ use crate::{
 use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
+    health_check::run_system_health_report,
     instance_manager::InstanceManager,
     moonlight::detect_client_display_for_provisioning,
     nvidia_headless::NvidiaHeadlessService,
@@ -193,6 +194,29 @@ impl OrchestrationService {
 
         *guard = true;
         drop(guard);
+
+        let health = run_system_health_report(&app, &context).await;
+        if !health.ok {
+            let failed = health
+                .probes
+                .iter()
+                .filter(|probe| {
+                    matches!(
+                        probe.status,
+                        crate::services::health_check::HealthProbeStatus::Failed
+                    )
+                })
+                .map(|probe| format!("{}: {}", probe.label, probe.summary))
+                .collect::<Vec<_>>()
+                .join("; ");
+            {
+                let mut guard = context.orchestration_guard.lock().await;
+                *guard = false;
+            }
+            return Err(AppError::Provisioning(format!(
+                "Local health check failed before provisioning: {failed}"
+            )));
+        }
 
         context.cancel_requested.store(false, Ordering::SeqCst);
         Self::spawn_run(app, context, request);
@@ -2612,6 +2636,37 @@ async fn ensure_post_nvidia_reboot(
         return Ok(());
     }
 
+    if let Some((old_boot_id, current_boot_id)) =
+        remote_post_nvidia_reboot_marker_completed(remote).await?
+    {
+        emit_transition(
+            app,
+            context,
+            OrchestrationState::ConnectingSsh,
+            "Detected completed post-NVIDIA reboot",
+            Some(format!(
+                "Remote reboot marker shows the instance already rebooted | old_boot_id={} | current_boot_id={}",
+                old_boot_id, current_boot_id
+            )),
+            false,
+        )
+        .await;
+
+        mark_server_step_completed(
+            context,
+            instance.id,
+            ProvisionStepMarker::PostNvidiaRebootCompleted,
+            OrchestrationState::ConnectingSsh,
+            &instance.status,
+            &instance.ssh_host,
+            instance.ssh_port,
+            offer_id,
+        )
+        .await?;
+
+        return Ok(());
+    }
+
     emit_transition(
         app,
         context,
@@ -2626,7 +2681,7 @@ async fn ensure_post_nvidia_reboot(
         let remote = remote.clone();
         tokio::task::spawn_blocking(move || {
             remote.ssh(
-                "sudo bash -lc 'nohup sh -c \"sleep 2; reboot\" >/dev/null 2>&1 &'",
+                "sudo bash -lc 'set -e; mkdir -p /var/lib/noland; old_boot_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); printf %s \"$old_boot_id\" > /var/lib/noland/post-nvidia-reboot.old_boot_id; sync /var/lib/noland/post-nvidia-reboot.old_boot_id 2>/dev/null || sync; nohup sh -c \"sleep 2; reboot\" >/dev/null 2>&1 & echo REBOOT_SCHEDULED old_boot_id=$old_boot_id marker=/var/lib/noland/post-nvidia-reboot.old_boot_id'",
                 Duration::from_secs(20),
             )
         })
@@ -2639,6 +2694,16 @@ async fn ensure_post_nvidia_reboot(
             "Reboot command returned non-zero (continuing): stdout: {} | stderr: {}",
             reboot_output.stdout.trim(),
             reboot_output.stderr.trim()
+        );
+    }
+
+    let old_boot_id = parse_reboot_marker_value(&reboot_output.stdout, "old_boot_id");
+    if let Some(old_boot_id) = old_boot_id.as_deref() {
+        info!(old_boot_id = old_boot_id, "Captured boot ID before reboot");
+    } else {
+        warn!(
+            stdout = %reboot_output.stdout.trim(),
+            "Could not capture boot ID before reboot; reconnect wait will rely on SSH readiness"
         );
     }
 
@@ -2711,13 +2776,28 @@ async fn ensure_post_nvidia_reboot(
                 };
 
                 if probe.status_code == 0 {
-                    // Wait for systemd to finish booting before continuing
-                    // Prevents race conditions where Xorg service start fails because systemd is mid-boot
+                    let new_boot_id = probe_remote_boot_id(remote).await.ok().flatten();
+                    let reboot_confirmed = match (old_boot_id.as_deref(), new_boot_id.as_deref()) {
+                        (Some(old), Some(new)) if old != new => true,
+                        (Some(old), Some(new)) => {
+                            warn!(
+                                old_boot_id = old,
+                                new_boot_id = new,
+                                "SSH is online, but boot ID has not changed yet; instance may not have rebooted or probe raced the reboot"
+                            );
+                            false
+                        }
+                        _ => false,
+                    };
+
+                    // Wait for systemd to finish booting before continuing.
+                    // This probe can hang while the host is still settling after reboot, so timeouts
+                    // are treated as transient readiness failures instead of provisioning failures.
                     const SYSTEM_STATE_ATTEMPTS: usize = 30;
                     const SYSTEM_STATE_INTERVAL: Duration = Duration::from_secs(2);
                     let mut system_ready = false;
                     for sys_attempt in 1..=SYSTEM_STATE_ATTEMPTS {
-                        let system_state = {
+                        let system_state_result = {
                             let remote = remote.clone();
                             tokio::task::spawn_blocking(move || {
                                 remote.ssh(
@@ -2730,21 +2810,48 @@ async fn ensure_post_nvidia_reboot(
                                 AppError::Command(format!(
                                     "system-state probe join failure: {error}"
                                 ))
-                            })??
+                            })?
                         };
-                        let state = system_state.stdout.trim();
-                        if state == "running" || state == "degraded" {
-                            system_ready = true;
-                            break;
-                        }
+
+                        let details = match system_state_result {
+                            Ok(system_state) => {
+                                let state = system_state.stdout.trim();
+                                if state == "running" || state == "degraded" {
+                                    system_ready = true;
+                                    break;
+                                }
+                                format!(
+                                    "system state: {} (status {}, attempt {}/{})",
+                                    if state.is_empty() { "unknown" } else { state },
+                                    system_state.status_code,
+                                    sys_attempt,
+                                    SYSTEM_STATE_ATTEMPTS
+                                )
+                            }
+                            Err(error) => {
+                                warn!(
+                                    sys_attempt = sys_attempt,
+                                    error = %error,
+                                    "Systemd readiness probe failed after SSH returned; treating as transient post-reboot state"
+                                );
+                                format!(
+                                    "system state probe failed after SSH returned: {} (attempt {}/{})",
+                                    error, sys_attempt, SYSTEM_STATE_ATTEMPTS
+                                )
+                            }
+                        };
+
                         emit_transition(
                             app,
                             context,
                             OrchestrationState::ConnectingSsh,
-                            "Waiting for system to finish booting",
+                            "Waiting for system to finish booting after reboot",
                             Some(format!(
-                                "system state: {} (attempt {}/{})",
-                                state, sys_attempt, SYSTEM_STATE_ATTEMPTS
+                                "{} | reboot_confirmed={} | old_boot_id={} | new_boot_id={}",
+                                details,
+                                reboot_confirmed,
+                                old_boot_id.as_deref().unwrap_or("unknown"),
+                                new_boot_id.as_deref().unwrap_or("unknown")
                             )),
                             false,
                         )
@@ -2753,7 +2860,10 @@ async fn ensure_post_nvidia_reboot(
                     }
                     if !system_ready {
                         warn!(
-                            "System did not reach 'running' state after reboot, continuing anyway"
+                            reboot_confirmed = reboot_confirmed,
+                            old_boot_id = old_boot_id.as_deref().unwrap_or("unknown"),
+                            new_boot_id = new_boot_id.as_deref().unwrap_or("unknown"),
+                            "System did not reach 'running' state after reboot readiness polling, continuing because SSH is online"
                         );
                     }
 
@@ -2828,6 +2938,77 @@ async fn ensure_post_nvidia_reboot(
         "Timed out waiting for instance {} to reconnect after reboot",
         instance.id
     )))
+}
+
+async fn remote_post_nvidia_reboot_marker_completed(
+    remote: &RemoteExec,
+) -> AppResult<Option<(String, String)>> {
+    let output = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || {
+            remote.ssh(
+                "sudo bash -lc 'marker=/var/lib/noland/post-nvidia-reboot.old_boot_id; if [ ! -s \"$marker\" ]; then echo POST_NVIDIA_REBOOT_MARKER_MISSING; exit 0; fi; old=$(cat \"$marker\" 2>/dev/null || true); current=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true); if [ -n \"$old\" ] && [ -n \"$current\" ] && [ \"$old\" != \"$current\" ]; then echo POST_NVIDIA_REBOOT_CONFIRMED old_boot_id=$old current_boot_id=$current; else echo POST_NVIDIA_REBOOT_NOT_CONFIRMED old_boot_id=$old current_boot_id=$current; fi'",
+                Duration::from_secs(8),
+            )
+        })
+        .await
+        .map_err(|error| {
+            AppError::Command(format!(
+                "post-NVIDIA reboot marker probe join failure: {error}"
+            ))
+        })??
+    };
+
+    if output.status_code != 0 {
+        warn!(
+            status_code = output.status_code,
+            stdout = %output.stdout.trim(),
+            stderr = %output.stderr.trim(),
+            "Post-NVIDIA reboot marker probe returned non-zero; continuing with normal reboot flow"
+        );
+        return Ok(None);
+    }
+
+    if !output.stdout.contains("POST_NVIDIA_REBOOT_CONFIRMED") {
+        return Ok(None);
+    }
+
+    let old_boot_id = parse_reboot_marker_value(&output.stdout, "old_boot_id");
+    let current_boot_id = parse_reboot_marker_value(&output.stdout, "current_boot_id");
+    match (old_boot_id, current_boot_id) {
+        (Some(old), Some(current)) => Ok(Some((old, current))),
+        _ => Ok(None),
+    }
+}
+
+async fn probe_remote_boot_id(remote: &RemoteExec) -> AppResult<Option<String>> {
+    let output = {
+        let remote = remote.clone();
+        tokio::task::spawn_blocking(move || {
+            remote.ssh(
+                "cat /proc/sys/kernel/random/boot_id 2>/dev/null || true",
+                Duration::from_secs(8),
+            )
+        })
+        .await
+        .map_err(|error| AppError::Command(format!("boot-id probe join failure: {error}")))??
+    };
+
+    let boot_id = output.stdout.trim();
+    if boot_id.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(boot_id.to_string()))
+    }
+}
+
+fn parse_reboot_marker_value(stdout: &str, key: &str) -> Option<String> {
+    stdout
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(&format!("{key}=")))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 fn is_no_such_ask_error(error: &AppError) -> bool {

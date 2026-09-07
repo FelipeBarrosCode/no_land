@@ -5,6 +5,8 @@ import {
   getAppState,
   getRentedInstances,
   getProvisioningLogs,
+  runSystemHealthCheck,
+  exportDiagnosticReport,
   searchOffers,
   listAvailableOfferCountries,
   selectOffer,
@@ -119,6 +121,8 @@ import type {
   LaunchLibraryResponse,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
+  SystemHealthReport,
+  DiagnosticReportResponse,
 } from "../lib/types";
 
 interface AppStore {
@@ -139,6 +143,9 @@ interface AppStore {
   error: string | null;
   _eventsBound: boolean;
   vastWalletSummary: VastWalletSummary | null;
+  systemHealth: SystemHealthReport | null;
+  healthChecking: boolean;
+  lastDiagnosticReport: DiagnosticReportResponse | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
   dismissProvisioningModal: () => void;
@@ -308,6 +315,8 @@ interface AppStore {
   reconnectMic: (instanceId: number) => Promise<MicSessionResponse | null>;
   recreateMicDevice: (instanceId: number) => Promise<void>;
   loadMicStatus: (instanceId: number) => Promise<void>;
+  refreshSystemHealth: () => Promise<SystemHealthReport | null>;
+  exportCrashReport: (reason?: string, frontendError?: string) => Promise<DiagnosticReportResponse | null>;
   clearError: () => void;
 }
 
@@ -388,6 +397,22 @@ function mapError(error: unknown): string {
   }
 
   return "Something went wrong. Check logs and try again.";
+}
+
+function serializeErrorForReport(error: unknown): string {
+  if (error instanceof Error) {
+    return `${error.name}: ${error.message}\n${error.stack ?? ""}`.trim();
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 interface AsyncActionOptions {
@@ -718,6 +743,19 @@ function shouldClearBlockingAction(
 export const useAppStore = create<AppStore>((set, get) => {
   let provisioningEventQueue: Promise<void> = Promise.resolve();
 
+  const createCrashReport = async (
+    reason = "error",
+    frontendError?: string,
+  ): Promise<DiagnosticReportResponse | null> => {
+    try {
+      const report = await exportDiagnosticReport({ reason, frontendError });
+      set({ lastDiagnosticReport: report });
+      return report;
+    } catch {
+      return null;
+    }
+  };
+
   const runBusyTask = async <T>(
     options: AsyncActionOptions,
     task: () => Promise<T>,
@@ -741,7 +779,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     try {
       return await task();
     } catch (error) {
-      set({ error: mapError(error) });
+      const message = mapError(error);
+      set({ error: message });
+      void createCrashReport(options.key, serializeErrorForReport(error));
       return fallback;
     } finally {
       set((state) => ({
@@ -780,7 +820,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     try {
       return await task();
     } catch (error) {
-      set({ error: mapError(error) });
+      const message = mapError(error);
+      set({ error: message });
+      void createCrashReport(options.key, serializeErrorForReport(error));
       return fallback;
     } finally {
       set((state) => ({
@@ -841,6 +883,9 @@ export const useAppStore = create<AppStore>((set, get) => {
     error: null,
     _eventsBound: false,
     vastWalletSummary: null,
+    systemHealth: null,
+    healthChecking: false,
+    lastDiagnosticReport: null,
     sharedStorageSettings: null,
     storageProviders: [],
     sharedStorageProfiles: [],
@@ -867,10 +912,11 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const [appState, logs, postWireguardSetup] = await Promise.all([
+        const [appState, logs, postWireguardSetup, systemHealth] = await Promise.all([
           getAppState(),
           getProvisioningLogs(),
           getSetupStatus(),
+          runSystemHealthCheck().catch(() => null),
         ]);
         let rentedInstances: RentedInstanceSummary[] = [];
         let vastWalletSummary: VastWalletSummary | null = null;
@@ -894,11 +940,14 @@ export const useAppStore = create<AppStore>((set, get) => {
           logs,
           rentedInstances,
           vastWalletSummary,
+          systemHealth,
           provisioningModalDismissed: false,
           loading: false,
         });
       } catch (error) {
-        set({ loading: false, error: mapError(error) });
+        const message = mapError(error);
+        set({ loading: false, error: message });
+        void createCrashReport("app.initialize", serializeErrorForReport(error));
       }
     },
 
@@ -2209,6 +2258,24 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (error) {
         set({ error: mapError(error) });
       }
+    },
+
+    refreshSystemHealth: async () => {
+      set({ healthChecking: true });
+      try {
+        const report = await runSystemHealthCheck();
+        set({ systemHealth: report, healthChecking: false });
+        return report;
+      } catch (error) {
+        const message = mapError(error);
+        set({ healthChecking: false, error: message });
+        void createCrashReport("system.health", serializeErrorForReport(error));
+        return null;
+      }
+    },
+
+    exportCrashReport: async (reason, frontendError) => {
+      return createCrashReport(reason ?? "manual", frontendError ?? get().error ?? undefined);
     },
 
     clearError: () => set({ error: null }),

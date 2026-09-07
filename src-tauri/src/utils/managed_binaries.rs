@@ -92,11 +92,10 @@ pub fn configure_bundled_linux_runtime(
             return;
         }
 
-        let mut paths = vec![runtime_dir];
-        if let Some(existing) = env::var_os("LD_LIBRARY_PATH") {
-            paths.extend(env::split_paths(&existing));
-        }
-        if let Ok(value) = env::join_paths(paths) {
+        // Keep sidecar runtime libraries scoped and deterministic. Inheriting the
+        // parent LD_LIBRARY_PATH can interpose unrelated GTK/GLib/AT-SPI libs and
+        // crash older LTS distros with symbol lookup errors.
+        if let Ok(value) = env::join_paths([runtime_dir]) {
             command.env("LD_LIBRARY_PATH", value);
         }
     }

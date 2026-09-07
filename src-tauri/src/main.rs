@@ -545,6 +545,8 @@ fn main() {
             get_software_artwork,
             update_igdb_credentials,
             local_environment_preflight,
+            system_health_check,
+            export_diagnostic_report,
             setup_wireguard_client,
             reconnect_local_wireguard_client_quick,
             disconnect_local_wireguard_client_command,

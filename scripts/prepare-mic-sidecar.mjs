@@ -193,10 +193,10 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
     `${tool.stagedStem}-${targetTriple}${isWindowsTarget(targetTriple) ? '.exe' : ''}`,
   );
 
-  if (targetTriple.endsWith('apple-darwin') && ['ssh', 'scp', 'ssh-keygen'].includes(tool.lookupName)) {
+  if ((targetTriple.endsWith('apple-darwin') || targetTriple.includes('linux')) && ['ssh', 'scp', 'ssh-keygen'].includes(tool.lookupName)) {
     writeFileSyncSafe(stagedBinary, `#!/bin/sh\nexec /usr/bin/${tool.lookupName} "$@"\n`);
     chmodSync(stagedBinary, 0o755);
-    console.log(`Staged macOS ${tool.lookupName} wrapper for packaging: ${stagedBinary}`);
+    console.log(`Staged ${targetTriple.includes('linux') ? 'Linux' : 'macOS'} ${tool.lookupName} wrapper for packaging: ${stagedBinary}`);
     return;
   }
 

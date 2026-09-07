@@ -16,6 +16,7 @@ import {
   VAST_BILLING_URL,
   VAST_API_KEY_URL,
 } from "../../lib/constants";
+import { buildDiagnosticIssueUrl } from "../../lib/githubIssue";
 import type {
   BackupPerformanceMode,
   OfferCandidate,
@@ -27,6 +28,8 @@ import type {
   EmbeddedMoonlightInstanceStatus,
   VastBrowserBillingAction,
   VastWalletSummary,
+  SystemHealthReport,
+  DiagnosticReportResponse,
   LaunchLibraryResponse,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
@@ -41,6 +44,26 @@ import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
+
+function healthStatusClass(status: "ok" | "warning" | "failed") {
+  if (status === "failed") {
+    return "border-[#ff8ca2] bg-[#361220] text-[#ffc1cf]";
+  }
+  if (status === "warning") {
+    return "border-[#ffd166] bg-[#3c2c13] text-[#ffe0a3]";
+  }
+  return "border-[#7bff48] bg-[#142815] text-[#b4ff88]";
+}
+
+function healthStatusGlyph(status: "ok" | "warning" | "failed") {
+  if (status === "failed") {
+    return "✕";
+  }
+  if (status === "warning") {
+    return "!";
+  }
+  return "✓";
+}
 
 interface Props {
   appState: PersistedAppState;
@@ -58,6 +81,11 @@ interface Props {
   onLoadAvailableOfferCountries: () => Promise<
     OfferCountryAvailability[] | null
   >;
+  systemHealth: SystemHealthReport | null;
+  healthChecking: boolean;
+  lastDiagnosticReport: DiagnosticReportResponse | null;
+  onRefreshSystemHealth: () => Promise<SystemHealthReport | null>;
+  onExportCrashReport: (reason?: string, frontendError?: string) => Promise<DiagnosticReportResponse | null>;
   onNextOffersPage: () => Promise<void>;
   onPreviousOffersPage: () => Promise<void>;
   onManualLocationSave: (payload: {
@@ -137,6 +165,11 @@ export function DashboardScreen({
   blockingAction,
   onSearchOffers,
   onLoadAvailableOfferCountries,
+  systemHealth,
+  healthChecking,
+  lastDiagnosticReport,
+  onRefreshSystemHealth,
+  onExportCrashReport,
   onNextOffersPage,
   onPreviousOffersPage,
   onManualLocationSave,
@@ -179,6 +212,7 @@ export function DashboardScreen({
     useState<number | null>(null);
   const [launchLibraryInstanceId, setLaunchLibraryInstanceId] = useState<number | null>(null);
   const [walletModalOpen, setWalletModalOpen] = useState(false);
+  const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
   const [connectionInfoModalType, setConnectionInfoModalType] = useState<
@@ -239,6 +273,25 @@ export function DashboardScreen({
     } catch {
       window.open(url, "_blank", "noopener,noreferrer");
     }
+  }
+
+  async function handleHealthClick() {
+    setHealthModalOpen(true);
+    await onRefreshSystemHealth();
+  }
+
+  async function handleExportDiagnostics() {
+    const report = await onExportCrashReport("manual-health-export");
+    if (!report) {
+      return;
+    }
+    await openExternalUrl(
+      buildDiagnosticIssueUrl({
+        report,
+        reason: "manual-health-export",
+        health: systemHealth,
+      }),
+    );
   }
 
   async function handlePlay() {
@@ -367,6 +420,15 @@ export function DashboardScreen({
           </div>
 
           <div className="flex items-center gap-2">
+            <Button
+              variant={systemHealth?.ok === false ? "danger" : "secondary"}
+              onClick={handleHealthClick}
+              loading={healthChecking}
+              loadingText="Checking..."
+              title={systemHealth?.summary ?? "Run local health check"}
+            >
+              {systemHealth?.ok === false ? "✕" : "✓"} Health
+            </Button>
             <Button variant="ghost" onClick={() => setWalletModalOpen(true)}>
               Wallet {walletAmountLabel}
             </Button>
@@ -479,6 +541,86 @@ export function DashboardScreen({
           onNext={goToNextTutorialStep}
           onClose={() => setTutorialOpen(false)}
         />
+
+        {healthModalOpen && (
+          <ModalFrame
+            panelClassName="pixel-frame max-w-3xl bg-[#080c1d] text-[#d9efff]"
+            labelledBy="health-modal-title"
+          >
+            <div className="flex items-start justify-between border-b border-[#28345f] p-4">
+              <div>
+                <p className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
+                  Pre-provisioning health
+                </p>
+                <h2 id="health-modal-title" className="mt-1 font-display text-lg text-white">
+                  {systemHealth?.ok === false ? "Environment needs attention" : "Environment ready"}
+                </h2>
+                <p className="mt-1 text-[1.15rem] leading-[1.2] text-[#9ec4df]">
+                  {systemHealth?.summary ?? "Run the checker before provisioning to catch local OS, resource, tunnel, and credential issues."}
+                </p>
+              </div>
+              <Button variant="ghost" onClick={() => setHealthModalOpen(false)}>
+                Close
+              </Button>
+            </div>
+            <ModalBody className="space-y-4 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  variant="secondary"
+                  onClick={onRefreshSystemHealth}
+                  loading={healthChecking}
+                  loadingText="Checking..."
+                >
+                  Re-run checks
+                </Button>
+                <Button variant="ghost" onClick={handleExportDiagnostics}>
+                  Open GitHub issue
+                </Button>
+                {lastDiagnosticReport && (
+                  <span className="text-[1rem] text-[#9ec4df]">
+                    Report saved: {lastDiagnosticReport.path}
+                  </span>
+                )}
+              </div>
+
+              {systemHealth ? (
+                <div className="space-y-2">
+                  {systemHealth.probes.map((probe) => (
+                    <div
+                      key={probe.id}
+                      className={`rounded border p-3 ${healthStatusClass(probe.status)}`}
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-display text-sm">{healthStatusGlyph(probe.status)}</span>
+                          <div>
+                            <p className="font-display text-[11px] uppercase tracking-[0.12em]">
+                              {probe.label}
+                            </p>
+                            <p className="text-[1.08rem] leading-[1.15]">{probe.summary}</p>
+                          </div>
+                        </div>
+                        <span className="font-display text-[10px] uppercase tracking-[0.12em] opacity-80">
+                          {probe.category}
+                        </span>
+                      </div>
+                      {probe.details && (
+                        <p className="mt-2 break-all text-[0.95rem] opacity-85">{probe.details}</p>
+                      )}
+                      {probe.fixHint && (
+                        <p className="mt-2 text-[1rem] leading-[1.15] opacity-95">Fix: {probe.fixHint}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-[1.15rem] text-[#9ec4df]">
+                  No health report loaded yet. Click “Re-run checks”.
+                </p>
+              )}
+            </ModalBody>
+          </ModalFrame>
+        )}
 
         <section>
           <Card className="pixel-frame">

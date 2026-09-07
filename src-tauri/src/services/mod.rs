@@ -1,7 +1,9 @@
 pub mod app_config;
 pub mod app_context;
 pub mod audio_latency;
+pub mod diagnostics;
 pub mod display_profile;
+pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 pub mod launch_library;
