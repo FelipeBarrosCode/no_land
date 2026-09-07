@@ -33,6 +33,63 @@ const target = readTarget(args)
   || process.env.TAURI_ENV_TARGET_TRIPLE?.trim()
   || defaultHostTarget();
 
+const LINUX_SYSTEM_LIBRARY_PATTERNS = [
+  /^ld-linux/u,
+  /^ld-musl/u,
+  /^libc\.so/u,
+  /^libm\.so/u,
+  /^libpthread\.so/u,
+  /^libdl\.so/u,
+  /^librt\.so/u,
+  /^libresolv\.so/u,
+  /^libutil\.so/u,
+
+  // Do not bundle the Linux desktop platform stack. GTK/WebKit/AT-SPI/GIO/GLib
+  // must come from the user's distro as one compatible set. Bundling any of
+  // these can make LTS systems crash on startup with symbol lookup errors like:
+  //   libatspi.so.0: undefined symbol: g_once_init_leave_pointer
+  /^libglib-2\.0\.so/u,
+  /^libgobject-2\.0\.so/u,
+  /^libgio-2\.0\.so/u,
+  /^libgmodule-2\.0\.so/u,
+  /^libgthread-2\.0\.so/u,
+  /^libatk-1\.0\.so/u,
+  /^libatk-bridge-2\.0\.so/u,
+  /^libatspi\.so/u,
+  /^libgtk-3\.so/u,
+  /^libgdk-3\.so/u,
+  /^libwebkit2gtk/u,
+  /^libjavascriptcoregtk/u,
+  /^libpango/u,
+  /^libpangocairo/u,
+  /^libpangoft2/u,
+  /^libharfbuzz/u,
+  /^libcairo/u,
+  /^libcairo-gobject/u,
+  /^libgdk_pixbuf-2\.0\.so/u,
+  /^libepoxy\.so/u,
+  /^libdbus-1\.so/u,
+  /^libsystemd\.so/u,
+  /^libselinux\.so/u,
+  /^libmount\.so/u,
+  /^libblkid\.so/u,
+  /^libffi\.so/u,
+  /^libpcre2-8\.so/u,
+  /^libz\.so/u,
+  /^libzstd\.so/u,
+  /^liblzma\.so/u,
+  /^libbrotli/u,
+  /^libgraphite2\.so/u,
+  /^libfontconfig\.so/u,
+  /^libfreetype\.so/u,
+  /^libexpat\.so/u,
+  /^libpng16\.so/u,
+  /^libwayland-/u,
+  /^libxkbcommon\.so/u,
+  /^libX/u,
+  /^libxcb/u,
+];
+
 if (!target) {
   console.error('Unable to determine native dependency target triple. Pass --target <triple>.');
   process.exit(1);
@@ -923,63 +980,6 @@ function linuxSharedLibraryDependencies(path) {
     })
     .filter((value) => value && existsSync(value));
 }
-
-const LINUX_SYSTEM_LIBRARY_PATTERNS = [
-  /^ld-linux/u,
-  /^ld-musl/u,
-  /^libc\.so/u,
-  /^libm\.so/u,
-  /^libpthread\.so/u,
-  /^libdl\.so/u,
-  /^librt\.so/u,
-  /^libresolv\.so/u,
-  /^libutil\.so/u,
-
-  // Do not bundle the Linux desktop platform stack. GTK/WebKit/AT-SPI/GIO/GLib
-  // must come from the user's distro as one compatible set. Bundling any of
-  // these can make LTS systems crash on startup with symbol lookup errors like:
-  //   libatspi.so.0: undefined symbol: g_once_init_leave_pointer
-  /^libglib-2\.0\.so/u,
-  /^libgobject-2\.0\.so/u,
-  /^libgio-2\.0\.so/u,
-  /^libgmodule-2\.0\.so/u,
-  /^libgthread-2\.0\.so/u,
-  /^libatk-1\.0\.so/u,
-  /^libatk-bridge-2\.0\.so/u,
-  /^libatspi\.so/u,
-  /^libgtk-3\.so/u,
-  /^libgdk-3\.so/u,
-  /^libwebkit2gtk/u,
-  /^libjavascriptcoregtk/u,
-  /^libpango/u,
-  /^libpangocairo/u,
-  /^libpangoft2/u,
-  /^libharfbuzz/u,
-  /^libcairo/u,
-  /^libcairo-gobject/u,
-  /^libgdk_pixbuf-2\.0\.so/u,
-  /^libepoxy\.so/u,
-  /^libdbus-1\.so/u,
-  /^libsystemd\.so/u,
-  /^libselinux\.so/u,
-  /^libmount\.so/u,
-  /^libblkid\.so/u,
-  /^libffi\.so/u,
-  /^libpcre2-8\.so/u,
-  /^libz\.so/u,
-  /^libzstd\.so/u,
-  /^liblzma\.so/u,
-  /^libbrotli/u,
-  /^libgraphite2\.so/u,
-  /^libfontconfig\.so/u,
-  /^libfreetype\.so/u,
-  /^libexpat\.so/u,
-  /^libpng16\.so/u,
-  /^libwayland-/u,
-  /^libxkbcommon\.so/u,
-  /^libX/u,
-  /^libxcb/u,
-];
 
 function shouldSkipLinuxBundledDependency(dep) {
   return shouldUseSystemLinuxLibrary(basename(dep));
