@@ -72,6 +72,7 @@
           "libegl1",
           "libgl1",
           "libgles2",
+          "libgnutls30",
           "libx11-6",
           "libxext6",
           "libxfixes3",

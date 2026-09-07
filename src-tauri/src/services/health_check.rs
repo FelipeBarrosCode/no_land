@@ -182,6 +182,8 @@ fn linux_forbidden_runtime_lib(name: &str) -> bool {
         "libcurl",
         "libnghttp2",
         "libgnutls",
+        "libpsl",
+        "libssh2",
     ];
     forbidden_prefixes
         .iter()
