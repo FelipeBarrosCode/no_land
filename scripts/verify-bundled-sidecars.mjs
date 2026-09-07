@@ -60,11 +60,10 @@ function verifyMacBundles(targetTriple, bundleRoot) {
 
 function verifyLinuxBundles(targetTriple, bundleRoot) {
   const appDir = findFirstPath(bundleRoot, (path) => path.endsWith('.AppDir'));
-  if (!appDir) {
-    fail(`Could not locate AppDir under ${bundleRoot}`);
+  if (appDir) {
+    verifyBundleTree(appDir, targetTriple, 'linux AppDir');
+    verifyLinuxExecutableSmokeTests(appDir, targetTriple, 'linux AppDir');
   }
-  verifyBundleTree(appDir, targetTriple, 'linux AppDir');
-  verifyLinuxExecutableSmokeTests(appDir, targetTriple, 'linux AppDir');
 
   const appImage = findFirstPath(bundleRoot, (path) => path.endsWith('.AppImage'));
   if (appImage) {
@@ -76,8 +75,10 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
     });
   }
 
+  let verifiedNativePackage = false;
   const deb = findFirstPath(bundleRoot, (path) => path.endsWith('.deb'));
   if (deb) {
+    verifiedNativePackage = true;
     withExtractedTemp('linux-deb-', (extractRoot) => {
       run('dpkg-deb', ['-x', deb, extractRoot]);
       const label = `deb package ${basename(deb)}`;
@@ -88,12 +89,17 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
 
   const rpm = findFirstPath(bundleRoot, (path) => path.endsWith('.rpm'));
   if (rpm) {
+    verifiedNativePackage = true;
     withExtractedTemp('linux-rpm-', (extractRoot) => {
       runShell(`rpm2cpio '${escapeForSingleQuotes(rpm)}' | cpio -idm --quiet`, extractRoot);
       const label = `rpm package ${basename(rpm)}`;
       verifyBundleTree(extractRoot, targetTriple, label);
       verifyLinuxLinkage(extractRoot, targetTriple, label);
     });
+  }
+
+  if (!appDir && !appImage && !verifiedNativePackage) {
+    fail(`Could not locate any Linux bundle output under ${bundleRoot}`);
   }
 
   console.log(`Verified bundled Linux sidecars/runtime for ${targetTriple}`);
@@ -332,7 +338,49 @@ function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cl
 
 function verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label) {
   const gstreamerRoot = join(root, 'usr', 'lib', productName, 'binaries', 'gstreamer', targetTriple);
-  const forbidden = [
+  const offenders = [];
+  const scopedRuntimeDirs = [
+    join(gstreamerRoot, 'lib'),
+    join(gstreamerRoot, 'lib64'),
+  ];
+  const packageLibraryDirs = [
+    join(root, 'usr', 'lib'),
+    join(root, 'usr', 'lib64'),
+  ];
+
+  for (const libDir of scopedRuntimeDirs) {
+    collectForbiddenLinuxLibraries(libDir, offenders, linuxDistroOwnedRuntimeLibraryPatterns());
+  }
+
+  // AppImage/linuxdeploy-style usr/lib injection is the most dangerous place for
+  // these libraries: AppRun adds it to the dynamic loader path, then host GIO
+  // modules can accidentally bind against bundled GLib/libcurl/nghttp2 versions.
+  // Native .deb/.rpm builds should depend on distro GTK/WebKit/GIO instead.
+  for (const libDir of packageLibraryDirs) {
+    collectForbiddenLinuxLibraries(libDir, offenders, linuxDistroOwnedRuntimeLibraryPatterns(), { recursive: false });
+  }
+
+  if (offenders.length > 0) {
+    fail(`Linux bundle contains distro-owned desktop/system libraries in ${label}. These can break Ubuntu/Zorin LTS with GLib/GIO/libcurl symbol lookup errors; use system GTK/WebKit/AT-SPI/GLib/curl/nghttp2 instead.\n${offenders.join('\n')}`);
+  }
+}
+
+function collectForbiddenLinuxLibraries(libDir, offenders, patterns, { recursive = false } = {}) {
+  if (!existsSync(libDir)) return;
+  for (const entry of readdirSync(libDir, { withFileTypes: true })) {
+    const path = join(libDir, entry.name);
+    if (entry.isDirectory()) {
+      if (recursive) collectForbiddenLinuxLibraries(path, offenders, patterns, { recursive });
+      continue;
+    }
+    if ((entry.isFile() || entry.isSymbolicLink()) && patterns.some((pattern) => pattern.test(entry.name))) {
+      offenders.push(path);
+    }
+  }
+}
+
+function linuxDistroOwnedRuntimeLibraryPatterns() {
+  return [
     /^libglib-2\.0\.so/u,
     /^libgobject-2\.0\.so/u,
     /^libgio-2\.0\.so/u,
@@ -346,20 +394,59 @@ function verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label)
     /^libwebkit2gtk/u,
     /^libjavascriptcoregtk/u,
     /^libpango/u,
+    /^libpangocairo/u,
+    /^libpangoft2/u,
+    /^libharfbuzz/u,
     /^libcairo/u,
+    /^libcairo-gobject/u,
+    /^libgdk_pixbuf-2\.0\.so/u,
+    /^libepoxy\.so/u,
+    /^libdbus-1\.so/u,
+    /^libsystemd\.so/u,
+    /^libselinux\.so/u,
+    /^libmount\.so/u,
+    /^libblkid\.so/u,
+    /^libffi\.so/u,
+    /^libpcre2-8\.so/u,
+    /^libz\.so/u,
+    /^libzstd\.so/u,
+    /^liblzma\.so/u,
+    /^libbrotli/u,
+    /^libgraphite2\.so/u,
+    /^libfontconfig\.so/u,
+    /^libfreetype\.so/u,
+    /^libexpat\.so/u,
+    /^libpng16\.so/u,
+    /^libwayland-/u,
+    /^libxkbcommon\.so/u,
+    /^libX/u,
+    /^libxcb/u,
+    /^libcurl/u,
+    /^libnghttp2/u,
+    /^libpsl/u,
+    /^libssh2/u,
+    /^libgnutls/u,
+    /^libudev\.so/u,
+    /^libgudev/u,
+    /^libva/u,
+    /^libvdpau/u,
+    /^libdrm/u,
+    /^libgbm/u,
+    /^libGL\.so/u,
+    /^libGLX/u,
+    /^libEGL/u,
+    /^libGLESv/u,
+    /^libOpenGL\.so/u,
+    /^libglapi/u,
+    /^libopengl\.so/u,
+    /^libpipewire/u,
+    /^libspa/u,
+    /^libpulse/u,
+    /^libasound/u,
+    /^libjack/u,
+    /^libxkbcommon-x11/u,
+    /^libxshmfence/u,
   ];
-  const offenders = [];
-  for (const libDir of [join(gstreamerRoot, 'lib'), join(gstreamerRoot, 'lib64')]) {
-    if (!existsSync(libDir)) continue;
-    for (const entry of readdirSync(libDir, { withFileTypes: true })) {
-      if ((entry.isFile() || entry.isSymbolicLink()) && forbidden.some((pattern) => pattern.test(entry.name))) {
-        offenders.push(join(libDir, entry.name));
-      }
-    }
-  }
-  if (offenders.length > 0) {
-    fail(`Linux bundle contains distro-owned desktop platform libraries in ${label}. These can break Ubuntu/Zorin LTS with GLib symbol lookup errors; use system GTK/AT-SPI/GLib instead.\n${offenders.join('\n')}`);
-  }
 }
 
 function cleanLinuxRuntimeEnv() {
