@@ -52,74 +52,13 @@ function stageLinuxTools(targetTriple) {
     ], 'openssh-client did not provide ssh-keygen'),
   };
 
-  stageLinuxToolRuntime(Object.values(envAssignments), targetTriple);
+  // Linux .deb/.rpm rely on the distro OpenSSH stack: the staged wrappers exec
+  // /usr/bin/ssh|scp|ssh-keygen and openssh-client is declared as a package
+  // dependency. Copying a build-host closure into binaries/ssh-runtime would
+  // interpose CI's libcrypto/libz/libselinux on user distros, the same failure
+  // class as the bundled GTK/GLib symbol lookups seen on Ubuntu/Zorin LTS.
   writeGitHubEnv(envAssignments);
   logAssignments(envAssignments);
-}
-
-function stageLinuxToolRuntime(seedExecutables, targetTriple) {
-  const destination = join(repoRoot, 'src-tauri', 'binaries', 'ssh-runtime', targetTriple);
-  rmSync(destination, { recursive: true, force: true });
-  mkdirSync(destination, { recursive: true });
-
-  const queue = [...seedExecutables];
-  const scanned = new Set();
-  const copied = new Set();
-  while (queue.length > 0) {
-    const current = queue.pop();
-    if (!current || scanned.has(current)) continue;
-    scanned.add(current);
-
-    const result = spawnSync('ldd', [current], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (result.status !== 0) {
-      fail(`Unable to inspect Linux runtime dependencies for ${current}: ${result.stderr?.trim() || `ldd exited ${result.status}`}`);
-    }
-    if (/not found/u.test(result.stdout)) {
-      fail(`Linux managed tool has unresolved dependencies: ${current}\n${result.stdout}`);
-    }
-
-    for (const dependency of parseLddDependencies(result.stdout)) {
-      if (isLinuxBaseRuntime(dependency) || copied.has(dependency)) continue;
-      copied.add(dependency);
-      const output = join(destination, basename(dependency));
-      copyFileSync(dependency, output);
-      chmodSync(output, statSync(dependency).mode);
-      queue.push(dependency);
-    }
-  }
-
-  console.log(`Staged ${copied.size} non-base OpenSSH runtime libraries in ${destination}`);
-}
-
-function parseLddDependencies(output) {
-  return output
-    .split(/\r?\n/u)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const mapped = line.match(/=>\s+(\/[^\s]+)\s+\(/u);
-      if (mapped) return mapped[1];
-      const direct = line.match(/^(\/[^\s]+)\s+\(/u);
-      return direct ? direct[1] : null;
-    })
-    .filter((path) => path && existsSync(path));
-}
-
-function isLinuxBaseRuntime(path) {
-  return [
-    /^ld-linux/u,
-    /^ld-musl/u,
-    /^libc\.so/u,
-    /^libm\.so/u,
-    /^libpthread\.so/u,
-    /^libdl\.so/u,
-    /^librt\.so/u,
-    /^libresolv\.so/u,
-    /^libutil\.so/u,
-  ].some((pattern) => pattern.test(basename(path)));
 }
 
 function stageWindowsTools(targetTriple) {
