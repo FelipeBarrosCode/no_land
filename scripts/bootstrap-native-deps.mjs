@@ -113,6 +113,16 @@ const LINUX_SYSTEM_LIBRARY_PATTERNS = [
   /^libpulse/u,
   /^libasound/u,
   /^libjack/u,
+
+  // Distro-owned network/crypto client libraries. ffmpeg's libavformat pulls
+  // libgnutls into the closure; host GIO modules can also load libcurl and its
+  // friends. Interposing CI versions on user distros is the same symbol-mismatch
+  // failure class as bundling GLib/GTK.
+  /^libgnutls/u,
+  /^libcurl/u,
+  /^libnghttp2/u,
+  /^libpsl/u,
+  /^libssh2/u,
 ];
 
 if (!target) {
