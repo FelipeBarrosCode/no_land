@@ -146,11 +146,11 @@ export function InstanceDisplayModal({ instance, onClose }: Props) {
 
             {status.profileUpdateRequired ? (
               <div className="rounded border border-amber-400/40 bg-amber-400/10 p-3 text-sm text-amber-100">
-                The VM has a different EDID profile. Applying a resolution will install the current client-native profile and briefly restart Xorg and Sunshine.
+                The VM is using a different EDID profile. Applying this setting will install your local display profile and briefly restart Xorg and Sunshine.
               </div>
             ) : (
               <div className="rounded border border-emerald-400/30 bg-emerald-400/10 p-3 text-sm text-emerald-100">
-                The VM already has the current multi-resolution EDID. Applying another listed mode uses the fast switch path.
+                The VM is already using this EDID profile. Switching to another listed resolution will apply instantly without a full restart.
               </div>
             )}
 
