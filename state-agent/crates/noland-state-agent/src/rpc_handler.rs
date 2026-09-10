@@ -350,7 +350,7 @@ impl RpcHandler for AgentRpc {
                                     &task_agent.config.paths.run_root,
                                     session,
                                 )?;
-                                let storage = RcloneStorage::from_session(session, &config);
+                                let storage = RcloneStorage::try_from_session(session, &config)?;
                                 noland_storage::commit_checkpoint(&storage, master, &checkpoint)
                                     .await?;
                             }
@@ -596,7 +596,7 @@ impl RpcHandler for AgentRpc {
                 let master = master_from_params(&request.params, agent)?;
                 let (config, _session_guard) =
                     write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                let storage = RcloneStorage::from_session(&session, &config);
+                let storage = RcloneStorage::try_from_session(&session, &config)?;
                 let catalog = load_catalog(&storage, &master).await;
                 Ok(serde_json::to_value(catalog?)?)
             }
@@ -604,7 +604,7 @@ impl RpcHandler for AgentRpc {
                 if let Ok(session) = parse_session(&request.params) {
                     let (config, _session_guard) =
                         write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                    let storage = RcloneStorage::from_session(&session, &config);
+                    let storage = RcloneStorage::try_from_session(&session, &config)?;
                     let health = storage.health_check().await?;
                     return Ok(serde_json::to_value(health)?);
                 }

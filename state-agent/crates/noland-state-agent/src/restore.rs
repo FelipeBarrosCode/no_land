@@ -132,7 +132,8 @@ pub async fn run_restore_with_session(
     } else {
         TransferTuning::gameplay_safe()
     };
-    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
+    let storage =
+        RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     let storage_before = storage.operation_metrics();
 
     // Dynamic roots such as Steam libraries may appear after the agent starts.

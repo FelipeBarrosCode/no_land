@@ -993,12 +993,26 @@ async fn sunshine_config_response(
     })
 }
 
+fn sunshine_pairing_id(unique_id: &str) -> String {
+    let normalized = unique_id.trim().to_ascii_lowercase();
+    if normalized.len() == 32 && normalized.chars().all(|value| value.is_ascii_hexdigit()) {
+        return normalized;
+    }
+
+    // Older persisted Moonlight identities use a 16-character unique ID. Sunshine's
+    // current /api/pin endpoint requires a 32-character hexadecimal pairing ID;
+    // expanding the stable legacy ID keeps re-pairing requests associated with the
+    // same client without changing the GameStream identity format.
+    format!("{normalized}{normalized}")
+}
+
 async fn submit_sunshine_pin_request(
     client: &reqwest::Client,
     host: &str,
     username: &str,
     password: &str,
     pin: &str,
+    pairing_id: &str,
     client_name: &str,
 ) -> Result<SunshineApiResponse, reqwest::Error> {
     let response = client
@@ -1006,6 +1020,7 @@ async fn submit_sunshine_pin_request(
         .basic_auth(username, Some(password))
         .json(&serde_json::json!({
             "pin": pin,
+            "pairing_id": sunshine_pairing_id(pairing_id),
             "name": client_name,
         }))
         .send()
@@ -1034,6 +1049,7 @@ pub async fn authorize_sunshine_pin(
     username: &str,
     password: &str,
     pin: &str,
+    pairing_id: &str,
     client_name: Option<&str>,
 ) -> AppResult<()> {
     let client = sunshine_http_client()?;
@@ -1054,6 +1070,7 @@ pub async fn authorize_sunshine_pin(
             username,
             password,
             pin,
+            pairing_id,
             &effective_client_name,
         )
         .await
@@ -1558,8 +1575,22 @@ async fn emit_post_wireguard_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_sunshine_pin_response_body, tcp_reachability};
+    use super::{parse_sunshine_pin_response_body, sunshine_pairing_id, tcp_reachability};
     use std::{net::TcpListener, time::Duration};
+
+    #[test]
+    fn sunshine_pairing_id_expands_legacy_identity() {
+        let pairing_id = sunshine_pairing_id("0123456789abcdef");
+        assert_eq!(pairing_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(pairing_id.len(), 32);
+        assert!(pairing_id.chars().all(|value| value.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn sunshine_pairing_id_preserves_current_identity() {
+        let pairing_id = sunshine_pairing_id("ABCDEF0123456789ABCDEF0123456789");
+        assert_eq!(pairing_id, "abcdef0123456789abcdef0123456789");
+    }
 
     #[test]
     fn reachability_reports_open_port() {

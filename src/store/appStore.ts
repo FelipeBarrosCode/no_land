@@ -71,6 +71,7 @@ import {
   setActiveSharedStorageProfile,
   disconnectSharedStorageProfile,
   beginOauthAuthorization,
+  cancelOauthAuthorization,
   completeOauthAuthorization,
   getInstanceLaunchLibrary,
   launchInstanceSoftware as launchInstanceSoftwareCommand,
@@ -240,6 +241,7 @@ interface AppStore {
     providerFields?: Record<string, string>,
   ) => Promise<string | null>;
   completeOauthFlow: (sessionId: string) => Promise<void>;
+  cancelOauthFlow: (sessionId: string) => Promise<void>;
   triggerBackup: () => Promise<void>;
   triggerBackupForInstance: (instanceId: number) => Promise<void>;
   syncInstanceStorage: (
@@ -1757,6 +1759,15 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (error) {
         set({ error: mapError(error) });
         return null;
+      }
+    },
+
+    cancelOauthFlow: async (sessionId) => {
+      try {
+        await cancelOauthAuthorization(sessionId);
+        set({ oauthSessionId: null, error: null });
+      } catch (error) {
+        set({ error: mapError(error) });
       }
     },
 

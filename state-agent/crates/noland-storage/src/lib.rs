@@ -14,11 +14,13 @@ pub use commit::{
 };
 pub use local::LocalStorage;
 pub use noland_rclone_adapter::{
-    classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning,
+    classify_remote_error, GoogleDriveTransferOptions, ProviderCapabilities, ProviderKind,
+    ProviderOptions, ProviderRootIdentity, ProviderTransferConfig, RemoteErrorClass,
+    TransferProfile, TransferTuning,
 };
 pub use rclone::{
     shred_all_ephemeral_sessions, shred_ephemeral_session, write_ephemeral_session,
-    write_guarded_ephemeral_session, EphemeralSessionGuard, RcloneStorage,
+    write_guarded_ephemeral_session, EphemeralSessionGuard, RcloneCommandBuilder, RcloneStorage,
 };
 pub use transfer::{
     compare_remote_known, download_bounded, list_remote_known, upload_immutable_bounded,
@@ -154,6 +156,14 @@ pub trait SharedStorageProvider: Send + Sync {
             );
         }
         Ok(written)
+    }
+
+    fn provider_kind(&self) -> Option<ProviderKind> {
+        None
+    }
+
+    fn capabilities(&self) -> Option<&ProviderCapabilities> {
+        None
     }
 
     fn storage_identity(&self) -> Option<ProviderRootIdentity> {

@@ -36,7 +36,7 @@ pub async fn pair_host_with_stage1_authorization<F, Fut>(
     authorize_after_stage1_pending: F,
 ) -> Result<PairHostResult, MoonlightError>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<(), MoonlightError>>,
 {
     let resolved_ports = resolve_pairing_ports(&request).await?;
@@ -58,6 +58,7 @@ where
     let address = request.address.clone();
     let unique_id = request.unique_id.clone();
     let http_port = resolved_ports.http_port;
+    let pairing_id = unique_id.clone();
     let stage1_params = vec![
         ("devicename", "roth".to_string()),
         ("updateState", "1".to_string()),
@@ -78,7 +79,7 @@ where
     });
 
     tokio::time::sleep(Duration::from_millis(250)).await;
-    authorize_after_stage1_pending().await?;
+    authorize_after_stage1_pending(pairing_id).await?;
 
     let stage1 = stage1_task.await.map_err(|error| {
         MoonlightError::Persistence(format!("pair stage 1 task failed: {error}"))

@@ -581,6 +581,7 @@ fn main() {
             set_active_shared_storage_profile,
             disconnect_shared_storage_profile,
             begin_oauth_authorization,
+            cancel_oauth_authorization,
             complete_oauth_authorization,
             trigger_instance_backup,
             trigger_instance_backup_for,

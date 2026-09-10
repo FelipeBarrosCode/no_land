@@ -1001,7 +1001,8 @@ pub async fn run_backup_with_session_performance(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let tuning = transfer_tuning(agent, performance);
-    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
+    let storage =
+        RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup(
         agent,
         app_id,
@@ -1042,7 +1043,8 @@ pub async fn run_backup_all_with_session_performance(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let tuning = transfer_tuning(agent, performance);
-    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
+    let storage =
+        RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup_all(agent, mode, performance, &storage, master, operation_id).await
 }
 

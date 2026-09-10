@@ -56,3 +56,44 @@ pub mod constants {
     pub const RPC_SOCKET: &str = "/run/noland/state-agent.sock";
     pub const SHARED_STORAGE_ROOT_NAME: &str = "Noland Shared Storage";
 }
+
+/// Provider-independent, versioned storage-format parameters. Provider transfer
+/// profiles must never mutate these values.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StorageFormatConfig {
+    pub fastcdc_min: u64,
+    pub fastcdc_avg: u64,
+    pub fastcdc_max: u64,
+    pub pack_target: u64,
+    pub pack_max: u64,
+}
+
+impl Default for StorageFormatConfig {
+    fn default() -> Self {
+        Self {
+            fastcdc_min: constants::FASTCDC_MIN,
+            fastcdc_avg: constants::FASTCDC_AVG,
+            fastcdc_max: constants::FASTCDC_MAX,
+            pack_target: constants::PACK_TARGET,
+            pack_max: constants::PACK_MAX,
+        }
+    }
+}
+
+#[cfg(test)]
+mod storage_format_tests {
+    use super::{constants, StorageFormatConfig};
+
+    #[test]
+    fn provider_independent_storage_format_defaults_are_locked() {
+        let format = StorageFormatConfig::default();
+        assert_eq!(format.fastcdc_min, 1024 * 1024);
+        assert_eq!(format.fastcdc_avg, 4 * 1024 * 1024);
+        assert_eq!(format.fastcdc_max, 8 * 1024 * 1024);
+        assert_eq!(format.pack_target, 512 * 1024 * 1024);
+        assert_eq!(format.pack_max, 1024 * 1024 * 1024);
+        assert_eq!(format.fastcdc_min, constants::FASTCDC_MIN);
+        assert_eq!(format.pack_target, constants::PACK_TARGET);
+    }
+}
