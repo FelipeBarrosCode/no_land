@@ -8,7 +8,7 @@ use chrono::Utc;
 use noland_discovery::{
     fallback_exe_identity, is_backup_candidate, resolve_identity_for_executable, SteamDiscovery,
 };
-use noland_observer::{self_excluded, ObserverHub};
+use noland_observer::ObserverHub;
 use noland_state_core::*;
 use noland_state_db::StateDb;
 use uuid::Uuid;
@@ -336,6 +336,9 @@ impl<'a> AttributionEngine<'a> {
             &event.path
         };
         let canonical = canonicalize_lossy(observed_path);
+        if self.path_is_excluded(Path::new(&canonical)) {
+            return Ok(None);
+        }
         let path_id = self.db.upsert_path(&canonical)?;
         let logical = self.roots.classify(Path::new(&canonical));
         let mut record = PathRecord {
@@ -536,7 +539,14 @@ impl<'a> AttributionEngine<'a> {
         } else {
             &event.path
         };
-        self_excluded(path, &self.agent_paths) || is_hard_volatile_root(path)
+        let canonical = canonicalize_lossy(path);
+        self.path_is_excluded(Path::new(&canonical))
+    }
+
+    fn path_is_excluded(&self, path: &Path) -> bool {
+        let in_known_app_root = self.known_root_for_path(path).is_some();
+        self.agent_paths.is_internal(path)
+            || is_tracking_excluded(path, in_known_app_root, self.roots.home.as_deref())
     }
 
     fn session_for_ebpf_fs(&self, fact: &EbpfFilesystemFact) -> Result<Option<AppSession>> {
@@ -822,7 +832,11 @@ pub fn infer_initial_class(
     kind: FsEventKind,
     in_known_root: bool,
 ) -> PersistenceClass {
-    if looks_like_cache(path) || looks_like_lock_or_socket(path) || is_hard_volatile_root(path) {
+    if is_noland_internal(path)
+        || looks_like_cache(path)
+        || looks_like_lock_or_socket(path)
+        || is_hard_volatile_root(path)
+    {
         return PersistenceClass::Ephemeral;
     }
     if looks_like_os_or_lib(path) && !kind.is_mutation() {
@@ -985,11 +999,78 @@ mod tests {
             at: Utc::now(),
             sampled: false,
         };
-        let dep = engine.ingest_fs(&read).unwrap().unwrap();
-        assert!(dep.confidence <= CONF_DEPENDENCY + 0.05);
+        assert!(engine.ingest_fs(&read).unwrap().is_none());
         std::fs::remove_dir_all(home).ok();
         let _ = Metrics::default();
         let _ = Arc::new(());
+    }
+
+    #[test]
+    fn base_system_tracking_requires_a_known_root_but_noland_never_allows_one() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppIdentity::new(AppId::desktop("example-game"), "Example Game");
+        db.upsert_app(&app).unwrap();
+        db.add_known_root(&app.app_id, "install", "/usr/local/share/example-game")
+            .unwrap();
+        db.add_known_root(&app.app_id, "install", "/opt/noland/example-game")
+            .unwrap();
+        db.insert_session(&AppSession::new(
+            app.app_id.clone(),
+            42,
+            SessionSource::DesktopEntry,
+        ))
+        .unwrap();
+        let home = PathBuf::from("/home/gamer");
+        let mut engine = AttributionEngine::new(
+            &db,
+            LogicalRootMap::from_home(&home),
+            AgentPaths::from_roots(
+                PathBuf::from("/var/lib/noland/state"),
+                PathBuf::from("/run/noland"),
+            ),
+        );
+
+        for path in ["/usr/lib/libc.so.6", "/etc/example-game/settings.toml"] {
+            assert!(engine
+                .ingest_fs(&FilesystemEvent {
+                    kind: FsEventKind::Write,
+                    pid: 42,
+                    path: PathBuf::from(path),
+                    dest_path: None,
+                    at: Utc::now(),
+                    sampled: false,
+                })
+                .unwrap()
+                .is_none());
+        }
+
+        let known = engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Write,
+                pid: 42,
+                path: PathBuf::from("/usr/local/share/example-game/content.pak"),
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .expect("an explicit app root may override the base-system filter");
+        assert!(known
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == EvidenceKind::KnownAppRoot));
+
+        assert!(engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Write,
+                pid: 42,
+                path: PathBuf::from("/opt/noland/example-game/content.pak"),
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .is_none());
     }
 
     #[test]

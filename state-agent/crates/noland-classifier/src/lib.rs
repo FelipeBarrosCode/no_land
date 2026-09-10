@@ -9,6 +9,8 @@ use noland_state_db::StateDb;
 pub struct Classifier<'a> {
     pub db: &'a StateDb,
     pub image_id: String,
+    agent_paths: Option<AgentPaths>,
+    target_home: Option<std::path::PathBuf>,
 }
 
 impl<'a> Classifier<'a> {
@@ -16,7 +18,40 @@ impl<'a> Classifier<'a> {
         Self {
             db,
             image_id: image_id.into(),
+            agent_paths: None,
+            target_home: None,
         }
+    }
+
+    pub fn with_exclusion_context(
+        mut self,
+        agent_paths: AgentPaths,
+        target_home: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        self.agent_paths = Some(agent_paths);
+        self.target_home = Some(target_home.into());
+        self
+    }
+
+    fn known_root_kind(&self, app_id: &AppId, path: &Path) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .known_roots(Some(app_id))?
+            .into_iter()
+            .filter_map(|(_, kind, root)| {
+                let root = std::path::PathBuf::from(root);
+                path.starts_with(&root)
+                    .then_some((root.as_os_str().len(), kind))
+            })
+            .max_by_key(|(length, _)| *length)
+            .map(|(_, kind)| kind))
+    }
+
+    fn excluded_from_tracking(&self, path: &Path, in_known_app_root: bool) -> bool {
+        self.agent_paths
+            .as_ref()
+            .is_some_and(|agent_paths| agent_paths.is_internal(path))
+            || is_tracking_excluded(path, in_known_app_root, self.target_home.as_deref())
     }
 
     pub fn classify_path(
@@ -25,11 +60,20 @@ impl<'a> Classifier<'a> {
         assoc: &PathAssociation,
     ) -> Result<(PersistenceClass, SemanticRole)> {
         let path = Path::new(&record.canonical_path);
-        if is_noland_internal(path)
+        let known_root_kind = self.known_root_kind(&assoc.app_id, path)?;
+        let in_known_app_root = known_root_kind.is_some();
+        if self
+            .agent_paths
+            .as_ref()
+            .is_some_and(|agent_paths| agent_paths.is_internal(path))
+            || is_noland_internal_for_home(path, self.target_home.as_deref())
             || is_hard_volatile_root(path)
             || looks_like_lock_or_socket(path)
         {
             return Ok((PersistenceClass::Ephemeral, SemanticRole::Temp));
+        }
+        if is_base_system_path(path) && !in_known_app_root {
+            return Ok((PersistenceClass::BaseImage, SemanticRole::Os));
         }
         if looks_like_cache(path) {
             return Ok((PersistenceClass::Ephemeral, SemanticRole::Cache));
@@ -49,11 +93,22 @@ impl<'a> Classifier<'a> {
             .count()
             > 1;
 
-        let class = if baseline_hit && !assoc.evidence.iter().any(|e| e.kind.is_mutation()) {
-            PersistenceClass::BaseImage
-        } else if baseline_hit && assoc.evidence.iter().any(|e| e.kind.is_mutation()) {
+        let has_mutation = assoc.evidence.iter().any(|e| e.kind.is_mutation());
+        let explicit_root_overrides_image =
+            in_known_app_root && (baseline_hit || is_base_system_path(path));
+        let class = if explicit_root_overrides_image
+            && matches!(known_root_kind.as_deref(), Some("install" | "proton"))
+            && !has_mutation
+            && !looks_like_user_state(path)
+        {
+            PersistenceClass::ReconstructableApp
+        } else if explicit_root_overrides_image {
             PersistenceClass::PersistentState
-        } else if pkg.is_some() && !assoc.evidence.iter().any(|e| e.kind.is_mutation()) {
+        } else if baseline_hit && !has_mutation {
+            PersistenceClass::BaseImage
+        } else if baseline_hit && has_mutation {
+            PersistenceClass::PersistentState
+        } else if pkg.is_some() && !has_mutation {
             PersistenceClass::ReconstructableApp
         } else if shared {
             PersistenceClass::SharedState
@@ -94,10 +149,24 @@ impl<'a> Classifier<'a> {
         mode: BackupMode,
     ) -> Result<BackupDecision> {
         let path = Path::new(&record.canonical_path);
+        let in_known_app_root = self.known_root_kind(&assoc.app_id, path)?.is_some();
+        if self.excluded_from_tracking(path, in_known_app_root) {
+            return Ok(BackupDecision::Exclude);
+        }
         let (class, role) = self.classify_path(record, assoc)?;
         let mut assoc = assoc.clone();
         assoc.persistence_class = class;
         assoc.semantic_role = role;
+        if in_known_app_root
+            && !assoc
+                .evidence
+                .iter()
+                .any(|evidence| evidence.kind == EvidenceKind::KnownAppRoot)
+        {
+            assoc
+                .evidence
+                .push(Evidence::new(EvidenceKind::KnownAppRoot));
+        }
         let policy = self
             .db
             .path_policy(&record.canonical_path, Some(&assoc.app_id))?
@@ -207,6 +276,60 @@ mod tests {
             clf.decide(&save_rec, &save_assoc, BackupMode::PersonalState)
                 .unwrap(),
             BackupDecision::Include
+        );
+    }
+
+    #[test]
+    fn explicit_app_root_overrides_base_system_but_not_noland_exclusions() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppIdentity::new(AppId::desktop("game"), "Game");
+        db.upsert_app(&app).unwrap();
+        db.add_known_root(&app.app_id, "install", "/usr/local/share/game")
+            .unwrap();
+        db.add_known_root(&app.app_id, "install", "/opt/noland/game")
+            .unwrap();
+        let now = Utc::now();
+        let association_for = |path_id| PathAssociation {
+            app_id: app.app_id.clone(),
+            path_id,
+            confidence: CONF_DEPENDENCY,
+            evidence: vec![Evidence::new(EvidenceKind::ReadOnlyDependency)],
+            persistence_class: PersistenceClass::Unknown,
+            semantic_role: SemanticRole::Unknown,
+            first_seen_at: now,
+            last_seen_at: now,
+        };
+
+        let known_id = db.upsert_path("/usr/local/share/game/content.pak").unwrap();
+        let known_record = db.get_path_by_id(known_id).unwrap().unwrap();
+        let known_assoc = association_for(known_id);
+        let internal_id = db.upsert_path("/opt/noland/game/content.pak").unwrap();
+        let internal_record = db.get_path_by_id(internal_id).unwrap().unwrap();
+        let internal_assoc = association_for(internal_id);
+        let classifier = Classifier::new(&db, "img");
+
+        assert_eq!(
+            classifier
+                .classify_path(&known_record, &known_assoc)
+                .unwrap()
+                .0,
+            PersistenceClass::ReconstructableApp
+        );
+        assert_ne!(
+            classifier
+                .decide(&known_record, &known_assoc, BackupMode::CompleteApplication)
+                .unwrap(),
+            BackupDecision::Exclude
+        );
+        assert_eq!(
+            classifier
+                .decide(
+                    &internal_record,
+                    &internal_assoc,
+                    BackupMode::CompleteApplication
+                )
+                .unwrap(),
+            BackupDecision::Exclude
         );
     }
 }

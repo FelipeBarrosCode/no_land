@@ -13,16 +13,12 @@ pub fn reconcile_app(agent: &StateAgent, app_id: &AppId) -> Result<usize> {
         .iter()
         .map(|root| PathBuf::from(&root.canonical_root))
         .collect();
+    let known_roots = known_app_roots(agent, app_id)?;
     if roots.is_empty() {
-        roots = agent
-            .db
-            .known_roots(Some(app_id))?
-            .into_iter()
-            .map(|(_, _, path)| PathBuf::from(path))
-            .collect();
+        roots = known_roots.clone();
         roots.extend(association_roots(agent, app_id)?);
     }
-    reconcile_roots(agent, app_id, roots, Some(6), &[], true)
+    reconcile_roots(agent, app_id, roots, Some(6), &known_roots, &[], true)
 }
 
 /// Reconciles every root that can contain application content before a complete backup plans
@@ -37,16 +33,28 @@ pub(crate) fn reconcile_app_for_complete_backup(
         .into_iter()
         .map(|root| PathBuf::from(root.canonical_root))
         .collect::<Vec<_>>();
-    roots.extend(
-        agent
-            .db
-            .known_roots(Some(app_id))?
-            .into_iter()
-            .map(|(_, _, path)| PathBuf::from(path)),
-    );
+    let known_roots = known_app_roots(agent, app_id)?;
+    roots.extend(known_roots.iter().cloned());
     roots.extend(association_roots(agent, app_id)?);
     let install_roots = known_install_roots(agent, app_id)?;
-    reconcile_roots(agent, app_id, roots, None, &install_roots, false)
+    reconcile_roots(
+        agent,
+        app_id,
+        roots,
+        None,
+        &known_roots,
+        &install_roots,
+        false,
+    )
+}
+
+fn known_app_roots(agent: &StateAgent, app_id: &AppId) -> Result<Vec<PathBuf>> {
+    Ok(agent
+        .db
+        .known_roots(Some(app_id))?
+        .into_iter()
+        .map(|(_, _, path)| PathBuf::from(path))
+        .collect())
 }
 
 pub(crate) fn known_install_roots(agent: &StateAgent, app_id: &AppId) -> Result<Vec<PathBuf>> {
@@ -72,6 +80,7 @@ fn reconcile_roots(
     app_id: &AppId,
     roots: Vec<PathBuf>,
     max_depth: Option<usize>,
+    known_roots: &[PathBuf],
     install_roots: &[PathBuf],
     clear_dirty_evidence: bool,
 ) -> Result<usize> {
@@ -80,14 +89,25 @@ fn reconcile_roots(
     let mut found = 0;
     let now = Utc::now();
     for root in roots {
-        if !root.exists() || is_hard_volatile_root(&root) || agent.config.paths.is_internal(&root) {
+        let root_reaches_known_path = known_roots
+            .iter()
+            .any(|known| root.starts_with(known) || known.starts_with(&root));
+        if !root.exists()
+            || agent.config.paths.is_internal(&root)
+            || is_tracking_excluded(&root, root_reaches_known_path, Some(&agent.config.home))
+        {
             continue;
         }
         let walk = max_depth
             .map(|depth| Walk::new(&root).max_depth(depth))
             .unwrap_or_else(|| Walk::new(&root));
         for path in walk {
-            if looks_like_cache(&path) || looks_like_lock_or_socket(&path) {
+            let in_known_app_root = known_roots.iter().any(|root| path.starts_with(root));
+            if agent.config.paths.is_internal(&path)
+                || is_tracking_excluded(&path, in_known_app_root, Some(&agent.config.home))
+                || looks_like_cache(&path)
+                || looks_like_lock_or_socket(&path)
+            {
                 continue;
             }
             let canonical = path.to_string_lossy().into_owned();
@@ -172,9 +192,13 @@ fn reconcile_roots(
                 } else {
                     PersistenceClass::Unknown
                 };
+                let mut evidence = vec![Evidence::new(EvidenceKind::ReconciliationDelta)];
+                if in_known_app_root {
+                    evidence.push(Evidence::new(EvidenceKind::KnownAppRoot));
+                }
                 (
                     CONF_REPEATED,
-                    vec![Evidence::new(EvidenceKind::ReconciliationDelta)],
+                    evidence,
                     persistence_class,
                     infer_semantic_role(&path, persistence_class),
                 )
@@ -315,6 +339,43 @@ mod tests {
         }
         assert_eq!(agent.db.list_dirty_roots(Some(&app_id)).unwrap().len(), 1);
 
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn reconciliation_does_not_index_managed_sunshine_state() {
+        let root = test_root("sunshine-exclusion");
+        let home = root.join("home");
+        let sunshine = home.join(".config/sunshine/sunshine.conf");
+        let app_state = home.join(".config/example-app/settings.toml");
+        std::fs::create_dir_all(sunshine.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(app_state.parent().unwrap()).unwrap();
+        std::fs::write(&sunshine, b"managed").unwrap();
+        std::fs::write(&app_state, b"user state").unwrap();
+
+        let mut config = AgentConfig::isolated(root.clone());
+        config.home = home.clone();
+        let agent = StateAgent::boot(config).unwrap();
+        let app = AppIdentity::new(AppId::desktop("example-app"), "Example App");
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .mark_dirty_root(&app_id, home.to_string_lossy().as_ref(), None, true)
+            .unwrap();
+
+        reconcile_app(&agent, &app_id).unwrap();
+
+        assert!(agent
+            .db
+            .get_path_by_canonical(app_state.to_string_lossy().as_ref())
+            .unwrap()
+            .is_some());
+        assert!(agent
+            .db
+            .get_path_by_canonical(sunshine.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
         std::fs::remove_dir_all(root).ok();
     }
 

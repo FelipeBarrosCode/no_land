@@ -149,7 +149,8 @@ pub async fn run_backup(
     }
 
     let planning_started = Instant::now();
-    let classifier = Classifier::new(&agent.db, &agent.config.image_id);
+    let classifier = Classifier::new(&agent.db, &agent.config.image_id)
+        .with_exclusion_context(agent.config.paths.clone(), agent.config.home.clone());
     let roots = agent.roots.lock().clone();
     let install_roots = if mode == BackupMode::CompleteApplication {
         known_install_roots(agent, app_id)?
@@ -1216,6 +1217,49 @@ mod tests {
                 false,
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_directly_indexed_agent_storage() {
+        let root = test_root("self-exclusion");
+        let cloud = root.join("cloud");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("test-game"), "Test Game");
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+
+        let internal = agent.config.paths.state_root.join("should-not-back-up.dat");
+        std::fs::write(&internal, b"internal").unwrap();
+        let path_id = agent
+            .db
+            .upsert_path(internal.to_string_lossy().as_ref())
+            .unwrap();
+        let now = Utc::now();
+        agent
+            .db
+            .upsert_association(&PathAssociation {
+                app_id: app_id.clone(),
+                path_id,
+                confidence: CONF_EXPLICIT,
+                evidence: vec![Evidence::new(EvidenceKind::ExplicitUserBinding)],
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+                first_seen_at: now,
+                last_seen_at: now,
+            })
+            .unwrap();
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        assert!(manifest.files.is_empty());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

@@ -15,8 +15,19 @@ install_build_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     export NEEDRESTART_MODE=l
     export NEEDRESTART_SUSPEND=1
-    apt-get update -qq
-    apt-get install -y -qq --no-install-recommends \
+    apt_update_ok=0
+    for attempt in 1 2 3; do
+      if apt-get -o DPkg::Lock::Timeout=600 update -qq; then
+        apt_update_ok=1
+        break
+      fi
+      echo "APT index refresh attempt $attempt failed; retrying because third-party mirrors can be temporarily inconsistent" >&2
+      sleep 10
+    done
+    if [[ "$apt_update_ok" != "1" ]]; then
+      echo "APT index refresh remained partially unavailable; continuing with verified cached indexes" >&2
+    fi
+    apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends \
       build-essential ca-certificates clang curl libelf-dev llvm pkg-config zlib1g-dev
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y clang elfutils-libelf-devel gcc llvm make pkgconf-pkg-config zlib-devel curl ca-certificates
