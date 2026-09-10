@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::operation_manager::CancelOutcome;
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 10;
+const AGENT_API_VERSION: u64 = 11;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 

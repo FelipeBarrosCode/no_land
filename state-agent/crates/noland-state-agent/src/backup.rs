@@ -19,7 +19,7 @@ use noland_storage::{
 };
 use uuid::Uuid;
 
-use crate::reconcile::reconcile_app;
+use crate::reconcile::{known_install_roots, reconcile_app, reconcile_app_for_complete_backup};
 use crate::StateAgent;
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -136,10 +136,14 @@ pub async fn run_backup(
             .list_dirty_roots(Some(app_id))?
             .iter()
             .any(|root| root.requires_reconciliation);
-    if requires_reconciliation {
+    if requires_reconciliation || mode == BackupMode::CompleteApplication {
         persist_operation(agent, &mut op, BackupState::Reconciling, &metrics)?;
         let started = Instant::now();
-        let reconciled = reconcile_app(agent, app_id)?;
+        let reconciled = if mode == BackupMode::CompleteApplication {
+            reconcile_app_for_complete_backup(agent, app_id)?
+        } else {
+            reconcile_app(agent, app_id)?
+        };
         metrics.reconciliation_duration_ms = elapsed_ms(started);
         metrics.num_files_scanned = reconciled as u64;
     }
@@ -147,6 +151,11 @@ pub async fn run_backup(
     let planning_started = Instant::now();
     let classifier = Classifier::new(&agent.db, &agent.config.image_id);
     let roots = agent.roots.lock().clone();
+    let install_roots = if mode == BackupMode::CompleteApplication {
+        known_install_roots(agent, app_id)?
+    } else {
+        Vec::new()
+    };
     let mut candidates = BTreeMap::<String, (PathRecord, PathAssociation)>::new();
     let full_scope = parent.is_none()
         || mode == BackupMode::CompleteApplication
@@ -266,10 +275,18 @@ pub async fn run_backup(
             }
             continue;
         }
-        match classifier.decide(&record, &association, mode)? {
-            BackupDecision::Exclude
-            | BackupDecision::MetadataOnly
-            | BackupDecision::DeferAndReconcile => continue,
+        let decision = classifier.decide(&record, &association, mode)?;
+        let complete_install_content = mode == BackupMode::CompleteApplication
+            && install_roots
+                .iter()
+                .any(|root| Path::new(&canonical).starts_with(root));
+        match decision {
+            BackupDecision::Exclude => continue,
+            BackupDecision::MetadataOnly | BackupDecision::DeferAndReconcile
+                if !complete_install_content =>
+            {
+                continue;
+            }
             _ => {}
         }
 
@@ -1355,6 +1372,106 @@ mod tests {
 
         assert_eq!(steam_appmanifest_path(&identity, &roots), Some(manifest));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_state_does_not_reconcile_unobserved_install_content() {
+        let root = test_root("personal-known-root");
+        let cloud = root.join("cloud");
+        let install = root.join("library/game");
+        let content = install.join("game.bin");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(&content, b"game executable").unwrap();
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("test-game"), "Test Game");
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .add_known_root(&app_id, "install", install.to_string_lossy().as_ref())
+            .unwrap();
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::PersonalState,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+
+        assert!(manifest.files.is_empty());
+        assert!(agent
+            .db
+            .get_path_by_canonical(content.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn complete_application_reconciles_unobserved_install_content_and_deep_trees() {
+        let root = test_root("complete-known-root");
+        let cloud = root.join("cloud");
+        let steamapps = root.join("library/steamapps");
+        let install = steamapps.join("common/Test Game");
+        let shallow = install.join("game.bin");
+        let deep = install
+            .join("one/two/three/four/five/six/seven/eight")
+            .join("asset.pak");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&shallow, b"game executable").unwrap();
+        std::fs::write(&deep, b"deep install asset").unwrap();
+        std::fs::write(steamapps.join("appmanifest_123.acf"), b"manifest").unwrap();
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let mut app = AppIdentity::new(AppId::steam(123), "Test Game");
+        app.steam_app_id = Some(123);
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .add_known_root(&app_id, "install", install.to_string_lossy().as_ref())
+            .unwrap();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("test".into(), steamapps);
+        assert!(agent
+            .db
+            .get_path_by_canonical(shallow.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+        assert!(agent
+            .db
+            .get_path_by_canonical(deep.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        let source_paths = manifest
+            .files
+            .iter()
+            .filter_map(|file| file.source_path_hint.as_deref())
+            .collect::<BTreeSet<_>>();
+        assert!(source_paths.contains(shallow.to_string_lossy().as_ref()));
+        assert!(source_paths.contains(deep.to_string_lossy().as_ref()));
+        assert!(source_paths
+            .iter()
+            .any(|path| path.ends_with("appmanifest_123.acf")));
+
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

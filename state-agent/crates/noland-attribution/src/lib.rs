@@ -27,6 +27,76 @@ struct PendingFilesystemEvent {
     queued_at: Instant,
 }
 
+#[derive(Debug, Clone)]
+struct RegisteredRoot {
+    app_id: AppId,
+    kind: String,
+    path: PathBuf,
+}
+
+impl RegisteredRoot {
+    fn supports_process_identity(&self) -> bool {
+        matches!(self.kind.as_str(), "install" | "proton")
+    }
+
+    fn supports_launcher_attribution(&self) -> bool {
+        matches!(self.kind.as_str(), "install" | "proton")
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct RootRegistry {
+    entries: Vec<RegisteredRoot>,
+}
+
+impl RootRegistry {
+    fn from_db(db: &StateDb) -> Self {
+        let mut registry = Self::default();
+        for (app_id, kind, path) in db.known_roots(None).unwrap_or_default() {
+            registry.register(app_id, kind, PathBuf::from(path));
+        }
+        registry
+    }
+
+    fn register(&mut self, app_id: AppId, kind: impl Into<String>, path: PathBuf) {
+        let kind = kind.into();
+        let path = PathBuf::from(canonicalize_lossy(&path));
+        if self
+            .entries
+            .iter()
+            .any(|root| root.app_id == app_id && root.kind == kind && root.path == path)
+        {
+            return;
+        }
+        self.entries.push(RegisteredRoot { app_id, kind, path });
+    }
+
+    fn register_steam(&mut self, steam: &SteamDiscovery) {
+        for app in &steam.apps {
+            let app_id = AppId::steam(app.app_id);
+            self.register(app_id.clone(), "install", app.install_dir.clone());
+            if let Some(prefix) = &app.prefix {
+                self.register(app_id, "proton", prefix.clone());
+            }
+        }
+    }
+
+    fn matching(&self, path: &Path) -> Option<&RegisteredRoot> {
+        self.entries
+            .iter()
+            .filter(|root| path.starts_with(&root.path))
+            .max_by_key(|root| root.path.as_os_str().len())
+    }
+
+    fn process_owner(&self, executable: &Path) -> Option<&AppId> {
+        self.entries
+            .iter()
+            .filter(|root| root.supports_process_identity() && executable.starts_with(&root.path))
+            .max_by_key(|root| root.path.as_os_str().len())
+            .map(|root| &root.app_id)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct CgroupSessionBinding {
     root_pid: i32,
@@ -40,6 +110,7 @@ pub struct AttributionEngine<'a> {
     pub agent_paths: AgentPaths,
     pub known_apps: Vec<AppIdentity>,
     pub steam: Option<SteamDiscovery>,
+    root_registry: RootRegistry,
     cgroup_sessions: HashMap<u64, CgroupSessionBinding>,
     unresolved: VecDeque<PendingFilesystemEvent>,
 }
@@ -47,15 +118,35 @@ pub struct AttributionEngine<'a> {
 impl<'a> AttributionEngine<'a> {
     pub fn new(db: &'a StateDb, roots: LogicalRootMap, agent_paths: AgentPaths) -> Self {
         let known_apps = db.list_apps().unwrap_or_default();
+        let root_registry = RootRegistry::from_db(db);
         Self {
             db,
             roots,
             agent_paths,
             known_apps,
             steam: None,
+            root_registry,
             cgroup_sessions: HashMap::new(),
             unresolved: VecDeque::new(),
         }
+    }
+
+    pub fn with_steam_discovery(mut self, steam: Option<SteamDiscovery>) -> Self {
+        if let Some(discovery) = &steam {
+            self.root_registry.register_steam(discovery);
+            for app in &discovery.apps {
+                let identity = app.to_identity();
+                if !self
+                    .known_apps
+                    .iter()
+                    .any(|known| known.app_id == identity.app_id)
+                {
+                    self.known_apps.push(identity);
+                }
+            }
+        }
+        self.steam = steam;
+        self
     }
 
     pub fn ingest_process(&mut self, event: &ProcessEvent) -> Result<Option<AppSession>> {
@@ -276,7 +367,19 @@ impl<'a> AttributionEngine<'a> {
         self.db.update_path_meta(path_id, &record)?;
 
         let mut evidence = Vec::new();
-        let in_known_root = self.path_in_known_root(&session.app_id, Path::new(&canonical))?;
+        let registered_root = self.known_root_for_path(Path::new(&canonical));
+        let attributed_app_id = registered_root
+            .as_ref()
+            .filter(|root| {
+                event.kind.is_mutation()
+                    && root.app_id != session.app_id
+                    && self.launcher_can_attribute_root(session, root)
+            })
+            .map(|root| root.app_id.clone())
+            .unwrap_or_else(|| session.app_id.clone());
+        let in_known_root = registered_root
+            .as_ref()
+            .is_some_and(|root| root.app_id == attributed_app_id);
         match event.kind {
             FsEventKind::Create | FsEventKind::Mkdir => {
                 evidence.push(
@@ -312,10 +415,18 @@ impl<'a> AttributionEngine<'a> {
         if looks_like_user_state(Path::new(&canonical)) {
             evidence.push(Evidence::new(EvidenceKind::KnownUserStateRoot));
         }
-        if self.is_steam_path(Path::new(&canonical)) {
+        if registered_root
+            .as_ref()
+            .is_some_and(|root| self.app_launcher(&root.app_id) == Some(LauncherKind::Steam))
+            || self.is_steam_path(Path::new(&canonical))
+        {
             evidence.push(Evidence::new(EvidenceKind::SteamMetadata));
         }
-        if self.is_proton_path(Path::new(&canonical)) {
+        if registered_root
+            .as_ref()
+            .is_some_and(|root| root.kind == "proton")
+            || self.is_proton_path(Path::new(&canonical))
+        {
             evidence.push(Evidence::new(EvidenceKind::ProtonPrefix));
         }
         if self.is_wine_path(Path::new(&canonical)) {
@@ -326,7 +437,7 @@ impl<'a> AttributionEngine<'a> {
             .db
             .associations_for_path(path_id)?
             .into_iter()
-            .find(|a| a.app_id == session.app_id)
+            .find(|a| a.app_id == attributed_app_id)
         {
             let mutation_count = existing
                 .evidence
@@ -346,7 +457,7 @@ impl<'a> AttributionEngine<'a> {
         let semantic_role = crate::infer_role(Path::new(&canonical), persistence_class);
         let now = Utc::now();
         let assoc = PathAssociation {
-            app_id: session.app_id.clone(),
+            app_id: attributed_app_id.clone(),
             path_id,
             confidence,
             evidence,
@@ -362,7 +473,7 @@ impl<'a> AttributionEngine<'a> {
                 FsEventKind::Rename | FsEventKind::Unlink | FsEventKind::Rmdir
             );
             self.db
-                .mark_dirty(&session.app_id, Some(path_id), requires_reconciliation)?;
+                .mark_dirty(&attributed_app_id, Some(path_id), requires_reconciliation)?;
 
             let mutation_kind = match event.kind {
                 FsEventKind::Create | FsEventKind::Mkdir | FsEventKind::Symlink => {
@@ -382,7 +493,7 @@ impl<'a> AttributionEngine<'a> {
                 evidence.session_id = Some(session.session_id);
             }
             let mut mutation =
-                AppMutationRecord::new(session.app_id.clone(), canonical.clone(), mutation_kind);
+                AppMutationRecord::new(attributed_app_id.clone(), canonical.clone(), mutation_kind);
             mutation.observed_at = event.at;
             mutation.session_id = Some(session.session_id);
             mutation.provenance = provenance;
@@ -395,7 +506,7 @@ impl<'a> AttributionEngine<'a> {
                 .parent()
                 .unwrap_or_else(|| Path::new(&canonical));
             self.db.mark_dirty_root(
-                &session.app_id,
+                &attributed_app_id,
                 &dirty_root.to_string_lossy(),
                 logical
                     .as_ref()
@@ -405,7 +516,7 @@ impl<'a> AttributionEngine<'a> {
             )?;
             if let Some(logical) = logical.as_ref() {
                 let _ = self.db.set_file_state_trust(
-                    &session.app_id,
+                    &attributed_app_id,
                     &logical.logical_root.as_token(),
                     &logical.relative_path,
                     if mutation_kind == AppMutationKind::Delete {
@@ -562,6 +673,12 @@ impl<'a> AttributionEngine<'a> {
     }
 
     fn resolve_identity(&self, exe: &Path, event: &ProcessEvent) -> AppIdentity {
+        let canonical_exe = PathBuf::from(canonicalize_lossy(exe));
+        if let Some(owner) = self.root_registry.process_owner(&canonical_exe) {
+            if let Some(found) = self.known_apps.iter().find(|app| app.app_id == *owner) {
+                return found.clone();
+            }
+        }
         if let Some(steam) = self.identify_steam(exe, event) {
             return steam;
         }
@@ -602,23 +719,87 @@ impl<'a> AttributionEngine<'a> {
         None
     }
 
-    fn path_in_known_root(&self, app_id: &AppId, path: &Path) -> Result<bool> {
-        for (_, _, root) in self.db.known_roots(Some(app_id))? {
-            if path.starts_with(&root) {
-                return Ok(true);
-            }
+    fn known_root_for_path(&self, path: &Path) -> Option<RegisteredRoot> {
+        if let Some(root) = self.root_registry.matching(path) {
+            return Some(root.clone());
         }
-        if let Some(steam) = &self.steam {
-            for app in &steam.apps {
-                if AppId::steam(app.app_id) == *app_id
-                    && (path.starts_with(&app.install_dir)
-                        || app.prefix.as_ref().is_some_and(|p| path.starts_with(p)))
-                {
-                    return Ok(true);
-                }
-            }
+
+        // Keep direct `steam` field assignment compatible for external callers while
+        // StateAgent uses `with_steam_discovery` to populate the registry eagerly.
+        self.steam.as_ref().and_then(|steam| {
+            steam
+                .apps
+                .iter()
+                .flat_map(|app| {
+                    let app_id = AppId::steam(app.app_id);
+                    [
+                        Some(RegisteredRoot {
+                            app_id: app_id.clone(),
+                            kind: "install".into(),
+                            path: PathBuf::from(canonicalize_lossy(&app.install_dir)),
+                        }),
+                        app.prefix.as_ref().map(|prefix| RegisteredRoot {
+                            app_id,
+                            kind: "proton".into(),
+                            path: PathBuf::from(canonicalize_lossy(prefix)),
+                        }),
+                    ]
+                    .into_iter()
+                    .flatten()
+                })
+                .filter(|root| path.starts_with(&root.path))
+                .max_by_key(|root| root.path.as_os_str().len())
+        })
+    }
+
+    fn launcher_can_attribute_root(&self, session: &AppSession, root: &RegisteredRoot) -> bool {
+        if !root.supports_launcher_attribution() {
+            return false;
         }
-        Ok(false)
+
+        let writer_is_game = session.app_id.as_str().starts_with("steam:")
+            || self
+                .known_apps
+                .iter()
+                .find(|app| app.app_id == session.app_id)
+                .is_some_and(|app| app.steam_app_id.is_some());
+        let writer_launcher = match session.source {
+            SessionSource::Steam => Some(LauncherKind::Steam),
+            SessionSource::Proton => Some(LauncherKind::Proton),
+            SessionSource::Wine => Some(LauncherKind::Wine),
+            SessionSource::Bottles => Some(LauncherKind::Bottles),
+            _ => self.app_launcher(&session.app_id),
+        };
+        match writer_launcher {
+            Some(LauncherKind::Steam) => {
+                !writer_is_game && self.app_launcher(&root.app_id) == Some(LauncherKind::Steam)
+            }
+            Some(LauncherKind::Proton) => {
+                !writer_is_game
+                    && matches!(
+                        self.app_launcher(&root.app_id),
+                        Some(LauncherKind::Steam | LauncherKind::Proton)
+                    )
+            }
+            Some(LauncherKind::Wine) => self.app_launcher(&root.app_id) == Some(LauncherKind::Wine),
+            Some(LauncherKind::Bottles) => {
+                self.app_launcher(&root.app_id) == Some(LauncherKind::Bottles)
+            }
+            _ => false,
+        }
+    }
+
+    fn app_launcher(&self, app_id: &AppId) -> Option<LauncherKind> {
+        self.known_apps
+            .iter()
+            .find(|app| app.app_id == *app_id)
+            .and_then(|app| app.launcher)
+            .or_else(|| {
+                app_id
+                    .as_str()
+                    .starts_with("steam:")
+                    .then_some(LauncherKind::Steam)
+            })
     }
 
     fn is_steam_path(&self, path: &Path) -> bool {
@@ -809,6 +990,119 @@ mod tests {
         std::fs::remove_dir_all(home).ok();
         let _ = Metrics::default();
         let _ = Arc::new(());
+    }
+
+    #[test]
+    fn registered_install_root_identifies_the_game_process() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-root-process-{}", Uuid::new_v4()));
+        let install_root = home.join("steamapps/common/Root Game");
+        let executable = install_root.join("root-game");
+        std::fs::create_dir_all(&install_root).unwrap();
+        std::fs::write(&executable, b"game").unwrap();
+
+        let game = AppIdentity {
+            steam_app_id: Some(4242),
+            launcher: Some(LauncherKind::Steam),
+            identity_confidence: 1.0,
+            ..AppIdentity::new(AppId::steam(4242), "Root Game")
+        };
+        db.upsert_app(&game).unwrap();
+        db.add_known_root(&game.app_id, "install", &install_root.to_string_lossy())
+            .unwrap();
+
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+        let session = engine
+            .ingest_process(&ProcessEvent {
+                kind: ProcessEventKind::Exec,
+                pid: 77,
+                ppid: 1,
+                uid: 1000,
+                gid: 1000,
+                cgroup: None,
+                executable: Some(executable),
+                argv_hash: None,
+                comm: Some("root-game".into()),
+                at: Utc::now(),
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(session.app_id, game.app_id);
+        assert_eq!(session.source, SessionSource::Steam);
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn steam_writer_mutations_use_the_registered_game_root_owner() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-steam-writer-{}", Uuid::new_v4()));
+        let install_root = home.join("steamapps/common/Owned Game");
+        let game_file = install_root.join("content.pak");
+        std::fs::create_dir_all(&install_root).unwrap();
+        std::fs::write(&game_file, b"content").unwrap();
+
+        let game = AppIdentity {
+            steam_app_id: Some(5150),
+            launcher: Some(LauncherKind::Steam),
+            identity_confidence: 1.0,
+            ..AppIdentity::new(AppId::steam(5150), "Owned Game")
+        };
+        let steam_client = AppIdentity {
+            launcher: Some(LauncherKind::Steam),
+            ..AppIdentity::new(AppId::desktop("steam-client"), "Steam")
+        };
+        db.upsert_app(&game).unwrap();
+        db.upsert_app(&steam_client).unwrap();
+        db.add_known_root(&game.app_id, "install", &install_root.to_string_lossy())
+            .unwrap();
+        db.insert_session(&AppSession::new(
+            steam_client.app_id.clone(),
+            88,
+            SessionSource::Steam,
+        ))
+        .unwrap();
+
+        let roots = LogicalRootMap::from_home(&home);
+        let paths = AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run"));
+        let mut engine = AttributionEngine::new(&db, roots, paths);
+        let write = engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Write,
+                pid: 88,
+                path: game_file.clone(),
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(write.app_id, game.app_id);
+        assert!(write
+            .evidence
+            .iter()
+            .any(|evidence| evidence.kind == EvidenceKind::KnownAppRoot));
+        assert_eq!(
+            write.persistence_class,
+            PersistenceClass::ReconstructableApp
+        );
+
+        let read = engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Read,
+                pid: 88,
+                path: game_file,
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(read.app_id, steam_client.app_id);
+        std::fs::remove_dir_all(home).ok();
     }
 
     #[test]

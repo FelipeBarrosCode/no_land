@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use noland_baseline::current_image_id;
-use noland_discovery::discover_all;
+use noland_discovery::{derive_owned_install_root, discover_all, SteamDiscovery};
 use noland_observer::ObserverHub;
 use noland_state_core::metrics::Metrics;
 use noland_state_core::*;
@@ -82,6 +82,7 @@ pub struct StateAgent {
     pub observer: observer::ObserverSupervisor,
     pub operations: operation_manager::OperationManager,
     pub roots: Mutex<LogicalRootMap>,
+    pub steam: Mutex<Option<SteamDiscovery>>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
 }
 
@@ -100,6 +101,7 @@ impl StateAgent {
             observer: observer::ObserverSupervisor::new(),
             operations: operation_manager::OperationManager::default(),
             roots: Mutex::new(roots),
+            steam: Mutex::new(None),
             master_key: Mutex::new(None),
         })
     }
@@ -157,12 +159,24 @@ impl StateAgent {
         Ok(())
     }
 
+    fn attribution_engine(&self) -> noland_attribution::AttributionEngine<'_> {
+        let roots = self.roots.lock().clone();
+        let steam = self.steam.lock().clone();
+        noland_attribution::AttributionEngine::new(&self.db, roots, self.config.paths.clone())
+            .with_steam_discovery(steam)
+    }
+
     pub fn discover(&self) -> Result<()> {
         let scan = discover_all(&self.config.home);
         for app in &scan.apps {
             self.db.upsert_app(app)?;
+            if let Some(root) = derive_owned_install_root(&self.config.home, app) {
+                self.db
+                    .add_known_root(&app.app_id, "install", &root.to_string_lossy())?;
+            }
             Metrics::inc(&self.metrics.apps_discovered_total);
         }
+        *self.steam.lock() = scan.steam.clone();
         if let Some(steam) = &scan.steam {
             let mut roots = self.roots.lock();
             roots.steam_root = Some(steam.root.clone());
@@ -186,16 +200,20 @@ impl StateAgent {
             }
         }
         for prefix in scan.wine_prefixes {
-            self.roots
-                .lock()
-                .wine_prefixes
-                .insert(prefix.id.clone(), prefix.path);
+            let path = std::fs::canonicalize(&prefix.path).unwrap_or(prefix.path);
+            if let Some(app_id) = &prefix.associated_app {
+                self.db
+                    .add_known_root(app_id, "install", &path.to_string_lossy())?;
+            }
+            self.roots.lock().wine_prefixes.insert(prefix.id, path);
         }
         for bottle in scan.bottles {
-            self.roots
-                .lock()
-                .bottles_prefixes
-                .insert(bottle.id.clone(), bottle.path);
+            let path = std::fs::canonicalize(&bottle.path).unwrap_or(bottle.path);
+            if let Some(app_id) = &bottle.associated_app {
+                self.db
+                    .add_known_root(app_id, "install", &path.to_string_lossy())?;
+            }
+            self.roots.lock().bottles_prefixes.insert(bottle.id, path);
         }
         Ok(())
     }
@@ -209,11 +227,7 @@ impl StateAgent {
             sessions_pruned: self.prune_stale_sessions()?,
             ..LiveProcessRecovery::default()
         };
-        let mut engine = noland_attribution::AttributionEngine::new(
-            &self.db,
-            self.roots.lock().clone(),
-            self.config.paths.clone(),
-        );
+        let mut engine = self.attribution_engine();
         for event in events {
             let had_session = self.db.session_for_pid(event.pid)?.is_some();
             let session = engine.ingest_process(&event)?;
@@ -270,11 +284,7 @@ impl StateAgent {
     }
 
     pub fn process_events(&self) -> Result<usize> {
-        let mut engine = noland_attribution::AttributionEngine::new(
-            &self.db,
-            self.roots.lock().clone(),
-            self.config.paths.clone(),
-        );
+        let mut engine = self.attribution_engine();
         let n = noland_attribution::process_hub_events(&mut engine, &self.hub)?;
         if self.hub.queue.take_loss_flag() {
             let dropped = self.hub.queue.dropped();
@@ -457,6 +467,155 @@ mod tests {
             .unwrap();
         assert_eq!(recovered_progress.phase, "uploading");
         assert_eq!(recovered_progress.completed_units, 7);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discovery_is_available_to_attribution_engines() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-agent-steam-discovery-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let steamapps = agent.config.home.join(".local/share/Steam/steamapps");
+        let install_root = steamapps.join("common/Discovered Game");
+        let executable = install_root.join("discovered-game");
+        std::fs::create_dir_all(&install_root).unwrap();
+        std::fs::write(&executable, b"game").unwrap();
+        std::fs::write(
+            steamapps.join("appmanifest_6060.acf"),
+            r#"
+            "AppState"
+            {
+                "appid" "6060"
+                "name" "Discovered Game"
+                "installdir" "Discovered Game"
+            }
+            "#,
+        )
+        .unwrap();
+
+        agent.discover().unwrap();
+        let engine = agent.attribution_engine();
+        assert!(engine
+            .steam
+            .as_ref()
+            .is_some_and(|steam| steam.apps.iter().any(|app| app.app_id == 6060)));
+        drop(engine);
+
+        agent.hub.inject_process(ProcessEvent {
+            kind: ProcessEventKind::Exec,
+            pid: 6060,
+            ppid: 1,
+            uid: 1000,
+            gid: 1000,
+            cgroup: None,
+            executable: Some(executable),
+            argv_hash: None,
+            comm: Some("discovered-game".into()),
+            at: Utc::now(),
+        });
+        assert_eq!(agent.process_events().unwrap(), 1);
+        assert_eq!(
+            agent.db.session_for_pid(6060).unwrap().unwrap().app_id,
+            AppId::steam(6060)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discovery_persists_owned_roots_for_non_steam_apps() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-agent-owned-roots-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let home = &agent.config.home;
+
+        let native_executable = home.join("Applications/Native Game/bin/game");
+        let portable_executable = home.join("Downloads/Portable.AppImage");
+        let shared_executable = home.join(".local/share/applications/shared-helper");
+        let applications = home.join(".local/share/applications");
+        std::fs::create_dir_all(native_executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(portable_executable.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&applications).unwrap();
+        std::fs::write(&native_executable, b"native").unwrap();
+        std::fs::write(&portable_executable, b"portable").unwrap();
+        std::fs::write(&shared_executable, b"shared").unwrap();
+        std::fs::write(
+            applications.join("native-game.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Native Game\nExec=\"{}\"\nType=Application\n",
+                native_executable.display()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            applications.join("shared-helper.desktop"),
+            format!(
+                "[Desktop Entry]\nName=Shared Helper\nExec={}\nType=Application\n",
+                shared_executable.display()
+            ),
+        )
+        .unwrap();
+
+        let wine_prefix = home.join(".wine");
+        let bottle_prefix = home.join(".local/share/bottles/bottles/arcade");
+        std::fs::create_dir_all(wine_prefix.join("drive_c")).unwrap();
+        std::fs::create_dir_all(&bottle_prefix).unwrap();
+
+        agent.discover().unwrap();
+
+        let wine_id = AppId::launcher("wine", "default");
+        let bottle_id = AppId::launcher("bottles", "arcade");
+        assert_eq!(
+            agent.db.get_app(&wine_id).unwrap().unwrap().launcher,
+            Some(LauncherKind::Wine)
+        );
+        assert_eq!(
+            agent.db.get_app(&bottle_id).unwrap().unwrap().launcher,
+            Some(LauncherKind::Bottles)
+        );
+        assert_eq!(
+            agent
+                .db
+                .get_app(&AppId::desktop("portable"))
+                .unwrap()
+                .unwrap()
+                .launcher,
+            Some(LauncherKind::AppImage)
+        );
+
+        let known_roots = agent.db.known_roots(None).unwrap();
+        for (app_id, expected) in [
+            (wine_id, wine_prefix),
+            (bottle_id, bottle_prefix),
+            (
+                AppId::desktop("native-game"),
+                home.join("Applications/Native Game"),
+            ),
+            (AppId::desktop("portable"), portable_executable),
+        ]
+        .map(|(app_id, path)| (app_id, std::fs::canonicalize(path).unwrap()))
+        {
+            assert!(
+                known_roots.iter().any(|(root_app_id, kind, path)| {
+                    root_app_id == &app_id && kind == "install" && PathBuf::from(path) == expected
+                }),
+                "missing durable root for {app_id}"
+            );
+        }
+        assert!(!known_roots
+            .iter()
+            .any(|(app_id, _, _)| { app_id == &AppId::desktop("shared-helper") }));
+        assert!(known_roots.iter().all(|(_, _, path)| {
+            let path = PathBuf::from(path);
+            path != *home && !path.starts_with("/usr") && !path.starts_with("/opt")
+        }));
 
         let _ = std::fs::remove_dir_all(root);
     }
