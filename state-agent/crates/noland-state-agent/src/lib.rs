@@ -112,6 +112,14 @@ impl StateAgent {
             return Err(StateError::Database(integrity));
         }
         noland_storage::shred_all_ephemeral_sessions(&self.config.paths.run_root)?;
+        let restore_recovery = noland_restore::recover_interrupted_restores(&self.config.paths)?;
+        for failure in &restore_recovery.failures {
+            tracing::error!(
+                workspace = %failure.workspace.display(),
+                error = %failure.error,
+                "interrupted restore rollback failed; retaining recovery artifacts"
+            );
+        }
         for mut op in self.db.unfinished_operations()? {
             let journal = self.db.sync_journal_summary(op.operation_id)?;
             let has_retry = matches!(op.kind.as_str(), "backup" | "restore");
@@ -199,6 +207,9 @@ impl StateAgent {
                 }
             }
         }
+        if let Some(steam) = &scan.steam {
+            self.reconcile_completed_steam_installers(steam)?;
+        }
         for prefix in scan.wine_prefixes {
             let path = std::fs::canonicalize(&prefix.path).unwrap_or(prefix.path);
             if let Some(app_id) = &prefix.associated_app {
@@ -214,6 +225,56 @@ impl StateAgent {
                     .add_known_root(app_id, "install", &path.to_string_lossy())?;
             }
             self.roots.lock().bottles_prefixes.insert(bottle.id, path);
+        }
+        Ok(())
+    }
+
+    fn reconcile_completed_steam_installers(&self, steam: &SteamDiscovery) -> Result<()> {
+        for transaction in self.db.open_installers()? {
+            if !matches!(
+                transaction.transaction_type,
+                InstallTransactionType::LauncherInstall | InstallTransactionType::LauncherUpdate
+            ) {
+                continue;
+            }
+            let Some(app) = steam
+                .apps
+                .iter()
+                .find(|app| AppId::steam(app.app_id) == transaction.app_id)
+            else {
+                continue;
+            };
+            let staging_roots = transaction
+                .candidate_roots
+                .iter()
+                .filter(|root| {
+                    noland_discovery::classify_observed_path(root).disposition
+                        == noland_discovery::PathDisposition::InstallStagingFile
+                })
+                .collect::<Vec<_>>();
+            let staging_complete = !staging_roots.is_empty()
+                && staging_roots
+                    .into_iter()
+                    .all(|root| staging_root_is_inactive(root));
+            if !app.install_dir.exists() || !staging_complete {
+                continue;
+            }
+
+            self.db.mark_dirty(&transaction.app_id, None, true)?;
+            self.db.mark_dirty_root(
+                &transaction.app_id,
+                &app.install_dir.to_string_lossy(),
+                None,
+                true,
+            )?;
+            let indexed = crate::reconcile::reconcile_install_roots(self, &transaction.app_id)?;
+            noland_attribution::finish_installer(&self.db, &transaction)?;
+            tracing::info!(
+                app_id = %transaction.app_id,
+                transaction_id = %transaction.transaction_id,
+                indexed,
+                "completed launcher install and rebuilt final application index"
+            );
         }
         Ok(())
     }
@@ -331,14 +392,13 @@ impl StateAgent {
     pub fn spawn_background(self: &Arc<Self>) {
         let agent = Arc::clone(self);
         tokio::spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(250));
             let mut process_recovery = tokio::time::interval(Duration::from_secs(2));
             let mut rediscovery = tokio::time::interval(Duration::from_secs(30));
             let mut checkpoint =
                 tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
             loop {
                 tokio::select! {
-                    _ = tick.tick() => {
+                    _ = agent.hub.wait_for_events() => {
                         if let Err(err) = agent.process_events() {
                             tracing::warn!(error = %err, "event processing failed");
                         }
@@ -398,10 +458,21 @@ impl StateAgent {
     }
 }
 
+fn staging_root_is_inactive(root: &std::path::Path) -> bool {
+    if !root.exists() {
+        return true;
+    }
+    root.is_dir()
+        && std::fs::read_dir(root)
+            .ok()
+            .is_some_and(|mut entries| entries.next().is_none())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::Utc;
+    use noland_restore::{RestorePlan, RestoreTarget, RestoreTransaction};
     use noland_state_core::{ContentObjectKind, SyncDirection, SyncJournalEntry, SyncJournalState};
 
     #[test]
@@ -468,6 +539,107 @@ mod tests {
         assert_eq!(recovered_progress.phase, "uploading");
         assert_eq!(recovered_progress.completed_units, 7);
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recover_rolls_back_crashed_restore_before_marking_operation_interrupted() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-crashed-restore-recover-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let operation_id = Uuid::new_v4();
+        agent
+            .db
+            .upsert_operation(&OperationRecord {
+                operation_id,
+                kind: "restore".into(),
+                app_id: Some(AppId::desktop("game")),
+                state: RestoreState::Applying.as_str().into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+                detail_json: serde_json::json!({"mode": "personal_state"}),
+            })
+            .unwrap();
+
+        let payload = b"new-save";
+        let hash = noland_cas::blake3_hex(payload);
+        let mut manifest = BundleManifest::new(
+            ManifestApp {
+                app_id: AppId::desktop("game"),
+                display_name: "Game".into(),
+                aliases: Vec::new(),
+                desktop_entry_id: None,
+                steam_app_id: None,
+                launcher: None,
+                canonical_executable: None,
+                icon_path: None,
+            },
+            ManifestSource {
+                instance_id: Uuid::new_v4(),
+                image_id: "test".into(),
+                captured_at: Utc::now(),
+            },
+            BackupMode::PersonalState,
+        );
+        manifest.files.push(ManifestFile {
+            logical_root: "$XDG_DATA_HOME".into(),
+            relative_path: "game/save.dat".into(),
+            source_path_hint: None,
+            file_type: "file".into(),
+            size: payload.len() as u64,
+            file_hash: hash.clone(),
+            chunks: vec![ChunkRef {
+                hash: hash.clone(),
+                size: payload.len() as u64,
+            }],
+            mode: None,
+            mtime_ns: None,
+            uid: None,
+            gid: None,
+            symlink_target: None,
+            persistence_class: PersistenceClass::PersistentState,
+            semantic_role: SemanticRole::UserState,
+            association_confidence: 1.0,
+            shared_app_ids: Vec::new(),
+        });
+        let restore_id = Uuid::new_v4();
+        let staging = agent.config.paths.restore_dir(&restore_id.to_string());
+        for child in ["packs", "materialized/.chunks", "pre_restore"] {
+            std::fs::create_dir_all(staging.join(child)).unwrap();
+        }
+        std::fs::write(
+            staging
+                .join("materialized/.chunks")
+                .join(hash.trim_start_matches("blake3:")),
+            payload,
+        )
+        .unwrap();
+        let plan = RestorePlan {
+            restore_id,
+            staging: staging.clone(),
+            pack_cache: agent.config.paths.cache.join("restore-packs"),
+            manifest,
+            mode: RestoreMode::PersonalState,
+        };
+        let roots = LogicalRootMap::from_home(&agent.config.home);
+        let destination = agent.config.home.join(".local/share/game/save.dat");
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(&destination, b"old-save").unwrap();
+        let mut transaction = RestoreTransaction::new(&plan, &roots, None);
+        transaction.publish_to(RestoreTarget::Complete).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), payload);
+        std::mem::forget(transaction);
+
+        agent.recover().unwrap();
+
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old-save");
+        assert!(!staging.exists());
+        let operation = agent.db.get_operation(operation_id).unwrap().unwrap();
+        assert_eq!(operation.state, "INTERRUPTED");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -616,6 +788,81 @@ mod tests {
             let path = PathBuf::from(path);
             path != *home && !path.starts_with("/usr") && !path.starts_with("/opt")
         }));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discovery_finishes_steam_transaction_after_scanning_only_final_content() {
+        let root = std::env::temp_dir().join(format!(
+            "noland-agent-install-complete-{}-{}",
+            std::process::id(),
+            Uuid::new_v4()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let steamapps = agent.config.home.join(".local/share/Steam/steamapps");
+        let final_root = steamapps.join("common/Completed Game");
+        let final_file = final_root.join("content/deep/asset.pak");
+        let staging_root = steamapps.join("downloading/7070");
+        std::fs::create_dir_all(final_file.parent().unwrap()).unwrap();
+        std::fs::write(&final_file, b"complete asset").unwrap();
+        std::fs::write(
+            steamapps.join("appmanifest_7070.acf"),
+            r#"
+            "AppState"
+            {
+                "appid" "7070"
+                "name" "Completed Game"
+                "installdir" "Completed Game"
+            }
+            "#,
+        )
+        .unwrap();
+        noland_attribution::start_installer(
+            &agent.db,
+            AppId::steam(7070),
+            None,
+            vec![staging_root.clone()],
+            InstallTransactionType::LauncherInstall,
+        )
+        .unwrap();
+
+        agent.discover().unwrap();
+
+        assert!(agent.db.open_installers().unwrap().is_empty());
+        assert!(agent
+            .db
+            .known_roots(Some(&AppId::steam(7070)))
+            .unwrap()
+            .iter()
+            .all(|(_, _, path)| PathBuf::from(path) != staging_root));
+        let record = agent
+            .db
+            .get_path_by_canonical(&final_file.to_string_lossy())
+            .unwrap()
+            .expect("completed install should be indexed");
+        let association = agent
+            .db
+            .associations_for_path(record.path_id)
+            .unwrap()
+            .into_iter()
+            .find(|association| association.app_id == AppId::steam(7070))
+            .expect("completed install should belong to its Steam app");
+        assert_eq!(
+            association.persistence_class,
+            PersistenceClass::ReconstructableApp
+        );
+        assert_eq!(association.semantic_role, SemanticRole::AppContent);
+        assert!(
+            !agent
+                .db
+                .list_dirty_apps()
+                .unwrap()
+                .into_iter()
+                .find(|dirty| dirty.app_id == AppId::steam(7070))
+                .unwrap()
+                .requires_reconciliation
+        );
 
         let _ = std::fs::remove_dir_all(root);
     }

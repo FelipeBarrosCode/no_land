@@ -1,12 +1,13 @@
 //! Session correlation, installer transactions, and inspectable ownership.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use noland_discovery::{
-    fallback_exe_identity, is_backup_candidate, resolve_identity_for_executable, SteamDiscovery,
+    classify_observed_path, fallback_exe_identity, is_backup_candidate,
+    resolve_identity_for_executable, PathDisposition, SteamDiscovery,
 };
 use noland_observer::ObserverHub;
 use noland_state_core::*;
@@ -15,6 +16,27 @@ use uuid::Uuid;
 
 const UNRESOLVED_TTL: Duration = Duration::from_secs(2);
 const UNRESOLVED_LIMIT: usize = 256;
+
+fn merge_evidence(
+    existing: &[Evidence],
+    incoming: impl IntoIterator<Item = Evidence>,
+) -> Vec<Evidence> {
+    let mut merged = existing.to_vec();
+    for candidate in incoming {
+        if let Some(current) = merged.iter_mut().find(|evidence| {
+            evidence.kind == candidate.kind
+                && evidence.detail == candidate.detail
+                && evidence.session_id == candidate.session_id
+        }) {
+            if candidate.observed_at > current.observed_at {
+                *current = candidate;
+            }
+        } else {
+            merged.push(candidate);
+        }
+    }
+    merged
+}
 
 #[derive(Clone)]
 enum PendingFilesystemFact {
@@ -53,7 +75,14 @@ impl RootRegistry {
     fn from_db(db: &StateDb) -> Self {
         let mut registry = Self::default();
         for (app_id, kind, path) in db.known_roots(None).unwrap_or_default() {
-            registry.register(app_id, kind, PathBuf::from(path));
+            let path = PathBuf::from(path);
+            if matches!(
+                classify_observed_path(&path).disposition,
+                PathDisposition::InstallStagingFile | PathDisposition::TemporaryFile
+            ) {
+                continue;
+            }
+            registry.register(app_id, kind, path);
         }
         registry
     }
@@ -112,6 +141,7 @@ pub struct AttributionEngine<'a> {
     pub steam: Option<SteamDiscovery>,
     root_registry: RootRegistry,
     cgroup_sessions: HashMap<u64, CgroupSessionBinding>,
+    open_installers: HashSet<AppId>,
     unresolved: VecDeque<PendingFilesystemEvent>,
 }
 
@@ -119,6 +149,12 @@ impl<'a> AttributionEngine<'a> {
     pub fn new(db: &'a StateDb, roots: LogicalRootMap, agent_paths: AgentPaths) -> Self {
         let known_apps = db.list_apps().unwrap_or_default();
         let root_registry = RootRegistry::from_db(db);
+        let open_installers = db
+            .open_installers()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|transaction| transaction.app_id)
+            .collect();
         Self {
             db,
             roots,
@@ -127,6 +163,7 @@ impl<'a> AttributionEngine<'a> {
             steam: None,
             root_registry,
             cgroup_sessions: HashMap::new(),
+            open_installers,
             unresolved: VecDeque::new(),
         }
     }
@@ -298,7 +335,7 @@ impl<'a> AttributionEngine<'a> {
     }
 
     pub fn ingest_fs(&mut self, event: &FilesystemEvent) -> Result<Option<PathAssociation>> {
-        if self.event_is_excluded(event) {
+        if self.defer_unfinished_event(event)? || self.event_is_excluded(event) {
             return Ok(None);
         }
         let Some(session) = self.db.session_for_pid(event.pid)? else {
@@ -313,7 +350,7 @@ impl<'a> AttributionEngine<'a> {
             return Ok(None);
         }
         let event = fact.as_filesystem_event();
-        if self.event_is_excluded(&event) {
+        if self.defer_unfinished_event(&event)? || self.event_is_excluded(&event) {
             return Ok(None);
         }
         let Some(session) = self.session_for_ebpf_fs(fact)? else {
@@ -321,6 +358,59 @@ impl<'a> AttributionEngine<'a> {
             return Ok(None);
         };
         self.ingest_fs_for_session(&event, &session, fact.inode, fact.device)
+    }
+
+    fn defer_unfinished_event(&mut self, event: &FilesystemEvent) -> Result<bool> {
+        let observed_path = if event.kind == FsEventKind::Rename {
+            event.second_path().unwrap_or(&event.path)
+        } else {
+            &event.path
+        };
+        let decision = classify_observed_path(observed_path);
+        match decision.disposition {
+            PathDisposition::TemporaryFile => Ok(true),
+            PathDisposition::InstallStagingFile => {
+                let Some(app_id) = decision.app_id else {
+                    return Ok(true);
+                };
+                if !self.open_installers.contains(&app_id) {
+                    let candidate_roots = decision.transaction_root.into_iter().collect();
+                    start_installer(
+                        self.db,
+                        app_id.clone(),
+                        None,
+                        candidate_roots,
+                        InstallTransactionType::LauncherInstall,
+                    )?;
+                    self.open_installers.insert(app_id.clone());
+                    self.db.mark_dirty(&app_id, None, true)?;
+                    if self.db.get_app(&app_id)?.is_some() {
+                        for (_, kind, root) in self.db.known_roots(Some(&app_id))? {
+                            let root = PathBuf::from(root);
+                            if kind == "install"
+                                && !matches!(
+                                    classify_observed_path(&root).disposition,
+                                    PathDisposition::InstallStagingFile
+                                        | PathDisposition::TemporaryFile
+                                )
+                            {
+                                self.db.mark_dirty_root(
+                                    &app_id,
+                                    &root.to_string_lossy(),
+                                    None,
+                                    true,
+                                )?;
+                            }
+                        }
+                    }
+                }
+                Ok(true)
+            }
+            PathDisposition::FinalApplicationFile
+            | PathDisposition::UserStateFile
+            | PathDisposition::RuntimeDependency
+            | PathDisposition::Unknown => Ok(false),
+        }
     }
 
     fn ingest_fs_for_session(
@@ -383,6 +473,9 @@ impl<'a> AttributionEngine<'a> {
         let in_known_root = registered_root
             .as_ref()
             .is_some_and(|root| root.app_id == attributed_app_id);
+        let in_reconstructable_root = registered_root
+            .as_ref()
+            .is_some_and(|root| root.app_id == attributed_app_id && root.kind == "install");
         match event.kind {
             FsEventKind::Create | FsEventKind::Mkdir => {
                 evidence.push(
@@ -435,6 +528,11 @@ impl<'a> AttributionEngine<'a> {
         if self.is_wine_path(Path::new(&canonical)) {
             evidence.push(Evidence::new(EvidenceKind::WinePrefix));
         }
+        for item in &mut evidence {
+            if item.kind.is_mutation() {
+                item.session_id = Some(session.session_id);
+            }
+        }
 
         if let Some(existing) = self
             .db
@@ -442,21 +540,23 @@ impl<'a> AttributionEngine<'a> {
             .into_iter()
             .find(|a| a.app_id == attributed_app_id)
         {
-            let mutation_count = existing
-                .evidence
+            evidence = merge_evidence(&existing.evidence, evidence);
+            let mutation_count = evidence
                 .iter()
-                .filter(|e| e.kind.is_mutation())
-                .count()
-                + event.kind.is_mutation() as usize;
-            evidence.extend(existing.evidence);
-            if mutation_count >= 2 {
+                .filter(|evidence| evidence.kind.is_mutation())
+                .count();
+            if mutation_count >= 2
+                && !evidence
+                    .iter()
+                    .any(|evidence| evidence.kind == EvidenceKind::RepeatedSessionUse)
+            {
                 evidence.push(Evidence::new(EvidenceKind::RepeatedSessionUse));
             }
         }
 
         let (confidence, _breakdown) = score_evidence(&evidence);
         let persistence_class =
-            infer_initial_class(Path::new(&canonical), event.kind, in_known_root);
+            infer_initial_class(Path::new(&canonical), event.kind, in_reconstructable_root);
         let semantic_role = crate::infer_role(Path::new(&canonical), persistence_class);
         let now = Utc::now();
         let assoc = PathAssociation {
@@ -475,9 +575,6 @@ impl<'a> AttributionEngine<'a> {
                 event.kind,
                 FsEventKind::Rename | FsEventKind::Unlink | FsEventKind::Rmdir
             );
-            self.db
-                .mark_dirty(&attributed_app_id, Some(path_id), requires_reconciliation)?;
-
             let mutation_kind = match event.kind {
                 FsEventKind::Create | FsEventKind::Mkdir | FsEventKind::Symlink => {
                     AppMutationKind::Create
@@ -503,7 +600,12 @@ impl<'a> AttributionEngine<'a> {
             if event.kind == FsEventKind::Rename {
                 mutation.previous_path = Some(canonicalize_lossy(&event.path));
             }
-            self.db.append_app_mutation(&mutation)?;
+            let inserted = self.db.append_app_mutation(&mutation)?;
+            if !inserted {
+                return Ok(Some(assoc));
+            }
+            self.db
+                .mark_dirty(&attributed_app_id, Some(path_id), requires_reconciliation)?;
 
             let dirty_root = Path::new(&canonical)
                 .parent()
@@ -842,7 +944,7 @@ pub fn infer_initial_class(
     if looks_like_os_or_lib(path) && !kind.is_mutation() {
         return PersistenceClass::BaseImage;
     }
-    if in_known_root && kind.is_mutation() && !looks_like_user_state(path) {
+    if in_known_root && kind.is_mutation() {
         return PersistenceClass::ReconstructableApp;
     }
     if looks_like_user_state(path) || kind.is_mutation() {
@@ -947,15 +1049,12 @@ pub fn start_installer(
         confidence: 0.9,
     };
     db.insert_installer(&tx)?;
-    for root in roots {
-        db.add_known_root(&app_id, "install", &root.to_string_lossy())?;
-    }
     Ok(tx)
 }
 
 pub fn finish_installer(db: &StateDb, tx: &InstallerTransaction) -> Result<()> {
     db.finish_installer(tx.transaction_id)?;
-    db.mark_dirty(&tx.app_id, None, true)?;
+    db.mark_dirty(&tx.app_id, None, false)?;
     Ok(())
 }
 
@@ -964,6 +1063,134 @@ mod tests {
     use super::*;
     use noland_state_core::metrics::Metrics;
     use std::sync::Arc;
+
+    #[test]
+    fn steam_staging_events_open_one_transaction_without_indexing_staging_paths() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-staging-{}", Uuid::new_v4()));
+        let final_root = home.join(".local/share/Steam/steamapps/common/Helldivers 2");
+        let staging_root = home.join(".local/share/Steam/steamapps/downloading/553850");
+        let staging_file = staging_root.join("data/incomplete.stream");
+        let app_id = AppId::steam(553850);
+        db.add_known_root(&app_id, "install", &final_root.to_string_lossy())
+            .unwrap();
+        let mut engine = AttributionEngine::new(
+            &db,
+            LogicalRootMap::from_home(&home),
+            AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+        );
+
+        for _ in 0..3 {
+            assert!(engine
+                .ingest_fs(&FilesystemEvent {
+                    kind: FsEventKind::Write,
+                    pid: 42,
+                    path: staging_file.clone(),
+                    dest_path: None,
+                    at: Utc::now(),
+                    sampled: false,
+                })
+                .unwrap()
+                .is_none());
+        }
+
+        let installers = db.open_installers().unwrap();
+        assert_eq!(installers.len(), 1);
+        assert_eq!(installers[0].app_id, app_id);
+        assert_eq!(installers[0].candidate_roots, vec![staging_root]);
+        assert!(db
+            .get_path_by_canonical(&staging_file.to_string_lossy())
+            .unwrap()
+            .is_none());
+        assert_eq!(db.known_roots(Some(&app_id)).unwrap().len(), 1);
+        assert!(db.get_app(&app_id).unwrap().is_none());
+        assert!(db.list_dirty_roots(Some(&app_id)).unwrap().is_empty());
+        assert!(db
+            .list_dirty_apps()
+            .unwrap()
+            .iter()
+            .any(|dirty| dirty.app_id == app_id && dirty.requires_reconciliation));
+        assert_eq!(engine.unresolved_len(), 0);
+    }
+
+    #[test]
+    fn rename_from_staging_to_final_content_indexes_the_destination() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-final-rename-{}", Uuid::new_v4()));
+        let final_root = home.join(".local/share/Steam/steamapps/common/Example Game");
+        let final_file = final_root.join("content.pak");
+        let staging_file = home.join(".local/share/Steam/steamapps/downloading/4242/content.pak");
+        std::fs::create_dir_all(&final_root).unwrap();
+        std::fs::write(&final_file, b"complete").unwrap();
+
+        let app = AppIdentity::new(AppId::steam(4242), "Example Game");
+        db.upsert_app(&app).unwrap();
+        db.add_known_root(&app.app_id, "install", &final_root.to_string_lossy())
+            .unwrap();
+        db.insert_session(&AppSession::new(
+            app.app_id.clone(),
+            42,
+            SessionSource::Steam,
+        ))
+        .unwrap();
+        let mut engine = AttributionEngine::new(
+            &db,
+            LogicalRootMap::from_home(&home),
+            AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+        );
+
+        let association = engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Rename,
+                pid: 42,
+                path: staging_file,
+                dest_path: Some(final_file.clone()),
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .expect("final rename destination should be indexed");
+
+        assert_eq!(association.app_id, app.app_id);
+        assert_eq!(
+            association.persistence_class,
+            PersistenceClass::ReconstructableApp
+        );
+        assert!(db
+            .get_path_by_canonical(&canonicalize_lossy(&final_file))
+            .unwrap()
+            .is_some());
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn generic_temporary_mutations_are_not_indexed_or_queued() {
+        let db = StateDb::open_in_memory().unwrap();
+        let home = std::env::temp_dir().join(format!("noland-temporary-{}", Uuid::new_v4()));
+        let temporary = home.join(".config/game/settings.json.tmp");
+        let mut engine = AttributionEngine::new(
+            &db,
+            LogicalRootMap::from_home(&home),
+            AgentPaths::from_roots(home.join("agent-state"), home.join("agent-run")),
+        );
+
+        assert!(engine
+            .ingest_fs(&FilesystemEvent {
+                kind: FsEventKind::Write,
+                pid: 404,
+                path: temporary.clone(),
+                dest_path: None,
+                at: Utc::now(),
+                sampled: false,
+            })
+            .unwrap()
+            .is_none());
+        assert_eq!(engine.unresolved_len(), 0);
+        assert!(db
+            .get_path_by_canonical(&temporary.to_string_lossy())
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn write_is_owned_read_is_not() {

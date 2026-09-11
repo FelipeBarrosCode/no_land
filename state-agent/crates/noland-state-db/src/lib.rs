@@ -4,6 +4,6 @@ mod persistence;
 mod schema;
 mod store;
 
-pub use store::StateDb;
+pub use store::{RestoredPathAssociationInput, StateDb};
 
 pub const SCHEMA_VERSION: i64 = 2;

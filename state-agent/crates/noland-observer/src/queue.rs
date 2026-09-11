@@ -19,6 +19,7 @@ pub struct EventQueue {
     cap: usize,
     inner: Mutex<Inner>,
     metrics: Arc<Metrics>,
+    notify: tokio::sync::Notify,
 }
 
 struct Inner {
@@ -33,6 +34,7 @@ impl EventQueue {
         Self {
             cap,
             metrics,
+            notify: tokio::sync::Notify::new(),
             inner: Mutex::new(Inner {
                 events: VecDeque::with_capacity(cap.min(4096)),
                 last_write: HashMap::new(),
@@ -55,6 +57,8 @@ impl EventQueue {
                             _ => {}
                         }
                         Metrics::inc(&self.metrics.events_coalesced_total);
+                        drop(inner);
+                        self.notify.notify_one();
                         return;
                     }
                 }
@@ -94,6 +98,8 @@ impl EventQueue {
                 inner.dropped += 1;
                 inner.loss_detected = true;
                 Metrics::inc(&self.metrics.filesystem_events_dropped_total);
+                drop(inner);
+                self.notify.notify_one();
                 return;
             }
         }
@@ -106,6 +112,12 @@ impl EventQueue {
             inner.last_write.insert(key, idx);
         }
         inner.events.push_back(event);
+        drop(inner);
+        self.notify.notify_one();
+    }
+
+    pub async fn notified(&self) {
+        self.notify.notified().await;
     }
 
     pub fn drain(&self) -> Vec<QueuedEvent> {
@@ -122,6 +134,8 @@ impl EventQueue {
         inner.dropped = inner.dropped.saturating_add(count);
         inner.loss_detected = true;
         Metrics::add(&self.metrics.filesystem_events_dropped_total, count);
+        drop(inner);
+        self.notify.notify_one();
     }
 
     pub fn take_loss_flag(&self) -> bool {
@@ -211,5 +225,23 @@ mod tests {
             }));
         }
         assert_eq!(q.drain().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn push_wakes_an_event_consumer() {
+        let q = EventQueue::new(16, Arc::new(Metrics::default()));
+        let notified = q.notified();
+        q.push(QueuedEvent::Filesystem(FilesystemEvent {
+            kind: FsEventKind::Write,
+            pid: 1,
+            path: PathBuf::from("/tmp/save.dat"),
+            dest_path: None,
+            at: Utc::now(),
+            sampled: false,
+        }));
+
+        tokio::time::timeout(std::time::Duration::from_millis(100), notified)
+            .await
+            .expect("queue push should wake a waiting consumer");
     }
 }

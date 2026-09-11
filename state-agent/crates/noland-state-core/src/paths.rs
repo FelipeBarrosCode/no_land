@@ -184,7 +184,12 @@ pub fn is_tracking_excluded(
     in_known_app_root: bool,
     target_home: Option<&Path>,
 ) -> bool {
-    is_noland_internal_for_home(path, target_home)
+    let path_text = path.to_string_lossy();
+    let pseudo_path = path_text.trim_start_matches('/').starts_with("anon_inode:")
+        || path_text.trim_start_matches('/').starts_with("pipe:")
+        || path_text.trim_start_matches('/').starts_with("socket:");
+    pseudo_path
+        || is_noland_internal_for_home(path, target_home)
         || is_hard_volatile_root(path)
         || (is_base_system_path(path) && !in_known_app_root)
 }
@@ -328,6 +333,18 @@ mod tests {
             true,
             None
         ));
+    }
+
+    #[test]
+    fn pseudo_files_are_never_tracking_candidates() {
+        for path in [
+            "anon_inode:[eventpoll]",
+            "pipe:[12345]",
+            "socket:[67890]",
+            "/anon_inode:[eventpoll]",
+        ] {
+            assert!(is_tracking_excluded(Path::new(path), true, None), "{path}");
+        }
     }
 
     #[test]

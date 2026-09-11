@@ -1,11 +1,11 @@
 use noland_attribution::AttributionEngine;
 use noland_crypto::MasterKey;
 use noland_observer::{fs_event, process_exec, ObserverHub};
-use noland_restore::{apply_restore, download_and_verify, materialize_tree, prepare_restore};
+use noland_restore::{download_and_verify, prepare_restore, RestoreTarget, RestoreTransaction};
 use noland_state_agent::backup::run_backup_to_local;
 use noland_state_agent::{AgentConfig, StateAgent};
 use noland_state_core::*;
-use noland_storage::{LocalStorage, SharedStorageProvider};
+use noland_storage::{read_pack_index, LocalStorage, SharedStorageProvider};
 use noland_testkit::{launch_mutator, Harness};
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ async fn backup_commit_restore_roundtrip() {
     let fresh_home = harness.root.join("fresh-home");
     std::fs::create_dir_all(fresh_home.join(".local/share")).unwrap();
     std::fs::create_dir_all(fresh_home.join(".config")).unwrap();
-    let mut fresh_roots = LogicalRootMap::from_home(&fresh_home);
+    let fresh_roots = LogicalRootMap::from_home(&fresh_home);
 
     let storage = LocalStorage::new(&cloud);
     storage.ensure_root().await.unwrap();
@@ -102,78 +102,25 @@ async fn backup_commit_restore_roundtrip() {
     .await
     .unwrap();
 
-    // Collect pack index from uploaded packs via local files.
-    let index = Vec::new();
-    let packs_dir = cloud.join("packs");
-    if packs_dir.exists() {
-        for prefix in std::fs::read_dir(&packs_dir).unwrap().flatten() {
-            for pack in std::fs::read_dir(prefix.path()).unwrap().flatten() {
-                let pack_id = pack
-                    .path()
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
-                // Reconstruct index by extracting is handled in download if we have entries.
-                // For the local provider we restore from staged chunks built during backup.
-                let _ = pack_id;
-                let _ = &index;
-            }
-        }
-    }
-
-    // Restore using the already-built local pack files referenced by the backup.
-    // The pack index was persisted only in memory; rebuild chunks from the snapshot
-    // by re-reading the committed encrypted manifest and applying files from source
-    // bytes we still have in the pack cache under agent.paths.packs.
-    let pack_cache = agent
-        .config
-        .paths
-        .packs
-        .join(manifest.bundle_id.to_string());
-    if pack_cache.exists() {
-        for file in &plan.manifest.files {
-            let staged = plan
-                .staging
-                .join("materialized/tree")
-                .join(file.logical_root.replace(['$', ':', '/'], "_"))
-                .join(&file.relative_path);
-            if let Some(parent) = staged.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            // Pull original bytes from the pre-destroy copies in the cloud? We deleted data.
-            // Use snapshot leftover? discarded. Use pack extract if we have index.
-            let _ = staged;
-        }
-    }
-
-    // Simpler path: copy from materialized after we reconstruct from file hashes stored
-    // in the test itself. Re-write expected content from the manifest sizes by downloading
-    // via provider if packs were uploaded.
+    let index = read_pack_index(&storage, &master, &app_id, manifest.bundle_id)
+        .await
+        .unwrap();
     download_and_verify(&storage, &master, &plan, &index)
         .await
-        .ok();
-    let _ = materialize_tree(&plan, &fresh_roots);
-    // Apply using source_path_hint files when present in the manifest by rewriting roots.
-    fresh_roots.xdg_data_home = Some(fresh_home.join(".local/share"));
-    fresh_roots.xdg_config_home = Some(fresh_home.join(".config"));
-    // If materialize didn't have chunks, seed the known fixture files at the
-    // portable restore destinations so apply has something to keep.
-    let level = fresh_home.join(".local/share/example-game/saves/world/level.dat");
-    let options = fresh_home.join(".config/example-game/options.txt");
-    std::fs::create_dir_all(level.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(options.parent().unwrap()).unwrap();
-    if !level.exists() {
-        std::fs::write(&level, b"world-v1").unwrap();
-    }
-    if !options.exists() {
-        std::fs::write(&options, b"render=fancy").unwrap();
-    }
-    let _ = apply_restore(&plan, &fresh_roots, Some(&agent.db));
-    assert!(
-        fresh_home
-            .join(".local/share/example-game/saves/world/level.dat")
-            .exists()
-            || fresh_home.join(".config/example-game/options.txt").exists()
+        .unwrap();
+
+    let mut restore = RestoreTransaction::new(&plan, &fresh_roots, Some(&agent.db));
+    let report = restore.publish_to(RestoreTarget::Complete).unwrap();
+    assert!(report.published_entries > 0);
+    restore.commit().unwrap();
+
+    assert_eq!(
+        std::fs::read(fresh_home.join(".local/share/example-game/saves/world/level.dat")).unwrap(),
+        b"world-v1"
     );
+    assert_eq!(
+        std::fs::read(fresh_home.join(".config/example-game/options.txt")).unwrap(),
+        b"render=fancy"
+    );
+    assert!(!plan.staging.exists());
 }

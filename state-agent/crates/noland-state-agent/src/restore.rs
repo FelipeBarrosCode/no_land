@@ -1,15 +1,14 @@
 use std::{
     fs,
-    path::PathBuf,
-    time::{Duration, Instant},
+    path::{Path, PathBuf},
+    time::Instant,
 };
 
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::{EphemeralRcloneSession, TransferTuning};
 use noland_restore::{
-    apply_restore_to, cleanup_restore, download_and_verify_to, materialize_tree_to,
-    prepare_restore, prune_local_pack_cache, DownloadJournal, DownloadOptions, DownloadReport,
-    PackCacheGcOptions, RestoreTarget,
+    download_and_verify_to, prepare_restore, DownloadJournal, DownloadOptions, DownloadReport,
+    RestoreTarget, RestoreTransaction,
 };
 use noland_state_core::*;
 use noland_storage::{
@@ -191,6 +190,8 @@ pub async fn run_restore_with_session(
             )?;
 
             let restore_result = async {
+                let roots = agent.roots.lock().clone();
+                let mut restore = RestoreTransaction::new(&plan, &roots, Some(&agent.db));
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
                     app_id: manifest_app.app_id.clone(),
@@ -204,7 +205,6 @@ pub async fn run_restore_with_session(
                     icon_path: manifest_app.icon_path.clone(),
                 })?;
 
-                ensure_steam_appmanifest(agent, manifest_app)?;
                 let index = read_pack_index_for_operation(
                     &storage,
                     master,
@@ -219,7 +219,6 @@ pub async fn run_restore_with_session(
                     storage.storage_identity(),
                     &index,
                 )?;
-                let roots = agent.roots.lock().clone();
                 let download_journal = Some(DownloadJournal {
                     db: &agent.db,
                     operation_id,
@@ -259,29 +258,6 @@ pub async fn run_restore_with_session(
                 persist_restore_operation(
                     agent,
                     operation_id,
-                    RestoreState::Materializing,
-                    &metrics,
-                )?;
-                persist_restore_progress(
-                    agent,
-                    operation_id,
-                    &mut progress,
-                    RestoreState::Materializing.as_str(),
-                    0,
-                    "Materializing launch-critical files from verified chunks",
-                )?;
-                let materialize_started = Instant::now();
-                let ready_materialized =
-                    materialize_tree_to(&plan, &roots, RestoreTarget::ReadyToLaunch)?;
-                metrics.restore_materialize_duration_ms = metrics
-                    .restore_materialize_duration_ms
-                    .saturating_add(elapsed_ms(materialize_started));
-                progress.detail_json["ready_to_launch_materialized_files"] =
-                    serde_json::json!(ready_materialized.len());
-
-                persist_restore_operation(
-                    agent,
-                    operation_id,
                     RestoreState::CreatingRollbackPoint,
                     &metrics,
                 )?;
@@ -292,14 +268,17 @@ pub async fn run_restore_with_session(
                     &mut progress,
                     RestoreState::Applying.as_str(),
                     0,
-                    "Applying launch-critical files with rollback protection",
+                    "Reconstructing and atomically publishing launch-critical files",
                 )?;
                 let apply_started = Instant::now();
-                let _ready_rollback =
-                    apply_restore_to(&plan, &roots, Some(&agent.db), RestoreTarget::ReadyToLaunch)?;
+                let ready_report = restore.publish_to(RestoreTarget::ReadyToLaunch)?;
                 metrics.restore_apply_duration_ms = metrics
                     .restore_apply_duration_ms
                     .saturating_add(elapsed_ms(apply_started));
+                progress.detail_json["ready_to_launch_published_files"] =
+                    serde_json::json!(ready_report.published_entries);
+                progress.detail_json["ready_to_launch_reused_files"] =
+                    serde_json::json!(ready_report.reused_entries);
 
                 progress.detail_json["ready_to_launch_reached"] = serde_json::json!(true);
                 progress.detail_json["milestones"] = serde_json::json!(["READY_TO_LAUNCH"]);
@@ -370,28 +349,15 @@ pub async fn run_restore_with_session(
                     .saturating_add(elapsed_ms(download_started));
                 progress.detail_json["complete_download"] = download_report_json(complete_download);
 
-                persist_restore_operation(
-                    agent,
-                    operation_id,
-                    RestoreState::Materializing,
-                    &metrics,
-                )?;
-                persist_restore_progress(
-                    agent,
-                    operation_id,
-                    &mut progress,
-                    RestoreState::Materializing.as_str(),
-                    ready_to_launch_files,
-                    "Materializing all remaining restore files",
-                )?;
-                let materialize_started = Instant::now();
-                let complete_materialized =
-                    materialize_tree_to(&plan, &roots, RestoreTarget::Complete)?;
-                metrics.restore_materialize_duration_ms = metrics
-                    .restore_materialize_duration_ms
-                    .saturating_add(elapsed_ms(materialize_started));
-                progress.detail_json["complete_materialized_files"] =
-                    serde_json::json!(complete_materialized.len());
+                let staged_packs_released = restore.release_staged_pack_links()?;
+                let pack_cache_pruned = restore.prune_restore_pack_cache()?;
+                let chunks_evicted_on_enable = restore.enable_chunk_eviction()?;
+                progress.detail_json["final_publication_cleanup"] = serde_json::json!({
+                    "staged_pack_links_released": staged_packs_released,
+                    "cached_packs_pruned": pack_cache_pruned.packs_pruned,
+                    "cached_pack_bytes_before": pack_cache_pruned.bytes_before,
+                    "chunks_evicted_on_enable": chunks_evicted_on_enable,
+                });
 
                 persist_restore_operation(
                     agent,
@@ -406,45 +372,46 @@ pub async fn run_restore_with_session(
                     &mut progress,
                     RestoreState::Applying.as_str(),
                     ready_to_launch_files,
-                    "Applying the complete restore and deferred tombstones",
+                    "Reconstructing and atomically publishing all remaining files and tombstones",
                 )?;
                 let apply_started = Instant::now();
-                let rollback =
-                    apply_restore_to(&plan, &roots, Some(&agent.db), RestoreTarget::Complete)?;
+                let complete_report = restore.publish_to(RestoreTarget::Complete)?;
                 metrics.restore_apply_duration_ms = metrics
                     .restore_apply_duration_ms
                     .saturating_add(elapsed_ms(apply_started));
+                progress.detail_json["complete_published_files"] =
+                    serde_json::json!(complete_report.published_entries);
+                progress.detail_json["complete_reused_files"] =
+                    serde_json::json!(complete_report.reused_entries);
                 progress.detail_json["milestones"] =
                     serde_json::json!(["READY_TO_LAUNCH", "COMPLETE"]);
-                Ok(rollback)
+                restore.commit()?;
+                if mode == RestoreMode::CompleteApplication {
+                    ensure_steam_appmanifest_after_commit(agent, &plan.manifest)?;
+                }
+                Ok(())
             }
             .await;
 
+            let terminal_pack_release = plan.release_staged_pack_links();
+            let terminal_pack_prune = plan.prune_restore_pack_cache();
+            let terminal_pack_cleanup = terminal_pack_release.and(terminal_pack_prune);
             match restore_result {
-                Ok(rollback) => {
-                    cleanup_restore(&plan, rollback)?;
-                    let mut gc = PackCacheGcOptions::new(20 * 1024 * 1024 * 1024, 4_096);
-                    gc.min_unused_age = Duration::from_secs(24 * 60 * 60);
-                    match prune_local_pack_cache(&plan.pack_cache, &gc) {
-                        Ok(report) => {
-                            progress.detail_json["pack_cache_gc"] = serde_json::json!({
-                                "packs_pruned": report.packs_pruned,
-                                "bytes_before": report.bytes_before,
-                                "bytes_after": report.bytes_after,
-                            });
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "local restore pack-cache GC failed");
-                        }
-                    }
+                Ok(()) => {
+                    let report = terminal_pack_cleanup?;
+                    progress.detail_json["terminal_pack_cache_cleanup"] = serde_json::json!({
+                        "packs_pruned": report.packs_pruned,
+                        "bytes_before": report.bytes_before,
+                        "bytes_after": report.bytes_after,
+                    });
                     Ok(())
                 }
                 Err(error) => {
-                    if let Err(cleanup_error) = cleanup_restore(&plan, None) {
+                    if let Err(cleanup_error) = terminal_pack_cleanup {
                         tracing::warn!(
                             restore_id = %plan.restore_id,
                             %cleanup_error,
-                            "failed to clean restore staging after restore error"
+                            "failed to clear restore pack cache after terminal failure"
                         );
                     }
                     Err(error)
@@ -507,7 +474,11 @@ pub async fn run_restore_with_session(
     result
 }
 
-fn ensure_steam_appmanifest(agent: &StateAgent, manifest_app: &ManifestApp) -> Result<()> {
+fn ensure_steam_appmanifest_after_commit(
+    agent: &StateAgent,
+    bundle: &BundleManifest,
+) -> Result<()> {
+    let manifest_app = &bundle.app;
     let Some(steam_app_id) = manifest_app.steam_app_id.or_else(|| {
         manifest_app
             .app_id
@@ -520,24 +491,20 @@ fn ensure_steam_appmanifest(agent: &StateAgent, manifest_app: &ManifestApp) -> R
 
     let roots = agent.roots.lock().clone();
     let filename = format!("appmanifest_{steam_app_id}.acf");
-    if roots
-        .steam_libraries
-        .values()
-        .map(|steamapps| steamapps.join(&filename))
-        .any(|path| path.is_file())
-    {
+    let Some((target_dir, install_dir)) = steam_install_location_from_manifest(bundle, &roots)
+    else {
+        return Ok(());
+    };
+    let manifest_path = target_dir.join(&filename);
+    if manifest_path.is_file() {
         return Ok(());
     }
 
-    let Some(target_dir) = preferred_steamapps_dir(&roots) else {
-        return Ok(());
-    };
-    fs::create_dir_all(target_dir.join("common"))?;
-    let manifest_path = target_dir.join(&filename);
+    fs::create_dir_all(&target_dir)?;
     let manifest = format!(
         "\"AppState\"\n{{\n\t\"appid\"\t\t\"{steam_app_id}\"\n\t\"name\"\t\t\"{}\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"{}\"\n}}\n",
         escape_acf_value(&manifest_app.display_name),
-        escape_acf_value(&steam_install_dir_hint(manifest_app, steam_app_id)),
+        escape_acf_value(&install_dir),
     );
     fs::write(manifest_path, manifest)?;
     Ok(())
@@ -552,27 +519,58 @@ fn preferred_steamapps_dir(roots: &LogicalRootMap) -> Option<PathBuf> {
         .or_else(|| roots.steam_root.as_ref().map(|root| root.join("steamapps")))
 }
 
-fn steam_install_dir_hint(manifest_app: &ManifestApp, steam_app_id: u32) -> String {
-    let candidate = manifest_app.display_name.trim();
-    let sanitized = candidate
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, ' ' | '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let trimmed = sanitized.trim_matches([' ', '.']);
-    if trimmed.is_empty() {
-        format!("Steam-{steam_app_id}")
-    } else {
-        trimmed.to_string()
+fn steam_install_location_from_manifest(
+    bundle: &BundleManifest,
+    roots: &LogicalRootMap,
+) -> Option<(PathBuf, String)> {
+    let logical_location = bundle.files.iter().find_map(|file| {
+        let Some(LogicalRoot::SteamLibrary { id }) = file.logical_root_parsed() else {
+            return None;
+        };
+        let install_dir = steam_install_dir_from_path(Path::new(&file.relative_path))?;
+        Some((roots.steam_libraries.get(&id)?.clone(), install_dir))
+    });
+    if logical_location.is_some() {
+        return logical_location;
     }
+
+    let install_dir = bundle
+        .files
+        .iter()
+        .find_map(|file| {
+            file.source_path_hint
+                .as_deref()
+                .and_then(|path| steam_install_dir_from_path(Path::new(path)))
+        })
+        .or_else(|| {
+            bundle
+                .app
+                .canonical_executable
+                .as_deref()
+                .and_then(steam_install_dir_from_path)
+        })?;
+    Some((preferred_steamapps_dir(roots)?, install_dir))
+}
+
+fn steam_install_dir_from_path(path: &Path) -> Option<String> {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .collect::<Vec<_>>();
+    components
+        .windows(3)
+        .find(|parts| {
+            parts[0].eq_ignore_ascii_case("steamapps") && parts[1].eq_ignore_ascii_case("common")
+        })
+        .map(|parts| parts[2].to_string())
+        .or_else(|| {
+            components
+                .first()
+                .is_some_and(|component| component.eq_ignore_ascii_case("common"))
+                .then(|| components.get(1).map(|component| (*component).to_string()))
+                .flatten()
+        })
+        .filter(|install_dir| !install_dir.is_empty())
 }
 
 fn escape_acf_value(value: &str) -> String {
@@ -581,25 +579,41 @@ fn escape_acf_value(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_steam_appmanifest, preferred_steamapps_dir, steam_install_dir_hint};
+    use super::{
+        ensure_steam_appmanifest_after_commit, preferred_steamapps_dir, steam_install_dir_from_path,
+    };
     use crate::{AgentConfig, StateAgent};
-    use noland_state_core::{AppId, LogicalRootMap, ManifestApp};
-    use std::path::PathBuf;
+    use chrono::Utc;
+    use noland_state_core::{
+        AppId, AppIdentity, BackupMode, BundleManifest, LogicalRootMap, ManifestApp, ManifestSource,
+    };
+    use std::path::{Path, PathBuf};
+    use uuid::Uuid;
+
+    fn steam_bundle(display_name: &str) -> BundleManifest {
+        BundleManifest::new(
+            ManifestApp::from(&AppIdentity::new(AppId::steam(3_241_660), display_name)),
+            ManifestSource {
+                instance_id: Uuid::new_v4(),
+                image_id: "test".into(),
+                captured_at: Utc::now(),
+            },
+            BackupMode::CompleteApplication,
+        )
+    }
 
     #[test]
-    fn steam_install_dir_hint_sanitizes_manifest_titles() {
-        let app = ManifestApp {
-            app_id: AppId::steam(42),
-            display_name: "O'Brien: The / Test".into(),
-            aliases: Vec::new(),
-            desktop_entry_id: None,
-            steam_app_id: Some(42),
-            launcher: None,
-            canonical_executable: None,
-            icon_path: None,
-        };
-
-        assert_eq!(steam_install_dir_hint(&app, 42), "O_Brien_ The _ Test");
+    fn steam_install_dir_comes_from_install_path_not_display_name() {
+        assert_eq!(
+            steam_install_dir_from_path(Path::new(
+                "/mnt/library/steamapps/common/RepoInstall_3241660/bin/game.exe"
+            )),
+            Some("RepoInstall_3241660".into())
+        );
+        assert_eq!(
+            steam_install_dir_from_path(Path::new("common/RepoInstall_3241660/game.bin")),
+            Some("RepoInstall_3241660".into())
+        );
     }
 
     #[test]
@@ -617,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn ensure_steam_appmanifest_creates_missing_manifest() {
+    fn fallback_does_not_synthesize_manifest_from_display_name() {
         let home = std::env::temp_dir().join(format!(
             "noland-restore-steam-manifest-{}-{}",
             std::process::id(),
@@ -629,31 +643,49 @@ mod tests {
         let steamapps = home.join("steamapps");
         std::fs::create_dir_all(&steamapps).unwrap();
 
-        let config = AgentConfig::isolated(home.clone());
-        let agent = StateAgent::boot(config).unwrap();
-        {
-            let mut roots = agent.roots.lock();
-            roots.steam_libraries.insert("0".into(), steamapps.clone());
-        }
+        let agent = StateAgent::boot(AgentConfig::isolated(home.clone())).unwrap();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("0".into(), steamapps.clone());
+        let bundle = steam_bundle("Display Name Is Not The Install Directory");
 
-        let app = ManifestApp {
-            app_id: AppId::steam(3241660),
-            display_name: "R.E.P.O.".into(),
-            aliases: Vec::new(),
-            desktop_entry_id: None,
-            steam_app_id: Some(3_241_660),
-            launcher: None,
-            canonical_executable: None,
-            icon_path: None,
-        };
+        ensure_steam_appmanifest_after_commit(&agent, &bundle).unwrap();
 
-        ensure_steam_appmanifest(&agent, &app).unwrap();
+        assert!(!steamapps.join("appmanifest_3241660.acf").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
 
-        let manifest = steamapps.join("appmanifest_3241660.acf");
-        let text = std::fs::read_to_string(&manifest).unwrap();
-        assert!(manifest.is_file());
-        assert!(text.contains("\"appid\"\t\t\"3241660\""));
-        assert!(text.contains("\"name\"\t\t\"R.E.P.O.\""));
+    #[test]
+    fn post_commit_fallback_uses_source_install_directory() {
+        let home = std::env::temp_dir().join(format!(
+            "noland-restore-steam-source-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let steamapps = home.join("steamapps");
+        std::fs::create_dir_all(&steamapps).unwrap();
+
+        let agent = StateAgent::boot(AgentConfig::isolated(home.clone())).unwrap();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("0".into(), steamapps.clone());
+        let mut bundle = steam_bundle("Unrelated Display Name");
+        bundle.app.canonical_executable = Some(PathBuf::from(
+            "/source/steamapps/common/ActualInstallDirectory/bin/game.exe",
+        ));
+
+        ensure_steam_appmanifest_after_commit(&agent, &bundle).unwrap();
+
+        let manifest = std::fs::read_to_string(steamapps.join("appmanifest_3241660.acf")).unwrap();
+        assert!(manifest.contains("\"installdir\"\t\t\"ActualInstallDirectory\""));
+        assert!(!manifest.contains("\"installdir\"\t\t\"Unrelated Display Name\""));
         std::fs::remove_dir_all(home).unwrap();
     }
 }

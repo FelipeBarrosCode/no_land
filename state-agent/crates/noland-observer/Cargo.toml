@@ -8,6 +8,7 @@ license.workspace = true
 chrono.workspace = true
 noland-state-core.workspace = true
 parking_lot.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
