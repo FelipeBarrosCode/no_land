@@ -10,11 +10,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 mod config;
+mod profile;
 mod providers;
 mod session;
 mod tuning;
 
 pub use config::{RcloneRemoteConfig, RcloneRoot};
+pub use profile::{
+    configured_backend_type, validate_provider_backend, GoogleDriveTransferOptions,
+    ProviderCapabilities, ProviderOptions, ProviderTransferConfig, TransferProfile,
+};
 pub use providers::{adapter_for, Dispatcher};
 pub use session::{session_from_input, TokenMode};
 pub use tuning::{classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning};
@@ -63,6 +68,26 @@ impl ProviderKind {
             Self::Dropbox => "dropbox",
             Self::Box => "box",
             Self::AzureBlob => "azure_blob",
+            Self::Sftp => "sftp",
+            Self::Webdav => "webdav",
+            Self::Local => "local",
+        }
+    }
+
+    pub fn backend_type(self) -> &'static str {
+        match self {
+            Self::AmazonS3
+            | Self::CloudflareR2
+            | Self::Wasabi
+            | Self::DigitalOceanSpaces
+            | Self::GenericS3 => "s3",
+            Self::BackblazeB2 => "b2",
+            Self::GoogleDrive => "drive",
+            Self::GoogleCloudStorage => "google cloud storage",
+            Self::MicrosoftOneDrive => "onedrive",
+            Self::Dropbox => "dropbox",
+            Self::Box => "box",
+            Self::AzureBlob => "azureblob",
             Self::Sftp => "sftp",
             Self::Webdav => "webdav",
             Self::Local => "local",
@@ -191,6 +216,8 @@ pub struct EphemeralRcloneSession {
     pub root: String,
     pub config_ini: String,
     pub expires_at_unix: i64,
+    #[serde(default)]
+    pub upload_concurrency: Option<usize>,
 }
 
 impl EphemeralRcloneSession {

@@ -17,6 +17,12 @@ pub enum CancelOutcome {
     NotRunning,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationLane {
+    Control,
+    Transfer,
+}
+
 #[derive(Debug, Clone)]
 pub struct ManagedOperationSnapshot {
     pub operation_id: Uuid,
@@ -31,10 +37,11 @@ pub struct RetryDescriptor {
     pub params: Value,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct OperationManager {
     state: Arc<Mutex<ManagerState>>,
-    execution_gate: Arc<tokio::sync::Mutex<()>>,
+    control_gate: Arc<tokio::sync::Mutex<()>>,
+    transfer_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[derive(Default)]
@@ -51,6 +58,16 @@ struct RunningOperation {
     started_at: Option<Instant>,
 }
 
+impl Default for OperationManager {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ManagerState::default())),
+            control_gate: Arc::new(tokio::sync::Mutex::new(())),
+            transfer_gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+}
+
 impl OperationManager {
     pub fn spawn<F, C>(&self, operation_id: Uuid, future: F, on_terminated: C) -> bool
     where
@@ -63,6 +80,28 @@ impl OperationManager {
     pub fn spawn_cancellable<F, K, C>(
         &self,
         operation_id: Uuid,
+        future: F,
+        on_cancelled: K,
+        on_terminated: C,
+    ) -> bool
+    where
+        F: Future<Output = ()> + Send + 'static,
+        K: FnOnce() + Send + 'static,
+        C: FnOnce(String) + Send + 'static,
+    {
+        self.spawn_cancellable_on_lane(
+            operation_id,
+            OperationLane::Control,
+            future,
+            on_cancelled,
+            on_terminated,
+        )
+    }
+
+    pub fn spawn_cancellable_on_lane<F, K, C>(
+        &self,
+        operation_id: Uuid,
+        lane: OperationLane,
         future: F,
         on_cancelled: K,
         on_terminated: C,
@@ -90,7 +129,10 @@ impl OperationManager {
         }
 
         let state = Arc::clone(&self.state);
-        let execution_gate = Arc::clone(&self.execution_gate);
+        let execution_gate = match lane {
+            OperationLane::Control => Arc::clone(&self.control_gate),
+            OperationLane::Transfer => Arc::clone(&self.transfer_gate),
+        };
         tokio::spawn(async move {
             let _guard = RunningGuard {
                 operation_id,
@@ -201,7 +243,7 @@ impl OperationManager {
     where
         F: Future<Output = T>,
     {
-        let _permit = self.execution_gate.lock().await;
+        let _permit = self.control_gate.lock().await;
         future.await
     }
 }
@@ -280,6 +322,45 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn transfer_lane_runs_while_control_lane_is_busy() {
+        let manager = OperationManager::default();
+        let control_id = Uuid::new_v4();
+        let transfer_id = Uuid::new_v4();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (transfer_started_tx, transfer_started_rx) = oneshot::channel();
+
+        assert!(manager.spawn(
+            control_id,
+            async move {
+                let _ = release_rx.await;
+            },
+            |_| {},
+        ));
+        assert!(manager.spawn_cancellable_on_lane(
+            transfer_id,
+            OperationLane::Transfer,
+            async move {
+                let _ = transfer_started_tx.send(());
+            },
+            || {},
+            |_| {},
+        ));
+
+        tokio::time::timeout(Duration::from_secs(1), transfer_started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while manager.is_running(control_id) || manager.is_running(transfer_id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

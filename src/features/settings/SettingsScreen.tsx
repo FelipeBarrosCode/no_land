@@ -81,6 +81,7 @@ interface Props {
     providerFields?: Record<string, string>,
   ) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
+  onCancelOauthFlow: (sessionId: string) => Promise<void>;
   onSaveApiKey: (apiKey: string) => Promise<void>;
   onSavePlatformCredentials: (
     payload: PlatformCredentialsUpdate,
@@ -206,6 +207,7 @@ export function SettingsScreen({
   oauthSessionId,
   onBeginOauthFlow,
   onCompleteOauthFlow,
+  onCancelOauthFlow,
   onSaveApiKey,
   onSavePlatformCredentials,
   onSaveIgdbCredentials,
@@ -1131,6 +1133,7 @@ export function SettingsScreen({
           onLoadProfiles={onLoadSharedStorageProfiles}
           onBeginOauthFlow={onBeginOauthFlow}
           onCompleteOauthFlow={onCompleteOauthFlow}
+          onCancelOauthFlow={onCancelOauthFlow}
         />
       </div>
     </Card>

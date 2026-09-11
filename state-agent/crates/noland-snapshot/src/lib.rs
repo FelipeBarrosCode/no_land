@@ -55,12 +55,13 @@ pub fn create_view(
 
     let mut mappings = Vec::new();
     let mut consistent = true;
-    for source in sources {
+    for (source_index, source) in sources.iter().enumerate() {
         if !source.exists() {
             continue;
         }
-        let name = unique_name(source);
-        let staged = dest.join("copy").join(&name);
+        // The source index is injective within this immutable view. Flattening path components can
+        // alias distinct paths such as `/a_b/c` and `/a/b_c`, corrupting rollback data.
+        let staged = dest.join("copy").join(format!("{source_index:016x}"));
         if let Some(parent) = staged.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -136,15 +137,6 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-fn unique_name(path: &Path) -> String {
-    path.iter()
-        .map(|c| c.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("_")
-        .trim_start_matches('_')
-        .replace('/', "_")
-}
-
 fn common_btrfs_parent(sources: &[PathBuf]) -> Option<PathBuf> {
     let first = sources.first()?;
     let mut parent = first.parent()?.to_path_buf();
@@ -175,6 +167,26 @@ fn try_btrfs_snapshot(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_fallback_uses_distinct_artifacts_for_ambiguous_paths() {
+        let tmp = std::env::temp_dir().join(format!("noland-snap-alias-{}", Uuid::new_v4()));
+        let first = tmp.join("a_b/c");
+        let second = tmp.join("a/b_c");
+        fs::create_dir_all(first.parent().unwrap()).unwrap();
+        fs::create_dir_all(second.parent().unwrap()).unwrap();
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"second").unwrap();
+
+        let view =
+            create_view(&tmp.join("snaps"), &[first.clone(), second.clone()], false).unwrap();
+
+        assert_ne!(view.mappings[0].staged, view.mappings[1].staged);
+        assert_eq!(fs::read(&view.mappings[0].staged).unwrap(), b"first");
+        assert_eq!(fs::read(&view.mappings[1].staged).unwrap(), b"second");
+        discard(&view).unwrap();
+        fs::remove_dir_all(tmp).ok();
+    }
 
     #[test]
     fn copy_fallback_preserves_bytes() {

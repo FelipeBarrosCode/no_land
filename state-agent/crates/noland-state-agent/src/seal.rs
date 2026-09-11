@@ -120,6 +120,6 @@ pub async fn run_seal_with_session(
 ) -> Result<SealRecord> {
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
-    let storage = RcloneStorage::from_session(session, &config_path);
+    let storage = RcloneStorage::try_from_session(session, &config_path)?;
     run_seal(agent, &storage, master, mode).await
 }

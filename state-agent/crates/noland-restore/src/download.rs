@@ -451,6 +451,29 @@ fn mark_pack_completed(
         .complete_sync_journal_item(journal.operation_id, remote_key, size)
 }
 
+struct PartialFileGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl PartialFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PartialFileGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 async fn download_pack(
     provider: &dyn SharedStorageProvider,
     plan: &RestorePlan,
@@ -462,18 +485,16 @@ async fn download_pack(
     }
     let temp = cache_path.with_extension(format!("pack.{}.partial", plan.restore_id));
     remove_file_if_present(&temp)?;
-    let result = provider
+    let mut partial = PartialFileGuard::new(temp.clone());
+    provider
         .download(&RemoteKey::new(remote_pack_key(pack_id)), &temp)
-        .await;
-    if let Err(error) = result {
-        let _ = std::fs::remove_file(&temp);
-        return Err(error);
-    }
+        .await?;
     if cache_path.exists() {
         remove_file_if_present(&temp)?;
     } else {
         std::fs::rename(&temp, cache_path)?;
     }
+    partial.disarm();
     Ok(())
 }
 
@@ -692,6 +713,20 @@ mod tests {
         assert_eq!(report.packs_after, 2);
         std::fs::remove_dir_all(root).unwrap();
         std::fs::remove_dir_all(staging).unwrap();
+    }
+
+    #[test]
+    fn dropping_partial_file_guard_removes_cancelled_download() {
+        let root = test_dir("cancelled-partial");
+        let partial = root.join("pack.partial");
+        std::fs::write(&partial, b"incomplete").unwrap();
+
+        {
+            let _guard = PartialFileGuard::new(partial.clone());
+        }
+
+        assert!(!partial.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

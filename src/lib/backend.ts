@@ -574,6 +574,10 @@ export async function beginOauthAuthorization(
   });
 }
 
+export async function cancelOauthAuthorization(sessionId: string): Promise<void> {
+  return invokeSafe<void>("cancel_oauth_authorization", { sessionId });
+}
+
 export async function completeOauthAuthorization(
   sessionId: string,
 ): Promise<OAuthCompleteResponse> {

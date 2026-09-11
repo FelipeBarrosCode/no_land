@@ -28,7 +28,7 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
 ];
 
 pub fn is_backup_candidate(app: &AppIdentity) -> bool {
-    !is_always_ignored(app)
+    !is_always_ignored(app) && !is_steam_runtime(app)
 }
 
 pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
@@ -42,6 +42,23 @@ pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
 fn is_always_ignored(app: &AppIdentity) -> bool {
     let hay = haystack(app);
     ALWAYS_IGNORE_MARKERS.iter().any(|m| hay.contains(m))
+}
+
+fn is_steam_runtime(app: &AppIdentity) -> bool {
+    if app.steam_app_id.is_none() && !app.app_id.as_str().starts_with("steam:") {
+        return false;
+    }
+    std::iter::once(app.display_name.as_str())
+        .chain(app.aliases.iter().map(String::as_str))
+        .any(|name| {
+            let name = name.trim().to_ascii_lowercase();
+            name == "proton"
+                || name.starts_with("proton ")
+                || name.starts_with("steam linux runtime")
+                || name.starts_with("steamlinuxruntime")
+                || name == "steamworks common redistributables"
+                || name == "steamworks shared"
+        })
 }
 
 fn haystack(app: &AppIdentity) -> String {
@@ -86,5 +103,27 @@ mod tests {
         assert!(!is_backup_candidate(&dolphin));
         assert!(!is_backup_candidate(&plasma));
         assert!(!is_backup_candidate(&portal));
+    }
+
+    #[test]
+    fn hides_steam_runtimes_without_changing_non_steam_candidates() {
+        for (app_id, name) in [
+            (AppId::steam(1493710), "Proton Experimental"),
+            (AppId::steam(1628350), "Steam Linux Runtime 3.0 (sniper)"),
+            (AppId::steam(228980), "Steamworks Common Redistributables"),
+        ] {
+            assert!(
+                !is_backup_candidate(&AppIdentity::new(app_id, name)),
+                "{name}"
+            );
+        }
+
+        let non_steam = AppIdentity::new(
+            AppId::desktop("proton-game-launcher"),
+            "Proton Game Launcher",
+        );
+        let similarly_named_steam_game = AppIdentity::new(AppId::steam(42), "Protonium: The Game");
+        assert!(is_backup_candidate(&non_steam));
+        assert!(is_backup_candidate(&similarly_named_steam_game));
     }
 }

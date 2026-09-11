@@ -4,8 +4,7 @@ use crate::classify::{BackupDecision, BackupMode, PersistenceClass, SemanticRole
 use crate::confidence::{association_strength, AssociationStrength};
 use crate::evidence::PathAssociation;
 use crate::paths::{
-    is_hard_volatile_root, is_noland_internal, looks_like_cache, looks_like_secret,
-    looks_like_user_state,
+    is_tracking_excluded, looks_like_cache, looks_like_secret, looks_like_user_state,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,10 +29,14 @@ pub struct PathDecisionContext<'a> {
 }
 
 pub fn decide_path(ctx: PathDecisionContext<'_>) -> BackupDecision {
-    if is_noland_internal(ctx.path) {
-        return BackupDecision::Exclude;
-    }
-    if is_hard_volatile_root(ctx.path) {
+    let in_known_app_root = ctx.association.evidence.iter().any(|evidence| {
+        matches!(
+            evidence.kind,
+            crate::evidence::EvidenceKind::KnownAppRoot
+                | crate::evidence::EvidenceKind::ExplicitUserBinding
+        )
+    });
+    if is_tracking_excluded(ctx.path, in_known_app_root, None) {
         return BackupDecision::Exclude;
     }
     if matches!(ctx.policy_override, Some(PathPolicy::Exclude)) {
@@ -176,5 +179,65 @@ mod tests {
             }),
             BackupDecision::Exclude
         );
+    }
+
+    #[test]
+    fn base_system_paths_require_explicit_known_root_evidence() {
+        let association = external_dependency();
+        assert_eq!(
+            decide_path(PathDecisionContext {
+                path: Path::new("/etc/example-app/settings.toml"),
+                association: &association,
+                mode: BackupMode::CompleteApplication,
+                matches_image_baseline: false,
+                reliable_reconstruction: false,
+                policy_override: Some(PathPolicy::ForcePersistent),
+            }),
+            BackupDecision::Exclude
+        );
+
+        let mut known_root = association;
+        known_root
+            .evidence
+            .push(Evidence::new(EvidenceKind::KnownAppRoot));
+        known_root.persistence_class = PersistenceClass::PersistentState;
+        assert_eq!(
+            decide_path(PathDecisionContext {
+                path: Path::new("/etc/example-app/settings.toml"),
+                association: &known_root,
+                mode: BackupMode::PersonalState,
+                matches_image_baseline: false,
+                reliable_reconstruction: false,
+                policy_override: None,
+            }),
+            BackupDecision::Include
+        );
+    }
+
+    #[test]
+    fn known_roots_cannot_override_noland_or_volatile_exclusions() {
+        let mut association = external_dependency();
+        association
+            .evidence
+            .push(Evidence::new(EvidenceKind::KnownAppRoot));
+        association.persistence_class = PersistenceClass::PersistentState;
+        for path in [
+            "/opt/noland/state-agent/config.toml",
+            "/etc/sunshine/sunshine.conf",
+            "/run/example-app/state",
+        ] {
+            assert_eq!(
+                decide_path(PathDecisionContext {
+                    path: Path::new(path),
+                    association: &association,
+                    mode: BackupMode::CompleteApplication,
+                    matches_image_baseline: false,
+                    reliable_reconstruction: false,
+                    policy_override: Some(PathPolicy::ForcePersistent),
+                }),
+                BackupDecision::Exclude,
+                "{path}"
+            );
+        }
     }
 }

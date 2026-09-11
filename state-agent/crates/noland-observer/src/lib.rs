@@ -94,6 +94,10 @@ impl ObserverHub {
     pub fn drain(&self) -> Vec<QueuedEvent> {
         self.queue.drain()
     }
+
+    pub async fn wait_for_events(&self) {
+        self.queue.notified().await;
+    }
 }
 
 #[derive(Debug, Clone)]

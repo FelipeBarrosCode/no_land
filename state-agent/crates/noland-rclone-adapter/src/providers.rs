@@ -11,23 +11,7 @@ pub struct Dispatcher(pub ProviderKind);
 
 impl RcloneProviderAdapter for Dispatcher {
     fn backend_type(&self) -> &'static str {
-        match self.0 {
-            ProviderKind::AmazonS3
-            | ProviderKind::CloudflareR2
-            | ProviderKind::Wasabi
-            | ProviderKind::DigitalOceanSpaces
-            | ProviderKind::GenericS3 => "s3",
-            ProviderKind::BackblazeB2 => "b2",
-            ProviderKind::GoogleDrive => "drive",
-            ProviderKind::GoogleCloudStorage => "google cloud storage",
-            ProviderKind::MicrosoftOneDrive => "onedrive",
-            ProviderKind::Dropbox => "dropbox",
-            ProviderKind::Box => "box",
-            ProviderKind::AzureBlob => "azureblob",
-            ProviderKind::Sftp => "sftp",
-            ProviderKind::Webdav => "webdav",
-            ProviderKind::Local => "local",
-        }
+        self.0.backend_type()
     }
 
     fn create_config(&self, input: &AdapterInput) -> Result<RcloneRemoteConfig> {

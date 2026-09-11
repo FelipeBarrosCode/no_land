@@ -6,35 +6,75 @@ use uuid::Uuid;
 use crate::StateDb;
 
 impl StateDb {
-    /// Idempotently appends a mutation. Reusing a `mutation_id` leaves the
-    /// original record unchanged.
-    pub fn append_app_mutation(&self, mutation: &AppMutationRecord) -> Result<()> {
+    /// Appends a mutation unless an equivalent unprocessed observation already exists.
+    ///
+    /// The UUID remains the replay/idempotency key, while `(app_id, path, kind,
+    /// previous_path)` is the pending-event coalescing key. Once processed, a
+    /// later event may create a new row because it represents new work.
+    pub fn append_app_mutation(&self, mutation: &AppMutationRecord) -> Result<bool> {
         let provenance_json = mutation
             .provenance
             .as_ref()
             .map(serde_json::to_string)
             .transpose()?;
-        self.lock()?
-            .execute(
-                r#"INSERT INTO app_mutation_journal (
-                       mutation_id, app_id, path, previous_path, kind, observed_at_ms,
-                       session_id, provenance_json, processed_at_ms
-                   ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-                   ON CONFLICT(mutation_id) DO NOTHING"#,
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        let existing_id: Option<String> = tx
+            .query_row(
+                r#"SELECT mutation_id FROM app_mutation_journal
+                   WHERE app_id=?1 AND path=?2 AND kind=?3
+                     AND previous_path IS ?4 AND processed_at_ms IS NULL
+                   ORDER BY observed_at_ms DESC, mutation_id ASC LIMIT 1"#,
                 params![
-                    mutation.mutation_id.to_string(),
                     mutation.app_id.as_str(),
                     mutation.path,
-                    mutation.previous_path,
                     mutation.kind.as_str(),
+                    mutation.previous_path,
+                ],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?;
+
+        if let Some(mutation_id) = existing_id {
+            tx.execute(
+                r#"UPDATE app_mutation_journal
+                   SET observed_at_ms=?2, session_id=?3, provenance_json=?4
+                   WHERE mutation_id=?1 AND processed_at_ms IS NULL"#,
+                params![
+                    mutation_id,
                     mutation.observed_at.timestamp_millis(),
                     mutation.session_id.map(|id| id.to_string()),
                     provenance_json,
-                    mutation.processed_at.map(|at| at.timestamp_millis()),
                 ],
             )
             .map_err(db_err)?;
-        Ok(())
+            tx.commit().map_err(db_err)?;
+            return Ok(false);
+        }
+
+        tx.execute(
+            r#"INSERT INTO app_mutation_journal (
+                   mutation_id, app_id, path, previous_path, kind, observed_at_ms,
+                   session_id, provenance_json, processed_at_ms
+               ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+               ON CONFLICT(mutation_id) DO NOTHING"#,
+            params![
+                mutation.mutation_id.to_string(),
+                mutation.app_id.as_str(),
+                mutation.path,
+                mutation.previous_path,
+                mutation.kind.as_str(),
+                mutation.observed_at.timestamp_millis(),
+                mutation.session_id.map(|id| id.to_string()),
+                provenance_json,
+                mutation.processed_at.map(|at| at.timestamp_millis()),
+            ],
+        )
+        .map_err(db_err)?;
+        let inserted = tx.changes() != 0;
+        tx.commit().map_err(db_err)?;
+        Ok(inserted)
     }
 
     /// Returns unprocessed mutations oldest-first. A zero limit returns no rows;
@@ -204,27 +244,36 @@ impl StateDb {
             .map_err(db_err)
     }
 
-    pub fn upsert_file_state(&self, state: &FileStateRecord) -> Result<()> {
-        self.lock()?
-            .execute(
-                r#"INSERT INTO file_state_index (
-                       app_id, logical_root, relative_path, canonical_path, file_type,
-                       size, mtime_ns, inode, mount_id, mode, content_hash, trust_state,
-                       last_seen_at_ms, last_hashed_at_ms
-                   ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
-                   ON CONFLICT(app_id, logical_root, relative_path) DO UPDATE SET
-                       canonical_path=excluded.canonical_path,
-                       file_type=excluded.file_type,
-                       size=excluded.size,
-                       mtime_ns=excluded.mtime_ns,
-                       inode=excluded.inode,
-                       mount_id=excluded.mount_id,
-                       mode=excluded.mode,
-                       content_hash=excluded.content_hash,
-                       trust_state=excluded.trust_state,
-                       last_seen_at_ms=excluded.last_seen_at_ms,
-                       last_hashed_at_ms=excluded.last_hashed_at_ms"#,
-                params![
+    pub fn upsert_file_states(&self, states: &[FileStateRecord]) -> Result<()> {
+        if states.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"INSERT INTO file_state_index (
+                           app_id, logical_root, relative_path, canonical_path, file_type,
+                           size, mtime_ns, inode, mount_id, mode, content_hash, trust_state,
+                           last_seen_at_ms, last_hashed_at_ms
+                       ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+                       ON CONFLICT(app_id, logical_root, relative_path) DO UPDATE SET
+                           canonical_path=excluded.canonical_path,
+                           file_type=excluded.file_type,
+                           size=excluded.size,
+                           mtime_ns=excluded.mtime_ns,
+                           inode=excluded.inode,
+                           mount_id=excluded.mount_id,
+                           mode=excluded.mode,
+                           content_hash=excluded.content_hash,
+                           trust_state=excluded.trust_state,
+                           last_seen_at_ms=excluded.last_seen_at_ms,
+                           last_hashed_at_ms=excluded.last_hashed_at_ms"#,
+                )
+                .map_err(db_err)?;
+            for state in states {
+                stmt.execute(params![
                     state.app_id.as_str(),
                     state.logical_root,
                     state.relative_path,
@@ -239,10 +288,16 @@ impl StateDb {
                     state.trust.as_str(),
                     state.last_seen_at.timestamp_millis(),
                     state.last_hashed_at.map(|at| at.timestamp_millis()),
-                ],
-            )
-            .map_err(db_err)?;
+                ])
+                .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    pub fn upsert_file_state(&self, state: &FileStateRecord) -> Result<()> {
+        self.upsert_file_states(std::slice::from_ref(state))
     }
 
     pub fn get_file_state(
@@ -340,19 +395,28 @@ impl StateDb {
         Ok(changed != 0)
     }
 
-    pub fn upsert_local_cas_entry(&self, entry: &LocalCasEntry) -> Result<()> {
-        self.lock()?
-            .execute(
-                r#"INSERT INTO local_cas_index (
-                       object_kind, content_hash, local_path, size, created_at_ms,
-                       verified_at_ms, last_accessed_at_ms
-                   ) VALUES (?1,?2,?3,?4,?5,?6,?7)
-                   ON CONFLICT(object_kind, content_hash) DO UPDATE SET
-                       local_path=excluded.local_path,
-                       size=excluded.size,
-                       verified_at_ms=COALESCE(excluded.verified_at_ms, local_cas_index.verified_at_ms),
-                       last_accessed_at_ms=excluded.last_accessed_at_ms"#,
-                params![
+    pub fn upsert_local_cas_entries(&self, entries: &[LocalCasEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"INSERT INTO local_cas_index (
+                           object_kind, content_hash, local_path, size, created_at_ms,
+                           verified_at_ms, last_accessed_at_ms
+                       ) VALUES (?1,?2,?3,?4,?5,?6,?7)
+                       ON CONFLICT(object_kind, content_hash) DO UPDATE SET
+                           local_path=excluded.local_path,
+                           size=excluded.size,
+                           verified_at_ms=COALESCE(excluded.verified_at_ms, local_cas_index.verified_at_ms),
+                           last_accessed_at_ms=excluded.last_accessed_at_ms"#,
+                )
+                .map_err(db_err)?;
+            for entry in entries {
+                stmt.execute(params![
                     entry.object_kind.as_str(),
                     entry.content_hash,
                     entry.local_path,
@@ -360,10 +424,16 @@ impl StateDb {
                     entry.created_at.timestamp_millis(),
                     entry.verified_at.map(|at| at.timestamp_millis()),
                     entry.last_accessed_at.timestamp_millis(),
-                ],
-            )
-            .map_err(db_err)?;
+                ])
+                .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    pub fn upsert_local_cas_entry(&self, entry: &LocalCasEntry) -> Result<()> {
+        self.upsert_local_cas_entries(std::slice::from_ref(entry))
     }
 
     pub fn get_local_cas_entry(
@@ -419,21 +489,30 @@ impl StateDb {
         Ok(changed != 0)
     }
 
-    pub fn upsert_remote_content_entry(&self, entry: &RemoteContentEntry) -> Result<()> {
-        self.lock()?
-            .execute(
-                r#"INSERT INTO remote_content_index (
-                       storage_id, object_kind, content_hash, remote_path, size, etag,
-                       state, observed_at_ms, expires_at_ms
-                   ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
-                   ON CONFLICT(storage_id, object_kind, content_hash) DO UPDATE SET
-                       remote_path=excluded.remote_path,
-                       size=excluded.size,
-                       etag=excluded.etag,
-                       state=excluded.state,
-                       observed_at_ms=excluded.observed_at_ms,
-                       expires_at_ms=excluded.expires_at_ms"#,
-                params![
+    pub fn upsert_remote_content_entries(&self, entries: &[RemoteContentEntry]) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"INSERT INTO remote_content_index (
+                           storage_id, object_kind, content_hash, remote_path, size, etag,
+                           state, observed_at_ms, expires_at_ms
+                       ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)
+                       ON CONFLICT(storage_id, object_kind, content_hash) DO UPDATE SET
+                           remote_path=excluded.remote_path,
+                           size=excluded.size,
+                           etag=excluded.etag,
+                           state=excluded.state,
+                           observed_at_ms=excluded.observed_at_ms,
+                           expires_at_ms=excluded.expires_at_ms"#,
+                )
+                .map_err(db_err)?;
+            for entry in entries {
+                stmt.execute(params![
                     entry.storage_id,
                     entry.object_kind.as_str(),
                     entry.content_hash,
@@ -443,10 +522,41 @@ impl StateDb {
                     entry.state.as_str(),
                     entry.observed_at.timestamp_millis(),
                     entry.expires_at.map(|at| at.timestamp_millis()),
-                ],
+                ])
+                .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
+    pub fn upsert_remote_content_entry(&self, entry: &RemoteContentEntry) -> Result<()> {
+        self.upsert_remote_content_entries(std::slice::from_ref(entry))
+    }
+
+    pub fn list_remote_content_entries(
+        &self,
+        storage_id: &str,
+        object_kind: ContentObjectKind,
+    ) -> Result<Vec<RemoteContentEntry>> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare(
+                r#"SELECT storage_id, object_kind, content_hash, remote_path, size, etag,
+                          state, observed_at_ms, expires_at_ms
+                   FROM remote_content_index
+                   WHERE storage_id=?1 AND object_kind=?2"#,
             )
             .map_err(db_err)?;
-        Ok(())
+        let rows = stmt
+            .query_map(
+                params![storage_id, object_kind.as_str()],
+                crate::persistence::row_to_remote_content,
+            )
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        Ok(rows)
     }
 
     pub fn get_remote_content_by_hash(
@@ -965,7 +1075,9 @@ fn row_to_local_cas(row: &rusqlite::Row<'_>) -> rusqlite::Result<LocalCasEntry> 
     })
 }
 
-fn row_to_remote_content(row: &rusqlite::Row<'_>) -> rusqlite::Result<RemoteContentEntry> {
+pub(crate) fn row_to_remote_content(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<RemoteContentEntry> {
     Ok(RemoteContentEntry {
         storage_id: row.get(0)?,
         object_kind: ContentObjectKind::parse(&row.get::<_, String>(1)?),
@@ -1091,8 +1203,8 @@ mod tests {
         mutation.session_id = Some(session_id);
         mutation.provenance = Some(provenance);
 
-        db.append_app_mutation(&mutation).unwrap();
-        db.append_app_mutation(&mutation).unwrap();
+        assert!(db.append_app_mutation(&mutation).unwrap());
+        assert!(!db.append_app_mutation(&mutation).unwrap());
         let pending = db.pending_app_mutations(&app_id, 10).unwrap();
         assert_eq!(pending.len(), 1);
         assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 1);
@@ -1137,6 +1249,34 @@ mod tests {
         assert!(db
             .clear_dirty_root(&app_id, "/home/user/.config/game")
             .unwrap());
+    }
+
+    #[test]
+    fn distinct_repeated_pending_mutations_are_coalesced_but_processed_work_is_not() {
+        let (db, app_id) = test_db_with_app();
+        let path = "/home/user/.config/game/save.dat";
+        let first = AppMutationRecord::new(app_id.clone(), path, AppMutationKind::Modify);
+        let mut second = AppMutationRecord::new(app_id.clone(), path, AppMutationKind::Modify);
+        second.observed_at += Duration::milliseconds(1);
+
+        assert!(db.append_app_mutation(&first).unwrap());
+        assert!(!db.append_app_mutation(&second).unwrap());
+        let pending = db.pending_app_mutations(&app_id, 10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].mutation_id, first.mutation_id);
+        assert_eq!(
+            pending[0].observed_at.timestamp_millis(),
+            second.observed_at.timestamp_millis()
+        );
+
+        assert_eq!(
+            db.mark_app_mutations_processed(&[first.mutation_id], Utc::now())
+                .unwrap(),
+            1
+        );
+        let third = AppMutationRecord::new(app_id.clone(), path, AppMutationKind::Modify);
+        assert!(db.append_app_mutation(&third).unwrap());
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 1);
     }
 
     #[test]

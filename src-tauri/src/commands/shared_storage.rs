@@ -548,6 +548,14 @@ pub async fn begin_oauth_authorization(
 }
 
 #[tauri::command]
+pub async fn cancel_oauth_authorization(
+    context: State<'_, AppContext>,
+    session_id: String,
+) -> Result<(), FrontendError> {
+    clear_oauth_session_artifacts(context.inner(), &session_id).await
+}
+
+#[tauri::command]
 pub async fn complete_oauth_authorization(
     context: State<'_, AppContext>,
     session_id: String,

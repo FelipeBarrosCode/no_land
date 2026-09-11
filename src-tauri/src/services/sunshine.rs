@@ -561,15 +561,15 @@ case "$arch" in
   *) echo "Unsupported architecture for upstream Sunshine package: $arch" >&2; exit 1 ;;
 esac
 
-package=""
+asset_pattern=""
 if [ "${ID:-}" = "ubuntu" ]; then
   case "${VERSION_ID:-}" in
-    22.04|24.04) package="sunshine-ubuntu-${VERSION_ID}-${arch}.deb" ;;
+    22.04|24.04|26.04) asset_pattern="sunshine-ubuntu-${VERSION_ID}-${arch}\\.deb" ;;
     *) echo "Unsupported Ubuntu version for upstream Sunshine package: ${VERSION_ID:-unknown}" >&2; exit 1 ;;
   esac
 elif [ "${ID:-}" = "debian" ]; then
   case "${VERSION_CODENAME:-}" in
-    trixie) package="sunshine-debian-trixie-${arch}.deb" ;;
+    trixie) asset_pattern="sunshine-debian-trixie-${arch}\\.deb" ;;
     *) echo "Unsupported Debian codename for upstream Sunshine package: ${VERSION_CODENAME:-unknown}" >&2; exit 1 ;;
   esac
 else
@@ -577,10 +577,22 @@ else
   exit 1
 fi
 
+SUNSHINE_RELEASE_TAG="v2026.516.143833"
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT
-pkg_path="$tmpdir/$package"
-url="https://github.com/LizardByte/Sunshine/releases/latest/download/$package"
+pkg_path="$tmpdir/sunshine.deb"
+release_json=$(curl -fsSL \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'User-Agent: Noland-Connect' \
+  "https://api.github.com/repos/LizardByte/Sunshine/releases/tags/${SUNSHINE_RELEASE_TAG}")
+url=$(printf '%s\n' "$release_json" \
+  | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | sed -E 's/.*"([^"]*)"/\1/' \
+  | grep -E -m1 "${asset_pattern}$")
+if [ -z "$url" ]; then
+  echo "No Sunshine DEB asset found for ${ID:-unknown} ${VERSION_ID:-${VERSION_CODENAME:-unknown}} ${arch}" >&2
+  exit 1
+fi
 
 curl -fsSL "$url" -o "$pkg_path"
 sudo apt-get -o DPkg::Lock::Timeout=600 update
@@ -651,7 +663,7 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
                 remote.ssh(
-                    "sudo systemctl stop unattended-upgrades 2>/dev/null || true; sudo systemctl disable --now unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo apt-get remove -y unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                    "sudo systemctl stop --no-block unattended-upgrades 2>/dev/null || true; sudo systemctl disable unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
                     Duration::from_secs(30),
                 )
             })

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -12,6 +13,13 @@ use crate::SCHEMA_VERSION;
 
 pub struct StateDb {
     conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestoredPathAssociationInput {
+    pub canonical_path: String,
+    pub persistence_class: PersistenceClass,
+    pub semantic_role: SemanticRole,
 }
 
 impl StateDb {
@@ -383,6 +391,72 @@ impl StateDb {
         Ok(())
     }
 
+    pub fn upsert_restored_path_associations(
+        &self,
+        app_id: &AppId,
+        entries: &[RestoredPathAssociationInput],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let evidence = serde_json::to_string(&vec![Evidence::new(
+            EvidenceKind::RestoredFromCommittedBundle,
+        )])?;
+        let now = now_secs();
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut insert_path = tx
+                .prepare(
+                    "INSERT INTO paths (canonical_path) VALUES (?1) \
+                     ON CONFLICT(canonical_path) DO NOTHING",
+                )
+                .map_err(db_err)?;
+            let mut select_path = tx
+                .prepare("SELECT path_id FROM paths WHERE canonical_path=?1")
+                .map_err(db_err)?;
+            let mut upsert_association = tx
+                .prepare(
+                    r#"
+                    INSERT INTO path_associations (
+                        path_id, app_id, confidence, persistence_class, semantic_role,
+                        evidence_json, first_seen_at, last_seen_at
+                    ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                    ON CONFLICT(path_id, app_id) DO UPDATE SET
+                        confidence=excluded.confidence,
+                        persistence_class=excluded.persistence_class,
+                        semantic_role=excluded.semantic_role,
+                        evidence_json=excluded.evidence_json,
+                        last_seen_at=excluded.last_seen_at
+                    "#,
+                )
+                .map_err(db_err)?;
+
+            for entry in entries {
+                insert_path
+                    .execute(params![entry.canonical_path])
+                    .map_err(db_err)?;
+                let path_id = select_path
+                    .query_row(params![entry.canonical_path], |row| row.get::<_, i64>(0))
+                    .map_err(db_err)?;
+                upsert_association
+                    .execute(params![
+                        path_id,
+                        app_id.as_str(),
+                        CONF_EXPLICIT,
+                        entry.persistence_class.as_str(),
+                        entry.semantic_role.as_str(),
+                        evidence,
+                        now,
+                        now,
+                    ])
+                    .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)
+    }
+
     pub fn associations_for_app(
         &self,
         app_id: &AppId,
@@ -447,6 +521,41 @@ impl StateDb {
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
         Ok(rows)
+    }
+
+    pub fn associations_for_paths(
+        &self,
+        path_ids: &[i64],
+    ) -> Result<HashMap<i64, Vec<PathAssociation>>> {
+        let mut associations = HashMap::new();
+        for ids in path_ids.chunks(900) {
+            if ids.is_empty() {
+                continue;
+            }
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT path_id, app_id, confidence, persistence_class, semantic_role, \
+                 evidence_json, first_seen_at, last_seen_at FROM path_associations \
+                 WHERE path_id IN ({placeholders})"
+            );
+            let conn = self.lock()?;
+            let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+            let rows = stmt
+                .query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+                    row_to_assoc_from(row, 0)
+                })
+                .map_err(db_err)?;
+            for row in rows {
+                let association = row.map_err(db_err)?;
+                associations
+                    .entry(association.path_id)
+                    .or_insert_with(Vec::new)
+                    .push(association);
+            }
+        }
+        Ok(associations)
     }
 
     pub fn associations_for_path(&self, path_id: i64) -> Result<Vec<PathAssociation>> {
@@ -801,16 +910,36 @@ impl StateDb {
         Ok(())
     }
 
-    pub fn remember_chunk(&self, hash: &str, pack_id: Option<&str>, size: u64) -> Result<()> {
-        self.lock()?
-            .execute(
-                r#"INSERT INTO chunk_index (chunk_hash, pack_id, size, created_at)
-                   VALUES (?1,?2,?3,?4)
-                   ON CONFLICT(chunk_hash) DO UPDATE SET pack_id=COALESCE(excluded.pack_id, chunk_index.pack_id)"#,
-                params![hash, pack_id, size as i64, now_secs()],
-            )
-            .map_err(db_err)?;
+    pub fn remember_chunks_bulk(&self, chunks: &[(String, Option<String>, u64)]) -> Result<()> {
+        if chunks.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        {
+            let mut stmt = tx
+                .prepare(
+                    r#"INSERT INTO chunk_index (chunk_hash, pack_id, size, created_at)
+                       VALUES (?1,?2,?3,?4)
+                       ON CONFLICT(chunk_hash) DO UPDATE SET
+                           pack_id=COALESCE(excluded.pack_id, chunk_index.pack_id)"#,
+                )
+                .map_err(db_err)?;
+            let now = now_secs();
+            for (hash, pack_id, size) in chunks {
+                let size = i64::try_from(*size).map_err(|_| {
+                    StateError::Invalid("chunk size exceeds SQLite integer range".into())
+                })?;
+                stmt.execute(params![hash, pack_id, size, now])
+                    .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
+    }
+
+    pub fn remember_chunk(&self, hash: &str, pack_id: Option<&str>, size: u64) -> Result<()> {
+        self.remember_chunks_bulk(&[(hash.to_string(), pack_id.map(str::to_string), size)])
     }
 
     pub fn known_chunk(&self, hash: &str) -> Result<bool> {
@@ -1112,6 +1241,64 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restored_association_batch_rolls_back_on_mid_batch_failure() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppIdentity::new(AppId::desktop("restored-batch-test"), "Restored Batch Test");
+        db.upsert_app(&app).unwrap();
+        db.lock()
+            .unwrap()
+            .execute_batch(
+                r#"
+                CREATE TRIGGER fail_restored_association
+                BEFORE INSERT ON path_associations
+                WHEN (SELECT canonical_path FROM paths WHERE path_id=NEW.path_id) = '/restore/fail'
+                BEGIN
+                    SELECT RAISE(ABORT, 'injected mid-batch failure');
+                END;
+                "#,
+            )
+            .unwrap();
+        let entries = vec![
+            RestoredPathAssociationInput {
+                canonical_path: "/restore/first".into(),
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+            },
+            RestoredPathAssociationInput {
+                canonical_path: "/restore/fail".into(),
+                persistence_class: PersistenceClass::SharedState,
+                semantic_role: SemanticRole::SharedRuntime,
+            },
+            RestoredPathAssociationInput {
+                canonical_path: "/restore/last".into(),
+                persistence_class: PersistenceClass::Ephemeral,
+                semantic_role: SemanticRole::Cache,
+            },
+        ];
+
+        let error = db
+            .upsert_restored_path_associations(&app.app_id, &entries)
+            .unwrap_err();
+        assert!(error.to_string().contains("injected mid-batch failure"));
+
+        let conn = db.lock().unwrap();
+        let path_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM paths WHERE canonical_path LIKE '/restore/%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let association_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM path_associations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(path_count, 0);
+        assert_eq!(association_count, 0);
+    }
 
     #[test]
     fn wal_and_roundtrip() {

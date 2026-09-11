@@ -105,7 +105,7 @@ pub async fn complete_pairing(
         secret_store,
         sessions,
         session_id,
-        || async { Ok(()) },
+        |_| async { Ok(()) },
     )
     .await
 }
@@ -118,7 +118,7 @@ pub async fn complete_pairing_with_stage1_authorization<F, Fut>(
     authorize_after_stage1_pending: F,
 ) -> Result<PairingResult, MoonlightError>
 where
-    F: FnOnce() -> Fut,
+    F: FnOnce(String) -> Fut,
     Fut: Future<Output = Result<(), MoonlightError>>,
 {
     let session = sessions

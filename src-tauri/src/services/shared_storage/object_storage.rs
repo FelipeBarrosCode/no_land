@@ -175,17 +175,41 @@ impl StorageProvider {
                 category: self.category(),
                 is_oauth: self.is_oauth(),
                 description: "Google Drive cloud storage for your application backups".to_string(),
-                fields: vec![ProviderField {
-                    key: "folder".to_string(),
-                    label: "Folder Name".to_string(),
-                    field_type: ProviderFieldType::Text,
-                    required: false,
-                    placeholder: Some("Noland Shared Storage".to_string()),
-                    help_text: Some(
-                        "Folder in your Google Drive (will be created if it doesn't exist)"
-                            .to_string(),
-                    ),
-                }],
+                fields: vec![
+                    ProviderField {
+                        key: "folder".to_string(),
+                        label: "Folder Name".to_string(),
+                        field_type: ProviderFieldType::Text,
+                        required: false,
+                        placeholder: Some("Noland Shared Storage".to_string()),
+                        help_text: Some(
+                            "Folder in your Google Drive (will be created if it doesn't exist)"
+                                .to_string(),
+                        ),
+                    },
+                    ProviderField {
+                        key: "upload_concurrency".to_string(),
+                        label: "Upload Concurrency".to_string(),
+                        field_type: ProviderFieldType::Select {
+                            options: vec![
+                                ProviderSelectOption {
+                                    value: "1".to_string(),
+                                    label: "1 upload (recommended)".to_string(),
+                                },
+                                ProviderSelectOption {
+                                    value: "2".to_string(),
+                                    label: "2 uploads".to_string(),
+                                },
+                            ],
+                        },
+                        required: false,
+                        placeholder: None,
+                        help_text: Some(
+                            "Use one upload by default; two may improve throughput on fast, stable connections."
+                                .to_string(),
+                        ),
+                    },
+                ],
             },
             Self::MicrosoftOneDrive => ProviderDefinition {
                 provider: self.clone(),
