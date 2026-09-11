@@ -662,7 +662,7 @@ mod tests {
                 .get_path_by_canonical(&included.to_string_lossy())
                 .unwrap()
                 .unwrap_or_else(|| panic!("missing in-scope path {}", included.display()));
-            if included != &install_file {
+            if included == &explicit_file || included == &explicit_save_file {
                 let association = agent
                     .db
                     .associations_for_path(record.path_id)

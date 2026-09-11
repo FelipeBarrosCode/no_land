@@ -198,11 +198,8 @@ impl StateAgent {
                     &app.install_dir.to_string_lossy(),
                 )?;
                 if let Some(prefix) = &app.prefix {
-                    self.db.add_known_root(
-                        &AppId::steam(app.app_id),
-                        "proton",
-                        &prefix.to_string_lossy(),
-                    )?;
+                    // Keep the portable mapping available for explicitly selected saves/config,
+                    // but do not register the generated Proton prefix as an app-wide scan root.
                     roots.proton_prefixes.insert(app.app_id, prefix.clone());
                 }
             }

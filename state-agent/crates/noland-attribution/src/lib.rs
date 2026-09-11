@@ -406,9 +406,9 @@ impl<'a> AttributionEngine<'a> {
                 }
                 Ok(true)
             }
+            PathDisposition::RuntimeDependency => Ok(true),
             PathDisposition::FinalApplicationFile
             | PathDisposition::UserStateFile
-            | PathDisposition::RuntimeDependency
             | PathDisposition::Unknown => Ok(false),
         }
     }

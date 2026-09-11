@@ -190,7 +190,7 @@ pub async fn run_restore_with_session(
             )?;
 
             let restore_result = async {
-                let roots = agent.roots.lock().clone();
+                let roots = prepare_restore_roots(agent, &plan.manifest)?;
                 let mut restore = RestoreTransaction::new(&plan, &roots, Some(&agent.db));
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
@@ -510,6 +510,62 @@ fn ensure_steam_appmanifest_after_commit(
     Ok(())
 }
 
+fn prepare_restore_roots(agent: &StateAgent, bundle: &BundleManifest) -> Result<LogicalRootMap> {
+    let mut roots = agent.roots.lock().clone();
+    let Some(preferred_steamapps) = preferred_steamapps_dir(&roots) else {
+        return Ok(roots);
+    };
+
+    for library_id in bundle.files.iter().filter_map(|file| {
+        let LogicalRoot::SteamLibrary { id } = file.logical_root_parsed()? else {
+            return None;
+        };
+        Some(id)
+    }) {
+        roots
+            .steam_libraries
+            .entry(library_id)
+            .or_insert_with(|| preferred_steamapps.clone());
+    }
+
+    let steam_app_id = bundle.app.steam_app_id.or_else(|| {
+        bundle
+            .app
+            .app_id
+            .as_str()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+    });
+    if let Some(steam_app_id) = steam_app_id {
+        roots
+            .proton_prefixes
+            .entry(steam_app_id)
+            .or_insert_with(|| {
+                preferred_steamapps
+                    .join("compatdata")
+                    .join(steam_app_id.to_string())
+                    .join("pfx")
+            });
+    }
+
+    let mut live_roots = agent.roots.lock();
+    for (id, path) in &roots.steam_libraries {
+        live_roots
+            .steam_libraries
+            .entry(id.clone())
+            .or_insert_with(|| path.clone());
+    }
+    for (id, path) in &roots.proton_prefixes {
+        live_roots
+            .proton_prefixes
+            .entry(*id)
+            .or_insert_with(|| path.clone());
+    }
+    drop(live_roots);
+
+    Ok(roots)
+}
+
 fn preferred_steamapps_dir(roots: &LogicalRootMap) -> Option<PathBuf> {
     roots
         .steam_libraries
@@ -580,7 +636,8 @@ fn escape_acf_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_steam_appmanifest_after_commit, preferred_steamapps_dir, steam_install_dir_from_path,
+        ensure_steam_appmanifest_after_commit, preferred_steamapps_dir, prepare_restore_roots,
+        steam_install_dir_from_path,
     };
     use crate::{AgentConfig, StateAgent};
     use chrono::Utc;
@@ -628,6 +685,35 @@ mod tests {
             preferred_steamapps_dir(&roots),
             Some(PathBuf::from("/steam/library/steamapps"))
         );
+    }
+
+    #[test]
+    fn clean_machine_restore_derives_proton_prefix_without_registering_scan_root() {
+        let home = std::env::temp_dir().join(format!(
+            "noland-restore-proton-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let agent = StateAgent::boot(AgentConfig::isolated(home.clone())).unwrap();
+        let bundle = steam_bundle("Test Game");
+
+        let roots = prepare_restore_roots(&agent, &bundle).unwrap();
+        let expected = agent
+            .config
+            .home
+            .join(".steam/steam/steamapps/compatdata/3241660/pfx");
+
+        assert_eq!(roots.proton_prefixes.get(&3_241_660), Some(&expected));
+        assert!(!agent
+            .db
+            .known_roots(Some(&AppId::steam(3_241_660)))
+            .unwrap()
+            .iter()
+            .any(|(_, kind, _)| kind == "proton"));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

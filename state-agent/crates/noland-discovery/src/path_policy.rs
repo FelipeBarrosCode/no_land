@@ -45,10 +45,14 @@ pub fn classify_observed_path(path: &Path) -> PathPolicyDecision {
     }
 
     let normalized = normalized_path(path);
-    if normalized.contains("/steamapps/compatdata/")
-        || normalized.contains("/compatibilitytools.d/")
-        || steam_common_runtime_path(&normalized)
-    {
+    if normalized.contains("/steamapps/compatdata/") {
+        return PathPolicyDecision::new(if looks_like_user_state(path) {
+            PathDisposition::UserStateFile
+        } else {
+            PathDisposition::RuntimeDependency
+        });
+    }
+    if normalized.contains("/compatibilitytools.d/") || steam_common_runtime_path(&normalized) {
         return PathPolicyDecision::new(PathDisposition::RuntimeDependency);
     }
     if normalized.contains("/steamapps/common/") {
@@ -161,8 +165,9 @@ mod tests {
     }
 
     #[test]
-    fn proton_install_is_a_runtime_dependency_not_game_content() {
+    fn generated_proton_content_is_a_runtime_dependency_not_game_content() {
         for path in [
+            "/home/user/.steam/steam/steamapps/compatdata/553850/pfx/drive_c/windows/system32/kernel32.dll",
             "/home/user/.steam/steam/steamapps/common/Proton - Experimental/proton",
             "/home/user/.steam/steam/steamapps/common/Proton 9.0/proton",
             "/home/user/.steam/steam/steamapps/common/SteamLinuxRuntime_soldier/run",
@@ -172,6 +177,20 @@ mod tests {
             assert_eq!(
                 classify_observed_path(Path::new(path)).disposition,
                 PathDisposition::RuntimeDependency,
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn proton_save_and_config_paths_remain_user_state() {
+        for path in [
+            "/home/user/.steam/steam/steamapps/compatdata/553850/pfx/drive_c/users/steamuser/Saved Games/Game/slot.sav",
+            "/home/user/.steam/steam/steamapps/compatdata/553850/pfx/drive_c/users/steamuser/AppData/Roaming/Game/config/settings.json",
+        ] {
+            assert_eq!(
+                classify_observed_path(Path::new(path)).disposition,
+                PathDisposition::UserStateFile,
                 "{path}"
             );
         }
