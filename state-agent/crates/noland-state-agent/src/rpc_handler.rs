@@ -12,10 +12,10 @@ use noland_storage::{
 };
 use serde_json::json;
 
-use crate::operation_manager::CancelOutcome;
+use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 10;
+const AGENT_API_VERSION: u64 = 11;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 
@@ -135,20 +135,25 @@ impl RpcHandler for AgentRpc {
                 let terminated_agent = Arc::clone(agent);
                 let operation_manager = agent.operations.clone();
                 let total_started = Instant::now();
-                let spawned = operation_manager.spawn_cancellable(
+                let spawned = operation_manager.spawn_cancellable_on_lane(
                     op_id,
+                    OperationLane::Transfer,
                     async move {
                         let discovery_started = Instant::now();
                         let discovery = task_agent
                             .discover()
                             .and_then(|_| task_agent.process_events().map(|_| ()));
                         if let Err(error) = discovery {
-                            mark_operation_failed(
-                                &task_agent,
-                                op_id,
-                                error.to_string(),
-                                total_started,
-                            );
+                            if task_agent.operations.cancel_requested(op_id) {
+                                mark_operation_cancelled(&task_agent, op_id);
+                            } else {
+                                mark_operation_failed(
+                                    &task_agent,
+                                    op_id,
+                                    error.to_string(),
+                                    total_started,
+                                );
+                            }
                             return;
                         }
                         record_discovery_duration(&task_agent, op_id, discovery_started);
@@ -195,6 +200,9 @@ impl RpcHandler for AgentRpc {
                                 );
                             }
                             Ok(_) => {}
+                            Err(_) if task_agent.operations.cancel_requested(op_id) => {
+                                mark_operation_cancelled(&task_agent, op_id);
+                            }
                             Err(error) => {
                                 mark_operation_failed(
                                     &task_agent,
@@ -350,7 +358,7 @@ impl RpcHandler for AgentRpc {
                                     &task_agent.config.paths.run_root,
                                     session,
                                 )?;
-                                let storage = RcloneStorage::from_session(session, &config);
+                                let storage = RcloneStorage::try_from_session(session, &config)?;
                                 noland_storage::commit_checkpoint(&storage, master, &checkpoint)
                                     .await?;
                             }
@@ -427,8 +435,9 @@ impl RpcHandler for AgentRpc {
                 let terminated_agent = Arc::clone(agent);
                 let operation_manager = agent.operations.clone();
                 let started = Instant::now();
-                let spawned = operation_manager.spawn_cancellable(
+                let spawned = operation_manager.spawn_cancellable_on_lane(
                     operation_id,
+                    OperationLane::Transfer,
                     async move {
                         if let Err(error) = crate::restore::run_restore_with_session(
                             &task_agent,
@@ -596,7 +605,7 @@ impl RpcHandler for AgentRpc {
                 let master = master_from_params(&request.params, agent)?;
                 let (config, _session_guard) =
                     write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                let storage = RcloneStorage::from_session(&session, &config);
+                let storage = RcloneStorage::try_from_session(&session, &config)?;
                 let catalog = load_catalog(&storage, &master).await;
                 Ok(serde_json::to_value(catalog?)?)
             }
@@ -604,7 +613,7 @@ impl RpcHandler for AgentRpc {
                 if let Ok(session) = parse_session(&request.params) {
                     let (config, _session_guard) =
                         write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                    let storage = RcloneStorage::from_session(&session, &config);
+                    let storage = RcloneStorage::try_from_session(&session, &config)?;
                     let health = storage.health_check().await?;
                     return Ok(serde_json::to_value(health)?);
                 }

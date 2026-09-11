@@ -1,14 +1,15 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use noland_cas::{chunk_file_streaming, LocalCas};
 use noland_classifier::Classifier;
 use noland_crypto::MasterKey;
-use noland_pack::{pack_chunk_files, pack_chunk_files_with_limits, PackIndexEntry};
+use noland_pack::{pack_chunk_files_with_limits, BuiltPack, PackIndexEntry};
 use noland_rclone_adapter::{EphemeralRcloneSession, ProviderRootIdentity, TransferTuning};
 use noland_snapshot::{create_view, discard};
 use noland_state_core::*;
@@ -19,11 +20,522 @@ use noland_storage::{
 };
 use uuid::Uuid;
 
-use crate::reconcile::reconcile_app;
+use crate::reconcile::{
+    known_install_roots, reconcile_app, reconcile_app_for_complete_backup, steam_appmanifest_path,
+    SteamBackupScope,
+};
 use crate::StateAgent;
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+const PROGRESS_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+const PROGRESS_FLUSH_FILES: u64 = 384;
+const PROGRESS_FLUSH_BYTES: u64 = 96 * 1024 * 1024;
+
+struct ProgressReporter {
+    operation_id: Uuid,
+    completed_files: u64,
+    completed_bytes: u64,
+    last_flushed_files: u64,
+    last_flushed_bytes: u64,
+    last_flush: Instant,
+}
+
+impl ProgressReporter {
+    fn new(operation_id: Uuid) -> Self {
+        Self {
+            operation_id,
+            completed_files: 0,
+            completed_bytes: 0,
+            last_flushed_files: 0,
+            last_flushed_bytes: 0,
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn record_file(&mut self, bytes: u64) {
+        self.completed_files = self.completed_files.saturating_add(1);
+        self.completed_bytes = self.completed_bytes.saturating_add(bytes);
+    }
+
+    fn should_flush(&self) -> bool {
+        self.last_flush.elapsed() >= PROGRESS_FLUSH_INTERVAL
+            || self.completed_files.saturating_sub(self.last_flushed_files) >= PROGRESS_FLUSH_FILES
+            || self.completed_bytes.saturating_sub(self.last_flushed_bytes) >= PROGRESS_FLUSH_BYTES
+    }
+
+    fn maybe_flush(
+        &mut self,
+        agent: &StateAgent,
+        progress: &mut OperationProgress,
+        metrics: &OperationMetrics,
+    ) -> Result<()> {
+        if self.should_flush() {
+            self.flush(agent, progress, metrics)?;
+        }
+        Ok(())
+    }
+
+    fn flush(
+        &mut self,
+        agent: &StateAgent,
+        progress: &mut OperationProgress,
+        metrics: &OperationMetrics,
+    ) -> Result<()> {
+        progress.completed_units = self.completed_files;
+        progress.detail_json = serde_json::json!({
+            "bytes_hashed": metrics.bytes_hashed,
+            "files_rehashed": metrics.num_files_rehashed,
+            "bytes_completed": self.completed_bytes,
+        });
+        progress.updated_at = Utc::now();
+        agent
+            .db
+            .set_operation_progress(self.operation_id, Some(progress))?;
+        self.last_flushed_files = self.completed_files;
+        self.last_flushed_bytes = self.completed_bytes;
+        self.last_flush = Instant::now();
+        Ok(())
+    }
+}
+
+struct RemoteChunkIndex {
+    entries: HashMap<String, PackIndexEntry>,
+}
+
+#[derive(Debug)]
+struct HashJob {
+    app_id: AppId,
+    source: PathBuf,
+    staged: PathBuf,
+    record: PathRecord,
+    association: PathAssociation,
+    logical: LogicalPath,
+    shared_app_ids: Vec<AppId>,
+}
+
+#[derive(Debug, Default)]
+struct HashMetricsDelta {
+    bytes_hashed: u64,
+    chunks_reused: u64,
+    chunks_created: u64,
+    local_cas_hits: u64,
+    remote_index_hits: u64,
+    bytes_reused_local: u64,
+}
+
+#[derive(Debug)]
+struct HashResult {
+    source: PathBuf,
+    manifest_file: ManifestFile,
+    file_state: FileStateRecord,
+    new_chunks: Vec<(String, PathBuf)>,
+    remote_entries: Vec<PackIndexEntry>,
+    cas_observations: Vec<LocalCasEntry>,
+    small_file_chunk_hashes: Vec<String>,
+    metrics: HashMetricsDelta,
+}
+
+impl RemoteChunkIndex {
+    fn empty() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    fn get(&self, hash: &str) -> Option<&PackIndexEntry> {
+        self.entries.get(hash)
+    }
+}
+
+fn hashing_worker_count(performance: BackupPerformanceMode) -> usize {
+    if let Ok(value) = std::env::var("NOLAND_HASH_WORKERS") {
+        if let Ok(value) = value.parse::<usize>() {
+            return value.clamp(1, 8);
+        }
+    }
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4);
+    match performance {
+        BackupPerformanceMode::Balanced => 4.min(available).max(1),
+        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => 8.min(available).max(1),
+    }
+}
+
+fn pack_worker_count(performance: BackupPerformanceMode) -> usize {
+    if let Ok(value) = std::env::var("NOLAND_PACK_WORKERS") {
+        if let Ok(value) = value.parse::<usize>() {
+            return value.clamp(1, 4);
+        }
+    }
+    match performance {
+        BackupPerformanceMode::Balanced => 2,
+        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => 4,
+    }
+}
+
+type CancellationCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+fn cancellation_error() -> StateError {
+    StateError::Invalid("backup cancellation requested".into())
+}
+
+fn plan_pack_chunks(
+    mut chunks: Vec<(String, PathBuf)>,
+    target: u64,
+    max: u64,
+) -> Result<Vec<Vec<(String, PathBuf)>>> {
+    const PACK_HEADER_BYTES: u64 = 24;
+    const RECORD_OVERHEAD_BYTES: u64 = 52;
+    if target == 0 || target > max {
+        return Err(StateError::Invalid("invalid pack size limits".into()));
+    }
+    chunks.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut plans = Vec::new();
+    let mut current = Vec::new();
+    let mut current_bytes = PACK_HEADER_BYTES;
+    for (hash, path) in chunks {
+        let payload_bytes = std::fs::metadata(&path)?.len();
+        let record_bytes = RECORD_OVERHEAD_BYTES
+            .checked_add(payload_bytes)
+            .ok_or_else(|| StateError::msg("chunk length exceeds pack format"))?;
+        if PACK_HEADER_BYTES
+            .checked_add(record_bytes)
+            .is_none_or(|bytes| bytes > max)
+        {
+            return Err(StateError::msg("chunk exceeds pack hard maximum"));
+        }
+        if !current.is_empty()
+            && (current_bytes >= target
+                || current_bytes
+                    .checked_add(record_bytes)
+                    .is_none_or(|bytes| bytes > max))
+        {
+            plans.push(std::mem::take(&mut current));
+            current_bytes = PACK_HEADER_BYTES;
+        }
+        current_bytes += record_bytes;
+        current.push((hash, path));
+    }
+    if !current.is_empty() {
+        plans.push(current);
+    }
+    Ok(plans)
+}
+
+fn build_packs_parallel(
+    dest_dir: &Path,
+    master: &MasterKey,
+    chunks: Vec<(String, PathBuf)>,
+    target: u64,
+    max: u64,
+    worker_count: usize,
+    cancelled: CancellationCheck,
+) -> Result<Vec<BuiltPack>> {
+    let plans = plan_pack_chunks(chunks, target, max)?;
+    if plans.is_empty() {
+        return Ok(Vec::new());
+    }
+    if plans.len() == 1 || worker_count <= 1 {
+        let mut built = Vec::with_capacity(plans.len());
+        for plan in plans {
+            if cancelled() {
+                return Err(cancellation_error());
+            }
+            built.extend(pack_chunk_files_with_limits(
+                dest_dir,
+                master,
+                plan,
+                |_| false,
+                target,
+                max,
+            )?);
+        }
+        return Ok(built);
+    }
+
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    };
+    let workers = worker_count.min(plans.len()).max(1);
+    let (plan_tx, plan_rx) = mpsc::sync_channel::<Vec<(String, PathBuf)>>(workers * 2);
+    let (result_tx, result_rx) = mpsc::sync_channel::<Result<BuiltPack>>(workers * 2);
+    let plan_rx = Arc::new(Mutex::new(plan_rx));
+    let stopped = Arc::new(AtomicBool::new(false));
+    let mut built = Vec::with_capacity(plans.len());
+    let mut first_error = None;
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let plan_rx = Arc::clone(&plan_rx);
+            let result_tx = result_tx.clone();
+            let cancelled = Arc::clone(&cancelled);
+            let stopped = Arc::clone(&stopped);
+            scope.spawn(move || loop {
+                let plan = match plan_rx.lock().expect("pack plan receiver poisoned").recv() {
+                    Ok(plan) => plan,
+                    Err(_) => break,
+                };
+                if cancelled() {
+                    stopped.store(true, Ordering::Release);
+                    let _ = result_tx.send(Err(cancellation_error()));
+                    break;
+                }
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let result =
+                    pack_chunk_files_with_limits(dest_dir, master, plan, |_| false, target, max)
+                        .and_then(|mut packs| {
+                            packs
+                                .pop()
+                                .ok_or_else(|| StateError::msg("pack plan produced no pack"))
+                        });
+                let result = if cancelled() {
+                    Err(cancellation_error())
+                } else {
+                    result
+                };
+                let failed = result.is_err();
+                if failed {
+                    stopped.store(true, Ordering::Release);
+                }
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+                if failed {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+        let feeder_cancelled = Arc::clone(&cancelled);
+        let feeder_stopped = Arc::clone(&stopped);
+        let feeder = scope.spawn(move || {
+            for plan in plans {
+                if feeder_cancelled()
+                    || feeder_stopped.load(Ordering::Acquire)
+                    || plan_tx.send(plan).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        for result in result_rx {
+            match result {
+                Ok(pack) => built.push(pack),
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        feeder
+            .join()
+            .map_err(|_| StateError::msg("pack plan feeder panicked"))?;
+        Ok::<(), StateError>(())
+    })?;
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    built.sort_by(|left, right| left.entries[0].chunk_hash.cmp(&right.entries[0].chunk_hash));
+    Ok(built)
+}
+
+fn hash_one_file(
+    job: HashJob,
+    cas: &LocalCas,
+    inherited_hashes: &std::collections::HashSet<String>,
+    remote_chunks: &RemoteChunkIndex,
+    observed_at: chrono::DateTime<Utc>,
+) -> Result<HashResult> {
+    let mut new_chunks = Vec::new();
+    let mut remote_entries = Vec::new();
+    let mut cas_observations = Vec::new();
+    let mut metrics = HashMetricsDelta::default();
+    let summary = chunk_file_streaming(&job.staged, |chunk, payload| {
+        if inherited_hashes.contains(&chunk.hash) {
+            metrics.chunks_reused = metrics.chunks_reused.saturating_add(1);
+            return Ok(());
+        }
+        if let Some(remote_entry) = remote_chunks.get(&chunk.hash) {
+            metrics.remote_index_hits = metrics.remote_index_hits.saturating_add(1);
+            metrics.chunks_reused = metrics.chunks_reused.saturating_add(1);
+            remote_entries.push(remote_entry.clone());
+            return Ok(());
+        }
+        let stored = cas.put_prehashed(&chunk.hash, payload)?;
+        cas_observations.push(LocalCasEntry {
+            object_kind: ContentObjectKind::Chunk,
+            content_hash: chunk.hash.clone(),
+            local_path: stored.path.to_string_lossy().into_owned(),
+            size: stored.bytes,
+            created_at: observed_at,
+            verified_at: Some(observed_at),
+            last_accessed_at: observed_at,
+        });
+        if stored.reused {
+            metrics.local_cas_hits = metrics.local_cas_hits.saturating_add(1);
+            metrics.bytes_reused_local = metrics.bytes_reused_local.saturating_add(stored.bytes);
+        } else {
+            metrics.chunks_created = metrics.chunks_created.saturating_add(1);
+        }
+        new_chunks.push((chunk.hash.clone(), stored.path));
+        Ok(())
+    })?;
+
+    let metadata = std::fs::metadata(&job.source)?;
+    let current_mtime_ns = metadata_mtime_ns(&metadata);
+    let mut current_record = job.record.clone();
+    current_record.size = Some(summary.size.min(i64::MAX as u64) as i64);
+    current_record.mtime_ns = current_mtime_ns;
+    current_record.content_hash = Some(summary.file_hash.clone());
+    #[cfg(unix)]
+    {
+        current_record.inode = Some(metadata.ino().min(i64::MAX as u64) as i64);
+        current_record.mode = Some(metadata.mode() as i64);
+        current_record.uid = Some(metadata.uid() as i64);
+        current_record.gid = Some(metadata.gid() as i64);
+    }
+    let manifest_file = ManifestFile {
+        logical_root: job.logical.logical_root.as_token(),
+        relative_path: job.logical.relative_path.clone(),
+        source_path_hint: Some(job.record.canonical_path.clone()),
+        file_type: job
+            .record
+            .file_type
+            .clone()
+            .unwrap_or_else(|| "file".into()),
+        size: summary.size,
+        file_hash: summary.file_hash.clone(),
+        chunks: summary.chunks,
+        mode: current_record
+            .mode
+            .and_then(|value| u32::try_from(value).ok()),
+        mtime_ns: current_record.mtime_ns,
+        uid: current_record
+            .uid
+            .and_then(|value| u32::try_from(value).ok()),
+        gid: current_record
+            .gid
+            .and_then(|value| u32::try_from(value).ok()),
+        symlink_target: None,
+        persistence_class: job.association.persistence_class,
+        semantic_role: job.association.semantic_role,
+        association_confidence: job.association.confidence,
+        shared_app_ids: job.shared_app_ids,
+    };
+    metrics.bytes_hashed = summary.size;
+    let file_state = file_state_from_manifest(&job.app_id, &manifest_file, &current_record);
+    let small_file_chunk_hashes = if noland_cas::is_small_file(summary.size) {
+        manifest_file
+            .chunks
+            .iter()
+            .map(|chunk| chunk.hash.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ok(HashResult {
+        source: job.source,
+        manifest_file,
+        file_state,
+        new_chunks,
+        remote_entries,
+        cas_observations,
+        small_file_chunk_hashes,
+        metrics,
+    })
+}
+
+fn hash_files_parallel(
+    jobs: Vec<HashJob>,
+    worker_count: usize,
+    cas: LocalCas,
+    inherited_hashes: std::collections::HashSet<String>,
+    remote_chunks: RemoteChunkIndex,
+    observed_at: chrono::DateTime<Utc>,
+    cancelled: CancellationCheck,
+) -> Result<Vec<HashResult>> {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    };
+
+    let worker_count = worker_count.max(1);
+    let (job_tx, job_rx) = mpsc::sync_channel::<HashJob>(worker_count * 2);
+    let (result_tx, result_rx) = mpsc::sync_channel::<Result<HashResult>>(worker_count * 2);
+    let job_rx = Arc::new(Mutex::new(job_rx));
+    let inherited_hashes = Arc::new(inherited_hashes);
+    let remote_chunks = Arc::new(remote_chunks);
+    let stopped = Arc::new(AtomicBool::new(false));
+    let feeder_cancelled = Arc::clone(&cancelled);
+    let feeder_stopped = Arc::clone(&stopped);
+    let feeder = std::thread::spawn(move || {
+        for job in jobs {
+            if feeder_cancelled()
+                || feeder_stopped.load(Ordering::Acquire)
+                || job_tx.send(job).is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    // The coordinator drains results while the feeder submits jobs, keeping both channels bounded.
+    let mut results = Vec::new();
+    let mut first_error = None;
+    std::thread::scope(|scope| {
+        for _ in 0..worker_count {
+            let job_rx = Arc::clone(&job_rx);
+            let result_tx = result_tx.clone();
+            let inherited_hashes = Arc::clone(&inherited_hashes);
+            let remote_chunks = Arc::clone(&remote_chunks);
+            let cancelled = Arc::clone(&cancelled);
+            let stopped = Arc::clone(&stopped);
+            let cas = cas.clone();
+            scope.spawn(move || loop {
+                let job = match job_rx.lock().expect("hash job receiver poisoned").recv() {
+                    Ok(job) => job,
+                    Err(_) => break,
+                };
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let result = if cancelled() {
+                    Err(cancellation_error())
+                } else {
+                    hash_one_file(job, &cas, &inherited_hashes, &remote_chunks, observed_at)
+                };
+                let failed = result.is_err();
+                if failed {
+                    stopped.store(true, Ordering::Release);
+                }
+                if result_tx.send(result).is_err() {
+                    break;
+                }
+                if failed || cancelled() {
+                    break;
+                }
+            });
+        }
+        drop(result_tx);
+        for result in result_rx {
+            match result {
+                Ok(result) => results.push(result),
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        Ok::<(), StateError>(())
+    })?;
+    feeder.join().expect("hash job feeder panicked");
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    results.sort_by(|left, right| left.source.cmp(&right.source));
+    Ok(results)
 }
 
 struct SnapshotCleanup(PathBuf);
@@ -31,6 +543,32 @@ struct SnapshotCleanup(PathBuf);
 impl Drop for SnapshotCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+struct PackCleanup {
+    path: PathBuf,
+    cloud_committed: bool,
+}
+
+impl PackCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            cloud_committed: false,
+        }
+    }
+
+    fn mark_cloud_committed(&mut self) {
+        self.cloud_committed = true;
+    }
+}
+
+impl Drop for PackCleanup {
+    fn drop(&mut self) {
+        if self.cloud_committed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
     }
 }
 
@@ -136,17 +674,35 @@ pub async fn run_backup(
             .list_dirty_roots(Some(app_id))?
             .iter()
             .any(|root| root.requires_reconciliation);
-    if requires_reconciliation {
+    if requires_reconciliation || mode == BackupMode::CompleteApplication {
         persist_operation(agent, &mut op, BackupState::Reconciling, &metrics)?;
         let started = Instant::now();
-        let reconciled = reconcile_app(agent, app_id)?;
+        let reconciled = if mode == BackupMode::CompleteApplication {
+            reconcile_app_for_complete_backup(agent, app_id)?
+        } else {
+            reconcile_app(agent, app_id)?
+        };
         metrics.reconciliation_duration_ms = elapsed_ms(started);
         metrics.num_files_scanned = reconciled as u64;
     }
 
     let planning_started = Instant::now();
-    let classifier = Classifier::new(&agent.db, &agent.config.image_id);
+    let classifier = Classifier::new(&agent.db, &agent.config.image_id)
+        .with_exclusion_context(agent.config.paths.clone(), agent.config.home.clone());
     let roots = agent.roots.lock().clone();
+    let strict_steam_scope = if mode == BackupMode::CompleteApplication {
+        SteamBackupScope::load(agent, app_id)?
+    } else {
+        None
+    };
+    let install_roots = if mode == BackupMode::CompleteApplication {
+        strict_steam_scope
+            .as_ref()
+            .map(|scope| scope.install_roots().to_vec())
+            .unwrap_or(known_install_roots(agent, app_id)?)
+    } else {
+        Vec::new()
+    };
     let mut candidates = BTreeMap::<String, (PathRecord, PathAssociation)>::new();
     let full_scope = parent.is_none()
         || mode == BackupMode::CompleteApplication
@@ -161,33 +717,44 @@ pub async fn run_backup(
             agent.db.likely_backup_associations(app_id)?
         };
         for (record, association) in rows {
+            if strict_steam_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.contains(Path::new(&record.canonical_path)))
+            {
+                continue;
+            }
             candidates.insert(record.canonical_path.clone(), (record, association));
         }
     } else {
+        let mut candidate_records = BTreeMap::<String, PathRecord>::new();
         for mutation in &pending_mutations {
             if let Some(record) = agent.db.get_path_by_canonical(&mutation.path)? {
-                if let Some(association) = agent
-                    .db
-                    .associations_for_path(record.path_id)?
-                    .into_iter()
-                    .find(|association| association.app_id == *app_id)
-                {
-                    candidates.insert(record.canonical_path.clone(), (record, association));
-                }
+                candidate_records.insert(record.canonical_path.clone(), record);
             }
         }
         if let Some(dirty) = &dirty_state {
             for path_id in &dirty.dirty_paths {
                 if let Some(record) = agent.db.get_path_by_id(*path_id)? {
-                    if let Some(association) = agent
-                        .db
-                        .associations_for_path(record.path_id)?
-                        .into_iter()
-                        .find(|association| association.app_id == *app_id)
-                    {
-                        candidates.insert(record.canonical_path.clone(), (record, association));
-                    }
+                    candidate_records.insert(record.canonical_path.clone(), record);
                 }
+            }
+        }
+        let path_ids = candidate_records
+            .values()
+            .map(|record| record.path_id)
+            .collect::<Vec<_>>();
+        let associations_by_path = agent.db.associations_for_paths(&path_ids)?;
+        for (canonical, record) in candidate_records {
+            if let Some(association) = associations_by_path
+                .get(&record.path_id)
+                .and_then(|associations| {
+                    associations
+                        .iter()
+                        .find(|association| association.app_id == *app_id)
+                })
+                .cloned()
+            {
+                candidates.insert(canonical, (record, association));
             }
         }
         if candidates.is_empty() && dirty_state.is_some() {
@@ -197,10 +764,10 @@ pub async fn run_backup(
         }
     }
 
-    if let Some((record, association)) = track_steam_appmanifest(agent, &identity, &roots)? {
-        candidates
-            .entry(record.canonical_path.clone())
-            .or_insert((record, association));
+    if let Some((record, association)) =
+        track_steam_appmanifest(agent, &identity, &roots, &install_roots)?
+    {
+        candidates.insert(record.canonical_path.clone(), (record, association));
     }
     metrics.num_candidate_paths = candidates.len() as u64;
 
@@ -233,22 +800,55 @@ pub async fn run_backup(
         ),
     };
 
-    let mut tombstones = BTreeSet::<(String, String)>::new();
+    let mut tombstones = BTreeMap::<(String, String), String>::new();
+    if let Some(scope) = strict_steam_scope.as_ref() {
+        let inherited_files = std::mem::take(&mut manifest.files);
+        for file in inherited_files {
+            let in_scope = manifest_source_path(&file, &roots)
+                .as_deref()
+                .is_some_and(|path| scope.contains(path));
+            if in_scope {
+                manifest.files.push(file);
+            } else {
+                tombstones.insert(
+                    (file.logical_root, file.relative_path),
+                    "outside strict Steam backup scope".into(),
+                );
+            }
+        }
+    }
     for mutation in &pending_mutations {
         if mutation.kind == AppMutationKind::Delete {
             if let Some(logical) = roots.classify(Path::new(&mutation.path)) {
                 remove_manifest_file(&mut manifest, &logical);
-                tombstones.insert((logical.logical_root.as_token(), logical.relative_path));
+                tombstones.insert(
+                    (logical.logical_root.as_token(), logical.relative_path),
+                    "observed deletion or rename".into(),
+                );
             }
         }
         if let Some(previous_path) = &mutation.previous_path {
             if let Some(logical) = roots.classify(Path::new(previous_path)) {
                 remove_manifest_file(&mut manifest, &logical);
-                tombstones.insert((logical.logical_root.as_token(), logical.relative_path));
+                tombstones.insert(
+                    (logical.logical_root.as_token(), logical.relative_path),
+                    "observed deletion or rename".into(),
+                );
             }
         }
     }
 
+    let indexed_states = agent
+        .db
+        .list_file_states(app_id, None)?
+        .into_iter()
+        .map(|state| {
+            (
+                (state.logical_root.clone(), state.relative_path.clone()),
+                state,
+            )
+        })
+        .collect::<HashMap<_, _>>();
     let mut include_paths = Vec::new();
     let mut changed_files = BTreeMap::<String, (PathRecord, PathAssociation, LogicalPath)>::new();
     for (canonical, (record, association)) in candidates {
@@ -262,14 +862,25 @@ pub async fn run_backup(
         remove_manifest_file(&mut manifest, &logical);
         if !Path::new(&canonical).is_file() {
             if manifest.parent_bundle_id.is_some() {
-                tombstones.insert((logical.logical_root.as_token(), logical.relative_path));
+                tombstones.insert(
+                    (logical.logical_root.as_token(), logical.relative_path),
+                    "observed deletion or rename".into(),
+                );
             }
             continue;
         }
-        match classifier.decide(&record, &association, mode)? {
-            BackupDecision::Exclude
-            | BackupDecision::MetadataOnly
-            | BackupDecision::DeferAndReconcile => continue,
+        let decision = classifier.decide(&record, &association, mode)?;
+        let complete_install_content = mode == BackupMode::CompleteApplication
+            && install_roots
+                .iter()
+                .any(|root| Path::new(&canonical).starts_with(root));
+        match decision {
+            BackupDecision::Exclude => continue,
+            BackupDecision::MetadataOnly | BackupDecision::DeferAndReconcile
+                if !complete_install_content =>
+            {
+                continue;
+            }
             _ => {}
         }
 
@@ -279,13 +890,12 @@ pub async fn run_backup(
         let inode = Some(metadata.ino());
         #[cfg(not(unix))]
         let inode = None;
-        let indexed = agent.db.get_file_state(
-            app_id,
-            &logical.logical_root.as_token(),
-            &logical.relative_path,
-        )?;
+        let indexed = indexed_states.get(&(
+            logical.logical_root.as_token(),
+            logical.relative_path.clone(),
+        ));
         if performance != BackupPerformanceMode::Full
-            && indexed.as_ref().is_some_and(|state| {
+            && indexed.is_some_and(|state| {
                 state.fast_identity_matches(metadata.len(), mtime_ns, inode, None)
             })
             && inherited.is_some()
@@ -300,12 +910,33 @@ pub async fn run_backup(
         include_paths.push(PathBuf::from(&canonical));
         changed_files.insert(canonical, (record, association, logical));
     }
+    let changed_path_ids = changed_files
+        .values()
+        .map(|(record, _, _)| record.path_id)
+        .collect::<Vec<_>>();
+    let shared_app_ids_by_path = agent
+        .db
+        .associations_for_paths(&changed_path_ids)?
+        .into_iter()
+        .map(|(path_id, associations)| {
+            (
+                path_id,
+                associations
+                    .into_iter()
+                    .filter(|other| {
+                        other.app_id != *app_id && other.confidence >= OWNERSHIP_CANDIDATE_MIN
+                    })
+                    .map(|other| other.app_id)
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<HashMap<_, _>>();
 
-    for (logical_root, relative_path) in tombstones {
+    for ((logical_root, relative_path), reason) in tombstones {
         manifest.tombstones.push(ManifestTombstone {
             logical_root,
             relative_path,
-            reason: "observed deletion or rename".into(),
+            reason,
         });
     }
     metrics.planning_duration_ms = elapsed_ms(planning_started);
@@ -345,120 +976,90 @@ pub async fn run_backup(
     agent.db.set_operation_progress(op_id, Some(&progress))?;
     let hashing_started = Instant::now();
     let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks"))?;
+    let cancelled: CancellationCheck = {
+        let operations = agent.operations.clone();
+        Arc::new(move || operations.cancel_requested(op_id))
+    };
+    let snapshot_time = Utc::now();
     let storage_id = provider
         .storage_identity()
         .map(|identity| identity.cache_key());
-    let mut inherited_hashes = pack_index
+    let remote_chunks = load_remote_chunk_index(agent, storage_id.as_deref(), snapshot_time)?;
+    let cas_observed_at = snapshot_time;
+    let mut cas_observations = Vec::<LocalCasEntry>::new();
+    let mut progress_reporter = ProgressReporter::new(op_id);
+    let inherited_hashes = pack_index
         .iter()
         .map(|entry| entry.chunk_hash.clone())
-        .collect::<BTreeSet<_>>();
+        .collect::<std::collections::HashSet<_>>();
+    let jobs = view
+        .mappings
+        .iter()
+        .filter_map(|mapping| {
+            changed_files
+                .get(&mapping.source.to_string_lossy().into_owned())
+                .map(|(record, association, logical)| HashJob {
+                    app_id: app_id.clone(),
+                    source: mapping.source.clone(),
+                    staged: mapping.staged.clone(),
+                    record: record.clone(),
+                    association: association.clone(),
+                    logical: logical.clone(),
+                    shared_app_ids: shared_app_ids_by_path
+                        .get(&record.path_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                })
+        })
+        .collect::<Vec<_>>();
+    let results = hash_files_parallel(
+        jobs,
+        hashing_worker_count(performance),
+        cas,
+        inherited_hashes,
+        remote_chunks,
+        cas_observed_at,
+        Arc::clone(&cancelled),
+    )?;
     let mut new_chunk_paths = BTreeMap::<String, PathBuf>::new();
     let mut small_file_chunk_hashes = BTreeSet::<String>::new();
     let mut trusted_states = Vec::<FileStateRecord>::new();
-
-    for mapping in &view.mappings {
-        let Some((record, association, logical)) =
-            changed_files.get(&mapping.source.to_string_lossy().into_owned())
-        else {
-            continue;
-        };
-        let summary = chunk_file_streaming(&mapping.staged, |chunk, payload| {
-            if inherited_hashes.contains(&chunk.hash) || new_chunk_paths.contains_key(&chunk.hash) {
-                metrics.num_chunks_reused = metrics.num_chunks_reused.saturating_add(1);
-                return Ok(());
-            }
-            if let Some(storage_id) = storage_id.as_deref() {
-                if let Some(remote_entry) =
-                    lookup_remote_pack_entry(agent, storage_id, &chunk.hash)?
-                {
-                    metrics.num_remote_index_hits = metrics.num_remote_index_hits.saturating_add(1);
-                    metrics.num_chunks_reused = metrics.num_chunks_reused.saturating_add(1);
-                    pack_index.push(remote_entry);
-                    inherited_hashes.insert(chunk.hash.clone());
-                    return Ok(());
-                }
-            }
-            let stored = cas.put_verified(&chunk.hash, payload)?;
-            remember_local_cas(
-                agent,
-                &chunk.hash,
-                &stored.path,
-                stored.bytes,
-                stored.reused,
-            )?;
-            if stored.reused {
-                metrics.num_local_cas_hits = metrics.num_local_cas_hits.saturating_add(1);
-                metrics.bytes_reused_local =
-                    metrics.bytes_reused_local.saturating_add(stored.bytes);
-            } else {
-                metrics.num_chunks_created = metrics.num_chunks_created.saturating_add(1);
-            }
-            new_chunk_paths.insert(chunk.hash.clone(), stored.path);
-            Ok(())
-        })?;
+    for result in results {
         metrics.num_files_rehashed = metrics.num_files_rehashed.saturating_add(1);
-        metrics.bytes_scanned = metrics.bytes_scanned.saturating_add(summary.size);
-        metrics.bytes_hashed = metrics.bytes_hashed.saturating_add(summary.size);
-        metrics.bytes_chunked = metrics.bytes_chunked.saturating_add(summary.size);
-        if noland_cas::is_small_file(summary.size) {
-            metrics.num_small_files_packed = metrics.num_small_files_packed.saturating_add(1);
-            small_file_chunk_hashes.extend(summary.chunks.iter().map(|chunk| chunk.hash.clone()));
-        }
-        let metadata = std::fs::metadata(&mapping.source)?;
-        let current_mtime_ns = metadata_mtime_ns(&metadata);
-        let mut current_record = record.clone();
-        current_record.size = Some(summary.size.min(i64::MAX as u64) as i64);
-        current_record.mtime_ns = current_mtime_ns;
-        current_record.content_hash = Some(summary.file_hash.clone());
-        #[cfg(unix)]
-        {
-            current_record.inode = Some(metadata.ino().min(i64::MAX as u64) as i64);
-            current_record.mode = Some(metadata.mode() as i64);
-            current_record.uid = Some(metadata.uid() as i64);
-            current_record.gid = Some(metadata.gid() as i64);
-        }
-        let file = ManifestFile {
-            logical_root: logical.logical_root.as_token(),
-            relative_path: logical.relative_path.clone(),
-            source_path_hint: Some(record.canonical_path.clone()),
-            file_type: record.file_type.clone().unwrap_or_else(|| "file".into()),
-            size: summary.size,
-            file_hash: summary.file_hash.clone(),
-            chunks: summary.chunks,
-            mode: current_record
-                .mode
-                .and_then(|value| u32::try_from(value).ok()),
-            mtime_ns: current_record.mtime_ns,
-            uid: current_record
-                .uid
-                .and_then(|value| u32::try_from(value).ok()),
-            gid: current_record
-                .gid
-                .and_then(|value| u32::try_from(value).ok()),
-            symlink_target: None,
-            persistence_class: association.persistence_class,
-            semantic_role: association.semantic_role,
-            association_confidence: association.confidence,
-            shared_app_ids: agent
-                .db
-                .associations_for_path(record.path_id)?
-                .into_iter()
-                .filter(|other| {
-                    other.app_id != *app_id && other.confidence >= OWNERSHIP_CANDIDATE_MIN
-                })
-                .map(|other| other.app_id)
-                .collect(),
-        };
-        trusted_states.push(file_state_from_manifest(app_id, &file, &current_record));
-        manifest.files.push(file);
-        progress.completed_units = progress.completed_units.saturating_add(1);
-        progress.detail_json = serde_json::json!({
-            "bytes_hashed": metrics.bytes_hashed,
-            "files_rehashed": metrics.num_files_rehashed,
-        });
-        progress.updated_at = Utc::now();
-        agent.db.set_operation_progress(op_id, Some(&progress))?;
+        metrics.bytes_scanned = metrics
+            .bytes_scanned
+            .saturating_add(result.metrics.bytes_hashed);
+        metrics.bytes_hashed = metrics
+            .bytes_hashed
+            .saturating_add(result.metrics.bytes_hashed);
+        metrics.bytes_chunked = metrics
+            .bytes_chunked
+            .saturating_add(result.metrics.bytes_hashed);
+        metrics.num_chunks_reused = metrics
+            .num_chunks_reused
+            .saturating_add(result.metrics.chunks_reused);
+        metrics.num_chunks_created = metrics
+            .num_chunks_created
+            .saturating_add(result.metrics.chunks_created);
+        metrics.num_local_cas_hits = metrics
+            .num_local_cas_hits
+            .saturating_add(result.metrics.local_cas_hits);
+        metrics.num_remote_index_hits = metrics
+            .num_remote_index_hits
+            .saturating_add(result.metrics.remote_index_hits);
+        metrics.bytes_reused_local = metrics
+            .bytes_reused_local
+            .saturating_add(result.metrics.bytes_reused_local);
+        pack_index.extend(result.remote_entries);
+        new_chunk_paths.extend(result.new_chunks);
+        cas_observations.extend(result.cas_observations);
+        small_file_chunk_hashes.extend(result.small_file_chunk_hashes);
+        trusted_states.push(result.file_state);
+        manifest.files.push(result.manifest_file);
+        progress_reporter.record_file(result.metrics.bytes_hashed);
+        progress_reporter.maybe_flush(agent, &mut progress, &metrics)?;
     }
+    progress_reporter.flush(agent, &mut progress, &metrics)?;
     metrics.hashing_duration_ms = elapsed_ms(hashing_started);
 
     persist_operation(agent, &mut op, BackupState::Packing, &metrics)?;
@@ -470,6 +1071,7 @@ pub async fn run_backup(
         .paths
         .packs
         .join(manifest.bundle_id.to_string());
+    let mut pack_cleanup = PackCleanup::new(pack_dir.clone());
     let mut small_chunks = Vec::new();
     let mut regular_chunks = Vec::new();
     for chunk in new_chunk_paths {
@@ -481,17 +1083,24 @@ pub async fn run_backup(
     }
     // Small state files are deliberately grouped into compact packs so launch-critical
     // restore does not need to fetch a mostly unrelated 512 MiB pack.
-    let mut packs = pack_chunk_files_with_limits(
+    let mut packs = build_packs_parallel(
         &pack_dir,
         master,
         small_chunks,
-        |_| false,
         16 * 1024 * 1024,
         32 * 1024 * 1024,
+        pack_worker_count(performance),
+        Arc::clone(&cancelled),
     )?;
-    packs.extend(pack_chunk_files(&pack_dir, master, regular_chunks, |_| {
-        false
-    })?);
+    packs.extend(build_packs_parallel(
+        &pack_dir,
+        master,
+        regular_chunks,
+        noland_state_core::constants::PACK_TARGET,
+        noland_state_core::constants::PACK_MAX,
+        pack_worker_count(performance),
+        Arc::clone(&cancelled),
+    )?);
     let mut incremental = 0u64;
     let mut pack_files = Vec::new();
     let mut new_pack_entries = Vec::<PackIndexEntry>::new();
@@ -543,6 +1152,7 @@ pub async fn run_backup(
         Some(op_id),
     )
     .await?;
+    pack_cleanup.mark_cloud_committed();
     metrics.upload_duration_ms = elapsed_ms(upload_started);
     metrics.num_manifest_writes = 1;
 
@@ -554,17 +1164,20 @@ pub async fn run_backup(
     let storage_metrics = provider.operation_metrics().saturating_sub(storage_before);
     apply_storage_metrics(&mut metrics, storage_metrics);
 
-    for entry in &new_pack_entries {
-        agent.db.remember_chunk(
-            &entry.chunk_hash,
-            Some(&entry.pack_id),
-            entry.plaintext_len as u64,
-        )?;
-    }
+    let chunk_rows = new_pack_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.chunk_hash.clone(),
+                Some(entry.pack_id.clone()),
+                u64::from(entry.plaintext_len),
+            )
+        })
+        .collect::<Vec<_>>();
+    agent.db.remember_chunks_bulk(&chunk_rows)?;
     remember_remote_pack_index(agent, provider.storage_identity(), &pack_index)?;
-    for state in &trusted_states {
-        agent.db.upsert_file_state(state)?;
-    }
+    agent.db.upsert_local_cas_entries(&cas_observations)?;
+    agent.db.upsert_file_states(&trusted_states)?;
     finish_backup_evidence(agent, app_id, &pending_mutations)?;
 
     persist_operation(agent, &mut op, BackupState::Checkpointing, &metrics)?;
@@ -648,6 +1261,32 @@ fn read_cached_parent(
     Some((manifest, index))
 }
 
+fn load_remote_chunk_index(
+    agent: &StateAgent,
+    storage_id: Option<&str>,
+    observed_at: chrono::DateTime<Utc>,
+) -> Result<RemoteChunkIndex> {
+    let Some(storage_id) = storage_id else {
+        return Ok(RemoteChunkIndex::empty());
+    };
+    let mut entries = HashMap::new();
+    for entry in agent
+        .db
+        .list_remote_content_entries(storage_id, ContentObjectKind::Chunk)?
+    {
+        if entry.state != RemoteContentState::Present || !entry.is_fresh_at(observed_at) {
+            continue;
+        }
+        let Some(payload) = entry.etag else {
+            continue;
+        };
+        if let Ok(pack_entry) = serde_json::from_str::<PackIndexEntry>(&payload) {
+            entries.insert(entry.content_hash, pack_entry);
+        }
+    }
+    Ok(RemoteChunkIndex { entries })
+}
+
 pub(crate) fn remember_remote_pack_index(
     agent: &StateAgent,
     identity: Option<ProviderRootIdentity>,
@@ -658,72 +1297,23 @@ pub(crate) fn remember_remote_pack_index(
     };
     let storage_id = identity.cache_key();
     let now = Utc::now();
-    for entry in index {
-        agent.db.upsert_remote_content_entry(&RemoteContentEntry {
-            storage_id: storage_id.clone(),
-            object_kind: ContentObjectKind::Chunk,
-            content_hash: entry.chunk_hash.clone(),
-            remote_path: noland_state_core::pack_key(&entry.pack_id),
-            size: Some(u64::from(entry.plaintext_len)),
-            etag: Some(serde_json::to_string(entry)?),
-            state: RemoteContentState::Present,
-            observed_at: now,
-            expires_at: None,
-        })?;
-    }
-    Ok(())
-}
-
-fn lookup_remote_pack_entry(
-    agent: &StateAgent,
-    storage_id: &str,
-    chunk_hash: &str,
-) -> Result<Option<PackIndexEntry>> {
-    let Some(entry) =
-        agent
-            .db
-            .get_remote_content_by_hash(storage_id, ContentObjectKind::Chunk, chunk_hash)?
-    else {
-        return Ok(None);
-    };
-    if entry.state != RemoteContentState::Present || !entry.is_fresh_at(Utc::now()) {
-        return Ok(None);
-    }
-    let Some(payload) = entry.etag else {
-        return Ok(None);
-    };
-    Ok(serde_json::from_str(&payload).ok())
-}
-
-fn remember_local_cas(
-    agent: &StateAgent,
-    content_hash: &str,
-    path: &Path,
-    size: u64,
-    reused: bool,
-) -> Result<()> {
-    let now = Utc::now();
-    if reused {
-        let _ = agent
-            .db
-            .touch_local_cas_entry(ContentObjectKind::Chunk, content_hash, now)?;
-        if agent
-            .db
-            .get_local_cas_entry(ContentObjectKind::Chunk, content_hash)?
-            .is_some()
-        {
-            return Ok(());
-        }
-    }
-    agent.db.upsert_local_cas_entry(&LocalCasEntry {
-        object_kind: ContentObjectKind::Chunk,
-        content_hash: content_hash.to_string(),
-        local_path: path.to_string_lossy().into_owned(),
-        size,
-        created_at: now,
-        verified_at: Some(now),
-        last_accessed_at: now,
-    })
+    let entries = index
+        .iter()
+        .map(|entry| {
+            Ok(RemoteContentEntry {
+                storage_id: storage_id.clone(),
+                object_kind: ContentObjectKind::Chunk,
+                content_hash: entry.chunk_hash.clone(),
+                remote_path: noland_state_core::pack_key(&entry.pack_id),
+                size: Some(u64::from(entry.plaintext_len)),
+                etag: Some(serde_json::to_string(entry)?),
+                state: RemoteContentState::Present,
+                observed_at: now,
+                expires_at: None,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    agent.db.upsert_remote_content_entries(&entries)
 }
 
 fn cache_parent(
@@ -757,6 +1347,18 @@ fn remove_manifest_file(manifest: &mut BundleManifest, logical: &LogicalPath) {
         file.logical_root != logical.logical_root.as_token()
             || file.relative_path != logical.relative_path
     });
+}
+
+fn manifest_source_path(file: &ManifestFile, roots: &LogicalRootMap) -> Option<PathBuf> {
+    file.source_path_hint
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| {
+            let root = file.logical_root_parsed()?;
+            roots
+                .resolve(&root)
+                .map(|base| base.join(&file.relative_path))
+        })
 }
 
 fn file_state_from_manifest(
@@ -866,8 +1468,18 @@ fn track_steam_appmanifest(
     agent: &StateAgent,
     identity: &AppIdentity,
     roots: &LogicalRootMap,
+    install_roots: &[PathBuf],
 ) -> Result<Option<(PathRecord, PathAssociation)>> {
-    let Some(path) = steam_appmanifest_path(identity, roots) else {
+    let Some(steam_app_id) = identity.steam_app_id.or_else(|| {
+        identity
+            .app_id
+            .as_str()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+    }) else {
+        return Ok(None);
+    };
+    let Some(path) = steam_appmanifest_path(steam_app_id, roots, install_roots) else {
         return Ok(None);
     };
     let metadata = std::fs::metadata(&path)?;
@@ -930,23 +1542,6 @@ fn track_steam_appmanifest(
     Ok(Some((record, association)))
 }
 
-fn steam_appmanifest_path(identity: &AppIdentity, roots: &LogicalRootMap) -> Option<PathBuf> {
-    let steam_app_id = identity.steam_app_id.or_else(|| {
-        identity
-            .app_id
-            .as_str()
-            .strip_prefix("steam:")
-            .and_then(|value| value.parse::<u32>().ok())
-    })?;
-    let filename = format!("appmanifest_{steam_app_id}.acf");
-
-    roots
-        .steam_libraries
-        .values()
-        .map(|steamapps| steamapps.join(&filename))
-        .find(|path| path.is_file())
-}
-
 pub async fn run_backup_to_local(
     agent: &StateAgent,
     app_id: &AppId,
@@ -1001,7 +1596,8 @@ pub async fn run_backup_with_session_performance(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let tuning = transfer_tuning(agent, performance);
-    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
+    let storage =
+        RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup(
         agent,
         app_id,
@@ -1042,7 +1638,8 @@ pub async fn run_backup_all_with_session_performance(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let tuning = transfer_tuning(agent, performance);
-    let storage = RcloneStorage::from_session(session, &config_path).with_transfer_tuning(tuning);
+    let storage =
+        RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup_all(agent, mode, performance, &storage, master, operation_id).await
 }
 
@@ -1144,6 +1741,27 @@ mod tests {
         ))
     }
 
+    #[test]
+    fn local_packs_are_removed_only_after_cloud_commit() {
+        let retained = test_root("packs-retained-on-failure");
+        std::fs::create_dir_all(&retained).unwrap();
+        std::fs::write(retained.join("pack"), b"data").unwrap();
+        {
+            let _cleanup = PackCleanup::new(retained.clone());
+        }
+        assert!(retained.join("pack").is_file());
+        std::fs::remove_dir_all(&retained).unwrap();
+
+        let committed = test_root("packs-removed-after-commit");
+        std::fs::create_dir_all(&committed).unwrap();
+        std::fs::write(committed.join("pack"), b"data").unwrap();
+        {
+            let mut cleanup = PackCleanup::new(committed.clone());
+            cleanup.mark_cloud_committed();
+        }
+        assert!(!committed.exists());
+    }
+
     fn tracked_save(
         agent: &StateAgent,
         app_id: &AppId,
@@ -1172,6 +1790,29 @@ mod tests {
         (path, path_id)
     }
 
+    fn associate_path(
+        agent: &StateAgent,
+        app_id: &AppId,
+        path: &Path,
+        evidence: EvidenceKind,
+    ) -> i64 {
+        let path_id = agent.db.upsert_path(&path.to_string_lossy()).unwrap();
+        agent
+            .db
+            .upsert_association(&PathAssociation {
+                app_id: app_id.clone(),
+                path_id,
+                confidence: CONF_EXPLICIT,
+                evidence: vec![Evidence::new(evidence)],
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+                first_seen_at: Utc::now(),
+                last_seen_at: Utc::now(),
+            })
+            .unwrap();
+        path_id
+    }
+
     fn mark_mutated(
         agent: &StateAgent,
         app_id: &AppId,
@@ -1197,6 +1838,49 @@ mod tests {
                 false,
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn backup_rejects_directly_indexed_agent_storage() {
+        let root = test_root("self-exclusion");
+        let cloud = root.join("cloud");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("test-game"), "Test Game");
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+
+        let internal = agent.config.paths.state_root.join("should-not-back-up.dat");
+        std::fs::write(&internal, b"internal").unwrap();
+        let path_id = agent
+            .db
+            .upsert_path(internal.to_string_lossy().as_ref())
+            .unwrap();
+        let now = Utc::now();
+        agent
+            .db
+            .upsert_association(&PathAssociation {
+                app_id: app_id.clone(),
+                path_id,
+                confidence: CONF_EXPLICIT,
+                evidence: vec![Evidence::new(EvidenceKind::ExplicitUserBinding)],
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+                first_seen_at: now,
+                last_seen_at: now,
+            })
+            .unwrap();
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        assert!(manifest.files.is_empty());
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]
@@ -1349,10 +2033,370 @@ mod tests {
 
         let mut roots = LogicalRootMap::default();
         roots.steam_libraries.insert("0".into(), steamapps);
-        let identity = AppIdentity::new(AppId::steam(3241660), "R.E.P.O.");
 
-        assert_eq!(steam_appmanifest_path(&identity, &roots), Some(manifest));
+        assert_eq!(steam_appmanifest_path(3241660, &roots, &[]), Some(manifest));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_selection_follows_the_selected_install_library() {
+        let root = test_root("steam-selected-manifest");
+        let first_steamapps = root.join("first/steamapps");
+        let selected_steamapps = root.join("selected/steamapps");
+        let install = selected_steamapps.join("common/Test Game");
+        let stale_manifest = first_steamapps.join("appmanifest_123.acf");
+        let selected_manifest = selected_steamapps.join("appmanifest_123.acf");
+        for manifest in [&stale_manifest, &selected_manifest] {
+            std::fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+            std::fs::write(manifest, b"manifest").unwrap();
+        }
+
+        let mut roots = LogicalRootMap::default();
+        roots
+            .steam_libraries
+            .insert("first".into(), first_steamapps);
+        roots
+            .steam_libraries
+            .insert("selected".into(), selected_steamapps);
+
+        assert_eq!(
+            steam_appmanifest_path(123, &roots, &[install]),
+            Some(selected_manifest)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn personal_state_does_not_reconcile_unobserved_install_content() {
+        let root = test_root("personal-known-root");
+        let cloud = root.join("cloud");
+        let install = root.join("library/game");
+        let content = install.join("game.bin");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::write(&content, b"game executable").unwrap();
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("test-game"), "Test Game");
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .add_known_root(&app_id, "install", install.to_string_lossy().as_ref())
+            .unwrap();
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::PersonalState,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+
+        assert!(manifest.files.is_empty());
+        assert!(agent
+            .db
+            .get_path_by_canonical(content.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn complete_application_reconciles_unobserved_install_content_and_deep_trees() {
+        let root = test_root("complete-known-root");
+        let cloud = root.join("cloud");
+        let steamapps = root.join("library/steamapps");
+        let install = steamapps.join("common/Test Game");
+        let shallow = install.join("game.bin");
+        let deep = install
+            .join("one/two/three/four/five/six/seven/eight")
+            .join("asset.pak");
+        std::fs::create_dir_all(deep.parent().unwrap()).unwrap();
+        std::fs::write(&shallow, b"game executable").unwrap();
+        std::fs::write(&deep, b"deep install asset").unwrap();
+        std::fs::write(steamapps.join("appmanifest_123.acf"), b"manifest").unwrap();
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let mut app = AppIdentity::new(AppId::steam(123), "Test Game");
+        app.steam_app_id = Some(123);
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .add_known_root(&app_id, "install", install.to_string_lossy().as_ref())
+            .unwrap();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("test".into(), steamapps);
+        assert!(agent
+            .db
+            .get_path_by_canonical(shallow.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+        assert!(agent
+            .db
+            .get_path_by_canonical(deep.to_string_lossy().as_ref())
+            .unwrap()
+            .is_none());
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        let source_paths = manifest
+            .files
+            .iter()
+            .filter_map(|file| file.source_path_hint.as_deref())
+            .collect::<BTreeSet<_>>();
+        assert!(source_paths.contains(shallow.to_string_lossy().as_ref()));
+        assert!(source_paths.contains(deep.to_string_lossy().as_ref()));
+        assert!(source_paths
+            .iter()
+            .any(|path| path.ends_with("appmanifest_123.acf")));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn steam_complete_backup_includes_only_install_and_explicit_state() {
+        let root = test_root("steam-strict-scope");
+        let cloud = root.join("cloud");
+        let home = root.join("home");
+        let steamapps = home.join(".local/share/Steam/steamapps");
+        let install = steamapps.join("common/Test Game");
+        let install_file = install.join("game.bin");
+        let deep_install_file = install.join("data/content.pak");
+        let compatdata_file =
+            steamapps.join("compatdata/123/pfx/drive_c/windows/system32/runtime.dll");
+        let proton_file = steamapps.join("common/Proton 9.0/proton");
+        let linux_runtime_file = steamapps.join("common/SteamLinuxRuntime_sniper/run");
+        let steamworks_file = steamapps.join("common/Steamworks Shared/redist.bin");
+        let other_game_file = steamapps.join("common/Other Game/other.bin");
+        let shader_file = steamapps.join("shadercache/123/cache.bin");
+        let unrelated_file = home.join(".local/share/unrelated/data.bin");
+        let explicit_save_root = steamapps.join("compatdata/123/pfx/save");
+        let explicit_save = explicit_save_root.join("save.sav");
+        let explicit_config = steamapps.join("compatdata/123/pfx/config");
+        let explicit_config_file = explicit_config.join("settings.json");
+        let appmanifest = steamapps.join("appmanifest_123.acf");
+        let other_appmanifest = steamapps.join("appmanifest_999.acf");
+        for file in [
+            &install_file,
+            &deep_install_file,
+            &compatdata_file,
+            &proton_file,
+            &linux_runtime_file,
+            &steamworks_file,
+            &other_game_file,
+            &shader_file,
+            &unrelated_file,
+            &explicit_save,
+            &explicit_config_file,
+            &appmanifest,
+            &other_appmanifest,
+        ] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"data").unwrap();
+        }
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let mut app = AppIdentity::new(AppId::steam(123), "Test Game");
+        app.steam_app_id = Some(123);
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        let broad_common_root = steamapps.join("common");
+        for (kind, path) in [
+            ("install", &install),
+            ("install", &broad_common_root),
+            ("proton", &steamapps.join("compatdata/123/pfx")),
+            ("install", &steamapps.join("common/Proton 9.0")),
+            (
+                "install",
+                &steamapps.join("common/SteamLinuxRuntime_sniper"),
+            ),
+            ("install", &steamapps.join("common/Steamworks Shared")),
+        ] {
+            agent
+                .db
+                .add_known_root(&app_id, kind, &path.to_string_lossy())
+                .unwrap();
+        }
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("test".into(), steamapps.clone());
+
+        associate_path(
+            &agent,
+            &app_id,
+            &steamapps.join("compatdata/123/pfx"),
+            EvidenceKind::ProtonPrefix,
+        );
+        for path in [
+            &proton_file,
+            &linux_runtime_file,
+            &steamworks_file,
+            &other_game_file,
+            &shader_file,
+            &unrelated_file,
+            Path::new("/usr/lib/libc.so.6"),
+        ] {
+            associate_path(&agent, &app_id, path, EvidenceKind::ReadOnlyDependency);
+        }
+        associate_path(
+            &agent,
+            &app_id,
+            &explicit_save_root,
+            EvidenceKind::ExplicitUserBinding,
+        );
+        associate_path(
+            &agent,
+            &app_id,
+            &explicit_config,
+            EvidenceKind::ExplicitUserBinding,
+        );
+
+        let manifest = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        let source_paths = manifest
+            .files
+            .iter()
+            .filter_map(|file| file.source_path_hint.clone())
+            .collect::<BTreeSet<_>>();
+        let expected = [
+            install_file.to_string_lossy().into_owned(),
+            deep_install_file.to_string_lossy().into_owned(),
+            explicit_save.to_string_lossy().into_owned(),
+            explicit_config_file.to_string_lossy().into_owned(),
+            appmanifest.to_string_lossy().into_owned(),
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        assert_eq!(source_paths, expected);
+        assert!(manifest
+            .files
+            .iter()
+            .any(|file| file.relative_path.ends_with("appmanifest_123.acf")));
+        assert!(!manifest
+            .files
+            .iter()
+            .any(|file| file.relative_path.ends_with("appmanifest_999.acf")));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn steam_complete_backup_prunes_inherited_files_outside_scope() {
+        let root = test_root("steam-parent-prune");
+        let cloud = root.join("cloud");
+        let home = root.join("home");
+        let steamapps = home.join(".local/share/Steam/steamapps");
+        let install = steamapps.join("common/Test Game");
+        let install_file = install.join("game.bin");
+        let leaked_runtime = steamapps.join("compatdata/123/pfx/drive_c/runtime.dll");
+        for file in [&install_file, &leaked_runtime] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"data").unwrap();
+        }
+
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let mut app = AppIdentity::new(AppId::steam(123), "Test Game");
+        app.steam_app_id = Some(123);
+        let app_id = app.app_id.clone();
+        agent.db.upsert_app(&app).unwrap();
+        agent
+            .db
+            .add_known_root(&app_id, "install", &install.to_string_lossy())
+            .unwrap();
+        associate_path(
+            &agent,
+            &app_id,
+            &leaked_runtime,
+            EvidenceKind::DirectCgroupWrite,
+        );
+        let master = MasterKey::generate();
+
+        let parent = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::PersonalState,
+            cloud.clone(),
+            &master,
+        )
+        .await
+        .unwrap();
+        assert!(parent.files.iter().any(|file| {
+            file.source_path_hint.as_deref() == Some(leaked_runtime.to_string_lossy().as_ref())
+        }));
+
+        let strict = run_backup_to_local(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            cloud,
+            &master,
+        )
+        .await
+        .unwrap();
+        assert_eq!(strict.parent_bundle_id, Some(parent.bundle_id));
+        assert!(!strict.files.iter().any(|file| {
+            file.source_path_hint.as_deref() == Some(leaked_runtime.to_string_lossy().as_ref())
+        }));
+        assert!(strict.tombstones.iter().any(|tombstone| {
+            tombstone.reason == "outside strict Steam backup scope"
+                && tombstone.relative_path.ends_with("drive_c/runtime.dll")
+        }));
+
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn single_pack_worker_builds_every_planned_pack() {
+        let root = test_root("single-pack-worker");
+        let chunks_dir = root.join("chunks");
+        let packs_dir = root.join("packs");
+        std::fs::create_dir_all(&chunks_dir).unwrap();
+        let mut chunks = Vec::new();
+        for index in 0..4 {
+            let path = chunks_dir.join(format!("chunk-{index}"));
+            std::fs::write(&path, [index as u8; 10]).unwrap();
+            chunks.push((format!("chunk-hash-{index}"), path));
+        }
+
+        let packs = build_packs_parallel(
+            &packs_dir,
+            &MasterKey::generate(),
+            chunks,
+            86,
+            100,
+            1,
+            Arc::new(|| false),
+        )
+        .unwrap();
+
+        assert_eq!(packs.len(), 4);
+        assert_eq!(
+            packs.iter().map(|pack| pack.entries.len()).sum::<usize>(),
+            4
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[tokio::test]

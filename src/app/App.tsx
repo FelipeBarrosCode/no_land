@@ -442,6 +442,7 @@ export function App() {
   const oauthSessionId = useAppStore((state) => state.oauthSessionId);
   const beginOauthFlow = useAppStore((state) => state.beginOauthFlow);
   const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
+  const cancelOauthFlow = useAppStore((state) => state.cancelOauthFlow);
   const provisioningStopRequested = useAppStore(
     (state) => state.provisioningStopRequested,
   );
@@ -676,6 +677,7 @@ export function App() {
                   oauthSessionId={oauthSessionId}
                   onBeginOauthFlow={beginOauthFlow}
                   onCompleteOauthFlow={completeOauthFlow}
+                  onCancelOauthFlow={cancelOauthFlow}
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveIgdbCredentials={saveIgdbCredentials}

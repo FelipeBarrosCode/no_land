@@ -447,12 +447,19 @@ impl LocalCas {
     /// a same-directory hard link, so an existing immutable object is never
     /// replaced, including under concurrent writers.
     pub fn put_verified(&self, hash: &str, data: &[u8]) -> Result<CasPut> {
-        let path = self.path_for_hash(hash)?;
         if blake3_hex(data) != hash {
             return Err(StateError::Integrity(format!(
                 "payload does not match CAS key {hash}"
             )));
         }
+        self.put_prehashed(hash, data)
+    }
+
+    /// Publishes bytes whose hash was computed immediately before this call by
+    /// the trusted local chunking pipeline. Existing objects are still verified;
+    /// this only avoids hashing a newly produced chunk twice.
+    pub fn put_prehashed(&self, hash: &str, data: &[u8]) -> Result<CasPut> {
+        let path = self.path_for_hash(hash)?;
         if path.exists() {
             self.verify_object(hash, &path)?;
             return Ok(CasPut {

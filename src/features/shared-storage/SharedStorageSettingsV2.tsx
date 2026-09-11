@@ -30,6 +30,7 @@ interface Props {
   onLoadProfiles: () => Promise<void>;
   onBeginOauthFlow: (provider: string, displayName: string, clientId?: string, clientSecret?: string | null, providerFields?: Record<string, string>) => Promise<string | null>;
   onCompleteOauthFlow: (sessionId: string) => Promise<void>;
+  onCancelOauthFlow: (sessionId: string) => Promise<void>;
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -52,6 +53,7 @@ export function SharedStorageSettingsV2({
   onLoadProfiles,
   onBeginOauthFlow,
   onCompleteOauthFlow,
+  onCancelOauthFlow,
 }: Props) {
   const [selectedProvider, setSelectedProvider] = useState<ProviderDefinition | null>(null);
   const [showProviderPicker, setShowProviderPicker] = useState(false);
@@ -504,17 +506,39 @@ All data is encrypted before upload and can only be decrypted with your reposito
                 placeholder="Your OAuth Client Secret"
                 type="password"
               />
-              {oauthProviderFields.map((field) => (
-                <InputField
-                  key={field.key}
-                  label={field.label}
-                  value={formValues[field.key] || ""}
-                  onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
-                  placeholder={field.placeholder || ""}
-                  type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
-                  disabled={busy}
-                />
-              ))}
+              {oauthProviderFields.map((field) => {
+                if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
+                  return (
+                    <label key={field.key} className="flex flex-col gap-2 text-base">
+                      <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{field.label}</span>
+                      <select
+                        className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] outline-none shadow-[inset_0_0_0_2px_#121731] focus:border-neon-cyan"
+                        value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
+                        onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                        disabled={busy}
+                      >
+                        {field.fieldType.options.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      {field.helpText && <span className="text-xs text-gray-400">{field.helpText}</span>}
+                    </label>
+                  );
+                }
+                return (
+                  <InputField
+                    key={field.key}
+                    label={field.label}
+                    value={formValues[field.key] || ""}
+                    onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                    placeholder={field.placeholder || ""}
+                    type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
+                    disabled={busy}
+                  />
+                );
+              })}
             </div>
           )}
 
@@ -556,12 +580,13 @@ All data is encrypted before upload and can only be decrypted with your reposito
                 </Button>
                 <Button
                   variant="ghost"
-                  onClick={() => {
+                  onClick={async () => {
                     clearStoreError();
-                    setSelectedProvider(null);
+                    await onCancelOauthFlow(oauthSessionId);
                   }}
+                  disabled={busy}
                 >
-                  Cancel
+                  Stop Authorization
                 </Button>
               </div>
             </div>

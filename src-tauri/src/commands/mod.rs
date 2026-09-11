@@ -6,9 +6,10 @@ pub use self::launch_library::{
     launch_instance_software, update_igdb_credentials,
 };
 pub use self::shared_storage::{
-    begin_oauth_authorization, complete_oauth_authorization, disconnect_shared_storage_profile,
-    get_shared_storage_profiles, list_storage_providers, save_static_provider_credentials,
-    set_active_shared_storage_profile, test_shared_storage_connection,
+    begin_oauth_authorization, cancel_oauth_authorization, complete_oauth_authorization,
+    disconnect_shared_storage_profile, get_shared_storage_profiles, list_storage_providers,
+    save_static_provider_credentials, set_active_shared_storage_profile,
+    test_shared_storage_connection,
 };
 
 use std::{
@@ -1104,18 +1105,22 @@ async fn auto_pair_embedded_host(
     )
     .await?;
     let first_pin = first_session.pin.clone();
+    let first_sunshine_host = sunshine_host.clone();
+    let first_sunshine_username = sunshine_username.clone();
+    let first_sunshine_password = sunshine_password.clone();
 
     match pairing::complete_pairing_with_stage1_authorization(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
         &moonlight.pairing_sessions,
         &first_session.id,
-        || async {
+        |pairing_id| async move {
             authorize_sunshine_pin(
-                &sunshine_host,
-                &sunshine_username,
-                &sunshine_password,
+                &first_sunshine_host,
+                &first_sunshine_username,
+                &first_sunshine_password,
                 &first_pin,
+                &pairing_id,
                 Some("Noland Connect"),
             )
             .await
@@ -1146,12 +1151,13 @@ async fn auto_pair_embedded_host(
                 moonlight.secret_store.as_ref(),
                 &moonlight.pairing_sessions,
                 &second_session.id,
-                || async {
+                |pairing_id| async move {
                     authorize_sunshine_pin(
                         &sunshine_host,
                         &sunshine_username,
                         &sunshine_password,
                         &second_pin,
+                        &pairing_id,
                         Some("Noland Connect"),
                     )
                     .await
@@ -2821,12 +2827,13 @@ pub async fn moonlight_complete_instance_pairing(
         moonlight.secret_store.as_ref(),
         &moonlight.pairing_sessions,
         &session_id,
-        || async {
+        |pairing_id| async move {
             authorize_sunshine_pin(
                 &sunshine_host,
                 &sunshine_username,
                 &sunshine_password,
                 &pairing_pin,
+                &pairing_id,
                 Some("Noland Connect"),
             )
             .await

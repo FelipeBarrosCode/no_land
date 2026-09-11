@@ -7,12 +7,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use noland_rclone_adapter::{
-    classify_remote_error, EphemeralRcloneSession, ProviderRootIdentity, RemoteErrorClass,
-    TransferTuning,
+    classify_remote_error, EphemeralRcloneSession, ProviderCapabilities, ProviderKind,
+    ProviderRootIdentity, RemoteErrorClass, TransferProfile, TransferTuning,
 };
 use noland_state_core::{Result, StateError};
 use tokio::process::Command;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, Semaphore};
 
 use crate::{
     compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, Health,
@@ -61,6 +61,97 @@ impl RcloneFailure {
     }
 }
 
+/// Builds safe rclone argument lists from provider-neutral operations and a
+/// provider-specific transfer profile.
+#[derive(Debug, Clone)]
+pub struct RcloneCommandBuilder {
+    provider: ProviderKind,
+    profile: TransferProfile,
+}
+
+impl RcloneCommandBuilder {
+    pub fn new(
+        provider: ProviderKind,
+        backend_type: impl Into<String>,
+        profile: TransferProfile,
+    ) -> Result<Self> {
+        let backend_type = backend_type.into();
+        noland_rclone_adapter::validate_provider_backend(provider, &backend_type)
+            .map_err(|error| StateError::Invalid(error.to_string()))?;
+        if provider != ProviderKind::GoogleDrive
+            && profile
+                .rclone_backend_args
+                .iter()
+                .any(|arg| arg.starts_with("--drive-"))
+        {
+            return Err(StateError::Invalid(format!(
+                "Drive-specific rclone options cannot be used with {}",
+                provider.label()
+            )));
+        }
+        Ok(Self { provider, profile })
+    }
+
+    pub fn upload_copyto_args(
+        &self,
+        local: String,
+        destination: String,
+        immutable: bool,
+    ) -> Result<Vec<String>> {
+        let mut args = vec!["copyto".into()];
+        if immutable {
+            args.push("--immutable".into());
+        }
+        self.push_upload_options(&mut args);
+        args.extend([local, destination]);
+        Ok(args)
+    }
+
+    pub fn upload_copy_args(
+        &self,
+        tuning: &TransferTuning,
+        source: String,
+        destination: String,
+        immutable: bool,
+    ) -> Result<Vec<String>> {
+        let mut args = vec!["copy".into()];
+        if immutable {
+            args.push("--immutable".into());
+        }
+        args.push("--no-traverse".into());
+        self.push_upload_options(&mut args);
+        args.extend([
+            "--transfers".into(),
+            self.upload_transfers(tuning).to_string(),
+            "--checkers".into(),
+            tuning.rclone_checkers.max(1).to_string(),
+            source,
+            destination,
+        ]);
+        Ok(args)
+    }
+
+    pub fn global_args(&self) -> &[String] {
+        &self.profile.rclone_global_args
+    }
+
+    pub fn profile(&self) -> &TransferProfile {
+        &self.profile
+    }
+
+    fn upload_transfers(&self, tuning: &TransferTuning) -> usize {
+        if self.provider == ProviderKind::GoogleDrive {
+            self.profile.upload_concurrency
+        } else {
+            tuning.rclone_transfers.max(1)
+        }
+    }
+
+    fn push_upload_options(&self, args: &mut Vec<String>) {
+        args.extend(self.profile.rclone_backend_args.iter().cloned());
+    }
+}
+
 /// rclone-backed provider. Backup transfers use `copy` / `copyto` only.
 /// Provider-specific remotes are created by `noland-rclone-adapter`.
 pub struct RcloneStorage {
@@ -69,8 +160,12 @@ pub struct RcloneStorage {
     pub extra_args: Vec<String>,
     pub backend_type: String,
     pub provider: String,
+    provider_kind: ProviderKind,
+    capabilities: ProviderCapabilities,
+    command_builder: RcloneCommandBuilder,
     tuning: TransferTuning,
     retry_gate: Arc<SharedRetryGate>,
+    upload_limiter: Arc<Semaphore>,
     root_ready: OnceCell<()>,
     metrics: StorageCounters,
 }
@@ -78,37 +173,78 @@ pub struct RcloneStorage {
 impl RcloneStorage {
     pub fn new(remote: impl Into<String>, root: impl Into<String>) -> Self {
         let tuning = TransferTuning::default();
+        let provider_kind = ProviderKind::Local;
+        let capabilities = ProviderCapabilities::for_provider(provider_kind);
+        let profile = TransferProfile::for_provider(provider_kind, provider_kind.backend_type())
+            .expect("the built-in local profile must be valid");
+        let command_builder =
+            RcloneCommandBuilder::new(provider_kind, provider_kind.backend_type(), profile.clone())
+                .expect("the built-in local command profile must be valid");
         Self {
             remote: remote.into(),
             root: root.into(),
             extra_args: Vec::new(),
-            backend_type: "unknown".into(),
-            provider: "unknown".into(),
+            backend_type: provider_kind.backend_type().into(),
+            provider: provider_kind.as_str().into(),
+            provider_kind,
+            capabilities,
+            command_builder,
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
+            upload_limiter: Arc::new(Semaphore::new(profile.upload_concurrency)),
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
         }
     }
 
-    pub fn from_session(session: &EphemeralRcloneSession, config_path: &Path) -> Self {
+    pub fn try_from_session(session: &EphemeralRcloneSession, config_path: &Path) -> Result<Self> {
         let tuning = TransferTuning::default();
-        Self {
+        let provider_kind = ProviderKind::parse(&session.provider).ok_or_else(|| {
+            StateError::Invalid(format!("unknown storage provider `{}`", session.provider))
+        })?;
+        let configured_backend = noland_rclone_adapter::configured_backend_type(
+            &session.config_ini,
+            &session.remote_name,
+        )
+        .ok_or_else(|| {
+            StateError::Invalid(format!(
+                "rclone config has no backend type for remote `{}`",
+                session.remote_name
+            ))
+        })?;
+        if configured_backend != session.backend_type {
+            return Err(StateError::Invalid(format!(
+                "rclone session backend `{}` does not match configured backend `{configured_backend}`",
+                session.backend_type
+            )));
+        }
+        let mut profile = TransferProfile::for_provider(provider_kind, configured_backend)
+            .map_err(|error| StateError::Invalid(error.to_string()))?;
+        if let Some(concurrency) = session.upload_concurrency {
+            profile = profile
+                .with_upload_concurrency(provider_kind, concurrency)
+                .map_err(|error| StateError::Invalid(error.to_string()))?;
+        }
+        let capabilities = ProviderCapabilities::for_provider(provider_kind);
+        let command_builder =
+            RcloneCommandBuilder::new(provider_kind, &session.backend_type, profile.clone())?;
+        let mut extra_args = vec!["--config".into(), config_path.display().to_string()];
+        extra_args.extend(command_builder.global_args().iter().cloned());
+        Ok(Self {
             remote: session.remote_name.clone(),
             root: session.root.clone(),
             backend_type: session.backend_type.clone(),
             provider: session.provider.clone(),
-            extra_args: vec!["--config".into(), config_path.display().to_string()],
+            provider_kind,
+            capabilities,
+            command_builder,
+            extra_args,
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
+            upload_limiter: Arc::new(Semaphore::new(profile.upload_concurrency)),
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
-        }
-    }
-
-    pub fn with_extra_args(mut self, args: Vec<String>) -> Self {
-        self.extra_args.extend(args);
-        self
+        })
     }
 
     pub fn with_transfer_tuning(mut self, tuning: TransferTuning) -> Self {
@@ -118,8 +254,33 @@ impl RcloneStorage {
         self
     }
 
+    pub fn with_provider_upload_concurrency(mut self, concurrency: usize) -> Result<Self> {
+        let profile = self
+            .command_builder
+            .profile()
+            .clone()
+            .with_upload_concurrency(self.provider_kind, concurrency)
+            .map_err(|error| StateError::Invalid(error.to_string()))?;
+        self.command_builder =
+            RcloneCommandBuilder::new(self.provider_kind, &self.backend_type, profile.clone())?;
+        self.upload_limiter = Arc::new(Semaphore::new(profile.upload_concurrency));
+        Ok(self)
+    }
+
     pub fn transfer_tuning(&self) -> &TransferTuning {
         &self.tuning
+    }
+
+    pub fn provider_kind(&self) -> ProviderKind {
+        self.provider_kind
+    }
+
+    pub fn capabilities(&self) -> &ProviderCapabilities {
+        &self.capabilities
+    }
+
+    pub fn transfer_profile(&self) -> &TransferProfile {
+        self.command_builder.profile()
     }
 
     pub fn root_cache_key(&self) -> String {
@@ -165,6 +326,21 @@ impl RcloneStorage {
             class: RemoteErrorClass::Permanent,
             message: error.to_string(),
         })?;
+        if self.provider_kind != ProviderKind::GoogleDrive
+            && self
+                .extra_args
+                .iter()
+                .chain(args.iter())
+                .any(|arg| arg.starts_with("--drive-"))
+        {
+            return Err(RcloneFailure {
+                class: RemoteErrorClass::Permanent,
+                message: format!(
+                    "Drive-specific rclone options cannot be used with {}",
+                    self.provider_kind.label()
+                ),
+            });
+        }
         let max_attempts = self.tuning.max_attempts.max(1);
         for attempt in 1..=max_attempts {
             self.retry_gate.wait_for_turn().await;
@@ -257,14 +433,16 @@ impl RcloneStorage {
     }
 
     async fn copy_staged(&self, stage: &StagingTree, immutable: bool) -> Result<()> {
-        self.run(staged_copy_args(
+        let _permit = self.upload_limiter.acquire().await.map_err(|_| {
+            StateError::Storage("provider upload concurrency limiter was closed".into())
+        })?;
+        let args = self.command_builder.upload_copy_args(
             &self.tuning,
             stage.root.display().to_string(),
             self.root_remote(),
             immutable,
-        ))
-        .await
-        .map(|_| ())
+        )?;
+        self.run(args).await.map(|_| ())
     }
 
     async fn put_metadata_entries(&self, entries: &[MetadataWrite]) -> Result<Vec<RemoteMeta>> {
@@ -296,28 +474,6 @@ impl RcloneStorage {
         }
         Ok(output)
     }
-}
-
-fn staged_copy_args(
-    tuning: &TransferTuning,
-    source: String,
-    destination: String,
-    immutable: bool,
-) -> Vec<String> {
-    let mut args = vec!["copy".into()];
-    if immutable {
-        args.push("--immutable".into());
-    }
-    args.extend([
-        "--no-traverse".into(),
-        "--transfers".into(),
-        tuning.rclone_transfers.max(1).to_string(),
-        "--checkers".into(),
-        tuning.rclone_checkers.max(1).to_string(),
-        source,
-        destination,
-    ]);
-    args
 }
 
 struct StagingTree {
@@ -449,13 +605,15 @@ impl SharedStorageProvider for RcloneStorage {
         self.metrics
             .remote_upload_calls
             .fetch_add(1, Ordering::Relaxed);
-        self.run(vec![
-            "copyto".into(),
-            "--immutable".into(),
+        let _permit = self.upload_limiter.acquire().await.map_err(|_| {
+            StateError::Storage("provider upload concurrency limiter was closed".into())
+        })?;
+        let args = self.command_builder.upload_copyto_args(
             local.display().to_string(),
             self.remote_path(key),
-        ])
-        .await?;
+            true,
+        )?;
+        self.run(args).await?;
         self.metrics
             .bytes_uploaded
             .fetch_add(size, Ordering::Relaxed);
@@ -607,22 +765,27 @@ impl SharedStorageProvider for RcloneStorage {
             key.as_str().replace('/', "_")
         ));
         std::fs::write(&tmp, &bytes)?;
-        let result = self
-            .run(vec![
-                "copyto".into(),
+        let result = async {
+            let _permit = self.upload_limiter.acquire().await.map_err(|_| {
+                StateError::Storage("provider upload concurrency limiter was closed".into())
+            })?;
+            let args = self.command_builder.upload_copyto_args(
                 tmp.display().to_string(),
                 self.remote_path(key),
-            ])
-            .await
-            .map(|_| {
-                self.metrics
-                    .bytes_uploaded
-                    .fetch_add(bytes.len() as u64, Ordering::Relaxed);
-                RemoteMeta {
-                    key: key.clone(),
-                    size: bytes.len() as u64,
-                }
-            });
+                false,
+            )?;
+            self.run(args).await
+        }
+        .await
+        .map(|_| {
+            self.metrics
+                .bytes_uploaded
+                .fetch_add(bytes.len() as u64, Ordering::Relaxed);
+            RemoteMeta {
+                key: key.clone(),
+                size: bytes.len() as u64,
+            }
+        });
         let _ = std::fs::remove_file(tmp);
         result
     }
@@ -640,6 +803,14 @@ impl SharedStorageProvider for RcloneStorage {
             );
         }
         Ok(written)
+    }
+
+    fn provider_kind(&self) -> Option<ProviderKind> {
+        Some(self.provider_kind)
+    }
+
+    fn capabilities(&self) -> Option<&ProviderCapabilities> {
+        Some(&self.capabilities)
     }
 
     fn storage_identity(&self) -> Option<ProviderRootIdentity> {
@@ -772,17 +943,106 @@ mod tests {
 
     #[test]
     fn bulk_copy_args_are_provider_neutral_immutable_and_copy_only() {
-        let args = staged_copy_args(
-            &TransferTuning::default(),
-            "/tmp/stage".into(),
-            "remote:root".into(),
-            true,
-        );
+        let profile = TransferProfile::for_provider(ProviderKind::Local, "local").unwrap();
+        let builder = RcloneCommandBuilder::new(ProviderKind::Local, "local", profile).unwrap();
+        let args = builder
+            .upload_copy_args(
+                &TransferTuning::default(),
+                "/tmp/stage".into(),
+                "remote:root".into(),
+                true,
+            )
+            .unwrap();
         assert_eq!(args.first().map(String::as_str), Some("copy"));
         assert!(args.iter().any(|arg| arg == "--immutable"));
         assert!(args.iter().any(|arg| arg == "--no-traverse"));
         assert!(assert_copy_only(&args).is_ok());
-        assert!(!args.iter().any(|arg| arg.contains("drive")));
+        assert!(!args.iter().any(|arg| arg.starts_with("--drive-")));
+    }
+
+    #[test]
+    fn drive_upload_args_are_scoped_and_concurrency_is_bounded() {
+        let profile = TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive").unwrap();
+        let builder =
+            RcloneCommandBuilder::new(ProviderKind::GoogleDrive, "drive", profile).unwrap();
+        let args = builder
+            .upload_copy_args(
+                &TransferTuning::throughput(),
+                "/tmp/stage".into(),
+                "remote:root".into(),
+                true,
+            )
+            .unwrap();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--drive-chunk-size", "32M"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--drive-upload-cutoff", "8M"]));
+        assert!(args.windows(2).any(|pair| pair == ["--transfers", "1"]));
+    }
+
+    #[test]
+    fn command_builder_rejects_provider_backend_mismatch() {
+        let profile = TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive").unwrap();
+        assert!(RcloneCommandBuilder::new(ProviderKind::GoogleDrive, "s3", profile).is_err());
+    }
+
+    #[test]
+    fn session_rejects_metadata_that_disagrees_with_the_rclone_config() {
+        let input = AdapterInput {
+            provider: ProviderKind::GoogleDrive,
+            remote_name: "noland_drive".into(),
+            credentials: AdapterCredential::OAuth2 {
+                access_token: "access".into(),
+                refresh_token: None,
+                expires_at: 1_800_000_000,
+            },
+            fields: BTreeMap::new(),
+            bucket: None,
+            prefix: None,
+        };
+        let mut session = session_from_input(&input, "op-drive", TokenMode::Operation).unwrap();
+        session.config_ini = session.config_ini.replacen("type = drive", "type = s3", 1);
+        assert!(RcloneStorage::try_from_session(
+            &session,
+            Path::new("/run/noland/storage/op-drive/rclone.conf"),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn drive_session_allows_two_uploads_but_rejects_more() {
+        let make_session = |concurrency: &str| {
+            session_from_input(
+                &AdapterInput {
+                    provider: ProviderKind::GoogleDrive,
+                    remote_name: "noland_drive".into(),
+                    credentials: AdapterCredential::OAuth2 {
+                        access_token: "access".into(),
+                        refresh_token: None,
+                        expires_at: 1_800_000_000,
+                    },
+                    fields: BTreeMap::from([("upload_concurrency".into(), concurrency.into())]),
+                    bucket: None,
+                    prefix: None,
+                },
+                "op-drive",
+                TokenMode::Operation,
+            )
+            .unwrap()
+        };
+        let storage = RcloneStorage::try_from_session(
+            &make_session("2"),
+            Path::new("/run/noland/storage/op-drive/rclone.conf"),
+        )
+        .unwrap();
+        assert_eq!(storage.transfer_profile().upload_concurrency, 2);
+        assert!(RcloneStorage::try_from_session(
+            &make_session("3"),
+            Path::new("/run/noland/storage/op-drive/rclone.conf"),
+        )
+        .is_err());
     }
 
     #[test]
@@ -798,10 +1058,11 @@ mod tests {
             prefix: Some("Noland Shared Storage".into()),
         };
         let session = session_from_input(&input, "op-42", TokenMode::Ephemeral).unwrap();
-        let storage = RcloneStorage::from_session(
+        let storage = RcloneStorage::try_from_session(
             &session,
             Path::new("/run/noland/storage/op-42/rclone.conf"),
-        );
+        )
+        .unwrap();
         assert_eq!(storage.provider_label(), "rclone:local");
         assert_eq!(
             storage.remote_path(&RemoteKey::new("packs/ab/id.pack")),

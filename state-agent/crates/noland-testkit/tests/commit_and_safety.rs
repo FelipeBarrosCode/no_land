@@ -145,10 +145,11 @@ fn adapter_session_is_provider_agnostic_and_ephemeral() {
     let session = session_from_input(&drive, "op", TokenMode::Ephemeral).unwrap();
     assert_eq!(session.backend_type, "drive");
     assert!(!session.config_ini.contains("refresh-secret"));
-    let storage = noland_storage::RcloneStorage::from_session(
+    let storage = noland_storage::RcloneStorage::try_from_session(
         &session,
         std::path::Path::new("/run/noland/storage/op/rclone.conf"),
-    );
+    )
+    .unwrap();
     assert_eq!(storage.provider_label(), "rclone:drive");
 
     let b2 = AdapterInput {
