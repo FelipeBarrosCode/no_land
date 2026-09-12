@@ -474,6 +474,44 @@ fn emit_operation_progress(
         }
         _ => None,
     };
+    let pack_transfer = status.get("pack_transfer");
+    let completed_objects = pack_transfer
+        .and_then(|value| value.get("completed_items"))
+        .and_then(serde_json::Value::as_u64);
+    let total_objects = progress
+        .and_then(|value| value.get("detail_json"))
+        .and_then(|value| value.get("total_packs"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            pack_transfer
+                .and_then(|value| value.get("total_items"))
+                .and_then(serde_json::Value::as_u64)
+        });
+    let completed_bytes = progress
+        .and_then(|value| value.get("detail_json"))
+        .and_then(|value| value.get("completed_pack_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            pack_transfer
+                .and_then(|value| value.get("completed_bytes"))
+                .and_then(serde_json::Value::as_u64)
+        });
+    let transferred_bytes = progress
+        .and_then(|value| value.get("detail_json"))
+        .and_then(|value| value.get("bytes_transferred"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            pack_transfer
+                .and_then(|value| value.get("bytes_transferred"))
+                .and_then(serde_json::Value::as_u64)
+        });
+    let total_bytes = progress
+        .and_then(|value| value.get("detail_json"))
+        .and_then(|value| value.get("total_transfer_bytes"))
+        .and_then(serde_json::Value::as_u64);
+    let object_unit = total_objects
+        .filter(|total| *total > 0)
+        .map(|_| "packs".to_string());
     let ready_to_launch = phase.as_deref() == Some("READY_TO_LAUNCH")
         || progress
             .and_then(|value| value.get("detail_json"))
@@ -513,6 +551,12 @@ fn emit_operation_progress(
         total_units,
         unit,
         fraction,
+        completed_objects,
+        total_objects,
+        object_unit,
+        completed_bytes,
+        total_bytes,
+        transferred_bytes,
         ready_to_launch,
         cancel_requested,
         cancellable: running && !cancel_requested,

@@ -14,7 +14,6 @@ INSTALLER_DIR="${USER_HOME}/Downloads/game-launchers"
 BOTTLES_APP_ID="com.usebottles.bottles"
 BOTTLES_GAMES_DIR="/srv/games"
 
-GAME_COMPAT_UPDATED=0
 ENABLE_GITHUB_GAME_COMPAT="${ENABLE_GITHUB_GAME_COMPAT:-0}"
 ENABLE_OPTIONAL_GAMING_STACK="${NOLAND_ENABLE_OPTIONAL_GAMING_STACK:-0}"
 OS_ID=""
@@ -261,7 +260,6 @@ install_proton_ge() {
   wget -q "$url" -O "$archive"
   run_user "mkdir -p '${PROTON_DIR}' && tar -xzf '${archive}' -C '${PROTON_DIR}'"
   rm -f "$archive"
-  GAME_COMPAT_UPDATED=1
   log "Installed Proton GE ${version}"
 }
 
@@ -297,7 +295,6 @@ install_wine_ge() {
     run_user "tar -xzf '${archive}' -C '${WINE_GE_DIR}'"
   fi
   rm -f "$archive"
-  GAME_COMPAT_UPDATED=1
   log "Installed Wine GE ${version}"
 }
 
@@ -322,7 +319,6 @@ install_dxvk() {
   wget -q "$url" -O "$archive"
   run_user "mkdir -p '${DXVK_DIR}' && tar -xzf '${archive}' -C '${DXVK_DIR}'"
   rm -f "$archive"
-  GAME_COMPAT_UPDATED=1
   log "Installed DXVK ${version}"
 }
 
@@ -348,7 +344,6 @@ install_vkd3d_proton() {
   wget -q "$url" -O "$archive"
   run_user "mkdir -p '${VKD3D_DIR}' && tar --zstd -xf '${archive}' -C '${VKD3D_DIR}'"
   rm -f "$archive"
-  GAME_COMPAT_UPDATED=1
   log "Installed VKD3D-Proton ${version}"
 }
 
@@ -564,12 +559,7 @@ main() {
   repair_wine_dosdevices_links
 
   phase "6/6 Finalization"
-  if [[ "$GAME_COMPAT_UPDATED" -eq 1 ]]; then
-    log "Game compatibility layer updated; scheduling reboot in 1 minute"
-    run_root "shutdown -r +1 'Noland: reboot after game compatibility updates'" || true
-  fi
-
-  log "Post-provision setup complete"
+  log "Post-provision setup complete; user-space compatibility updates do not require a reboot"
 }
 
 main "$@"

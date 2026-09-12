@@ -219,6 +219,19 @@ pub async fn run_restore_with_session(
                     storage.storage_identity(),
                     &index,
                 )?;
+                // Restore retries reuse verified local pack/chunk caches directly. Their old
+                // journal rows are not needed for resume and would pollute this attempt's totals.
+                agent.db.delete_sync_journal_entries_for_kind_direction(
+                    operation_id,
+                    ContentObjectKind::Pack,
+                    SyncDirection::Download,
+                )?;
+                let total_packs = noland_restore::planned_pack_download_count(
+                    &plan,
+                    &index,
+                    RestoreTarget::Complete,
+                )?;
+                progress.detail_json["total_packs"] = serde_json::json!(total_packs);
                 let download_journal = Some(DownloadJournal {
                     db: &agent.db,
                     operation_id,

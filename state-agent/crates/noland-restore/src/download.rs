@@ -218,6 +218,14 @@ struct PackJob {
     entries: Vec<PackIndexEntry>,
 }
 
+pub fn planned_pack_download_count(
+    plan: &RestorePlan,
+    pack_index: &[PackIndexEntry],
+    target: RestoreTarget,
+) -> Result<usize> {
+    Ok(plan_missing_pack_jobs(plan, pack_index, target)?.0.len())
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct VerifiedPack {
     pack_id: String,
@@ -239,6 +247,20 @@ pub async fn download_and_verify_to(
         ));
     }
 
+    let (jobs, chunks_reused) = plan_missing_pack_jobs(plan, pack_index, target)?;
+    let mut report = run_bounded(jobs, options.max_parallel_packs, |job| {
+        process_pack(provider, master, plan, job, journal)
+    })
+    .await?;
+    report.chunks_reused = report.chunks_reused.saturating_add(chunks_reused);
+    Ok(report)
+}
+
+fn plan_missing_pack_jobs(
+    plan: &RestorePlan,
+    pack_index: &[PackIndexEntry],
+    target: RestoreTarget,
+) -> Result<(Vec<PackJob>, usize)> {
     let priority_plan = plan.priority_plan();
     let mut needed = BTreeMap::<String, RestorePriority>::new();
     for planned in priority_plan.entries_for(target) {
@@ -263,10 +285,19 @@ pub async fn download_and_verify_to(
         .collect::<BTreeMap<_, _>>();
 
     let mut grouped = BTreeMap::<String, PackJob>::new();
+    let mut chunks_reused = 0usize;
     for (chunk_hash, priority) in needed {
         let entry = by_hash.get(&chunk_hash).cloned().ok_or_else(|| {
             StateError::NotFound(format!("pack index entry for chunk {chunk_hash}"))
         })?;
+        if verified_file(
+            &chunk_path(plan, &entry.chunk_hash),
+            entry.plaintext_len as u64,
+            &entry.chunk_hash,
+        ) {
+            chunks_reused = chunks_reused.saturating_add(1);
+            continue;
+        }
         let job = grouped
             .entry(entry.pack_id.clone())
             .or_insert_with(|| PackJob {
@@ -291,11 +322,7 @@ pub async fn download_and_verify_to(
             .cmp(&right.priority)
             .then_with(|| left.pack_id.cmp(&right.pack_id))
     });
-
-    run_bounded(jobs, options.max_parallel_packs, |job| {
-        process_pack(provider, master, plan, job, journal)
-    })
-    .await
+    Ok((jobs, chunks_reused))
 }
 
 async fn process_pack(
@@ -448,7 +475,7 @@ fn mark_pack_completed(
         .unwrap_or(0);
     journal
         .db
-        .complete_sync_journal_item(journal.operation_id, remote_key, size)
+        .complete_sync_journal_item_reused(journal.operation_id, remote_key, size)
 }
 
 struct PartialFileGuard {

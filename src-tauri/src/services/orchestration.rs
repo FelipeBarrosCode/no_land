@@ -942,17 +942,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
-    ensure_post_nvidia_reboot(
-        &app,
-        &context,
-        &vast,
-        &mut instance,
-        &mut remote,
-        Some(offer.id),
-    )
-    .await?;
-    ensure_not_cancelled(&context)?;
-
     let sunshine = SunshineService {
         defaults: context.config.sunshine.clone(),
     };
@@ -1850,21 +1839,56 @@ async fn run_existing_instance_orchestration(
         )
         .await;
     } else {
-        if let Err(error) = nvidia.setup_and_validate(&remote).await {
-            let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
-            let diag_summary = diagnostics
-                .map(|diag| {
-                    diag.commands
-                        .into_iter()
-                        .map(|(command, output)| format!("{command} -> {}", output.status_code))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                })
-                .unwrap_or_else(|| "no diagnostics collected".to_string());
+        match nvidia.setup_and_validate(&remote).await {
+            Ok(()) => {}
+            Err(AppError::DriverMismatch(_)) => {
+                warn!(
+                    "NVIDIA driver mismatch detected on existing instance — triggering reboot and retry"
+                );
+                ensure_post_nvidia_reboot(
+                    &app,
+                    &context,
+                    &vast,
+                    &mut instance,
+                    &mut remote,
+                    offer_id,
+                )
+                .await?;
+                ensure_not_cancelled(&context)?;
+                if let Err(error) = nvidia.setup_and_validate(&remote).await {
+                    let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
+                    let diag_summary = diagnostics
+                        .map(|diag| {
+                            diag.commands
+                                .into_iter()
+                                .map(|(command, output)| {
+                                    format!("{command} -> {}", output.status_code)
+                                })
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        })
+                        .unwrap_or_else(|| "no diagnostics collected".to_string());
+                    return Err(AppError::Provisioning(format!(
+                        "{error}. Diagnostics: {diag_summary}"
+                    )));
+                }
+            }
+            Err(error) => {
+                let diagnostics = nvidia.collect_diagnostics(&remote).await.ok();
+                let diag_summary = diagnostics
+                    .map(|diag| {
+                        diag.commands
+                            .into_iter()
+                            .map(|(command, output)| format!("{command} -> {}", output.status_code))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .unwrap_or_else(|| "no diagnostics collected".to_string());
 
-            return Err(AppError::Provisioning(format!(
-                "{error}. Diagnostics: {diag_summary}"
-            )));
+                return Err(AppError::Provisioning(format!(
+                    "{error}. Diagnostics: {diag_summary}"
+                )));
+            }
         }
 
         mark_server_step_completed(
@@ -1880,7 +1904,6 @@ async fn run_existing_instance_orchestration(
         .await?;
     }
 
-    ensure_post_nvidia_reboot(&app, &context, &vast, &mut instance, &mut remote, offer_id).await?;
     ensure_not_cancelled(&context)?;
 
     let sunshine = SunshineService {
@@ -2671,8 +2694,11 @@ async fn ensure_post_nvidia_reboot(
         app,
         context,
         OrchestrationState::ConnectingSsh,
-        "Rebooting instance to finalize NVIDIA/Xorg setup",
-        Some("Instance will disconnect briefly, then auto-reconnect".to_string()),
+        "Rebooting instance to recover NVIDIA driver compatibility",
+        Some(
+            "NVIDIA kernel and userspace driver versions do not match; the instance will disconnect briefly, then auto-reconnect"
+                .to_string(),
+        ),
         false,
     )
     .await;
