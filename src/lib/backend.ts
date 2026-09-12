@@ -22,6 +22,7 @@ import type {
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
   SharedStorageProgressEvent,
+  SharedStorageRestoreCompletedEvent,
   SunshineSettingsResponse,
 
   InstanceMicConfig,
@@ -628,6 +629,20 @@ export async function listInstanceExportableStorageObjects(instanceId: number) {
     "list_instance_exportable_storage_objects",
     { instanceId },
   );
+}
+
+export async function subscribeSharedStorageRestoreCompleted(
+  callback: (event: SharedStorageRestoreCompletedEvent) => void,
+): Promise<() => void> {
+  const unlisten = await listen<SharedStorageRestoreCompletedEvent>(
+    "shared-storage:restore-completed",
+    ({ payload }) => {
+      callback(payload);
+    },
+  );
+  return () => {
+    unlisten();
+  };
 }
 
 export async function subscribeSharedStorageProgress(

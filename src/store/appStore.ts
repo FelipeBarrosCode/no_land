@@ -1,4 +1,9 @@
 import { create } from "zustand";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
@@ -20,6 +25,7 @@ import {
   stopProvisioningAfterCurrentStage as stopProvisioningAfterCurrentStageCommand,
   subscribeProvisioningEvents,
   subscribeSharedStorageProgress,
+  subscribeSharedStorageRestoreCompleted,
   cancelSharedStorageOperation,
   verifyWireguard,
   getSetupStatus,
@@ -687,6 +693,40 @@ function formatTransferBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+const notifiedRestoreOperations = new Set<string>();
+
+async function handleSharedStorageRestoreCompleted(
+  event: import("../lib/types").SharedStorageRestoreCompletedEvent,
+  get: () => AppStore,
+) {
+  const blockingAction = get().blockingAction;
+  if (
+    blockingAction &&
+    ((blockingAction.operationId && blockingAction.operationId !== event.operationId) ||
+      (blockingAction.instanceId != null && blockingAction.instanceId !== event.instanceId))
+  ) {
+    return;
+  }
+  if (notifiedRestoreOperations.has(event.operationId)) {
+    return;
+  }
+  notifiedRestoreOperations.add(event.operationId);
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (granted) {
+      sendNotification({
+        title: "Noland",
+        body: "Your download is ready to go.",
+      });
+    }
+  } catch (error: unknown) {
+    console.warn("[shared-storage] restore notification failed", error);
+  }
+}
+
 function applySharedStorageProgress(
   event: SharedStorageProgressEvent,
   set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
@@ -1019,6 +1059,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       });
       await subscribeSharedStorageProgress((event) => {
         applySharedStorageProgress(event, set);
+      });
+      await subscribeSharedStorageRestoreCompleted((event) => {
+        void handleSharedStorageRestoreCompleted(event, get);
       });
 
       set({ _eventsBound: true });

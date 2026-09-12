@@ -777,6 +777,15 @@ export interface SharedStorageSyncSelectionRequest {
   selectedPaths: string[];
 }
 
+export interface SharedStorageRestoreCompletedEvent {
+  operationId: string;
+  instanceId: number;
+  kind: string;
+  appId: string;
+  displayName: string;
+  bundleId: string;
+}
+
 export interface SharedStorageProgressEvent {
   operationId: string;
   instanceId: number;

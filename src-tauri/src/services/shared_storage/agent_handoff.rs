@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::app_state::{BackupPerformanceMode, SharedStorageObjectEntry};
-use crate::models::events::SharedStorageProgressEvent;
+use crate::models::events::{SharedStorageProgressEvent, SharedStorageRestoreCompletedEvent};
 use crate::services::app_context::{ActiveAgentOperation, AppContext};
 use crate::services::remote_exec::RemoteExec;
 use crate::services::shared_storage::agent_runtime::{call_agent_raw, ensure_state_agent};
@@ -115,6 +115,8 @@ impl SharedStorageManager {
                 instance_id,
                 operation_id,
                 "backup",
+                None,
+                None,
                 Duration::from_secs(2 * 60 * 60),
             )
             .await;
@@ -141,6 +143,8 @@ impl SharedStorageManager {
             instance_id,
             operation_id,
             "backup",
+            None,
+            None,
             Duration::from_secs(2 * 60 * 60),
         )
         .await
@@ -219,6 +223,8 @@ impl SharedStorageManager {
                 instance_id,
                 operation_id,
                 "restore",
+                Some(app_id),
+                Some(bundle_id),
                 Duration::from_secs(2 * 60 * 60),
             )
             .await;
@@ -247,6 +253,8 @@ impl SharedStorageManager {
             instance_id,
             operation_id,
             "restore",
+            Some(app_id),
+            Some(bundle_id),
             Duration::from_secs(2 * 60 * 60),
         )
         .await
@@ -368,6 +376,8 @@ async fn wait_for_agent_operation(
     instance_id: u64,
     operation_id: &str,
     kind: &str,
+    app_id: Option<&str>,
+    bundle_id: Option<&str>,
     timeout: Duration,
 ) -> AppResult<serde_json::Value> {
     {
@@ -387,13 +397,34 @@ async fn wait_for_agent_operation(
             )
             .await?;
             emit_operation_progress(context, instance_id, kind, operation_id, &status);
+            let operation_state = status
+                .get("state")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("UNKNOWN");
+            if kind == "restore" && operation_state == "COMPLETED" {
+                if let (Some(app_id), Some(bundle_id)) = (app_id, bundle_id) {
+                    context.emit_shared_storage_restore_completed(
+                        SharedStorageRestoreCompletedEvent {
+                            operation_id: operation_id.to_string(),
+                            instance_id,
+                            kind: kind.to_string(),
+                            app_id: app_id.to_string(),
+                            display_name: app_id.to_string(),
+                            bundle_id: bundle_id.to_string(),
+                        },
+                    );
+                }
+                return Ok(status);
+            }
             let ready_to_launch = status
                 .get("progress")
                 .and_then(|progress| progress.get("detail_json"))
                 .and_then(|detail| detail.get("ready_to_launch_reached"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
-            if ready_to_launch {
+            // Restore completion is the notification boundary. Keep polling past
+            // READY_TO_LAUNCH so the event cannot claim readiness prematurely.
+            if ready_to_launch && kind != "restore" {
                 return Ok(status);
             }
             match status

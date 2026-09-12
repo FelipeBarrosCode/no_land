@@ -45,6 +45,17 @@ impl ProvisioningEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedStorageRestoreCompletedEvent {
+    pub operation_id: String,
+    pub instance_id: u64,
+    pub kind: String,
+    pub app_id: String,
+    pub display_name: String,
+    pub bundle_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SharedStorageProgressEvent {
     pub operation_id: String,
     pub instance_id: u64,
