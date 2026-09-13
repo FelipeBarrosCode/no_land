@@ -14,9 +14,9 @@
     "tauri:build": "node scripts/tauri-with-mic-sidecar.mjs build"
   },
   "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "@tauri-apps/plugin-notification": "^2.0.0",
-    "@tauri-apps/plugin-opener": "^2.0.0",
+    "@tauri-apps/api": "2.10.1",
+    "@tauri-apps/plugin-notification": "2.4.0",
+    "@tauri-apps/plugin-opener": "2.5.3",
     "clsx": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -24,7 +24,7 @@
     "zustand": "^5.0.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2.0.0",
+    "@tauri-apps/cli": "2.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react-swc": "^3.7.2",
