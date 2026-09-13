@@ -128,7 +128,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IDREQTI0RDFDMzAwMDhBRkQKUldUOWlnQXdIRTJpVFMwaVJUY3ZlNDkvRVBGaUh4TjV4T2xRSGxna0g3U2lSUTVuc1VOaVgvWW0K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IDRGQ0Q4QUYyRTczQjVCQTgKUldTb1d6dm44b3JOVDdoVXYrblJqaGFpZWFCdmM4dERWb3N3cHRlYTBoYjNYUWJwYXAwN2F1QjcK",
       "endpoints": [
         "https://github.com/FelipeBarrosCode/no_land/releases/latest/download/latest.json"
       ],
