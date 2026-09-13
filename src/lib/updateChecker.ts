@@ -1,94 +1,64 @@
-import { getVersion } from "@tauri-apps/api/app";
-
-const GITHUB_LATEST_RELEASE_URL =
-  "https://api.github.com/repos/FelipeBarrosCode/no_land/releases/latest";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 
 export interface AppUpdateInfo {
   currentVersion: string;
   latestVersion: string;
   releaseName: string;
-  releaseUrl: string;
   releaseNotes: string;
   publishedAt: string | null;
 }
 
-interface GitHubReleaseResponse {
-  tag_name?: string;
-  name?: string | null;
-  html_url?: string;
-  body?: string | null;
-  published_at?: string | null;
-  draft?: boolean;
-  prerelease?: boolean;
+export interface AppUpdateProgress {
+  phase: "downloading" | "installing" | "restarting";
+  downloadedBytes: number;
+  totalBytes: number | null;
+  percent: number | null;
 }
 
-export async function checkForGitHubUpdate(): Promise<AppUpdateInfo | null> {
-  if (!("__TAURI_INTERNALS__" in window)) {
-    return null;
-  }
+let pendingUpdate: Update | null = null;
 
-  const currentVersion = normalizeVersion(await getVersion());
-  const response = await fetch(GITHUB_LATEST_RELEASE_URL, {
-    method: "GET",
-    cache: "no-store",
-    headers: {
-      Accept: "application/vnd.github+json",
-    },
-  });
+export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
+  if (!("__TAURI_INTERNALS__" in window)) return null;
 
-  if (response.status === 404) {
-    return null;
-  }
-
-  if (!response.ok) {
-    throw new Error(`GitHub update check failed (${response.status})`);
-  }
-
-  const release = (await response.json()) as GitHubReleaseResponse;
-  if (release.draft || release.prerelease) {
-    return null;
-  }
-
-  const latestVersion = normalizeVersion(release.tag_name ?? "");
-  if (!latestVersion || !isVersionGreater(latestVersion, currentVersion)) {
-    return null;
-  }
+  if (!pendingUpdate) pendingUpdate = await check({ timeout: 30_000 });
+  if (!pendingUpdate) return null;
 
   return {
-    currentVersion,
-    latestVersion,
-    releaseName: release.name?.trim() || `Noland Connect ${latestVersion}`,
-    releaseUrl: release.html_url ?? "https://github.com/FelipeBarrosCode/no_land/releases/latest",
-    releaseNotes: release.body?.trim() || "No release notes provided.",
-    publishedAt: release.published_at ?? null,
+    currentVersion: pendingUpdate.currentVersion,
+    latestVersion: pendingUpdate.version,
+    releaseName: `Noland Connect ${pendingUpdate.version}`,
+    releaseNotes: pendingUpdate.body?.trim() || "Performance improvements and bug fixes.",
+    publishedAt: pendingUpdate.date ?? null,
   };
 }
 
-function normalizeVersion(version: string): string {
-  return version.trim().replace(/^v/i, "");
-}
+export async function installPendingAppUpdate(
+  onProgress: (progress: AppUpdateProgress) => void,
+): Promise<void> {
+  const update = pendingUpdate;
+  if (!update) throw new Error("The update is no longer available. Check again.");
 
-function isVersionGreater(candidate: string, current: string): boolean {
-  const candidateParts = parseVersion(candidate);
-  const currentParts = parseVersion(current);
-
-  for (let index = 0; index < Math.max(candidateParts.length, currentParts.length); index += 1) {
-    const candidatePart = candidateParts[index] ?? 0;
-    const currentPart = currentParts[index] ?? 0;
-    if (candidatePart > currentPart) {
-      return true;
+  let downloadedBytes = 0;
+  let totalBytes: number | null = null;
+  const report = (event: DownloadEvent) => {
+    if (event.event === "Started") {
+      totalBytes = event.data.contentLength ?? null;
+    } else if (event.event === "Progress") {
+      downloadedBytes += event.data.chunkLength;
     }
-    if (candidatePart < currentPart) {
-      return false;
-    }
-  }
+    onProgress({
+      phase: event.event === "Finished" ? "installing" : "downloading",
+      downloadedBytes,
+      totalBytes,
+      percent: totalBytes && totalBytes > 0
+        ? Math.min(100, Math.round((downloadedBytes / totalBytes) * 100))
+        : null,
+    });
+  };
 
-  return false;
-}
-
-function parseVersion(version: string): number[] {
-  return version
-    .split(/[.+-]/)
-    .map((part) => Number.parseInt(part, 10))
-    .filter((part) => Number.isFinite(part));
+  await update.downloadAndInstall(report);
+  pendingUpdate = null;
+  onProgress({ phase: "restarting", downloadedBytes, totalBytes, percent: 100 });
+  await relaunch();
 }
