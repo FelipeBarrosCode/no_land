@@ -23,6 +23,8 @@ import type {
   SharedStorageObjectEntry,
   SharedStorageProgressEvent,
   SharedStorageRestoreCompletedEvent,
+  DirectUploadProgressEvent,
+  DirectUploadResult,
   SunshineSettingsResponse,
 
   InstanceMicConfig,
@@ -119,6 +121,71 @@ export async function startPlayExistingInstance(
   instanceId: number,
 ): Promise<string> {
   return invokeSafe<string>("start_play_existing_instance", { instanceId });
+}
+
+export interface RemoteTerminalSession {
+  sessionId: string;
+  sshUser: string;
+  sshHost: string;
+  sshPort: number;
+}
+
+export async function openRemoteTerminal(
+  instanceId: number,
+): Promise<RemoteTerminalSession> {
+  return invokeSafe<RemoteTerminalSession>("open_remote_terminal", { instanceId });
+}
+
+export async function writeRemoteTerminal(sessionId: string, input: string): Promise<void> {
+  await invokeSafe("write_remote_terminal", { sessionId, input });
+}
+
+export async function resizeRemoteTerminal(
+  sessionId: string,
+  rows: number,
+  cols: number,
+): Promise<void> {
+  await invokeSafe("resize_remote_terminal", { sessionId, rows, cols });
+}
+
+export async function closeRemoteTerminal(sessionId: string): Promise<void> {
+  await invokeSafe("close_remote_terminal", { sessionId });
+}
+
+export async function uploadPathsToInstance(
+  instanceId: number,
+  localPaths: string[],
+  destination?: string,
+): Promise<DirectUploadResult> {
+  return invokeSafe<DirectUploadResult>("upload_paths_to_instance", {
+    instanceId,
+    localPaths,
+    destination: destination?.trim() || null,
+  });
+}
+
+export interface RemoteFolderListing {
+  path: string;
+  homePath: string;
+  folders: string[];
+}
+
+export async function listRemoteUploadFolders(
+  instanceId: number,
+  path?: string,
+): Promise<RemoteFolderListing> {
+  return invokeSafe<RemoteFolderListing>("list_remote_upload_folders", {
+    instanceId,
+    path: path || null,
+  });
+}
+
+export async function subscribeDirectUploadProgress(
+  callback: (event: DirectUploadProgressEvent) => void,
+): Promise<() => void> {
+  return listen<DirectUploadProgressEvent>("direct-upload:progress", ({ payload }) => {
+    callback(payload);
+  });
 }
 
 export async function getInstanceLaunchLibrary(

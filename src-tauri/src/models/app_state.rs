@@ -104,7 +104,7 @@ impl Default for SshState {
             public_key_path: String::new(),
             uploaded_to_vast: false,
             ssh_username: "root".to_string(),
-            ssh_password: "user".to_string(),
+            ssh_password: "password".to_string(),
         }
     }
 }

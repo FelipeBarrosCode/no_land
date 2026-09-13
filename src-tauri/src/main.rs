@@ -614,6 +614,12 @@ fn main() {
             get_instance_display_status,
             apply_instance_display_mode,
             reboot_instance_services,
+            open_remote_terminal,
+            write_remote_terminal,
+            resize_remote_terminal,
+            close_remote_terminal,
+            upload_paths_to_instance,
+            list_remote_upload_folders,
             pause_instance,
             destroy_instance,
 

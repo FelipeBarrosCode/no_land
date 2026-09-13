@@ -225,6 +225,17 @@ int noland_macos_detect_main_display(unsigned int *width,
     double refresh = CGDisplayModeGetRefreshRate(mode);
     CGDisplayModeRelease(mode);
 
+    if (@available(macOS 12.0, *)) {
+        CGFloat logicalWidth = NSWidth(screen.frame);
+        if (logicalWidth > 0.0 && screen.safeAreaInsets.top > 0.0) {
+            double pixelsPerPoint = (double)detectedWidth / (double)logicalWidth;
+            size_t reservedTopPixels = (size_t)llround(screen.safeAreaInsets.top * pixelsPerPoint);
+            if (reservedTopPixels < detectedHeight) {
+                detectedHeight -= reservedTopPixels;
+            }
+        }
+    }
+
     if (detectedWidth == 0 || detectedHeight == 0) {
         return 0;
     }

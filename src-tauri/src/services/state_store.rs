@@ -51,6 +51,9 @@ impl JsonStateStore {
             }
         }
         migrated.connection_provider = ConnectionProvider::Wireguard;
+        if migrated.ssh.ssh_username == "root" && migrated.ssh.ssh_password == "user" {
+            migrated.ssh.ssh_password = "password".to_string();
+        }
         migrated.version = self.current_version;
         migrated.server_preferences.template_hash =
             if migrated.server_preferences.template_hash.is_empty() {

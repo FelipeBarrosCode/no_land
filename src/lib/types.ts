@@ -808,6 +808,26 @@ export interface SharedStorageProgressEvent {
   cancellable: boolean;
 }
 
+export interface DirectUploadProgressEvent {
+  operationId: string;
+  instanceId: number;
+  state: "uploading" | "completed" | "failed";
+  message: string;
+  currentItem: string | null;
+  completedObjects: number;
+  totalObjects: number;
+  completedBytes: number;
+  totalBytes: number;
+  fraction: number;
+}
+
+export interface DirectUploadResult {
+  operationId: string;
+  destination: string;
+  uploadedObjects: number;
+  uploadedBytes: number;
+}
+
 export interface SunshineSetting {
   key: string;
   value: unknown;

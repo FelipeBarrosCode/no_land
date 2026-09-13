@@ -4,6 +4,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { playArcadeSuccess } from "../lib/arcadeAudio";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
@@ -26,6 +27,7 @@ import {
   subscribeProvisioningEvents,
   subscribeSharedStorageProgress,
   subscribeSharedStorageRestoreCompleted,
+  subscribeDirectUploadProgress,
   cancelSharedStorageOperation,
   verifyWireguard,
   getSetupStatus,
@@ -83,6 +85,7 @@ import {
   launchInstanceSoftware as launchInstanceSoftwareCommand,
   getLaunchInstanceSoftwareJob,
   getSoftwareArtwork,
+  uploadPathsToInstance,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -106,6 +109,7 @@ import type {
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
   SharedStorageProgressEvent,
+  DirectUploadProgressEvent,
   SunshineSettingsResponse,
 
   InstanceMicConfig,
@@ -263,6 +267,12 @@ interface AppStore {
     performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
   cancelSharedStorageOperation: (instanceId: number) => Promise<void>;
+  clearBackgroundStorageAction: (operationId: string) => void;
+  uploadPathsToRemoteInstance: (
+    instanceId: number,
+    localPaths: string[],
+    destination?: string,
+  ) => Promise<void>;
   listExportableStorageObjects: (
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
@@ -428,6 +438,7 @@ interface AsyncActionOptions {
   label: string;
   detail?: string;
   blocking?: boolean;
+  background?: boolean;
 }
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
@@ -695,13 +706,35 @@ function formatTransferBytes(bytes: number): string {
 
 const notifiedRestoreOperations = new Set<string>();
 
+async function notifyStorageCompletion(body: string) {
+  playArcadeSuccess();
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (granted) {
+      await sendNotification({
+        title: "Noland Connect",
+        body,
+        icon: "icons/icon.png",
+        // Use the platform notification sound, independently of the optional
+        // in-app arcade sound setting.
+        sound: "Ping",
+        silent: false,
+      });
+    }
+  } catch (error: unknown) {
+    console.warn("[shared-storage] completion notification failed", error);
+  }
+}
+
 async function handleSharedStorageRestoreCompleted(
   event: import("../lib/types").SharedStorageRestoreCompletedEvent,
   get: () => AppStore,
 ) {
   const blockingAction = get().blockingAction;
-  if (
-    blockingAction &&
+  if (blockingAction &&
     ((blockingAction.operationId && blockingAction.operationId !== event.operationId) ||
       (blockingAction.instanceId != null && blockingAction.instanceId !== event.instanceId))
   ) {
@@ -711,20 +744,8 @@ async function handleSharedStorageRestoreCompleted(
     return;
   }
   notifiedRestoreOperations.add(event.operationId);
-  try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
-    if (granted) {
-      sendNotification({
-        title: "Noland",
-        body: "Your download is ready to go.",
-      });
-    }
-  } catch (error: unknown) {
-    console.warn("[shared-storage] restore notification failed", error);
-  }
+  get().clearBackgroundStorageAction(event.operationId);
+  await notifyStorageCompletion(`${event.displayName || "Your shared storage restore"} is ready to go.`);
 }
 
 function applySharedStorageProgress(
@@ -804,6 +825,30 @@ function applySharedStorageProgress(
         cancelRequested: event.cancelRequested,
         operationId: event.operationId,
         instanceId: event.instanceId,
+      },
+    };
+  });
+}
+
+function applyDirectUploadProgress(
+  event: DirectUploadProgressEvent,
+  set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
+) {
+  set((state) => {
+    const action = state.blockingAction;
+    if (!action || action.key !== "instance.files.upload") return {};
+    if (action.instanceId != null && action.instanceId !== event.instanceId) return {};
+    const objects = `${event.completedObjects}/${event.totalObjects} items`;
+    const bytes = `${formatTransferBytes(event.completedBytes)}/${formatTransferBytes(event.totalBytes)}`;
+    return {
+      blockingAction: {
+        ...action,
+        operationId: event.operationId,
+        instanceId: event.instanceId,
+        detail: [event.message, objects, bytes].filter(Boolean).join(" · "),
+        progress: Math.round(event.fraction * 100),
+        mode: "determinate",
+        cancellable: false,
       },
     };
   });
@@ -900,7 +945,7 @@ export const useAppStore = create<AppStore>((set, get) => {
   ): Promise<T> => {
     set({ instanceActionRunning: true, error: null });
 
-    if (options.blocking) {
+    if (options.background || options.blocking) {
       set((state) => ({
         blockingAction: createBlockingAction(state, {
           key: options.key,
@@ -909,8 +954,26 @@ export const useAppStore = create<AppStore>((set, get) => {
           progress: null,
           mode: "indeterminate",
         }),
-        isBlocking: true,
+        isBlocking: options.blocking === true,
       }));
+    }
+
+    if (options.background) {
+      set({ instanceActionRunning: false, busy: false });
+      void task()
+        .catch((error) => {
+          const message = mapError(error);
+          set({ error: message });
+          void createCrashReport(options.key, serializeErrorForReport(error));
+        })
+        .finally(() => {
+          set((state) => ({
+            ...(state.blockingAction?.key === options.key
+              ? { blockingAction: null }
+              : {}),
+          }));
+        });
+      return fallback;
     }
 
     try {
@@ -1062,6 +1125,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       });
       await subscribeSharedStorageRestoreCompleted((event) => {
         void handleSharedStorageRestoreCompleted(event, get);
+      });
+      await subscribeDirectUploadProgress((event) => {
+        applyDirectUploadProgress(event, set);
       });
 
       set({ _eventsBound: true });
@@ -1940,7 +2006,8 @@ export const useAppStore = create<AppStore>((set, get) => {
           label: "Restoring application state",
           detail:
             "Downloading, verifying, and applying selected app bundles on the instance.",
-          blocking: true,
+          blocking: false,
+          background: true,
         },
         async () => {
           console.info("[shared-storage] sync start", {
@@ -1996,14 +2063,18 @@ export const useAppStore = create<AppStore>((set, get) => {
           key: "instance.storage.export",
           label: "Backing up application state",
           detail: "The state agent is packing, encrypting, and committing selected apps.",
-          blocking: true,
+          blocking: false,
+          background: true,
         },
-        async () =>
-          await saveInstanceToSharedStorageSelected(
+        async () => {
+          const result = await saveInstanceToSharedStorageSelected(
             instanceId,
             selectedPaths,
             performanceMode,
-          ),
+          );
+          await notifyStorageCompletion("Your selected files are backed up and ready.");
+          return result;
+        },
         null,
       );
     },
@@ -2024,6 +2095,34 @@ export const useAppStore = create<AppStore>((set, get) => {
       } catch (error) {
         set({ error: mapError(error) });
       }
+    },
+
+    clearBackgroundStorageAction: (operationId) => {
+      set((state) => {
+        const action = state.blockingAction;
+        return action?.operationId === operationId && SHARED_STORAGE_ACTION_KEYS.has(action.key)
+          ? { blockingAction: null }
+          : {};
+      });
+    },
+
+    uploadPathsToRemoteInstance: async (instanceId, localPaths, destination) => {
+      await runInstanceTask(
+        {
+          key: "instance.files.upload",
+          label: "Uploading directly to instance",
+          detail: "Preparing selected files and folders for direct SCP transfer.",
+          blocking: false,
+          background: true,
+        },
+        async () => {
+          const result = await uploadPathsToInstance(instanceId, localPaths, destination);
+          await notifyStorageCompletion(
+            `${result.uploadedObjects} items uploaded to ${result.destination}.`,
+          );
+        },
+        undefined,
+      );
     },
 
     listExportableStorageObjects: async (instanceId) => {
