@@ -92,6 +92,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             mic_client::configure_embedded_stream_runtime();
@@ -389,11 +390,23 @@ fn main() {
             );
             let context = AppContext::new(config, state_store, initial_state);
             let mut shared_storage_progress = context.shared_storage_progress.subscribe();
+            let mut shared_storage_restore_completed =
+                context.shared_storage_restore_completed.subscribe();
             let progress_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while let Ok(event) = shared_storage_progress.recv().await {
                     if let Err(error) = progress_handle.emit("shared-storage:progress", event) {
                         warn!("failed to emit shared storage progress: {error}");
+                    }
+                }
+            });
+            let completion_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while let Ok(event) = shared_storage_restore_completed.recv().await {
+                    if let Err(error) =
+                        completion_handle.emit("shared-storage:restore-completed", event)
+                    {
+                        warn!("failed to emit shared storage restore completion: {error}");
                     }
                 }
             });

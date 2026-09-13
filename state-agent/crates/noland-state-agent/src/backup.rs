@@ -1122,14 +1122,34 @@ pub async fn run_backup(
     noland_restore::embed_restore_plan(&mut manifest, restore_mode_for_backup(mode));
     metrics.packing_duration_ms = elapsed_ms(packing_started);
 
+    let transfer_bytes = pack_files
+        .iter()
+        .filter_map(|(_, path)| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
+        .sum::<u64>();
     persist_operation(agent, &mut op, BackupState::Uploading, &metrics)?;
     progress.phase = "uploading".into();
     progress.completed_units = 0;
-    progress.total_units = Some(incremental);
+    progress.total_units = Some(transfer_bytes);
     progress.unit = Some("bytes".into());
-    progress.message = Some(format!("Uploading {incremental} bytes of changed state"));
-    progress.detail_json = serde_json::json!({ "bytes_to_upload": incremental });
+    progress.message = Some(format!(
+        "Uploading {transfer_bytes} bytes in encrypted packs"
+    ));
+    progress.detail_json = serde_json::json!({
+        "bytes_to_upload": transfer_bytes,
+        "total_packs": pack_files.len(),
+        "completed_pack_bytes": 0,
+        "bytes_transferred": 0,
+        "total_transfer_bytes": transfer_bytes,
+    });
     progress.updated_at = Utc::now();
+    // Every backup attempt creates a fresh bundle and random pack IDs. Old upload
+    // journal rows cannot resume that regenerated pack set, so scope progress to
+    // this bundle without deleting any immutable objects already in cloud storage.
+    agent.db.delete_sync_journal_entries_for_kind_direction(
+        op_id,
+        ContentObjectKind::Pack,
+        SyncDirection::Upload,
+    )?;
     agent.db.set_operation_progress(op_id, Some(&progress))?;
     let storage_before = provider.operation_metrics();
     let upload_started = Instant::now();

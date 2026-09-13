@@ -45,6 +45,7 @@ urlencoding = "2"
 ctrlc = "3.4.5"
 tauri = { version = "2.0.0", features = ["unstable"] }
 tauri-plugin-dialog = "2.0.0"
+tauri-plugin-notification = "2.0.0"
 tauri-plugin-opener = "2.0.0"
 thiserror = "2.0.3"
 time = { version = "0.3.36", features = ["std"] }

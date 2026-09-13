@@ -11,13 +11,15 @@ use noland_rclone_adapter::{
     ProviderRootIdentity, RemoteErrorClass, TransferProfile, TransferTuning,
 };
 use noland_state_core::{Result, StateError};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{OnceCell, Semaphore};
 
 use crate::{
     compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, Health,
-    ImmutableUpload, MetadataBatch, MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta,
-    SharedRetryGate, SharedStorageProvider, StorageOperationMetrics,
+    ImmutableUpload, ImmutableUploadCompletion, ImmutableUploadObserver, MetadataBatch,
+    MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta, SharedRetryGate, SharedStorageProvider,
+    StorageOperationMetrics,
 };
 
 #[derive(Default)]
@@ -125,6 +127,10 @@ impl RcloneCommandBuilder {
             self.upload_transfers(tuning).to_string(),
             "--checkers".into(),
             tuning.rclone_checkers.max(1).to_string(),
+            "--stats".into(),
+            "500ms".into(),
+            "--stats-one-line".into(),
+            "--use-json-log".into(),
             source,
             destination,
         ]);
@@ -388,6 +394,86 @@ impl RcloneStorage {
         unreachable!("rclone retry count is always at least one")
     }
 
+    async fn run_with_progress(
+        &self,
+        args: Vec<String>,
+        observer: &(dyn ImmutableUploadObserver + '_),
+    ) -> Result<()> {
+        forbid_rclone_sync(&args)?;
+        if self.provider_kind != ProviderKind::GoogleDrive
+            && self
+                .extra_args
+                .iter()
+                .chain(args.iter())
+                .any(|arg| arg.starts_with("--drive-"))
+        {
+            return Err(StateError::Invalid(format!(
+                "Drive-specific rclone options cannot be used with {}",
+                self.provider_kind.label()
+            )));
+        }
+
+        let max_attempts = self.tuning.max_attempts.max(1);
+        for attempt in 1..=max_attempts {
+            self.retry_gate.wait_for_turn().await;
+            self.metrics
+                .rclone_invocations
+                .fetch_add(1, Ordering::Relaxed);
+            let mut cmd = Command::new("rclone");
+            cmd.args(&self.extra_args)
+                .args(&args)
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = match cmd.spawn() {
+                Ok(child) => child,
+                Err(error) => {
+                    let failure = RcloneFailure {
+                        class: classify_remote_error(None, &error.to_string()),
+                        message: error.to_string(),
+                    };
+                    if failure.class.is_retryable() && attempt < max_attempts {
+                        self.retry_gate.wait_for_retry(attempt, failure.class).await;
+                        continue;
+                    }
+                    return Err(failure.into_state_error());
+                }
+            };
+            let stderr = child.stderr.take().ok_or_else(|| {
+                StateError::Storage("rclone progress stream was not available".into())
+            })?;
+            let mut lines = BufReader::new(stderr).lines();
+            let mut error_output = String::new();
+            while let Some(line) = lines.next_line().await? {
+                if let Some(bytes) = parse_rclone_stats_bytes(&line) {
+                    if let Err(error) = observer.transfer_progress(bytes) {
+                        let _ = child.kill().await;
+                        return Err(error);
+                    }
+                } else {
+                    if !error_output.is_empty() {
+                        error_output.push('\n');
+                    }
+                    error_output.push_str(&line);
+                }
+            }
+            let status = child.wait().await?;
+            if status.success() {
+                return Ok(());
+            }
+            let failure = RcloneFailure {
+                class: classify_remote_error(status.code(), error_output.trim()),
+                message: error_output.trim().to_string(),
+            };
+            if failure.class.is_retryable() && attempt < max_attempts {
+                self.retry_gate.wait_for_retry(attempt, failure.class).await;
+                continue;
+            }
+            return Err(failure.into_state_error());
+        }
+        unreachable!("rclone retry count is always at least one")
+    }
+
     async fn compare_bulk_known(
         &self,
         uploads: &[ImmutableUpload],
@@ -432,7 +518,12 @@ impl RcloneStorage {
         Ok(combined)
     }
 
-    async fn copy_staged(&self, stage: &StagingTree, immutable: bool) -> Result<()> {
+    async fn copy_staged(
+        &self,
+        stage: &StagingTree,
+        immutable: bool,
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<()> {
         let _permit = self.upload_limiter.acquire().await.map_err(|_| {
             StateError::Storage("provider upload concurrency limiter was closed".into())
         })?;
@@ -442,7 +533,13 @@ impl RcloneStorage {
             self.root_remote(),
             immutable,
         )?;
-        self.run(args).await.map(|_| ())
+        match observer {
+            Some(observer) => {
+                observer.transfer_started()?;
+                self.run_with_progress(args, observer).await
+            }
+            None => self.run(args).await.map(|_| ()),
+        }
     }
 
     async fn put_metadata_entries(&self, entries: &[MetadataWrite]) -> Result<Vec<RemoteMeta>> {
@@ -460,7 +557,7 @@ impl RcloneStorage {
                 validate_remote_key(&entry.key)?;
                 stage.write(&entry.key, &entry.bytes)?;
             }
-            self.copy_staged(&stage, false).await?;
+            self.copy_staged(&stage, false, None).await?;
             for entry in chunk {
                 self.metrics
                     .bytes_uploaded
@@ -624,6 +721,14 @@ impl SharedStorageProvider for RcloneStorage {
     }
 
     async fn upload_immutable_bulk(&self, uploads: &[ImmutableUpload]) -> Result<Vec<RemoteMeta>> {
+        self.upload_immutable_bulk_observed(uploads, None).await
+    }
+
+    async fn upload_immutable_bulk_observed(
+        &self,
+        uploads: &[ImmutableUpload],
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<Vec<RemoteMeta>> {
         if uploads.is_empty() {
             return Ok(Vec::new());
         }
@@ -656,6 +761,16 @@ impl SharedStorageProvider for RcloneStorage {
             .into_iter()
             .map(|meta| (meta.key.clone(), meta))
             .collect();
+        if let Some(observer) = observer {
+            let known = uploads
+                .iter()
+                .filter(|upload| uploaded_by_key.contains_key(&upload.key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !known.is_empty() {
+                observer.completed(&known, ImmutableUploadCompletion::ReusedRemote)?;
+            }
+        }
         let mut offset = 0;
         while offset < comparison.missing.len() {
             let mut end = offset;
@@ -672,10 +787,16 @@ impl SharedStorageProvider for RcloneStorage {
             for upload in &comparison.missing[offset..end] {
                 stage.link_or_copy(&upload.local, &upload.key)?;
             }
-            self.copy_staged(&stage, true).await?;
+            self.copy_staged(&stage, true, observer).await?;
             self.metrics
                 .bytes_uploaded
                 .fetch_add(bytes, Ordering::Relaxed);
+            if let Some(observer) = observer {
+                observer.completed(
+                    &comparison.missing[offset..end],
+                    ImmutableUploadCompletion::Uploaded,
+                )?;
+            }
             for upload in &comparison.missing[offset..end] {
                 let meta = RemoteMeta {
                     key: upload.key.clone(),
@@ -895,6 +1016,14 @@ pub fn shred_all_ephemeral_sessions(run_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn parse_rclone_stats_bytes(line: &str) -> Option<u64> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    value
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| value.get("stats")?.get("bytes")?.as_u64())
+}
+
 #[cfg(test)]
 fn assert_copy_only(command: &[String]) -> Result<()> {
     forbid_rclone_sync(command)
@@ -956,6 +1085,9 @@ mod tests {
         assert_eq!(args.first().map(String::as_str), Some("copy"));
         assert!(args.iter().any(|arg| arg == "--immutable"));
         assert!(args.iter().any(|arg| arg == "--no-traverse"));
+        assert!(args.windows(2).any(|pair| pair == ["--stats", "500ms"]));
+        assert!(args.iter().any(|arg| arg == "--stats-one-line"));
+        assert!(args.iter().any(|arg| arg == "--use-json-log"));
         assert!(assert_copy_only(&args).is_ok());
         assert!(!args.iter().any(|arg| arg.starts_with("--drive-")));
     }
@@ -975,11 +1107,42 @@ mod tests {
             .unwrap();
         assert!(args
             .windows(2)
-            .any(|pair| pair == ["--drive-chunk-size", "32M"]));
+            .any(|pair| pair == ["--drive-chunk-size", "64M"]));
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--drive-upload-cutoff", "8M"]));
-        assert!(args.windows(2).any(|pair| pair == ["--transfers", "1"]));
+        assert!(args.windows(2).any(|pair| pair == ["--transfers", "4"]));
+    }
+
+    #[test]
+    fn non_drive_throughput_keeps_eight_rclone_workers() {
+        let profile = TransferProfile::for_provider(ProviderKind::Local, "local").unwrap();
+        let builder = RcloneCommandBuilder::new(ProviderKind::Local, "local", profile).unwrap();
+        let args = builder
+            .upload_copy_args(
+                &TransferTuning::throughput(),
+                "/tmp/stage".into(),
+                "remote:root".into(),
+                true,
+            )
+            .unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--transfers", "8"]));
+        assert!(args.windows(2).any(|pair| pair == ["--checkers", "8"]));
+    }
+
+    #[test]
+    fn parses_rclone_one_line_json_stats() {
+        assert_eq!(
+            parse_rclone_stats_bytes(
+                r#"{"bytes":123456,"checks":0,"deletedDirs":0,"elapsedTime":0.5}"#,
+            ),
+            Some(123_456)
+        );
+        assert_eq!(parse_rclone_stats_bytes("ordinary rclone error"), None);
+        assert_eq!(
+            parse_rclone_stats_bytes(r#"{"stats":{"bytes":654321}}"#),
+            Some(654_321)
+        );
     }
 
     #[test]
@@ -1012,7 +1175,7 @@ mod tests {
     }
 
     #[test]
-    fn drive_session_allows_two_uploads_but_rejects_more() {
+    fn drive_session_allows_four_uploads_but_rejects_more() {
         let make_session = |concurrency: &str| {
             session_from_input(
                 &AdapterInput {
@@ -1033,13 +1196,13 @@ mod tests {
             .unwrap()
         };
         let storage = RcloneStorage::try_from_session(
-            &make_session("2"),
+            &make_session("4"),
             Path::new("/run/noland/storage/op-drive/rclone.conf"),
         )
         .unwrap();
-        assert_eq!(storage.transfer_profile().upload_concurrency, 2);
+        assert_eq!(storage.transfer_profile().upload_concurrency, 4);
         assert!(RcloneStorage::try_from_session(
-            &make_session("3"),
+            &make_session("5"),
             Path::new("/run/noland/storage/op-drive/rclone.conf"),
         )
         .is_err());

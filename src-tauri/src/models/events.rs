@@ -45,6 +45,17 @@ impl ProvisioningEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct SharedStorageRestoreCompletedEvent {
+    pub operation_id: String,
+    pub instance_id: u64,
+    pub kind: String,
+    pub app_id: String,
+    pub display_name: String,
+    pub bundle_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SharedStorageProgressEvent {
     pub operation_id: String,
     pub instance_id: u64,
@@ -56,6 +67,12 @@ pub struct SharedStorageProgressEvent {
     pub total_units: Option<u64>,
     pub unit: Option<String>,
     pub fraction: Option<f64>,
+    pub completed_objects: Option<u64>,
+    pub total_objects: Option<u64>,
+    pub object_unit: Option<String>,
+    pub completed_bytes: Option<u64>,
+    pub total_bytes: Option<u64>,
+    pub transferred_bytes: Option<u64>,
     pub ready_to_launch: bool,
     pub cancel_requested: bool,
     pub cancellable: bool,

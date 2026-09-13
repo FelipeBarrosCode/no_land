@@ -13,7 +13,7 @@ pub struct GoogleDriveTransferOptions {
 impl Default for GoogleDriveTransferOptions {
     fn default() -> Self {
         Self {
-            chunk_size: 32 * MIB,
+            chunk_size: 64 * MIB,
             upload_cutoff: 8 * MIB,
         }
     }
@@ -38,7 +38,7 @@ impl ProviderTransferConfig {
     pub fn for_provider(provider: ProviderKind) -> Self {
         if provider == ProviderKind::GoogleDrive {
             Self {
-                upload_concurrency: 1,
+                upload_concurrency: 4,
                 download_concurrency: 4,
                 options: ProviderOptions::GoogleDrive(GoogleDriveTransferOptions::default()),
             }
@@ -83,12 +83,12 @@ impl ProviderCapabilities {
                 | ProviderKind::AzureBlob
         );
         let preferred_upload_concurrency = if provider == ProviderKind::GoogleDrive {
-            1
+            4
         } else {
             2
         };
         let max_upload_concurrency = if provider == ProviderKind::GoogleDrive {
-            2
+            4
         } else {
             usize::MAX
         };
@@ -219,12 +219,12 @@ mod tests {
     ];
 
     #[test]
-    fn drive_profile_is_isolated_and_defaults_to_one_upload() {
+    fn drive_profile_uses_four_uploads_and_larger_chunks() {
         let profile = TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive").unwrap();
-        assert_eq!(profile.upload_concurrency, 1);
+        assert_eq!(profile.upload_concurrency, 4);
         assert_eq!(
             profile.rclone_backend_args,
-            ["--drive-chunk-size", "32M", "--drive-upload-cutoff", "8M"]
+            ["--drive-chunk-size", "64M", "--drive-upload-cutoff", "8M"]
         );
 
         let profile = profile
@@ -234,7 +234,7 @@ mod tests {
         assert!(
             TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive")
                 .unwrap()
-                .with_upload_concurrency(ProviderKind::GoogleDrive, 3)
+                .with_upload_concurrency(ProviderKind::GoogleDrive, 5)
                 .is_err()
         );
     }

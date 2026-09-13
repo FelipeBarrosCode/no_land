@@ -1,14 +1,117 @@
 use std::path::Path;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use noland_crypto::{derive_keys, unwrap_envelope, wrap_envelope, MasterKey};
 use noland_state_core::*;
 use uuid::Uuid;
 
-use crate::{ImmutableUpload, MetadataBatch, MetadataWrite, RemoteKey, SharedStorageProvider};
+use crate::{
+    ImmutableUpload, ImmutableUploadCompletion, ImmutableUploadObserver, MetadataBatch,
+    MetadataWrite, RemoteKey, SharedStorageProvider,
+};
 
 const COMPRESSED_DOCUMENT_MAGIC: &[u8; 4] = b"NLZ1";
 const COMPRESSION_MIN_BYTES: usize = 4 * 1024;
+
+#[derive(Default)]
+struct UploadProgressState {
+    completed_bytes_at_start: u64,
+    transferred_bytes_at_start: u64,
+    in_flight_bytes: u64,
+}
+
+struct JournalUploadObserver<'a> {
+    db: &'a noland_state_db::StateDb,
+    operation_id: Uuid,
+    state: Mutex<UploadProgressState>,
+}
+
+impl JournalUploadObserver<'_> {
+    fn persist_progress(&self, completed_bytes: u64, transferred_bytes: u64) -> Result<()> {
+        let summary = self
+            .db
+            .sync_journal_summary_for_kind(self.operation_id, ContentObjectKind::Pack)?;
+        if let Some(mut progress) = self.db.get_operation_progress(self.operation_id)? {
+            progress.completed_units = completed_bytes.min(summary.total_bytes);
+            progress.total_units = Some(summary.total_bytes);
+            progress.unit = Some("bytes".into());
+            progress.detail_json["completed_packs"] = serde_json::json!(summary.completed_items);
+            progress.detail_json["total_packs"] = serde_json::json!(summary.total_items);
+            progress.detail_json["completed_pack_bytes"] =
+                serde_json::json!(completed_bytes.min(summary.total_bytes));
+            progress.detail_json["bytes_transferred"] = serde_json::json!(transferred_bytes);
+            progress.detail_json["total_transfer_bytes"] = serde_json::json!(summary.total_bytes);
+            progress.updated_at = chrono::Utc::now();
+            self.db
+                .set_operation_progress(self.operation_id, Some(&progress))?;
+        }
+        Ok(())
+    }
+}
+
+impl ImmutableUploadObserver for JournalUploadObserver<'_> {
+    fn transfer_started(&self) -> Result<()> {
+        let summary = self
+            .db
+            .sync_journal_summary_for_kind(self.operation_id, ContentObjectKind::Pack)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("upload progress lock was poisoned".into()))?;
+        state.completed_bytes_at_start = summary.completed_bytes;
+        state.transferred_bytes_at_start = summary.bytes_transferred;
+        state.in_flight_bytes = 0;
+        Ok(())
+    }
+
+    fn transfer_progress(&self, bytes_transferred: u64) -> Result<()> {
+        let (completed_bytes, transferred_bytes) = {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_| StateError::Storage("upload progress lock was poisoned".into()))?;
+            state.in_flight_bytes = state.in_flight_bytes.max(bytes_transferred);
+            (
+                state
+                    .completed_bytes_at_start
+                    .saturating_add(state.in_flight_bytes),
+                state
+                    .transferred_bytes_at_start
+                    .saturating_add(state.in_flight_bytes),
+            )
+        };
+        self.persist_progress(completed_bytes, transferred_bytes)
+    }
+
+    fn completed(
+        &self,
+        completed: &[ImmutableUpload],
+        completion: ImmutableUploadCompletion,
+    ) -> Result<()> {
+        for upload in completed {
+            let size = std::fs::metadata(&upload.local)?.len();
+            match completion {
+                ImmutableUploadCompletion::Uploaded => self.db.complete_sync_journal_item(
+                    self.operation_id,
+                    upload.key.as_str(),
+                    size,
+                )?,
+                ImmutableUploadCompletion::ReusedRemote => {
+                    self.db.complete_sync_journal_item_reused(
+                        self.operation_id,
+                        upload.key.as_str(),
+                        size,
+                    )?
+                }
+            }
+        }
+        let summary = self
+            .db
+            .sync_journal_summary_for_kind(self.operation_id, ContentObjectKind::Pack)?;
+        self.persist_progress(summary.completed_bytes, summary.bytes_transferred)
+    }
+}
 
 fn encode_document(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.len() < COMPRESSION_MIN_BYTES {
@@ -184,23 +287,35 @@ pub async fn commit_bundle_with_index_for_operation(
         }
         pack_uploads.push(upload.clone());
     }
-    if let Err(error) = provider.upload_immutable_bulk(&pack_uploads).await {
+    let upload_observer = match (db, operation_id) {
+        (Some(db), Some(operation_id)) => Some(JournalUploadObserver {
+            db,
+            operation_id,
+            state: Mutex::default(),
+        }),
+        _ => None,
+    };
+    let upload_result = match upload_observer.as_ref() {
+        Some(observer) => {
+            provider
+                .upload_immutable_bulk_observed(&pack_uploads, Some(observer))
+                .await
+        }
+        None => provider.upload_immutable_bulk(&pack_uploads).await,
+    };
+    if let Err(error) = upload_result {
         if let (Some(db), Some(operation_id)) = (db, operation_id) {
             for upload in &pack_uploads {
-                let _ = db.fail_sync_journal_item(
-                    operation_id,
-                    upload.key.as_str(),
-                    &error.to_string(),
-                );
+                if !db.sync_journal_completed(operation_id, upload.key.as_str())? {
+                    let _ = db.fail_sync_journal_item(
+                        operation_id,
+                        upload.key.as_str(),
+                        &error.to_string(),
+                    );
+                }
             }
         }
         return Err(error);
-    }
-    if let (Some(db), Some(operation_id)) = (db, operation_id) {
-        for upload in &pack_uploads {
-            let size = std::fs::metadata(&upload.local)?.len();
-            db.complete_sync_journal_item(operation_id, upload.key.as_str(), size)?;
-        }
     }
     if let Some(db) = db {
         for upload in &all_pack_uploads {
@@ -478,4 +593,75 @@ fn enc_meta(checkpoint: &LearnedStateCheckpoint) -> Vec<u8> {
         "created_at": checkpoint.created_at,
     }))
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upload_observer_separates_ready_bytes_from_network_bytes() {
+        let db = noland_state_db::StateDb::open_in_memory().unwrap();
+        let operation_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        db.upsert_operation(&OperationRecord {
+            operation_id,
+            kind: "backup".into(),
+            app_id: None,
+            state: "UPLOADING".into(),
+            created_at: now,
+            updated_at: now,
+            last_error: None,
+            detail_json: serde_json::json!({}),
+        })
+        .unwrap();
+        db.set_operation_progress(operation_id, Some(&OperationProgress::new("uploading", 0)))
+            .unwrap();
+        let root = std::env::temp_dir().join(format!("noland-upload-observer-{operation_id}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let uploaded = ImmutableUpload::new(root.join("uploaded.pack"), RemoteKey::new("packs/a"));
+        let reused = ImmutableUpload::new(root.join("reused.pack"), RemoteKey::new("packs/b"));
+        std::fs::write(&uploaded.local, vec![0_u8; 10]).unwrap();
+        std::fs::write(&reused.local, vec![0_u8; 20]).unwrap();
+        for upload in [&uploaded, &reused] {
+            db.start_sync_journal_item(
+                operation_id,
+                upload.key.as_str(),
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+                Some(&upload.local.to_string_lossy()),
+                Some(upload.key.as_str()),
+                Some(std::fs::metadata(&upload.local).unwrap().len()),
+            )
+            .unwrap();
+        }
+        let observer = JournalUploadObserver {
+            db: &db,
+            operation_id,
+            state: Mutex::default(),
+        };
+
+        observer.transfer_started().unwrap();
+        observer.transfer_progress(4).unwrap();
+        let live = db.get_operation_progress(operation_id).unwrap().unwrap();
+        assert_eq!(live.completed_units, 4);
+        assert_eq!(live.detail_json["bytes_transferred"], 4);
+
+        observer
+            .completed(&[uploaded], ImmutableUploadCompletion::Uploaded)
+            .unwrap();
+        observer
+            .completed(&[reused], ImmutableUploadCompletion::ReusedRemote)
+            .unwrap();
+        let summary = db
+            .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)
+            .unwrap();
+        assert_eq!(summary.completed_items, 2);
+        assert_eq!(summary.completed_bytes, 30);
+        assert_eq!(summary.bytes_transferred, 10);
+        let final_progress = db.get_operation_progress(operation_id).unwrap().unwrap();
+        assert_eq!(final_progress.completed_units, 30);
+        assert_eq!(final_progress.detail_json["bytes_transferred"], 10);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
