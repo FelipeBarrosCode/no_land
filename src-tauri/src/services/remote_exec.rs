@@ -1,13 +1,15 @@
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     thread,
     time::{Duration, Instant},
 };
 
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 use tracing::{debug, info, warn};
 
 use crate::{
@@ -56,6 +58,30 @@ pub struct RemoteExec {
     pub ssh_password: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalSession {
+    pub session_id: String,
+    pub ssh_user: String,
+    pub ssh_host: String,
+    pub ssh_port: u16,
+}
+
+struct InteractiveSession {
+    writer: Mutex<Box<dyn Write + Send>>,
+    master: Mutex<Box<dyn MasterPty + Send>>,
+    child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
+}
+
+static INTERACTIVE_SESSIONS: OnceLock<
+    Mutex<std::collections::HashMap<String, Arc<InteractiveSession>>>,
+> = OnceLock::new();
+
+fn interactive_sessions(
+) -> &'static Mutex<std::collections::HashMap<String, Arc<InteractiveSession>>> {
+    INTERACTIVE_SESSIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
 impl RemoteExec {
     pub fn is_root(&self) -> bool {
         self.ssh_user == "root"
@@ -96,6 +122,148 @@ impl RemoteExec {
     pub fn ssh_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
         ensure_command_available("ssh")?;
         self.ssh_with_key_until_complete(remote_command)
+    }
+
+    pub fn open_terminal(&self, app: AppHandle) -> AppResult<TerminalSession> {
+        ensure_command_available("ssh")?;
+        let os = OsDetection::new();
+        let ssh_binary = resolve_ssh_binary("ssh")?;
+        let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 32,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| AppError::Command(format!("Could not create terminal: {error}")))?;
+        let mut command = CommandBuilder::new(&ssh_binary);
+        let port = self.ssh_port.to_string();
+        let known_hosts = format!("UserKnownHostsFile={}", os.ssh_known_hosts_null_file());
+        for arg in [
+            "-tt",
+            "-p",
+            &port,
+            "-i",
+            &self.private_key_path,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            &known_hosts,
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=30",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "IdentitiesOnly=yes",
+            &connection_string,
+        ] {
+            command.arg(arg);
+        }
+        #[cfg(target_os = "linux")]
+        if let Some(binary_dir) = ssh_binary.parent() {
+            let runtime_dir = binary_dir
+                .join("ssh-runtime")
+                .join(os.managed_binary_target_triple());
+            if runtime_dir.is_dir() {
+                command.env("LD_LIBRARY_PATH", runtime_dir);
+            }
+        }
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .map_err(|error| AppError::Command(format!("Could not open SSH terminal: {error}")))?;
+        drop(pair.slave);
+        let reader = pair
+            .master
+            .try_clone_reader()
+            .map_err(|error| AppError::Command(format!("Could not read SSH terminal: {error}")))?;
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|error| AppError::Command(format!("Could not write SSH terminal: {error}")))?;
+        let session = Arc::new(InteractiveSession {
+            writer: Mutex::new(writer),
+            master: Mutex::new(pair.master),
+            child: Mutex::new(child),
+        });
+        interactive_sessions()
+            .lock()
+            .map_err(|_| AppError::Command("Terminal session lock was poisoned".into()))?
+            .insert(session_id.clone(), session);
+        spawn_terminal_reader(app, session_id.clone(), reader);
+        Ok(TerminalSession {
+            session_id,
+            ssh_user: self.ssh_user.clone(),
+            ssh_host: self.ssh_host.clone(),
+            ssh_port: self.ssh_port,
+        })
+    }
+
+    pub fn write_terminal(session_id: &str, input: &str) -> AppResult<()> {
+        let session = interactive_sessions()
+            .lock()
+            .map_err(|_| AppError::Command("Terminal session lock was poisoned".into()))?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::InvalidInput("Terminal session is no longer connected".into())
+            })?;
+        use std::io::Write;
+        let mut writer = session
+            .writer
+            .lock()
+            .map_err(|_| AppError::Command("Terminal input lock was poisoned".into()))?;
+        writer
+            .write_all(input.as_bytes())
+            .and_then(|_| writer.flush())
+            .map_err(|error| AppError::Command(format!("Could not write to SSH terminal: {error}")))
+    }
+
+    pub fn resize_terminal(session_id: &str, rows: u16, cols: u16) -> AppResult<()> {
+        let session = interactive_sessions()
+            .lock()
+            .map_err(|_| AppError::Command("Terminal session lock was poisoned".into()))?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::InvalidInput("Terminal session is no longer connected".into())
+            })?;
+        let result = session
+            .master
+            .lock()
+            .map_err(|_| AppError::Command("Terminal resize lock was poisoned".into()))?
+            .resize(PtySize {
+                rows: rows.max(1),
+                cols: cols.max(1),
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|error| AppError::Command(format!("Could not resize SSH terminal: {error}")));
+        result
+    }
+
+    pub fn close_terminal(session_id: &str) -> AppResult<()> {
+        if let Some(session) = interactive_sessions()
+            .lock()
+            .map_err(|_| AppError::Command("Terminal session lock was poisoned".into()))?
+            .remove(session_id)
+        {
+            let mut child = session
+                .child
+                .lock()
+                .map_err(|_| AppError::Command("Terminal process lock was poisoned".into()))?;
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        Ok(())
     }
 
     fn ssh_with_key(&self, remote_command: &str, timeout: Duration) -> AppResult<ExecOutput> {
@@ -203,6 +371,16 @@ impl RemoteExec {
         remote_path: &str,
         timeout: Duration,
     ) -> AppResult<ExecOutput> {
+        self.scp_path(local_path, remote_path, false, timeout)
+    }
+
+    pub fn scp_path(
+        &self,
+        local_path: &Path,
+        remote_path: &str,
+        recursive: bool,
+        timeout: Duration,
+    ) -> AppResult<ExecOutput> {
         ensure_command_available("scp")?;
         let os = OsDetection::new();
         let scp_binary = resolve_ssh_binary("scp")?;
@@ -233,11 +411,51 @@ impl RemoteExec {
             .arg("-o")
             .arg("PreferredAuthentications=publickey")
             .arg("-o")
-            .arg("IdentitiesOnly=yes")
+            .arg("IdentitiesOnly=yes");
+        if recursive {
+            command.arg("-r");
+        }
+        command
             .arg(local_path)
             .arg(format!("{}@{}:{remote_path}", self.ssh_user, self.ssh_host));
         run_with_timeout(command, Some(timeout))
     }
+}
+
+fn spawn_terminal_reader<R: Read + Send + 'static>(
+    app: AppHandle,
+    session_id: String,
+    mut reader: R,
+) {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(size) => {
+                    let data = String::from_utf8_lossy(&buffer[..size]).into_owned();
+                    let _ = app.emit(
+                        "remote-terminal-output",
+                        serde_json::json!({ "sessionId": session_id, "data": data }),
+                    );
+                }
+                Err(_) => break,
+            }
+        }
+        let session = interactive_sessions()
+            .lock()
+            .ok()
+            .and_then(|mut sessions| sessions.remove(&session_id));
+        if let Some(session) = session {
+            if let Ok(mut child) = session.child.lock() {
+                let _ = child.wait();
+            }
+        }
+        let _ = app.emit(
+            "remote-terminal-closed",
+            serde_json::json!({ "sessionId": session_id }),
+        );
+    });
 }
 
 fn shell_single_quote_escape(value: &str) -> String {

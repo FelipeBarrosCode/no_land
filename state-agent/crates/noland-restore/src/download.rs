@@ -2,15 +2,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::{poll_fn, Future};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::Poll;
 use std::time::{Duration, SystemTime};
 
 use noland_crypto::MasterKey;
 use noland_pack::{extract_chunk, PackIndexEntry};
 use noland_state_core::pack_key as remote_pack_key;
-use noland_state_core::{ContentObjectKind, Result, StateError, SyncDirection};
+use noland_state_core::{ContentObjectKind, Result, StateError, SyncDirection, SyncJournalEntry};
 use noland_state_db::StateDb;
-use noland_storage::{RemoteKey, SharedStorageProvider};
+use noland_storage::{DownloadObserver, RemoteKey, SharedStorageProvider};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -216,6 +217,96 @@ struct PackJob {
     pack_id: String,
     priority: RestorePriority,
     entries: Vec<PackIndexEntry>,
+    expected_size: u64,
+}
+
+#[derive(Default)]
+struct DownloadProgressState {
+    in_flight: BTreeMap<String, u64>,
+}
+
+struct JournalDownloadObserver<'a> {
+    journal: DownloadJournal<'a>,
+    item_key: String,
+    state: Arc<Mutex<DownloadProgressState>>,
+}
+
+impl JournalDownloadObserver<'_> {
+    fn persist_progress(&self) -> Result<()> {
+        let in_flight_bytes = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("download progress lock was poisoned".into()))?
+            .in_flight
+            .values()
+            .copied()
+            .sum::<u64>();
+        let summary = self
+            .journal
+            .db
+            .sync_journal_summary_for_kind(self.journal.operation_id, ContentObjectKind::Pack)?;
+        if let Some(mut progress) = self
+            .journal
+            .db
+            .get_operation_progress(self.journal.operation_id)?
+        {
+            let ready_bytes = summary
+                .completed_bytes
+                .saturating_add(in_flight_bytes)
+                .min(summary.total_bytes);
+            progress.completed_units = ready_bytes;
+            progress.total_units = Some(summary.total_bytes);
+            progress.unit = Some("bytes".into());
+            progress.detail_json["completed_packs"] = serde_json::json!(summary.completed_items);
+            progress.detail_json["total_packs"] = serde_json::json!(summary.total_items);
+            progress.detail_json["completed_pack_bytes"] = serde_json::json!(ready_bytes);
+            progress.detail_json["bytes_transferred"] =
+                serde_json::json!(summary.bytes_transferred);
+            progress.detail_json["total_transfer_bytes"] = serde_json::json!(summary.total_bytes);
+            progress.updated_at = chrono::Utc::now();
+            self.journal
+                .db
+                .set_operation_progress(self.journal.operation_id, Some(&progress))?;
+        }
+        Ok(())
+    }
+
+    fn finish(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| StateError::Storage("download progress lock was poisoned".into()))?
+            .in_flight
+            .remove(&self.item_key);
+        self.persist_progress()
+    }
+}
+
+impl DownloadObserver for JournalDownloadObserver<'_> {
+    fn transfer_started(&self) -> Result<()> {
+        self.state
+            .lock()
+            .map_err(|_| StateError::Storage("download progress lock was poisoned".into()))?
+            .in_flight
+            .entry(self.item_key.clone())
+            .or_insert(0);
+        self.persist_progress()
+    }
+
+    fn transfer_progress(&self, bytes_transferred: u64) -> Result<()> {
+        self.journal.db.update_sync_journal_progress(
+            self.journal.operation_id,
+            &self.item_key,
+            bytes_transferred,
+        )?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("download progress lock was poisoned".into()))?;
+        let current = state.in_flight.entry(self.item_key.clone()).or_insert(0);
+        *current = (*current).max(bytes_transferred);
+        drop(state);
+        self.persist_progress()
+    }
 }
 
 pub fn planned_pack_download_count(
@@ -248,8 +339,35 @@ pub async fn download_and_verify_to(
     }
 
     let (jobs, chunks_reused) = plan_missing_pack_jobs(plan, pack_index, target)?;
+    if let Some(journal) = journal {
+        let (complete_jobs, _) = plan_missing_pack_jobs(plan, pack_index, RestoreTarget::Complete)?;
+        for job in &complete_jobs {
+            let remote_key = remote_pack_key(&job.pack_id);
+            if journal
+                .db
+                .get_sync_journal_entry(journal.operation_id, &remote_key)?
+                .is_none()
+            {
+                let mut entry = SyncJournalEntry::pending(
+                    journal.operation_id,
+                    &remote_key,
+                    ContentObjectKind::Pack,
+                    SyncDirection::Download,
+                );
+                entry.local_path = Some(
+                    pack_cache_path(plan, &job.pack_id)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+                entry.remote_path = Some(remote_key);
+                entry.size = Some(job.expected_size);
+                journal.db.upsert_sync_journal_entry(&entry)?;
+            }
+        }
+    }
+    let progress_state = Arc::new(Mutex::new(DownloadProgressState::default()));
     let mut report = run_bounded(jobs, options.max_parallel_packs, |job| {
-        process_pack(provider, master, plan, job, journal)
+        process_pack(provider, master, plan, job, journal, progress_state.clone())
     })
     .await?;
     report.chunks_reused = report.chunks_reused.saturating_add(chunks_reused);
@@ -270,6 +388,19 @@ fn plan_missing_pack_jobs(
                 .and_modify(|priority| *priority = (*priority).min(planned.priority))
                 .or_insert(planned.priority);
         }
+    }
+
+    let mut pack_sizes = BTreeMap::<String, u64>::new();
+    for entry in pack_index {
+        let record_end = entry
+            .offset
+            .saturating_add(12)
+            .saturating_add(entry.nonce.len() as u64)
+            .saturating_add(u64::from(entry.ciphertext_len));
+        pack_sizes
+            .entry(entry.pack_id.clone())
+            .and_modify(|size| *size = (*size).max(record_end))
+            .or_insert(record_end);
     }
 
     let mut indexed = pack_index.to_vec();
@@ -304,6 +435,7 @@ fn plan_missing_pack_jobs(
                 pack_id: entry.pack_id.clone(),
                 priority,
                 entries: Vec::new(),
+                expected_size: pack_sizes.get(&entry.pack_id).copied().unwrap_or(0),
             });
         job.priority = job.priority.min(priority);
         job.entries.push(entry);
@@ -331,6 +463,7 @@ async fn process_pack(
     plan: &RestorePlan,
     job: PackJob,
     journal: Option<DownloadJournal<'_>>,
+    progress_state: Arc<Mutex<DownloadProgressState>>,
 ) -> Result<DownloadReport> {
     let mut report = DownloadReport::default();
     let mut missing = Vec::new();
@@ -375,6 +508,7 @@ async fn process_pack(
             &cache_path,
             &remote_key,
             journal,
+            progress_state.clone(),
         )
         .await?;
         report.packs_downloaded += 1;
@@ -394,6 +528,7 @@ async fn process_pack(
                 &cache_path,
                 &remote_key,
                 journal,
+                progress_state,
             )
             .await?;
             report.packs_reused = report.packs_reused.saturating_sub(1);
@@ -419,6 +554,7 @@ async fn download_pack_journaled(
     cache_path: &Path,
     remote_key: &str,
     journal: Option<DownloadJournal<'_>>,
+    progress_state: Arc<Mutex<DownloadProgressState>>,
 ) -> Result<()> {
     if let Some(journal) = journal {
         journal.db.start_sync_journal_item(
@@ -431,7 +567,12 @@ async fn download_pack_journaled(
             None,
         )?;
     }
-    match download_pack(provider, plan, pack_id, cache_path).await {
+    let observer = journal.map(|journal| JournalDownloadObserver {
+        journal,
+        item_key: remote_key.to_string(),
+        state: progress_state,
+    });
+    match download_pack(provider, plan, pack_id, cache_path, observer.as_ref()).await {
         Ok(()) => {
             if let Some(journal) = journal {
                 let size = std::fs::metadata(cache_path)
@@ -440,6 +581,9 @@ async fn download_pack_journaled(
                 journal
                     .db
                     .complete_sync_journal_item(journal.operation_id, remote_key, size)?;
+            }
+            if let Some(observer) = &observer {
+                observer.finish()?;
             }
             Ok(())
         }
@@ -468,7 +612,7 @@ fn mark_pack_completed(
         SyncDirection::Download,
         Some(&cache_path.to_string_lossy()),
         Some(remote_key),
-        std::fs::metadata(cache_path).ok().map(|meta| meta.len()),
+        None,
     )?;
     let size = std::fs::metadata(cache_path)
         .map(|meta| meta.len())
@@ -506,6 +650,7 @@ async fn download_pack(
     plan: &RestorePlan,
     pack_id: &str,
     cache_path: &Path,
+    observer: Option<&JournalDownloadObserver<'_>>,
 ) -> Result<()> {
     if let Some(parent) = cache_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -514,7 +659,11 @@ async fn download_pack(
     remove_file_if_present(&temp)?;
     let mut partial = PartialFileGuard::new(temp.clone());
     provider
-        .download(&RemoteKey::new(remote_pack_key(pack_id)), &temp)
+        .download_observed(
+            &RemoteKey::new(remote_pack_key(pack_id)),
+            &temp,
+            observer.map(|value| value as &dyn DownloadObserver),
+        )
         .await?;
     if cache_path.exists() {
         remove_file_if_present(&temp)?;

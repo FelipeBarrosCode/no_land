@@ -35,6 +35,10 @@ export function InstanceCardActions({
   const isRunning = instance.status.toLowerCase().includes("run");
   const actionDisabled = busy || instanceActionRunning;
   const loadingKey = blockingAction?.key ?? null;
+  const transferRunning =
+    loadingKey === "instance.storage.export" ||
+    loadingKey === "instance.storage.sync" ||
+    loadingKey === "instance.files.upload";
 
   const handleDestroy = async () => {
     if (!showDestroyConfirm) {
@@ -75,7 +79,7 @@ export function InstanceCardActions({
         <Button
           variant="ghost"
           className="w-full text-[14px]"
-          disabled={actionDisabled || !isRunning}
+          disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.export"}
           loadingText="Saving files..."
           onClick={() => onSaveStorage(instance.instanceId)}
@@ -86,7 +90,7 @@ export function InstanceCardActions({
         <Button
           variant="ghost"
           className="w-full text-[14px]"
-          disabled={actionDisabled || !isRunning}
+          disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
           loadingText="Syncing files..."
           onClick={() => onSyncStorage(instance.instanceId)}

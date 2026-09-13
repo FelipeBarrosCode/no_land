@@ -120,6 +120,9 @@ function RootRoute() {
   const listExportableStorageObjects = useAppStore(
     (state) => state.listExportableStorageObjects,
   );
+  const uploadPathsToRemoteInstance = useAppStore(
+    (state) => state.uploadPathsToRemoteInstance,
+  );
 
   if (!appState) {
     return null;
@@ -180,6 +183,7 @@ function RootRoute() {
       onSyncInstanceStorage={syncInstanceStorage}
       onListSyncableStorageObjects={listSyncableStorageObjects}
       onListExportableStorageObjects={listExportableStorageObjects}
+      onUploadPathsToInstance={uploadPathsToRemoteInstance}
       onRefreshIndexing={async (instanceId?: number) => {
         if (!instanceId) {
           return;
@@ -307,8 +311,8 @@ function UpdateAvailableModal({
           >
             Update Available
           </h2>
-          <p className="text-[1.15rem] leading-none text-[#b4c8de]">
-            Noland Connect {update.latestVersion} is ready to download.
+            <p className="text-[1.15rem] leading-none text-[#b4c8de]">
+             Noland Connect {update.latestVersion} is ready to install.
           </p>
         </div>
         <Button variant="ghost" onClick={onDismiss}>
@@ -343,7 +347,7 @@ function UpdateAvailableModal({
             loadingText="Opening..."
             onClick={openDownload}
           >
-            Download Update
+             Open Installer
           </Button>
         </div>
       </ModalBody>
@@ -652,6 +656,24 @@ export function App() {
           }
           stopRequested={provisioningStopRequested}
         />
+      )}
+
+      {!isBlocking && blockingAction &&
+        (blockingAction.key === "instance.storage.sync" ||
+          blockingAction.key === "instance.storage.export" ||
+          blockingAction.key === "instance.files.upload") && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[105] w-[min(24rem,calc(100vw-2rem))]">
+          <BlockingLoaderOverlay
+            action={blockingAction}
+            inline
+            className="pointer-events-auto p-4"
+            onCancel={
+              blockingAction.instanceId != null
+                ? () => void cancelSharedStorageOperation(blockingAction.instanceId as number)
+                : undefined
+            }
+          />
+        </div>
       )}
 
       <HashRouter>

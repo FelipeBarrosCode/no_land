@@ -331,9 +331,18 @@ All data is encrypted before upload and can only be decrypted with your reposito
                   {catProviders.map((provider) => (
                     <button
                       key={provider.provider}
-                      className="text-left p-3 border border-[#3f476c] rounded bg-[#0b0f23] hover:border-neon-cyan hover:bg-[#121731] transition text-sm group"
+                      className="group relative border border-[#3f476c] bg-[#0b0f23] p-3 pr-10 text-left text-sm transition hover:border-neon-cyan hover:bg-[#121731]"
                       onClick={() => handleProviderSelect(provider)}
                     >
+                      {provider.provider === "google_drive" && (
+                        <span
+                          className="absolute right-2 top-2 text-lg leading-none text-amber-300"
+                          title="Uniquely optimized provider"
+                        >
+                          <span aria-hidden="true">★</span>
+                          <span className="sr-only">Uniquely optimized provider</span>
+                        </span>
+                      )}
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-gray-200 font-medium">{provider.label}</p>
                         {PROVIDER_PROMPT_MAP[provider.provider] && (

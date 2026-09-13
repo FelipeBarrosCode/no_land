@@ -30,6 +30,7 @@ export async function checkForGitHubUpdate(): Promise<AppUpdateInfo | null> {
   const currentVersion = normalizeVersion(await getVersion());
   const response = await fetch(GITHUB_LATEST_RELEASE_URL, {
     method: "GET",
+    cache: "no-store",
     headers: {
       Accept: "application/vnd.github+json",
     },

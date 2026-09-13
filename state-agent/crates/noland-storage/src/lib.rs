@@ -144,6 +144,16 @@ pub trait ImmutableUploadObserver: Send + Sync {
     ) -> Result<()>;
 }
 
+pub trait DownloadObserver: Send + Sync {
+    fn transfer_started(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn transfer_progress(&self, _bytes_transferred: u64) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 pub trait SharedStorageProvider: Send + Sync {
     async fn health_check(&self) -> Result<Health>;
@@ -151,6 +161,22 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn stat(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>>;
     async fn upload_immutable(&self, local: &Path, key: &RemoteKey) -> Result<RemoteMeta>;
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()>;
+
+    async fn download_observed(
+        &self,
+        key: &RemoteKey,
+        dest: &Path,
+        observer: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
+        if let Some(observer) = observer {
+            observer.transfer_started()?;
+        }
+        self.download(key, dest).await?;
+        if let Some(observer) = observer {
+            observer.transfer_progress(std::fs::metadata(dest)?.len())?;
+        }
+        Ok(())
+    }
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>>;
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta>;
 
