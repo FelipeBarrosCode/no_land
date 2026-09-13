@@ -539,7 +539,12 @@ fn emit_operation_progress(
     let total_bytes = progress
         .and_then(|value| value.get("detail_json"))
         .and_then(|value| value.get("total_transfer_bytes"))
-        .and_then(serde_json::Value::as_u64);
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            pack_transfer
+                .and_then(|value| value.get("total_bytes"))
+                .and_then(serde_json::Value::as_u64)
+        });
     let object_unit = total_objects
         .filter(|total| *total > 0)
         .map(|_| "packs".to_string());

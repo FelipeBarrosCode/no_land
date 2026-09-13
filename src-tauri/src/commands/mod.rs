@@ -20,7 +20,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     errors::{AppError, FrontendError},
@@ -1475,7 +1475,7 @@ pub async fn complete_onboarding(
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
             state.ssh.uploaded_to_vast = uploaded || state.ssh.uploaded_to_vast;
             state.ssh.ssh_username = "root".to_string();
-            state.ssh.ssh_password = "user".to_string();
+            state.ssh.ssh_password = "password".to_string();
             state.orchestration_state = OrchestrationState::Idle;
             state.sunshine.edid_refresh_rate_hz = edid_refresh;
             state.sunshine.headless_edid_base64 = generated_edid.clone();
@@ -4136,6 +4136,495 @@ pub async fn reboot_instance_services(
     .await;
     InstanceLifecycleService::release_lock(instance_id).await;
     result.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn open_remote_terminal(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<crate::services::remote_exec::TerminalSession, FrontendError> {
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    tokio::task::spawn_blocking(move || remote.open_terminal(app))
+        .await
+        .map_err(|error| AppError::Command(format!("Terminal task failed: {error}")))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn write_remote_terminal(session_id: String, input: String) -> Result<(), FrontendError> {
+    tokio::task::spawn_blocking(move || RemoteExec::write_terminal(&session_id, &input))
+        .await
+        .map_err(|error| AppError::Command(format!("Terminal write task failed: {error}")))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn resize_remote_terminal(
+    session_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), FrontendError> {
+    tokio::task::spawn_blocking(move || RemoteExec::resize_terminal(&session_id, rows, cols))
+        .await
+        .map_err(|error| AppError::Command(format!("Terminal resize task failed: {error}")))?
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn close_remote_terminal(session_id: String) -> Result<(), FrontendError> {
+    tokio::task::spawn_blocking(move || RemoteExec::close_terminal(&session_id))
+        .await
+        .map_err(|error| AppError::Command(format!("Terminal close task failed: {error}")))?
+        .map_err(Into::into)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectUploadProgressEvent {
+    operation_id: String,
+    instance_id: u64,
+    state: String,
+    message: String,
+    current_item: Option<String>,
+    completed_objects: u64,
+    total_objects: u64,
+    completed_bytes: u64,
+    total_bytes: u64,
+    fraction: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectUploadResult {
+    operation_id: String,
+    destination: String,
+    uploaded_objects: u64,
+    uploaded_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteFolderListing {
+    path: String,
+    home_path: String,
+    folders: Vec<String>,
+}
+
+#[derive(Debug)]
+struct DirectUploadItem {
+    path: PathBuf,
+    display_name: String,
+    object_count: u64,
+    byte_count: u64,
+    recursive: bool,
+}
+
+#[tauri::command]
+pub async fn list_remote_upload_folders(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    path: Option<String>,
+) -> Result<RemoteFolderListing, FrontendError> {
+    let target_user = context.config.audio_target_user.clone();
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    let home_path = resolve_remote_home(&remote, &target_user).await?;
+    let requested = path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&home_path));
+    let requested = if requested.is_absolute() {
+        requested
+    } else {
+        Path::new(&home_path).join(requested)
+    };
+    validate_remote_browse_path(&requested)?;
+    let browse_script = format!(
+        "cd -- {} && printf '__NOLAND_PATH__%s\\n' \"$PWD\" && find . -mindepth 1 -maxdepth 1 -type d -printf '%f\\n' | LC_ALL=C sort",
+        shell_quote_upload_path(&requested.to_string_lossy())
+    );
+    let command = format!(
+        "{}sh -c {}",
+        remote.sudo_as_user_prefix(&target_user),
+        shell_quote_upload_path(&browse_script)
+    );
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+        .await
+        .map_err(|error| AppError::Command(format!("Remote folder listing failed: {error}")))??;
+    if output.status_code != 0 {
+        return Err(AppError::Command(format!(
+            "Could not open the remote folder: {}",
+            output.stderr.trim()
+        ))
+        .into());
+    }
+    let mut lines = output.stdout.lines();
+    let current_path = lines
+        .next()
+        .and_then(|line| line.strip_prefix("__NOLAND_PATH__"))
+        .ok_or_else(|| AppError::Command("Remote folder listing returned an invalid path".into()))?
+        .to_string();
+    let folders = lines
+        .filter(|line| !line.is_empty() && *line != "." && *line != "..")
+        .map(str::to_string)
+        .collect();
+    Ok(RemoteFolderListing {
+        path: current_path,
+        home_path,
+        folders,
+    })
+}
+
+#[tauri::command]
+pub async fn upload_paths_to_instance(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    local_paths: Vec<String>,
+    destination: Option<String>,
+) -> Result<DirectUploadResult, FrontendError> {
+    if local_paths.is_empty() {
+        return Err(AppError::InvalidInput("Select at least one file or folder".into()).into());
+    }
+    let requested_destination = validate_upload_destination(destination.as_deref())?;
+    let items = tokio::task::spawn_blocking(move || collect_direct_upload_items(local_paths))
+        .await
+        .map_err(|error| AppError::Command(format!("Upload scan failed: {error}")))??;
+    let total_objects = items.iter().map(|item| item.object_count).sum::<u64>();
+    let total_bytes = items.iter().map(|item| item.byte_count).sum::<u64>();
+    let operation_id = uuid::Uuid::new_v4().to_string();
+    let target_user = context.config.audio_target_user.clone();
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    let home_path = resolve_remote_home(&remote, &target_user).await?;
+    let destination_path = if requested_destination.is_absolute() {
+        requested_destination
+    } else {
+        Path::new(&home_path).join(requested_destination)
+    };
+    let destination_string = destination_path.to_string_lossy().into_owned();
+    let mkdir_command = format!(
+        "{}mkdir -p -- {}",
+        remote.sudo_as_user_prefix(&target_user),
+        shell_quote_upload_path(&destination_string)
+    );
+    let mkdir_output = {
+        let mkdir_remote = remote.clone();
+        tokio::task::spawn_blocking(move || {
+            mkdir_remote.ssh(&mkdir_command, Duration::from_secs(30))
+        })
+        .await
+        .map_err(|error| AppError::Command(format!("Remote directory setup failed: {error}")))??
+    };
+    if mkdir_output.status_code != 0 {
+        return Err(AppError::Command(format!(
+            "Could not create the remote destination: {}",
+            mkdir_output.stderr.trim()
+        ))
+        .into());
+    }
+
+    let mut completed_objects = 0_u64;
+    let mut completed_bytes = 0_u64;
+    for item in items {
+        emit_direct_upload_progress(
+            &app,
+            &operation_id,
+            instance_id,
+            "uploading",
+            format!("Uploading {}", item.display_name),
+            Some(item.display_name.clone()),
+            completed_objects,
+            total_objects,
+            completed_bytes,
+            total_bytes,
+        );
+        let upload_remote = remote.clone();
+        let path = item.path.clone();
+        // Always give SCP the complete target path. Relying on directory
+        // inference is inconsistent across the bundled SCP builds.
+        let destination = destination_path
+            .join(&item.display_name)
+            .to_string_lossy()
+            .into_owned();
+        let recursive = item.recursive;
+        let output = tokio::task::spawn_blocking(move || {
+            upload_remote.scp_path(&path, &destination, recursive, Duration::from_secs(3_600))
+        })
+        .await
+        .map_err(|error| AppError::Command(format!("Upload task failed: {error}")))??;
+        if output.status_code != 0 {
+            emit_direct_upload_progress(
+                &app,
+                &operation_id,
+                instance_id,
+                "failed",
+                format!("Upload failed for {}", item.display_name),
+                Some(item.display_name.clone()),
+                completed_objects,
+                total_objects,
+                completed_bytes,
+                total_bytes,
+            );
+            return Err(AppError::Command(format!(
+                "Upload failed for {} (exit {}): {} {}",
+                item.display_name,
+                output.status_code,
+                output.stderr.trim(),
+                output.stdout.trim()
+            ))
+            .into());
+        }
+        let uploaded_path = destination_path.join(&item.display_name);
+        let ownership_command = format!(
+            "{}chown -R {}:$(id -gn {}) -- {}",
+            remote.sudo_prefix(),
+            shell_quote_upload_path(&target_user),
+            shell_quote_upload_path(&target_user),
+            shell_quote_upload_path(&uploaded_path.to_string_lossy())
+        );
+        let ownership_output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&ownership_command, Duration::from_secs(120))
+            })
+            .await
+            .map_err(|error| {
+                AppError::Command(format!("Upload ownership task failed: {error}"))
+            })??
+        };
+        if ownership_output.status_code != 0 {
+            return Err(AppError::Command(format!(
+                "Files uploaded, but ownership could not be assigned to {target_user}: {}",
+                ownership_output.stderr.trim()
+            ))
+            .into());
+        }
+        completed_objects = completed_objects.saturating_add(item.object_count);
+        completed_bytes = completed_bytes.saturating_add(item.byte_count);
+    }
+
+    emit_direct_upload_progress(
+        &app,
+        &operation_id,
+        instance_id,
+        "completed",
+        "Upload complete".into(),
+        None,
+        completed_objects,
+        total_objects,
+        completed_bytes,
+        total_bytes,
+    );
+    Ok(DirectUploadResult {
+        operation_id,
+        destination: destination_string,
+        uploaded_objects: completed_objects,
+        uploaded_bytes: completed_bytes,
+    })
+}
+
+fn validate_upload_destination(destination: Option<&str>) -> Result<PathBuf, FrontendError> {
+    let Some(value) = destination.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(PathBuf::from("Downloads"));
+    };
+    let path = Path::new(value);
+    if path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    }) {
+        return Err(AppError::InvalidInput(
+            "Destination cannot contain parent traversal components".into(),
+        )
+        .into());
+    }
+    Ok(path.to_path_buf())
+}
+
+fn validate_remote_browse_path(path: &Path) -> Result<(), FrontendError> {
+    if !path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(AppError::InvalidInput("Remote folder path is invalid".into()).into());
+    }
+    Ok(())
+}
+
+async fn resolve_remote_home(
+    remote: &RemoteExec,
+    target_user: &str,
+) -> Result<String, FrontendError> {
+    let lookup = format!(
+        "getent passwd {} | cut -d: -f6",
+        shell_quote_upload_path(target_user)
+    );
+    let remote = remote.clone();
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&lookup, Duration::from_secs(30)))
+        .await
+        .map_err(|error| AppError::Command(format!("Home directory lookup failed: {error}")))??;
+    if output.status_code != 0 || output.stdout.trim().is_empty() {
+        return Err(AppError::Command(format!(
+            "Could not resolve the remote home directory: {}",
+            output.stderr.trim()
+        ))
+        .into());
+    }
+    Ok(output.stdout.trim().to_string())
+}
+
+fn collect_direct_upload_items(
+    local_paths: Vec<String>,
+) -> Result<Vec<DirectUploadItem>, AppError> {
+    let mut items = Vec::with_capacity(local_paths.len());
+    let mut names = std::collections::HashSet::new();
+    for value in local_paths {
+        let path = PathBuf::from(value);
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            AppError::Command(format!("Could not inspect {}: {error}", path.display()))
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(AppError::InvalidInput(format!(
+                "Symbolic links are not supported: {}",
+                path.display()
+            )));
+        }
+        if !metadata.is_file() && !metadata.is_dir() {
+            return Err(AppError::InvalidInput(format!(
+                "Only files and folders can be uploaded: {}",
+                path.display()
+            )));
+        }
+        let display_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                AppError::InvalidInput(format!("Invalid upload path: {}", path.display()))
+            })?
+            .to_string();
+        if !names.insert(display_name.clone()) {
+            return Err(AppError::InvalidInput(format!(
+                "Two selected items are named {display_name}; rename one before uploading"
+            )));
+        }
+        let (object_count, byte_count) = direct_upload_path_stats(&path)?;
+        items.push(DirectUploadItem {
+            path,
+            display_name,
+            object_count,
+            byte_count,
+            recursive: metadata.is_dir(),
+        });
+    }
+    Ok(items)
+}
+
+fn direct_upload_path_stats(path: &Path) -> Result<(u64, u64), AppError> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        AppError::Command(format!("Could not inspect {}: {error}", path.display()))
+    })?;
+    if metadata.file_type().is_symlink() {
+        return Err(AppError::InvalidInput(format!(
+            "Symbolic links are not supported: {}",
+            path.display()
+        )));
+    }
+    if metadata.is_file() {
+        return Ok((1, metadata.len()));
+    }
+    let mut objects = 0_u64;
+    let mut bytes = 0_u64;
+    for entry in std::fs::read_dir(path)
+        .map_err(|error| AppError::Command(format!("Could not read {}: {error}", path.display())))?
+    {
+        let entry = entry.map_err(|error| AppError::Command(error.to_string()))?;
+        let (child_objects, child_bytes) = direct_upload_path_stats(&entry.path())?;
+        objects = objects.saturating_add(child_objects);
+        bytes = bytes.saturating_add(child_bytes);
+    }
+    Ok((objects.max(1), bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_direct_upload_progress(
+    app: &AppHandle,
+    operation_id: &str,
+    instance_id: u64,
+    state: &str,
+    message: String,
+    current_item: Option<String>,
+    completed_objects: u64,
+    total_objects: u64,
+    completed_bytes: u64,
+    total_bytes: u64,
+) {
+    let fraction = if total_bytes > 0 {
+        completed_bytes as f64 / total_bytes as f64
+    } else if total_objects > 0 {
+        completed_objects as f64 / total_objects as f64
+    } else {
+        1.0
+    };
+    let _ = app.emit(
+        "direct-upload:progress",
+        DirectUploadProgressEvent {
+            operation_id: operation_id.to_string(),
+            instance_id,
+            state: state.to_string(),
+            message,
+            current_item,
+            completed_objects,
+            total_objects,
+            completed_bytes,
+            total_bytes,
+            fraction: fraction.clamp(0.0, 1.0),
+        },
+    );
+}
+
+fn shell_quote_upload_path(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod direct_upload_tests {
+    use super::{direct_upload_path_stats, validate_upload_destination};
+
+    #[test]
+    fn upload_destination_stays_inside_home() {
+        assert_eq!(
+            validate_upload_destination(None).unwrap(),
+            std::path::PathBuf::from("Downloads")
+        );
+        assert_eq!(
+            validate_upload_destination(Some("Downloads/projects")).unwrap(),
+            std::path::PathBuf::from("Downloads/projects")
+        );
+        assert!(validate_upload_destination(Some("/mnt/data")).is_ok());
+        assert!(validate_upload_destination(Some("../outside")).is_err());
+    }
+
+    #[test]
+    fn upload_stats_include_nested_files_and_empty_folders() {
+        let root =
+            std::env::temp_dir().join(format!("noland-upload-test-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir(root.join("empty")).unwrap();
+        std::fs::write(root.join("one.bin"), [1_u8, 2, 3]).unwrap();
+        std::fs::write(nested.join("two.bin"), [4_u8, 5]).unwrap();
+
+        assert_eq!(direct_upload_path_stats(&root).unwrap(), (3, 5));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[tauri::command]

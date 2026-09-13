@@ -41,6 +41,8 @@ import { InstanceDisplayModal } from "./InstanceDisplayModal";
 import { InstanceMoonlightOptionsModal } from "./InstanceMoonlightOptionsModal";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
+import { InstanceTerminalModal } from "./InstanceTerminalModal";
+import { InstanceUploadModal } from "./InstanceUploadModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
@@ -149,6 +151,11 @@ interface Props {
     instanceId: number,
   ) => Promise<SharedStorageObjectEntry[] | null>;
   onRefreshIndexing?: (instanceId: number) => Promise<void>;
+  onUploadPathsToInstance: (
+    instanceId: number,
+    paths: string[],
+    destination?: string,
+  ) => Promise<void>;
 }
 
 export function DashboardScreen({
@@ -200,6 +207,7 @@ export function DashboardScreen({
   onListSyncableStorageObjects,
   onListExportableStorageObjects,
   onRefreshIndexing,
+  onUploadPathsToInstance,
 }: Props) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [availableOfferCountries, setAvailableOfferCountries] = useState<
@@ -215,12 +223,18 @@ export function DashboardScreen({
   const [healthModalOpen, setHealthModalOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
+  const [terminalInstanceId, setTerminalInstanceId] = useState<number | null>(null);
+  const [uploadInstanceId, setUploadInstanceId] = useState<number | null>(null);
   const [connectionInfoModalType, setConnectionInfoModalType] = useState<
     "wireguard" | null
   >(null);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
+  const backgroundTransferRunning =
+    blockingAction?.key === "instance.storage.export" ||
+    blockingAction?.key === "instance.storage.sync" ||
+    blockingAction?.key === "instance.files.upload";
 
   const openServerPicker = async () => {
     setPickerOpen(true);
@@ -235,6 +249,9 @@ export function DashboardScreen({
   );
   const moonlightOptionsInstance = rentedInstances.find(
     (instance) => instance.instanceId === moonlightOptionsInstanceId,
+  );
+  const uploadInstance = rentedInstances.find(
+    (instance) => instance.instanceId === uploadInstanceId,
   );
   const launchLibraryInstance = rentedInstances.find(
     (instance) => instance.instanceId === launchLibraryInstanceId,
@@ -674,6 +691,26 @@ export function DashboardScreen({
                             : "WaitingForInstance"
                         }
                       />
+                      <Button
+                        variant="ghost"
+                        aria-label={`Upload files to ${instance.label}`}
+                        title="Upload files and folders directly to this instance"
+                        className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
+                        disabled={busy || backgroundTransferRunning || !instance.status.toLowerCase().includes("run")}
+                        onClick={() => setUploadInstanceId(instance.instanceId)}
+                      >
+                        <span aria-hidden="true">↑</span>
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        aria-label={`Open terminal for ${instance.label}`}
+                        title="Open an SSH terminal for this instance"
+                        className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
+                        disabled={busy || !instance.status.toLowerCase().includes("run")}
+                        onClick={() => setTerminalInstanceId(instance.instanceId)}
+                      >
+                        <span aria-hidden="true">&gt;</span>
+                      </Button>
                       <Button
                         variant="ghost"
                         aria-label={`Moonlight options for ${instance.label}`}
@@ -1175,6 +1212,21 @@ export function DashboardScreen({
             </div>
           </ModalBody>
         </ModalFrame>
+      )}
+
+      {terminalInstanceId !== null && (
+        <InstanceTerminalModal
+          instance={rentedInstances.find((candidate) => candidate.instanceId === terminalInstanceId) ?? null}
+          onClose={() => setTerminalInstanceId(null)}
+        />
+      )}
+
+      {uploadInstance && (
+        <InstanceUploadModal
+          instance={uploadInstance}
+          onUpload={onUploadPathsToInstance}
+          onClose={() => setUploadInstanceId(null)}
+        />
       )}
     </main>
   );

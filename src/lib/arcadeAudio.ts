@@ -70,3 +70,30 @@ export function playArcadeClick(): void {
   oscillator.start();
   oscillator.stop(audio.currentTime + 0.1);
 }
+
+export function playArcadeSuccess(): void {
+  if (!getArcadeSoundEnabled()) {
+    return;
+  }
+
+  const audio = getContext();
+  if (!audio) {
+    return;
+  }
+  if (audio.state === "suspended") {
+    void audio.resume();
+  }
+
+  const oscillator = audio.createOscillator();
+  const gain = audio.createGain();
+  oscillator.type = "square";
+  oscillator.frequency.setValueAtTime(520, audio.currentTime);
+  oscillator.frequency.setValueAtTime(780, audio.currentTime + 0.08);
+  gain.gain.setValueAtTime(0.0001, audio.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.055, audio.currentTime + 0.01);
+  gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.2);
+  oscillator.connect(gain);
+  gain.connect(audio.destination);
+  oscillator.start();
+  oscillator.stop(audio.currentTime + 0.21);
+}
