@@ -122,6 +122,28 @@ pub struct Health {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImmutableUploadCompletion {
+    Uploaded,
+    ReusedRemote,
+}
+
+pub trait ImmutableUploadObserver: Send + Sync {
+    fn transfer_started(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn transfer_progress(&self, _bytes_transferred: u64) -> Result<()> {
+        Ok(())
+    }
+
+    fn completed(
+        &self,
+        uploads: &[ImmutableUpload],
+        completion: ImmutableUploadCompletion,
+    ) -> Result<()>;
+}
+
 #[async_trait]
 pub trait SharedStorageProvider: Send + Sync {
     async fn health_check(&self) -> Result<Health>;
@@ -133,9 +155,23 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta>;
 
     async fn upload_immutable_bulk(&self, uploads: &[ImmutableUpload]) -> Result<Vec<RemoteMeta>> {
+        self.upload_immutable_bulk_observed(uploads, None).await
+    }
+
+    async fn upload_immutable_bulk_observed(
+        &self,
+        uploads: &[ImmutableUpload],
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<Vec<RemoteMeta>> {
         let mut uploaded = Vec::with_capacity(uploads.len());
         for upload in uploads {
             uploaded.push(self.upload_immutable(&upload.local, &upload.key).await?);
+            if let Some(observer) = observer {
+                observer.completed(
+                    std::slice::from_ref(upload),
+                    ImmutableUploadCompletion::Uploaded,
+                )?;
+            }
         }
         Ok(uploaded)
     }

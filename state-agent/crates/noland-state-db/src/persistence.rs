@@ -827,7 +827,41 @@ impl StateDb {
         item_key: &str,
         bytes_transferred: u64,
     ) -> Result<()> {
+        self.complete_sync_journal_item_with_transfer(
+            operation_id,
+            item_key,
+            bytes_transferred,
+            bytes_transferred,
+        )
+    }
+
+    pub fn complete_sync_journal_item_reused(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        size: u64,
+    ) -> Result<()> {
+        self.complete_sync_journal_item_with_transfer(operation_id, item_key, size, 0)
+    }
+
+    fn complete_sync_journal_item_with_transfer(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        size: u64,
+        bytes_transferred: u64,
+    ) -> Result<()> {
         self.update_sync_journal_progress(operation_id, item_key, bytes_transferred)?;
+        self.lock()?
+            .execute(
+                "UPDATE sync_journal_items SET size=COALESCE(size, ?3) WHERE operation_id=?1 AND item_key=?2",
+                params![
+                    operation_id.to_string(),
+                    item_key,
+                    to_i64(size, "sync item size")?
+                ],
+            )
+            .map_err(db_err)?;
         self.set_sync_journal_state(
             operation_id,
             item_key,
@@ -836,6 +870,21 @@ impl StateDb {
             None,
         )?;
         Ok(())
+    }
+
+    pub fn delete_sync_journal_entries_for_kind_direction(
+        &self,
+        operation_id: Uuid,
+        kind: ContentObjectKind,
+        direction: SyncDirection,
+    ) -> Result<usize> {
+        self.lock()?
+            .execute(
+                r#"DELETE FROM sync_journal_items
+                   WHERE operation_id=?1 AND item_kind=?2 AND direction=?3"#,
+                params![operation_id.to_string(), kind.as_str(), direction.as_str()],
+            )
+            .map_err(db_err)
     }
 
     pub fn fail_sync_journal_item(
@@ -855,35 +904,58 @@ impl StateDb {
     }
 
     pub fn sync_journal_summary(&self, operation_id: Uuid) -> Result<SyncJournalSummary> {
-        self.lock()?
-            .query_row(
-                r#"SELECT
-                       COUNT(*),
-                       COALESCE(SUM(state='PENDING'), 0),
-                       COALESCE(SUM(state='IN_PROGRESS'), 0),
-                       COALESCE(SUM(state='RETRY_SCHEDULED'), 0),
-                       COALESCE(SUM(state='COMPLETED'), 0),
-                       COALESCE(SUM(state='FAILED'), 0),
-                       COALESCE(SUM(state='SKIPPED'), 0),
-                       COALESCE(SUM(size), 0),
-                       COALESCE(SUM(bytes_transferred), 0)
-                   FROM sync_journal_items WHERE operation_id=?1"#,
-                params![operation_id.to_string()],
-                |row| {
-                    Ok(SyncJournalSummary {
-                        total_items: nonnegative(row.get(0)?),
-                        pending_items: nonnegative(row.get(1)?),
-                        in_progress_items: nonnegative(row.get(2)?),
-                        retry_scheduled_items: nonnegative(row.get(3)?),
-                        completed_items: nonnegative(row.get(4)?),
-                        failed_items: nonnegative(row.get(5)?),
-                        skipped_items: nonnegative(row.get(6)?),
-                        total_bytes: nonnegative(row.get(7)?),
-                        bytes_transferred: nonnegative(row.get(8)?),
-                    })
-                },
-            )
-            .map_err(db_err)
+        self.sync_journal_summary_where(operation_id, None)
+    }
+
+    pub fn sync_journal_summary_for_kind(
+        &self,
+        operation_id: Uuid,
+        kind: ContentObjectKind,
+    ) -> Result<SyncJournalSummary> {
+        self.sync_journal_summary_where(operation_id, Some(kind))
+    }
+
+    fn sync_journal_summary_where(
+        &self,
+        operation_id: Uuid,
+        kind: Option<ContentObjectKind>,
+    ) -> Result<SyncJournalSummary> {
+        let conn = self.lock()?;
+        let sql = r#"SELECT
+                         COUNT(*),
+                         COALESCE(SUM(state='PENDING'), 0),
+                         COALESCE(SUM(state='IN_PROGRESS'), 0),
+                         COALESCE(SUM(state='RETRY_SCHEDULED'), 0),
+                         COALESCE(SUM(state='COMPLETED'), 0),
+                         COALESCE(SUM(state='FAILED'), 0),
+                         COALESCE(SUM(state='SKIPPED'), 0),
+                         COALESCE(SUM(size), 0),
+                         COALESCE(SUM(CASE WHEN state='COMPLETED' THEN size ELSE 0 END), 0),
+                         COALESCE(SUM(bytes_transferred), 0)
+                     FROM sync_journal_items
+                     WHERE operation_id=?1 AND (?2 IS NULL OR item_kind=?2)"#;
+        conn.query_row(
+            sql,
+            params![
+                operation_id.to_string(),
+                kind.map(ContentObjectKind::as_str)
+            ],
+            |row| {
+                Ok(SyncJournalSummary {
+                    total_items: nonnegative(row.get(0)?),
+                    pending_items: nonnegative(row.get(1)?),
+                    in_progress_items: nonnegative(row.get(2)?),
+                    retry_scheduled_items: nonnegative(row.get(3)?),
+                    completed_items: nonnegative(row.get(4)?),
+                    failed_items: nonnegative(row.get(5)?),
+                    skipped_items: nonnegative(row.get(6)?),
+                    total_bytes: nonnegative(row.get(7)?),
+                    completed_bytes: nonnegative(row.get(8)?),
+                    bytes_transferred: nonnegative(row.get(9)?),
+                })
+            },
+        )
+        .map_err(db_err)
     }
 
     /// Lists operations newest-updated first. Limits are capped to 10,000.
@@ -1420,7 +1492,106 @@ mod tests {
         assert_eq!(summary.total_items, 1);
         assert_eq!(summary.completed_items, 1);
         assert_eq!(summary.total_bytes, 10);
+        assert_eq!(summary.completed_bytes, 10);
         assert_eq!(summary.bytes_transferred, 7);
+    }
+
+    #[test]
+    fn sync_journal_summary_can_filter_packs_and_fill_completed_size() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation_id = Uuid::new_v4();
+        for (key, kind, bytes) in [
+            ("packs/one.pack", ContentObjectKind::Pack, 11),
+            ("bundles/index.enc", ContentObjectKind::Other, 7),
+        ] {
+            let entry = SyncJournalEntry::pending(operation_id, key, kind, SyncDirection::Download);
+            db.upsert_sync_journal_entry(&entry).unwrap();
+            db.complete_sync_journal_item(operation_id, key, bytes)
+                .unwrap();
+        }
+
+        let all = db.sync_journal_summary(operation_id).unwrap();
+        assert_eq!(all.completed_items, 2);
+        assert_eq!(all.total_bytes, 18);
+        assert_eq!(all.completed_bytes, 18);
+        assert_eq!(all.bytes_transferred, 18);
+
+        let packs = db
+            .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)
+            .unwrap();
+        assert_eq!(packs.total_items, 1);
+        assert_eq!(packs.completed_items, 1);
+        assert_eq!(packs.total_bytes, 11);
+        assert_eq!(packs.completed_bytes, 11);
+        assert_eq!(packs.bytes_transferred, 11);
+    }
+
+    #[test]
+    fn reused_journal_items_complete_without_claiming_network_bytes() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation_id = Uuid::new_v4();
+        let entry = SyncJournalEntry::pending(
+            operation_id,
+            "packs/reused.pack",
+            ContentObjectKind::Pack,
+            SyncDirection::Upload,
+        );
+        db.upsert_sync_journal_entry(&entry).unwrap();
+        db.complete_sync_journal_item_reused(operation_id, "packs/reused.pack", 23)
+            .unwrap();
+
+        let summary = db
+            .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)
+            .unwrap();
+        assert_eq!(summary.completed_items, 1);
+        assert_eq!(summary.total_bytes, 23);
+        assert_eq!(summary.completed_bytes, 23);
+        assert_eq!(summary.bytes_transferred, 0);
+    }
+
+    #[test]
+    fn regenerated_backup_can_clear_only_its_old_pack_upload_journal() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation_id = Uuid::new_v4();
+        for (key, kind, direction) in [
+            (
+                "packs/old.pack",
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+            ),
+            (
+                "packs/download.pack",
+                ContentObjectKind::Pack,
+                SyncDirection::Download,
+            ),
+            (
+                "bundles/index.enc",
+                ContentObjectKind::Other,
+                SyncDirection::Upload,
+            ),
+        ] {
+            db.upsert_sync_journal_entry(&SyncJournalEntry::pending(
+                operation_id,
+                key,
+                kind,
+                direction,
+            ))
+            .unwrap();
+        }
+
+        let removed = db
+            .delete_sync_journal_entries_for_kind_direction(
+                operation_id,
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+            )
+            .unwrap();
+        assert_eq!(removed, 1);
+        let remaining = db.list_sync_journal_entries(operation_id, None).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining
+            .iter()
+            .all(|entry| entry.item_key != "packs/old.pack"));
     }
 
     #[test]

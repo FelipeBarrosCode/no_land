@@ -968,6 +968,9 @@ fn serialize_operation(
         .or(detail_metrics);
     let progress = agent.db.get_operation_progress(operation_id)?;
     let journal_summary = agent.db.sync_journal_summary(operation_id)?;
+    let pack_transfer = agent
+        .db
+        .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)?;
     let mut value = serde_json::to_value(operation)?;
     let fields = value
         .as_object_mut()
@@ -986,6 +989,7 @@ fn serialize_operation(
         "sync_journal".into(),
         serde_json::to_value(journal_summary)?,
     );
+    fields.insert("pack_transfer".into(), serde_json::to_value(pack_transfer)?);
     if include_journal {
         fields.insert(
             "sync_journal_entries".into(),

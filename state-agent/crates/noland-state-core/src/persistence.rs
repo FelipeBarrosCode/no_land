@@ -365,6 +365,8 @@ pub struct SyncJournalSummary {
     pub failed_items: u64,
     pub skipped_items: u64,
     pub total_bytes: u64,
+    #[serde(default)]
+    pub completed_bytes: u64,
     pub bytes_transferred: u64,
 }
 

@@ -20,8 +20,9 @@ use noland_storage::{read_committed_manifest, SharedStorageProvider};
 use uuid::Uuid;
 
 pub use download::{
-    download_and_verify_to, prune_local_pack_cache, DownloadJournal, DownloadOptions,
-    DownloadReport, PackCacheGcOptions, PackCacheGcReport, DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
+    download_and_verify_to, planned_pack_download_count, prune_local_pack_cache, DownloadJournal,
+    DownloadOptions, DownloadReport, PackCacheGcOptions, PackCacheGcReport,
+    DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
 };
 pub use planner::{
     embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
@@ -2208,6 +2209,56 @@ mod tests {
         assert_eq!(second_report.packs_downloaded, 0);
         assert_eq!(second_report.packs_reused, 1);
         assert_eq!(second_report.chunks_extracted, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn planned_pack_count_excludes_irrelevant_and_locally_satisfied_packs() {
+        let root = test_dir("planned-pack-count");
+        let master = MasterKey::generate();
+        let needed_payload = b"needed-state".to_vec();
+        let irrelevant_payload = b"old-parent-state".to_vec();
+        let needed_hash = noland_cas::blake3_hex(&needed_payload);
+        let irrelevant_hash = noland_cas::blake3_hex(&irrelevant_payload);
+        let needed_pack = pack_chunks(
+            &root.join("needed-pack"),
+            &master,
+            vec![(needed_hash.clone(), needed_payload.clone())],
+            |_| false,
+        )
+        .unwrap()
+        .remove(0);
+        let irrelevant_pack = pack_chunks(
+            &root.join("irrelevant-pack"),
+            &master,
+            vec![(irrelevant_hash, irrelevant_payload)],
+            |_| false,
+        )
+        .unwrap()
+        .remove(0);
+        let mut index = needed_pack.entries;
+        index.extend(irrelevant_pack.entries);
+        let file = test_file(
+            "game/save.dat",
+            PersistenceClass::PersistentState,
+            SemanticRole::UserState,
+            &needed_payload,
+        );
+        let plan = test_plan(&root, test_manifest(vec![file]));
+
+        assert_eq!(
+            planned_pack_download_count(&plan, &index, RestoreTarget::Complete).unwrap(),
+            1
+        );
+        let chunk = plan
+            .staging
+            .join("materialized/.chunks")
+            .join(needed_hash.trim_start_matches("blake3:"));
+        fs::write(chunk, needed_payload).unwrap();
+        assert_eq!(
+            planned_pack_download_count(&plan, &index, RestoreTarget::Complete).unwrap(),
+            0
+        );
         let _ = fs::remove_dir_all(root);
     }
 

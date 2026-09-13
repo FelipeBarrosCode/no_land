@@ -191,6 +191,7 @@ pub async fn run_restore_with_session(
 
             let restore_result = async {
                 let roots = prepare_restore_roots(agent, &plan.manifest)?;
+                remove_steam_appmanifest_before_restore(&plan.manifest, &roots)?;
                 let mut restore = RestoreTransaction::new(&plan, &roots, Some(&agent.db));
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
@@ -219,6 +220,19 @@ pub async fn run_restore_with_session(
                     storage.storage_identity(),
                     &index,
                 )?;
+                // Restore retries reuse verified local pack/chunk caches directly. Their old
+                // journal rows are not needed for resume and would pollute this attempt's totals.
+                agent.db.delete_sync_journal_entries_for_kind_direction(
+                    operation_id,
+                    ContentObjectKind::Pack,
+                    SyncDirection::Download,
+                )?;
+                let total_packs = noland_restore::planned_pack_download_count(
+                    &plan,
+                    &index,
+                    RestoreTarget::Complete,
+                )?;
+                progress.detail_json["total_packs"] = serde_json::json!(total_packs);
                 let download_journal = Some(DownloadJournal {
                     db: &agent.db,
                     operation_id,
@@ -474,6 +488,30 @@ pub async fn run_restore_with_session(
     result
 }
 
+fn remove_steam_appmanifest_before_restore(
+    bundle: &BundleManifest,
+    roots: &LogicalRootMap,
+) -> Result<()> {
+    let Some(steam_app_id) = bundle.app.steam_app_id.or_else(|| {
+        bundle
+            .app
+            .app_id
+            .as_str()
+            .strip_prefix("steam:")
+            .and_then(|value| value.parse::<u32>().ok())
+    }) else {
+        return Ok(());
+    };
+    let Some((target_dir, _)) = steam_install_location_from_manifest(bundle, roots) else {
+        return Ok(());
+    };
+    match fs::remove_file(target_dir.join(format!("appmanifest_{steam_app_id}.acf"))) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn ensure_steam_appmanifest_after_commit(
     agent: &StateAgent,
     bundle: &BundleManifest,
@@ -637,7 +675,7 @@ fn escape_acf_value(value: &str) -> String {
 mod tests {
     use super::{
         ensure_steam_appmanifest_after_commit, preferred_steamapps_dir, prepare_restore_roots,
-        steam_install_dir_from_path,
+        remove_steam_appmanifest_before_restore, steam_install_dir_from_path,
     };
     use crate::{AgentConfig, StateAgent};
     use chrono::Utc;
@@ -740,6 +778,38 @@ mod tests {
         ensure_steam_appmanifest_after_commit(&agent, &bundle).unwrap();
 
         assert!(!steamapps.join("appmanifest_3241660.acf").exists());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn pre_restore_removes_existing_steam_appmanifest() {
+        let home = std::env::temp_dir().join(format!(
+            "noland-restore-steam-pre-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let steamapps = home.join("steamapps");
+        std::fs::create_dir_all(&steamapps).unwrap();
+        let agent = StateAgent::boot(AgentConfig::isolated(home.clone())).unwrap();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("0".into(), steamapps.clone());
+        let mut bundle = steam_bundle("Test Game");
+        bundle.app.canonical_executable = Some(PathBuf::from(
+            "/source/steamapps/common/TestGame/bin/game.exe",
+        ));
+        let manifest_path = steamapps.join("appmanifest_3241660.acf");
+        std::fs::write(&manifest_path, "old manifest").unwrap();
+
+        let roots = prepare_restore_roots(&agent, &bundle).unwrap();
+        remove_steam_appmanifest_before_restore(&bundle, &roots).unwrap();
+
+        assert!(!manifest_path.exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 

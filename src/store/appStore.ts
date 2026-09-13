@@ -1,4 +1,9 @@
 import { create } from "zustand";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
@@ -20,6 +25,7 @@ import {
   stopProvisioningAfterCurrentStage as stopProvisioningAfterCurrentStageCommand,
   subscribeProvisioningEvents,
   subscribeSharedStorageProgress,
+  subscribeSharedStorageRestoreCompleted,
   cancelSharedStorageOperation,
   verifyWireguard,
   getSetupStatus,
@@ -588,17 +594,17 @@ async function applyProvisioningEventState(
         : {}),
     };
 
-    if (
-      state.provisioningStopRequested &&
-      (event.state === "Idle" || event.state === "Error")
-    ) {
-      // The backend finished (or aborted) the pipeline after a stop request.
-      // Clear the blocking modal and the stop flag so the app settles back
-      // into a normal state.
-      updates.busy = false;
+    if (state.provisioningStopRequested) {
+      // Keep the overlay dismissed while the backend finishes the current stage.
+      // In particular, repeated WaitingForInstance events must not reopen it.
       updates.blockingAction = null;
       updates.isBlocking = false;
-      updates.provisioningStopRequested = false;
+      if (event.state === "Idle" || event.state === "Error") {
+        updates.busy = false;
+        updates.provisioningStopRequested = false;
+      } else {
+        updates.busy = true;
+      }
       return updates;
     }
 
@@ -675,6 +681,52 @@ const SHARED_STORAGE_ACTION_KEYS = new Set([
   "instance.storage.sync",
 ]);
 
+function formatTransferBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = Math.max(0, bytes);
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+const notifiedRestoreOperations = new Set<string>();
+
+async function handleSharedStorageRestoreCompleted(
+  event: import("../lib/types").SharedStorageRestoreCompletedEvent,
+  get: () => AppStore,
+) {
+  const blockingAction = get().blockingAction;
+  if (
+    blockingAction &&
+    ((blockingAction.operationId && blockingAction.operationId !== event.operationId) ||
+      (blockingAction.instanceId != null && blockingAction.instanceId !== event.instanceId))
+  ) {
+    return;
+  }
+  if (notifiedRestoreOperations.has(event.operationId)) {
+    return;
+  }
+  notifiedRestoreOperations.add(event.operationId);
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) {
+      granted = (await requestPermission()) === "granted";
+    }
+    if (granted) {
+      sendNotification({
+        title: "Noland",
+        body: "Your download is ready to go.",
+      });
+    }
+  } catch (error: unknown) {
+    console.warn("[shared-storage] restore notification failed", error);
+  }
+}
+
 function applySharedStorageProgress(
   event: SharedStorageProgressEvent,
   set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
@@ -686,14 +738,52 @@ function applySharedStorageProgress(
     ) {
       return {};
     }
+    if (
+      (state.blockingAction.operationId &&
+        state.blockingAction.operationId !== event.operationId) ||
+      (state.blockingAction.instanceId != null &&
+        state.blockingAction.instanceId !== event.instanceId)
+    ) {
+      return {};
+    }
+    const transferPhase = /upload|download/i.test(event.phase ?? event.state);
+    const transferFraction = transferPhase
+      ? event.completedBytes != null && event.totalBytes != null && event.totalBytes > 0
+        ? event.completedBytes / event.totalBytes
+        : event.completedObjects != null &&
+            event.totalObjects != null &&
+            event.totalObjects > 0
+          ? event.completedObjects / event.totalObjects
+          : null
+      : null;
     const percent =
-      typeof event.fraction === "number"
-        ? Math.round(event.fraction * 100)
+      typeof transferFraction === "number"
+        ? Math.round(Math.max(0, Math.min(1, transferFraction)) * 100)
+        : typeof event.fraction === "number"
+          ? Math.round(event.fraction * 100)
+          : null;
+    const objects =
+      event.completedObjects != null && event.totalObjects != null
+        ? `${event.completedObjects}/${event.totalObjects} ${event.objectUnit ?? "objects"}`
         : null;
-    const units =
+    const bytes =
+      event.completedBytes != null
+        ? event.totalBytes != null && event.totalBytes > 0
+          ? `${formatTransferBytes(event.completedBytes)}/${formatTransferBytes(event.totalBytes)} ready`
+          : `${formatTransferBytes(event.completedBytes)} ready`
+        : null;
+    const transferVerb = /download/i.test(event.phase ?? event.state)
+      ? "downloaded"
+      : "uploaded";
+    const transferred =
+      event.transferredBytes != null
+        ? `${formatTransferBytes(event.transferredBytes)} ${transferVerb}`
+        : null;
+    const operationUnits =
       event.completedUnits != null && event.totalUnits != null
         ? `${event.completedUnits}/${event.totalUnits}${event.unit ? ` ${event.unit}` : ""}`
         : null;
+    const units = transferPhase ? (objects ?? operationUnits) : operationUnits;
     const phaseLabel = event.readyToLaunch
       ? "Ready to launch"
       : event.phase
@@ -703,7 +793,11 @@ function applySharedStorageProgress(
       blockingAction: {
         ...state.blockingAction,
         label: phaseLabel,
-        detail: [event.message, units].filter(Boolean).join(" · ") || state.blockingAction.detail,
+        detail:
+          [event.message, units, transferPhase ? bytes : null, transferPhase ? transferred : null]
+            .filter(Boolean)
+            .join(" · ") ||
+          state.blockingAction.detail,
         progress: percent,
         mode: percent == null ? "indeterminate" : "determinate",
         cancellable: event.cancellable,
@@ -966,6 +1060,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await subscribeSharedStorageProgress((event) => {
         applySharedStorageProgress(event, set);
       });
+      await subscribeSharedStorageRestoreCompleted((event) => {
+        void handleSharedStorageRestoreCompleted(event, get);
+      });
 
       set({ _eventsBound: true });
     },
@@ -980,11 +1077,23 @@ export const useAppStore = create<AppStore>((set, get) => {
         return;
       }
 
-      set({ provisioningStopRequested: true, error: null });
+      // Dismiss synchronously. The backend stop request may take until the current
+      // stage reaches a safe boundary, but the user should never wait on that RPC
+      // for the loading modal to close.
+      set({
+        provisioningStopRequested: true,
+        blockingAction: null,
+        isBlocking: false,
+        error: null,
+      });
       try {
         await stopProvisioningAfterCurrentStageCommand();
       } catch (error) {
-        set({ provisioningStopRequested: false, error: mapError(error) });
+        set({
+          provisioningStopRequested: false,
+          busy: false,
+          error: mapError(error),
+        });
       }
     },
 

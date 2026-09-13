@@ -194,18 +194,22 @@ impl StorageProvider {
                             options: vec![
                                 ProviderSelectOption {
                                     value: "1".to_string(),
-                                    label: "1 upload (recommended)".to_string(),
+                                    label: "1 upload (lowest resource use)".to_string(),
                                 },
                                 ProviderSelectOption {
                                     value: "2".to_string(),
                                     label: "2 uploads".to_string(),
+                                },
+                                ProviderSelectOption {
+                                    value: "4".to_string(),
+                                    label: "4 uploads (recommended for fast connections)".to_string(),
                                 },
                             ],
                         },
                         required: false,
                         placeholder: None,
                         help_text: Some(
-                            "Use one upload by default; two may improve throughput on fast, stable connections."
+                            "Use four uploads for fast connections, or reduce concurrency to limit bandwidth and memory use."
                                 .to_string(),
                         ),
                     },

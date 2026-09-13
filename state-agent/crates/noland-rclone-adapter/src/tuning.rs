@@ -24,7 +24,7 @@ impl Default for TransferTuning {
             max_parallel_uploads: 2,
             max_parallel_downloads: 4,
             max_bulk_files: 256,
-            max_bulk_bytes: 512 * 1024 * 1024,
+            max_bulk_bytes: 2 * 1024 * 1024 * 1024,
             max_attempts: 4,
             initial_backoff_ms: 500,
             max_backoff_ms: 30_000,
@@ -43,7 +43,7 @@ impl TransferTuning {
             max_parallel_uploads: 4,
             max_parallel_downloads: 8,
             max_bulk_files: 1_024,
-            max_bulk_bytes: 1024 * 1024 * 1024,
+            max_bulk_bytes: 4 * 1024 * 1024 * 1024,
             rclone_transfers: 8,
             rclone_checkers: 8,
             ..Self::default()
@@ -56,7 +56,7 @@ impl TransferTuning {
             max_parallel_uploads: 1,
             max_parallel_downloads: 2,
             max_bulk_files: 128,
-            max_bulk_bytes: 128 * 1024 * 1024,
+            max_bulk_bytes: 1024 * 1024 * 1024,
             min_request_interval_ms: 25,
             rclone_transfers: 2,
             rclone_checkers: 2,
@@ -265,6 +265,8 @@ mod tests {
     fn conservative_defaults_normalize_limits() {
         let defaults = TransferTuning::default();
         assert_eq!(defaults.max_parallel_uploads, 2);
+        assert_eq!(defaults.max_bulk_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(defaults.rclone_transfers, 4);
         assert!(defaults.max_attempts >= 3);
 
         let mut invalid = defaults;
@@ -283,6 +285,10 @@ mod tests {
         let gameplay = TransferTuning::gameplay_safe();
         assert!(throughput.max_parallel_uploads > gameplay.max_parallel_uploads);
         assert!(throughput.rclone_transfers > gameplay.rclone_transfers);
+        assert_eq!(throughput.max_bulk_bytes, 4 * 1024 * 1024 * 1024);
+        assert_eq!(throughput.rclone_transfers, 8);
+        assert_eq!(throughput.rclone_checkers, 8);
+        assert_eq!(gameplay.max_bulk_bytes, 1024 * 1024 * 1024);
         assert!(gameplay.min_request_interval_ms > 0);
     }
 
