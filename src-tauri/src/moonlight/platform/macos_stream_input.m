@@ -73,6 +73,9 @@ static void noland_macos_run_on_main_sync(dispatch_block_t block) {
 @property (nonatomic, strong) NSTimer *debugTimer;
 @property (nonatomic, strong) id didBecomeKeyObserver;
 @property (nonatomic, strong) id didResignKeyObserver;
+@property (nonatomic, strong) id didResizeObserver;
+@property (nonatomic, strong) id didEnterFullScreenObserver;
+@property (nonatomic, strong) id didExitFullScreenObserver;
 @property (nonatomic, strong) id localEventMonitor;
 @end
 
@@ -121,6 +124,22 @@ static NSHashTable<NolandMacosStreamInputBridge *> *noland_stream_input_bridges(
 }
 
 static void noland_update_debug_overlay(NolandMacosStreamInputBridge *bridge);
+
+static void noland_reflow_stream_view(NolandMacosStreamInputBridge *bridge) {
+    if (bridge == nil || bridge.view == nil) {
+        return;
+    }
+
+    NSView *contentView = bridge.window.contentView;
+    if (contentView != nil) {
+        [contentView setNeedsLayout:YES];
+        [contentView layoutSubtreeIfNeeded];
+    }
+    bridge.captureView.frame = bridge.view.bounds;
+    [bridge.view setNeedsLayout:YES];
+    [bridge.view layoutSubtreeIfNeeded];
+    noland_update_debug_overlay(bridge);
+}
 
 static void noland_update_debug_overlay_visibility(NolandMacosStreamInputBridge *bridge) {
     if (bridge == nil) {
@@ -1044,6 +1063,18 @@ int noland_macos_input_install(void *ns_view) {
             noland_set_capture_state(bridge, NO, kNolandCaptureModeNone);
             noland_macos_input_on_focus_changed(false);
         }];
+        bridge.didResizeObserver = [center addObserverForName:NSWindowDidResizeNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            noland_reflow_stream_view(bridge);
+        }];
+        bridge.didEnterFullScreenObserver = [center addObserverForName:NSWindowDidEnterFullScreenNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            noland_reflow_stream_view(bridge);
+        }];
+        bridge.didExitFullScreenObserver = [center addObserverForName:NSWindowDidExitFullScreenNotification object:window queue:nil usingBlock:^(NSNotification * _Nonnull note) {
+            (void)note;
+            noland_reflow_stream_view(bridge);
+        }];
 
         objc_setAssociatedObject(view, kNolandMacosStreamInputBridgeKey, bridge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         [noland_stream_input_bridges() addObject:bridge];
@@ -1095,6 +1126,18 @@ void noland_macos_input_uninstall(void *ns_view) {
         if (bridge.didResignKeyObserver != nil) {
             [center removeObserver:bridge.didResignKeyObserver];
             bridge.didResignKeyObserver = nil;
+        }
+        if (bridge.didResizeObserver != nil) {
+            [center removeObserver:bridge.didResizeObserver];
+            bridge.didResizeObserver = nil;
+        }
+        if (bridge.didEnterFullScreenObserver != nil) {
+            [center removeObserver:bridge.didEnterFullScreenObserver];
+            bridge.didEnterFullScreenObserver = nil;
+        }
+        if (bridge.didExitFullScreenObserver != nil) {
+            [center removeObserver:bridge.didExitFullScreenObserver];
+            bridge.didExitFullScreenObserver = nil;
         }
 
         objc_setAssociatedObject(view, kNolandMacosStreamInputBridgeKey, nil, OBJC_ASSOCIATION_ASSIGN);

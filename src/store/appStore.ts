@@ -766,15 +766,15 @@ function applySharedStorageProgress(
       event.completedObjects != null && event.totalObjects != null
         ? `${event.completedObjects}/${event.totalObjects} ${event.objectUnit ?? "objects"}`
         : null;
+    const isDownloadPhase = /download/i.test(event.phase ?? event.state);
+    const completedBytesLabel = isDownloadPhase ? "downloaded" : "ready";
     const bytes =
       event.completedBytes != null
         ? event.totalBytes != null && event.totalBytes > 0
-          ? `${formatTransferBytes(event.completedBytes)}/${formatTransferBytes(event.totalBytes)} ready`
-          : `${formatTransferBytes(event.completedBytes)} ready`
+          ? `${formatTransferBytes(event.completedBytes)}/${formatTransferBytes(event.totalBytes)} ${completedBytesLabel}`
+          : `${formatTransferBytes(event.completedBytes)} ${completedBytesLabel}`
         : null;
-    const transferVerb = /download/i.test(event.phase ?? event.state)
-      ? "downloaded"
-      : "uploaded";
+    const transferVerb = isDownloadPhase ? "downloaded" : "uploaded";
     const transferred =
       event.transferredBytes != null
         ? `${formatTransferBytes(event.transferredBytes)} ${transferVerb}`

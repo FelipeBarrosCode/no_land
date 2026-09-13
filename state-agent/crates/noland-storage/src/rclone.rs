@@ -16,8 +16,8 @@ use tokio::process::Command;
 use tokio::sync::{OnceCell, Semaphore};
 
 use crate::{
-    compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, Health,
-    ImmutableUpload, ImmutableUploadCompletion, ImmutableUploadObserver, MetadataBatch,
+    compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, DownloadObserver,
+    Health, ImmutableUpload, ImmutableUploadCompletion, ImmutableUploadObserver, MetadataBatch,
     MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta, SharedRetryGate, SharedStorageProvider,
     StorageOperationMetrics,
 };
@@ -107,6 +107,18 @@ impl RcloneCommandBuilder {
         self.push_upload_options(&mut args);
         args.extend([local, destination]);
         Ok(args)
+    }
+
+    pub fn download_copyto_args(&self, source: String, destination: String) -> Vec<String> {
+        vec![
+            "copyto".into(),
+            "--stats".into(),
+            "500ms".into(),
+            "--stats-one-line".into(),
+            "--use-json-log".into(),
+            source,
+            destination,
+        ]
     }
 
     pub fn upload_copy_args(
@@ -397,7 +409,7 @@ impl RcloneStorage {
     async fn run_with_progress(
         &self,
         args: Vec<String>,
-        observer: &(dyn ImmutableUploadObserver + '_),
+        mut on_progress: impl FnMut(u64) -> Result<()>,
     ) -> Result<()> {
         forbid_rclone_sync(&args)?;
         if self.provider_kind != ProviderKind::GoogleDrive
@@ -446,7 +458,7 @@ impl RcloneStorage {
             let mut error_output = String::new();
             while let Some(line) = lines.next_line().await? {
                 if let Some(bytes) = parse_rclone_stats_bytes(&line) {
-                    if let Err(error) = observer.transfer_progress(bytes) {
+                    if let Err(error) = on_progress(bytes) {
                         let _ = child.kill().await;
                         return Err(error);
                     }
@@ -536,7 +548,8 @@ impl RcloneStorage {
         match observer {
             Some(observer) => {
                 observer.transfer_started()?;
-                self.run_with_progress(args, observer).await
+                self.run_with_progress(args, |bytes| observer.transfer_progress(bytes))
+                    .await
             }
             None => self.run(args).await.map(|_| ()),
         }
@@ -821,18 +834,34 @@ impl SharedStorageProvider for RcloneStorage {
     }
 
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()> {
+        self.download_observed(key, dest, None).await
+    }
+
+    async fn download_observed(
+        &self,
+        key: &RemoteKey,
+        dest: &Path,
+        observer: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
         self.metrics
             .remote_download_calls
             .fetch_add(1, Ordering::Relaxed);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        self.run(vec![
-            "copyto".into(),
-            self.remote_path(key),
-            dest.display().to_string(),
-        ])
-        .await?;
+        let args = self
+            .command_builder
+            .download_copyto_args(self.remote_path(key), dest.display().to_string());
+        match observer {
+            Some(observer) => {
+                observer.transfer_started()?;
+                self.run_with_progress(args, |bytes| observer.transfer_progress(bytes))
+                    .await?;
+            }
+            None => {
+                self.run(args).await?;
+            }
+        }
         if let Ok(metadata) = std::fs::metadata(dest) {
             self.metrics
                 .bytes_downloaded
@@ -1090,6 +1119,17 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "--use-json-log"));
         assert!(assert_copy_only(&args).is_ok());
         assert!(!args.iter().any(|arg| arg.starts_with("--drive-")));
+    }
+
+    #[test]
+    fn download_copy_args_emit_machine_readable_progress() {
+        let profile = TransferProfile::for_provider(ProviderKind::Local, "local").unwrap();
+        let builder = RcloneCommandBuilder::new(ProviderKind::Local, "local", profile).unwrap();
+        let args = builder.download_copyto_args("remote:pack".into(), "/tmp/pack".into());
+        assert_eq!(args.first().map(String::as_str), Some("copyto"));
+        assert!(args.windows(2).any(|pair| pair == ["--stats", "500ms"]));
+        assert!(args.iter().any(|arg| arg == "--stats-one-line"));
+        assert!(args.iter().any(|arg| arg == "--use-json-log"));
     }
 
     #[test]
