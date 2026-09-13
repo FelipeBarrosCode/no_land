@@ -15,7 +15,12 @@ import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
-import { checkForGitHubUpdate, type AppUpdateInfo } from "../lib/updateChecker";
+import {
+  checkForAppUpdate,
+  installPendingAppUpdate,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+} from "../lib/updateChecker";
 
 function RootRoute() {
   const appState = useAppStore((state) => state.appState);
@@ -286,18 +291,19 @@ function UpdateAvailableModal({
   update: AppUpdateInfo;
   onDismiss: () => void;
 }) {
-  const [opening, setOpening] = useState(false);
+  const [progress, setProgress] = useState<AppUpdateProgress | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
   const releaseDate = update.publishedAt
     ? new Date(update.publishedAt).toLocaleDateString()
     : null;
 
-  async function openDownload() {
-    setOpening(true);
+  async function installUpdate() {
+    setInstallError(null);
     try {
-      await openUrl(update.releaseUrl);
-      onDismiss();
-    } finally {
-      setOpening(false);
+      await installPendingAppUpdate(setProgress);
+    } catch (error) {
+      setProgress(null);
+      setInstallError(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -315,7 +321,7 @@ function UpdateAvailableModal({
              Noland Connect {update.latestVersion} is ready to install.
           </p>
         </div>
-        <Button variant="ghost" onClick={onDismiss}>
+        <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
           Later
         </Button>
       </div>
@@ -335,19 +341,31 @@ function UpdateAvailableModal({
           <div className="mt-4 max-h-48 overflow-y-auto whitespace-pre-wrap border border-[#3e4270] bg-[#070b1b] p-3 text-[1.05rem] leading-snug text-[#b4c8de]">
             {update.releaseNotes}
           </div>
+          {progress && (
+            <div className="mt-4 space-y-2">
+              <div className="flex justify-between text-[1.05rem] text-[#9ad9ff]">
+                <span>{progress.phase === "downloading" ? "Downloading update" : progress.phase === "installing" ? "Installing update" : "Restarting Noland Connect"}</span>
+                <span>{progress.percent != null ? `${progress.percent}%` : "Working..."}</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded bg-[#171d35]">
+                <div className={`h-full bg-neon-cyan transition-[width] ${progress.percent == null ? "w-1/3 animate-pulse" : ""}`} style={progress.percent != null ? { width: `${progress.percent}%` } : undefined} />
+              </div>
+            </div>
+          )}
+          {installError && <p className="mt-4 border border-red-500/30 bg-red-900/20 p-3 text-sm text-red-300">{installError}</p>}
         </Card>
 
         <div className="mt-4 flex justify-end gap-3">
-          <Button variant="ghost" onClick={onDismiss}>
+          <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
             Skip for now
           </Button>
           <Button
             variant="secondary"
-            loading={opening}
-            loadingText="Opening..."
-            onClick={openDownload}
+            loading={progress !== null}
+            loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
+            onClick={installUpdate}
           >
-             Open Installer
+             Install and Restart
           </Button>
         </div>
       </ModalBody>
@@ -524,20 +542,29 @@ export function App() {
     }
 
     let cancelled = false;
+    let checking = false;
     async function checkForUpdate() {
+      if (checking) return;
+      checking = true;
       try {
-        const update = await checkForGitHubUpdate();
+        const update = await checkForAppUpdate();
         if (!cancelled && update) {
           setAvailableUpdate(update);
         }
       } catch (error) {
         console.warn("Update check failed", error);
+      } finally {
+        checking = false;
       }
     }
 
     void checkForUpdate();
+    const interval = window.setInterval(() => void checkForUpdate(), 15 * 60 * 1000);
+    window.addEventListener("focus", checkForUpdate);
     return () => {
       cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", checkForUpdate);
     };
   }, [windowLabel, windowLabelResolved]);
 

@@ -27,6 +27,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "externalBin": [
       "binaries/noland-net-helper",
@@ -124,5 +125,16 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IDREQTI0RDFDMzAwMDhBRkQKUldUOWlnQXdIRTJpVFMwaVJUY3ZlNDkvRVBGaUh4TjV4T2xRSGxna0g3U2lSUTVuc1VOaVgvWW0K",
+      "endpoints": [
+        "https://github.com/FelipeBarrosCode/no_land/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

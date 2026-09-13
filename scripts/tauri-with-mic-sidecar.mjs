@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -186,6 +186,33 @@ if (process.platform === 'darwin' && mode === 'build') {
     console.log(`[tauri-with-mic-sidecar] Custom macOS notarization finished for ${targetTriple}`);
   } else {
     console.log('[tauri-with-mic-sidecar] Skipping custom macOS notarization because APPLE_ID/APPLE_PASSWORD/APPLE_TEAM_ID are not all configured');
+  }
+
+  if (process.env.TAURI_SIGNING_PRIVATE_KEY) {
+    const productName = JSON.parse(readFileSync(resolve(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8')).productName;
+    const bundleDir = resolve(repoRoot, 'src-tauri', 'target', targetTriple, 'release', 'bundle', 'macos');
+    const appName = `${productName}.app`;
+    const updaterArchive = join(bundleDir, `${appName}.tar.gz`);
+    rmSync(updaterArchive, { force: true });
+    rmSync(`${updaterArchive}.sig`, { force: true });
+    console.log(`[tauri-with-mic-sidecar] Rebuilding updater archive from final notarized app: ${updaterArchive}`);
+    const archive = spawnSync('tar', ['-czf', updaterArchive, '-C', bundleDir, appName], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: nativeEnv,
+    });
+    if (archive.status !== 0) process.exit(archive.status ?? 1);
+
+    const signerArgs = existsSync(tauriCliScript)
+      ? [tauriCliScript, 'signer', 'sign', updaterArchive]
+      : ['tauri', 'signer', 'sign', updaterArchive];
+    const signerCommand = existsSync(tauriCliScript) ? process.execPath : 'npx';
+    const sign = spawnSync(signerCommand, signerArgs, {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: nativeEnv,
+    });
+    if (sign.status !== 0) process.exit(sign.status ?? 1);
   }
 }
 

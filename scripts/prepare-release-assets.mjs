@@ -16,7 +16,7 @@ const downloadedAssetsRoot = join(repoRoot, 'release-assets');
 const publishRoot = join(repoRoot, 'release-publish');
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
-const appVersion = tauriConfig.version ?? '0.1.0';
+const appVersion = releaseTag.replace(/^v/u, '');
 const [repositoryOwner = 'FelipeBarrosCode', repositoryName = 'no_land'] = (process.env.GITHUB_REPOSITORY || 'FelipeBarrosCode/no_land').split('/');
 const windowsStoreBaseUrl = process.env.WINDOWS_STORE_BASE_URL?.trim().replace(/\/$/u, '') || null;
 const windowsStorePathPrefix = sanitizePathPrefix(process.env.WINDOWS_STORE_PATH_PREFIX?.trim() || 'no_land');
@@ -39,9 +39,10 @@ if (approvedFiles.length === 0) {
 
 const publishedAssetNames = new Set();
 const publishedAssets = [];
+const publishedBySource = new Map();
 for (const source of approvedFiles) {
   const originalName = basename(source);
-  const name = sanitizePublishedAssetName(originalName);
+  const name = updaterSafeAssetName(source, originalName);
   if (publishedAssetNames.has(name)) {
     console.error(`Duplicate published asset name detected: ${name}`);
     process.exit(1);
@@ -51,8 +52,46 @@ for (const source of approvedFiles) {
   const destination = join(publishRoot, name);
   copyFileSync(source, destination);
   publishedAssets.push(destination);
+  publishedBySource.set(source, destination);
   console.log(`[prepare-release-assets] Included ${relative(repoRoot, source)} -> ${relative(repoRoot, destination)}`);
 }
+
+const updaterPlatforms = {};
+for (const descriptor of [
+  { artifact: 'tauri-macos-arm64', platform: 'darwin-aarch64', pattern: /\.app\.tar\.gz$/u },
+  { artifact: 'tauri-macos-x64', platform: 'darwin-x86_64', pattern: /\.app\.tar\.gz$/u },
+  { artifact: 'tauri-windows-arm64', platform: 'windows-aarch64', pattern: /-setup\.exe$/iu },
+  { artifact: 'tauri-windows-x64', platform: 'windows-x86_64', pattern: /-setup\.exe$/iu },
+]) {
+  const bundle = discoveredFiles.find((file) => {
+    const relativePath = relative(downloadedAssetsRoot, file).replaceAll('\\', '/');
+    return relativePath.startsWith(`${descriptor.artifact}/`) && descriptor.pattern.test(basename(file)) && !/-store-setup\.exe$/iu.test(basename(file));
+  });
+  if (!bundle) {
+    console.error(`Missing updater bundle for ${descriptor.platform}`);
+    process.exit(1);
+  }
+  const signature = `${bundle}.sig`;
+  const publishedBundle = publishedBySource.get(bundle);
+  if (!existsSync(signature) || !publishedBundle || !publishedBySource.has(signature)) {
+    console.error(`Missing updater signature for ${descriptor.platform}: ${signature}`);
+    process.exit(1);
+  }
+  updaterPlatforms[descriptor.platform] = {
+    signature: readFileSync(signature, 'utf8').trim(),
+    url: `https://github.com/${repositoryOwner}/${repositoryName}/releases/download/${releaseTag}/${encodeURIComponent(basename(publishedBundle))}`,
+  };
+}
+
+writeFileSync(
+  join(publishRoot, 'latest.json'),
+  `${JSON.stringify({
+    version: appVersion,
+    notes: `Noland Connect ${releaseTag}. See the GitHub release for full notes.`,
+    pub_date: new Date().toISOString(),
+    platforms: updaterPlatforms,
+  }, null, 2)}\n`,
+);
 
 for (const architecture of ['x64', 'arm64']) {
   const windowsStoreInstaller = publishedAssets.find((file) => new RegExp(`_${architecture}-store-setup\\.exe$`, 'iu').test(basename(file)));
@@ -114,6 +153,8 @@ for (const architecture of ['x64', 'arm64']) {
 console.log(`[prepare-release-assets] Prepared ${publishedAssets.length} publishable assets in ${publishRoot}`);
 
 function shouldPublish(relativePath, baseName) {
+  if (baseName.endsWith('.app.tar.gz') || baseName.endsWith('.app.tar.gz.sig')) return true;
+  if (baseName.endsWith('.exe.sig') || baseName.endsWith('.msi.sig')) return true;
   if (baseName.endsWith('.dmg')) return true;
   // AppImage is intentionally not published for the Linux client right now.
   // WebKitGTK/GIO can load host modules while AppImage injects bundled usr/lib,
@@ -128,6 +169,16 @@ function shouldPublish(relativePath, baseName) {
 
   console.log(`[prepare-release-assets] Skipped ${relativePath}`);
   return false;
+}
+
+function updaterSafeAssetName(source, originalName) {
+  const relativePath = relative(downloadedAssetsRoot, source).replaceAll('\\', '/');
+  const match = relativePath.match(/^tauri-(macos|windows)-(arm64|x64)\//u);
+  let name = originalName;
+  if (match && /\.app\.tar\.gz(?:\.sig)?$/u.test(originalName)) {
+    name = originalName.replace(/\.app\.tar\.gz/u, `_${match[2]}.app.tar.gz`);
+  }
+  return sanitizePublishedAssetName(name);
 }
 
 function sanitizePathPrefix(value) {
