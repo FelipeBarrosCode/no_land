@@ -20,7 +20,37 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      release_name: ${{ steps.version.outputs.release_name }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Determine next release version
+        id: version
+        shell: bash
+        run: |
+          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
+          configured_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          latest_version="${latest_tag#v}"
+          if [[ -z "$latest_version" ]] || [[ "$(printf '%s\n%s\n' "$latest_version" "$configured_version" | sort -V | tail -n 1)" == "$configured_version" ]]; then
+            version="$configured_version"
+          else
+            version="$latest_version"
+          fi
+          IFS='.' read -r major minor patch <<< "$version"
+          next_tag="v${major}.${minor}.$((patch + 1))"
+          echo "release_tag=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$next_tag" >> "$GITHUB_OUTPUT"
+          echo "version=${next_tag#v}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: version
     environment: Secrets
     strategy:
       fail-fast: false
@@ -213,6 +243,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Set release build version
+        run: node scripts/set-release-version.mjs "${{ needs.version.outputs.version }}"
+
       - name: Build Tauri app
         shell: bash
         env:
@@ -222,6 +255,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
           APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           NOLAND_REQUIRE_SIGNED_RELEASE: "1"
         run: |
           npm run tauri:build -- --target "${{ matrix.target }}"
@@ -245,6 +279,16 @@ jobs:
           xcrun stapler validate -v "$ARCHIVED_APP"
           spctl -a -vvv -t exec "$ARCHIVED_APP"
 
+          UPDATER_PATH="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${PRODUCT_NAME}.app.tar.gz"
+          test -s "$UPDATER_PATH"
+          test -s "$UPDATER_PATH.sig"
+          UPDATER_EXTRACT_DIR=$(mktemp -d)
+          tar -xzf "$UPDATER_PATH" -C "$UPDATER_EXTRACT_DIR"
+          UPDATER_APP="$UPDATER_EXTRACT_DIR/${PRODUCT_NAME}.app"
+          codesign --verify --deep --strict --verbose=2 "$UPDATER_APP"
+          xcrun stapler validate -v "$UPDATER_APP"
+          spctl -a -vvv -t exec "$UPDATER_APP"
+
       - name: Verify bundled sidecars and runtime
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
@@ -260,6 +304,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     environment: Secrets
     needs:
+      - version
       - build
     runs-on: ubuntu-latest
 
@@ -274,31 +319,13 @@ jobs:
         with:
           path: release-assets
 
-      - name: Determine next release version
-        id: version
-        shell: bash
-        run: |
-          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
-          if [[ -z "$latest_tag" ]]; then
-            next_tag="v0.0.1"
-          else
-            version="${latest_tag#v}"
-            IFS='.' read -r major minor patch <<< "$version"
-            next_patch=$((patch + 1))
-            next_tag="v${major}.${minor}.${next_patch}"
-          fi
-          echo "release_tag=$next_tag" >> "$GITHUB_OUTPUT"
-          echo "release_name=$next_tag" >> "$GITHUB_OUTPUT"
-          echo "Resolved next release tag: $next_tag"
-
-
       - name: Create git release tag
         shell: bash
         run: |
           git config user.name github-actions
           git config user.email github-actions@github.com
-          git tag "${{ steps.version.outputs.release_tag }}" "$GITHUB_SHA"
-          git push origin "refs/tags/${{ steps.version.outputs.release_tag }}"
+          git tag "${{ needs.version.outputs.release_tag }}" "$GITHUB_SHA"
+          git push origin "refs/tags/${{ needs.version.outputs.release_tag }}"
 
       - name: Prepare curated release assets
         shell: bash
@@ -306,7 +333,7 @@ jobs:
           WINDOWS_STORE_BASE_URL: ${{ secrets.CLOUDFLARE_R2_PUBLIC_BASE_URL }}
           WINDOWS_STORE_PATH_PREFIX: no_land
         run: |
-          node scripts/prepare-release-assets.mjs "${{ steps.version.outputs.release_tag }}"
+          node scripts/prepare-release-assets.mjs "${{ needs.version.outputs.release_tag }}"
 
 
       - name: Publish GitHub release assets
@@ -314,8 +341,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          tag_name: ${{ steps.version.outputs.release_tag }}
-          name: ${{ steps.version.outputs.release_name }}
+          tag_name: ${{ needs.version.outputs.release_tag }}
+          name: ${{ needs.version.outputs.release_name }}
           prerelease: false
           target_commitish: ${{ github.sha }}
           generate_release_notes: true

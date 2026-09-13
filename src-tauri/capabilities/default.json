@@ -3,5 +3,12 @@
   "identifier": "default",
   "description": "Default desktop capability",
   "windows": ["main", "moonlight-stream"],
-  "permissions": ["core:default", "dialog:default", "notification:default", "opener:default"]
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "notification:default",
+    "opener:default",
+    "process:allow-restart",
+    "updater:default"
+  ]
 }
