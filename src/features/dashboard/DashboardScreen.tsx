@@ -12,6 +12,7 @@ import { MicControls } from "../../components/ui/MicControls";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
+import { SocialLinks } from "../../components/ui/SocialLinks";
 import {
   VAST_BILLING_URL,
   VAST_API_KEY_URL,
@@ -436,7 +437,8 @@ export function DashboardScreen({
             </h1>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <SocialLinks />
             <Button
               variant={systemHealth?.ok === false ? "danger" : "secondary"}
               onClick={handleHealthClick}
