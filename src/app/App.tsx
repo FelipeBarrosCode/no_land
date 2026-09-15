@@ -6,6 +6,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
+import { SocialLinks } from "../components/ui/SocialLinks";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
@@ -355,18 +356,21 @@ function UpdateAvailableModal({
           {installError && <p className="mt-4 border border-red-500/30 bg-red-900/20 p-3 text-sm text-red-300">{installError}</p>}
         </Card>
 
-        <div className="mt-4 flex justify-end gap-3">
-          <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
-            Skip for now
-          </Button>
-          <Button
-            variant="secondary"
-            loading={progress !== null}
-            loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
-            onClick={installUpdate}
-          >
-             Install and Restart
-          </Button>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <SocialLinks />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
+              Skip for now
+            </Button>
+            <Button
+              variant="secondary"
+              loading={progress !== null}
+              loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
+              onClick={installUpdate}
+            >
+              Install and Restart
+            </Button>
+          </div>
         </div>
       </ModalBody>
     </ModalFrame>
