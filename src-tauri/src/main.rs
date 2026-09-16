@@ -6,6 +6,7 @@ mod input;
 mod mic_client;
 mod models;
 mod moonlight;
+mod network_monitor;
 mod services;
 mod utils;
 
@@ -414,6 +415,7 @@ fn main() {
             });
             app.manage(context.clone());
             app.manage(artwork_service);
+            app.manage(network_monitor::NetworkMonitor::default());
             app.manage(moonlight::platform::StreamWindowCloseState::default());
             let moonlight_manager = moonlight::composition::MoonlightManager::new(
                 state_path.clone(),
@@ -518,8 +520,10 @@ fn main() {
             let active_session_preferences = moonlight.active_session_preferences.clone();
             let active_stream_instance_id = moonlight.active_stream_instance_id.clone();
             let mic_context = app.state::<AppContext>().inner().clone();
+            let network_monitor = app.state::<network_monitor::NetworkMonitor>().inner().clone();
 
             tauri::async_runtime::spawn(async move {
+                network_monitor.stop().await;
                 let _ = runtime.stop().await;
                 let _ = runtime.detach_surface().await;
                 input.end_capture();
@@ -663,7 +667,8 @@ fn main() {
             moonlight_forget_host,
             moonlight_get_active_input_mode,
             moonlight_get_input_debug_state,
-            moonlight_get_session_state
+            moonlight_get_session_state,
+            network_monitor_get_state
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

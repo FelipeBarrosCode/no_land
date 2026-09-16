@@ -154,6 +154,8 @@ impl RemoteExec {
             "-o",
             "ConnectTimeout=10",
             "-o",
+            "ConnectionAttempts=1",
+            "-o",
             "ServerAliveInterval=30",
             "-o",
             "ServerAliveCountMax=3",
@@ -446,14 +448,17 @@ fn spawn_terminal_reader<R: Read + Send + 'static>(
             .lock()
             .ok()
             .and_then(|mut sessions| sessions.remove(&session_id));
-        if let Some(session) = session {
-            if let Ok(mut child) = session.child.lock() {
-                let _ = child.wait();
-            }
-        }
+        let exit_code: Option<u32> = session.and_then(|session| {
+            session
+                .child
+                .lock()
+                .ok()
+                .and_then(|mut child| child.wait().ok())
+                .map(|status| status.exit_code())
+        });
         let _ = app.emit(
             "remote-terminal-closed",
-            serde_json::json!({ "sessionId": session_id }),
+            serde_json::json!({ "sessionId": session_id, "exitCode": exit_code }),
         );
     });
 }

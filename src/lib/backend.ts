@@ -506,6 +506,10 @@ export async function moonlightGetSessionState(): Promise<{
   return invokeSafe<{ state: string }>("moonlight_get_session_state");
 }
 
+export async function getNetworkMonitorState(): Promise<Record<string, unknown> | null> {
+  return invokeSafe<Record<string, unknown> | null>("network_monitor_get_state");
+}
+
 export async function moonlightGetHostLatencyPreferences(
   hostId: string,
 ): Promise<MoonlightHostLatencyPreferencesResponse> {
