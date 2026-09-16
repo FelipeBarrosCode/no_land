@@ -119,6 +119,16 @@ impl RemoteExec {
         self.ssh_with_key(remote_command, timeout)
     }
 
+    pub fn ssh_with_stdin(
+        &self,
+        remote_command: &str,
+        input: Vec<u8>,
+        timeout: Duration,
+    ) -> AppResult<ExecOutput> {
+        ensure_command_available("ssh")?;
+        self.ssh_with_key_and_stdin(remote_command, input, timeout)
+    }
+
     pub fn ssh_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
         ensure_command_available("ssh")?;
         self.ssh_with_key_until_complete(remote_command)
@@ -317,6 +327,60 @@ impl RemoteExec {
         run_with_timeout(command, Some(timeout))
     }
 
+    fn ssh_with_key_and_stdin(
+        &self,
+        remote_command: &str,
+        input: Vec<u8>,
+        timeout: Duration,
+    ) -> AppResult<ExecOutput> {
+        let os = OsDetection::new();
+        let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
+        let port_str = self.ssh_port.to_string();
+
+        info!(
+            "SSH command with redacted stdin: ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
+            port_str, connection_string, remote_command
+        );
+
+        let ssh_binary = resolve_ssh_binary("ssh")?;
+        let mut command = Command::new(&ssh_binary);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &ssh_binary,
+            "ssh-runtime",
+            os.managed_binary_target_triple(),
+        );
+        command
+            .arg("-T")
+            .arg("-p")
+            .arg(&port_str)
+            .arg("-i")
+            .arg(&self.private_key_path)
+            .arg("-o")
+            .arg("StrictHostKeyChecking=no")
+            .arg("-o")
+            .arg(format!(
+                "UserKnownHostsFile={}",
+                os.ssh_known_hosts_null_file()
+            ))
+            .arg("-o")
+            .arg("ConnectTimeout=10")
+            .arg("-o")
+            .arg("ServerAliveInterval=30")
+            .arg("-o")
+            .arg("ServerAliveCountMax=3")
+            .arg("-o")
+            .arg("BatchMode=yes")
+            .arg("-o")
+            .arg("PreferredAuthentications=publickey")
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg(&connection_string)
+            .arg(remote_command);
+
+        run_with_timeout_input(command, Some(timeout), Some(input))
+    }
+
     fn ssh_with_key_until_complete(&self, remote_command: &str) -> AppResult<ExecOutput> {
         let os = OsDetection::new();
         let connection_string = format!("{}@{}", self.ssh_user, self.ssh_host);
@@ -479,7 +543,15 @@ fn ensure_command_available(command: &str) -> AppResult<()> {
     )))
 }
 
-fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {
+fn run_with_timeout(command: Command, timeout: Option<Duration>) -> AppResult<ExecOutput> {
+    run_with_timeout_input(command, timeout, None)
+}
+
+fn run_with_timeout_input(
+    mut command: Command,
+    timeout: Option<Duration>,
+    input: Option<Vec<u8>>,
+) -> AppResult<ExecOutput> {
     configure_no_window(&mut command);
     let rendered = render_command(&command);
     let started = Instant::now();
@@ -488,12 +560,34 @@ fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResul
         None => info!("Running command without timeout: {}", rendered),
     }
 
+    let stdin_mode = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(stdin_mode)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| AppError::Command(format!("Failed to spawn `{rendered}`: {error}")))?;
+
+    let stdin_handle = if let Some(mut bytes) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| AppError::Command(format!("Failed to open stdin for `{rendered}`")))?;
+        Some(thread::spawn(move || -> Result<(), String> {
+            let result = stdin
+                .write_all(&bytes)
+                .and_then(|_| stdin.flush())
+                .map_err(|error| format!("Failed writing redacted command input: {error}"));
+            bytes.fill(0);
+            result
+        }))
+    } else {
+        None
+    };
 
     let stdout_pipe = child
         .stdout
@@ -559,6 +653,15 @@ fn run_with_timeout(mut command: Command, timeout: Option<Duration>) -> AppResul
             }
         }
     };
+
+    if let Some(stdin_handle) = stdin_handle {
+        let stdin_join = stdin_handle
+            .join()
+            .map_err(|_| AppError::Command(format!("stdin writer panicked for `{rendered}`")))?;
+        if let Err(error) = stdin_join {
+            return Err(AppError::Command(format!("{error} for `{rendered}`")));
+        }
+    }
 
     let stdout_join = stdout_handle
         .join()

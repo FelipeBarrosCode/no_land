@@ -7,6 +7,7 @@ pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 pub mod launch_library;
+pub mod lifecycle_agent;
 pub mod location;
 pub mod mic_passthrough;
 pub mod mic_receiver;

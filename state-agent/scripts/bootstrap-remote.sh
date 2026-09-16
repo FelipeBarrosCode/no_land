@@ -113,7 +113,7 @@ if [[ -f "$SRC/systemd/noland-state-agent.service" ]]; then
     if [[ -n "$TARGET_USER" ]]; then
       TARGET_GROUP="$(id -gn "$TARGET_USER")"
       sed \
-        -e "s|^ExecStart=|User=$TARGET_USER\nGroup=$TARGET_GROUP\nExecStart=|" \
+        -e "s|^ExecStart=|User=root\nGroup=$TARGET_GROUP\nExecStart=|" \
         -e "s|Environment=NOLAND_HOME=/home/user|Environment=NOLAND_HOME=/home/$TARGET_USER|" \
         "$SRC/systemd/noland-state-agent.service" > /etc/systemd/system/noland-state-agent.service
     else
@@ -128,9 +128,13 @@ else
 fi
 
 if ! systemctl is-active --quiet noland-state-agent.service; then
-  systemctl --no-pager --full status noland-state-agent.service >&2 || true
+  systemctl --no-pager --full status noland-state-agent.service >&2
   exit 1
 fi
+
+install -d -o root -g root -m 0755 /opt/noland
+ln -sfn "$SRC" /opt/noland/state-agent
+chown -h root:root /opt/noland/state-agent
 
 SOCKET_PATH="$NOLAND_RUN_ROOT/state-agent.sock"
 for _ in $(seq 1 30); do

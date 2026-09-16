@@ -587,6 +587,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "noland-lifecycle-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "noland-rclone-adapter",
+ "noland-rpc",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "noland-observer"
 version = "0.1.0"
 dependencies = [
@@ -646,6 +663,7 @@ name = "noland-rpc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "noland-state-core",
  "serde",
  "serde_json",

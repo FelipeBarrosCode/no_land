@@ -10,7 +10,7 @@ use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
-const REQUIRED_AGENT_API_VERSION: u64 = 11;
+const REQUIRED_AGENT_API_VERSION: u64 = 13;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
     if probe_agent(remote).await.ok().and_then(|health| {
@@ -67,7 +67,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         worker = shell_escape(&worker),
     );
     let setup = format!(
-        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
+        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
         sudo = sudo,
         src = shell_escape(&remote_src),
         tar = shell_escape(&remote_tar),

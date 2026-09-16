@@ -1,11 +1,14 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::EphemeralRcloneSession;
-use noland_rpc::{HealthStatus, RpcHandler, RpcRequest};
+use noland_rpc::{
+    ActiveAppSession, GetActiveAppSessionsResult, HealthStatus, ResolvedProcessApp, RpcHandler,
+    RpcRequest, VerifyBackupCommitResult,
+};
 use noland_state_core::*;
 use noland_storage::{
     load_catalog, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
@@ -15,7 +18,7 @@ use serde_json::json;
 use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 11;
+const AGENT_API_VERSION: u64 = 13;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 
@@ -56,6 +59,24 @@ impl RpcHandler for AgentRpc {
                     .map(serialize_app_identity)
                     .collect::<Result<Vec<_>>>()?;
                 Ok(serde_json::Value::Array(apps))
+            }
+            "GetActiveAppSessions" => {
+                reconcile_process_state_best_effort(agent);
+                Ok(serde_json::to_value(active_app_sessions(&agent.db)?)?)
+            }
+            "ResolveProcessToApp" => {
+                let pid = req_pid(&request.params)?;
+                Ok(serde_json::to_value(resolve_process_to_app(
+                    &agent.db, pid,
+                )?)?)
+            }
+            "VerifyBackupCommit" => {
+                let app_id = AppId(req_str(&request.params, "app_id")?);
+                let bundle_id = req_uuid(&request.params, "bundle_id")?;
+                let commit_id = req_uuid(&request.params, "commit_id")?;
+                Ok(serde_json::to_value(verify_backup_commit(
+                    &agent.db, app_id, bundle_id, commit_id,
+                )?)?)
             }
             "GetAppDetails" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
@@ -1487,6 +1508,86 @@ fn mark_operation_failed(
     }
 }
 
+fn reconcile_process_state_best_effort(agent: &StateAgent) {
+    if let Err(error) = agent.discover() {
+        tracing::warn!(%error, "application discovery failed while listing active sessions");
+    }
+    if let Err(error) = agent.reconcile_live_processes() {
+        tracing::warn!(%error, "live process reconciliation failed while listing active sessions");
+    }
+    if let Err(error) = agent.process_events() {
+        tracing::warn!(%error, "process event reconciliation failed while listing active sessions");
+    }
+}
+
+fn active_app_sessions(db: &noland_state_db::StateDb) -> Result<GetActiveAppSessionsResult> {
+    let candidates = noland_discovery::filter_backup_candidates(db.list_apps()?)
+        .into_iter()
+        .map(|app| (app.app_id.clone(), app))
+        .collect::<HashMap<_, _>>();
+    let mut sessions = Vec::new();
+    for session in db.open_sessions()? {
+        let Some(app) = candidates.get(&session.app_id) else {
+            continue;
+        };
+        sessions.push(ActiveAppSession {
+            session_id: session.session_id,
+            app_id: session.app_id,
+            display_name: app.display_name.clone(),
+            pids: db.session_pids(session.session_id)?,
+            started_at: session.started_at,
+            identity_confidence: session.identity_confidence,
+        });
+    }
+    Ok(GetActiveAppSessionsResult { sessions })
+}
+
+fn resolve_process_to_app(
+    db: &noland_state_db::StateDb,
+    pid: i32,
+) -> Result<Option<ResolvedProcessApp>> {
+    let Some(session) = db.session_for_pid(pid)? else {
+        return Ok(None);
+    };
+    let Some(app) = db.get_app(&session.app_id)? else {
+        return Ok(None);
+    };
+    let Some(app) = noland_discovery::filter_backup_candidates(vec![app]).pop() else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedProcessApp {
+        app_id: app.app_id,
+        display_name: app.display_name,
+        session_id: session.session_id,
+        started_at: session.started_at,
+        identity_confidence: session.identity_confidence,
+    }))
+}
+
+fn verify_backup_commit(
+    db: &noland_state_db::StateDb,
+    app_id: AppId,
+    bundle_id: uuid::Uuid,
+    commit_id: uuid::Uuid,
+) -> Result<VerifyBackupCommitResult> {
+    let Some((latest_commit_id, latest_bundle_id, _)) = db.latest_commit(&app_id)? else {
+        return Err(StateError::NotFound(format!(
+            "committed backup for {app_id}"
+        )));
+    };
+    if latest_commit_id != commit_id || latest_bundle_id != bundle_id {
+        return Err(StateError::Conflict(format!(
+            "latest committed backup for {app_id} is bundle {latest_bundle_id}, commit {latest_commit_id}; requested bundle {bundle_id}, commit {commit_id}"
+        )));
+    }
+    Ok(VerifyBackupCommitResult {
+        verified: true,
+        app_id,
+        bundle_id,
+        commit_id,
+    })
+}
+
 fn serialize_app_identity(app: &AppIdentity) -> Result<serde_json::Value> {
     let mut value = serde_json::to_value(app)?;
     if let Some(method) = app.launch_method() {
@@ -1504,6 +1605,20 @@ fn req_str(params: &serde_json::Value, key: &str) -> Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| StateError::Invalid(format!("{key} required")))
+}
+
+fn req_uuid(params: &serde_json::Value, key: &str) -> Result<uuid::Uuid> {
+    let raw = req_str(params, key)?;
+    uuid::Uuid::parse_str(&raw)
+        .map_err(|error| StateError::Invalid(format!("{key} must be a UUID: {error}")))
+}
+
+fn req_pid(params: &serde_json::Value) -> Result<i32> {
+    let pid = params
+        .get("pid")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or_else(|| StateError::Invalid("pid must be an integer".into()))?;
+    i32::try_from(pid).map_err(|_| StateError::Invalid("pid must fit in a 32-bit integer".into()))
 }
 
 fn parse_session(params: &serde_json::Value) -> Result<EphemeralRcloneSession> {
@@ -1567,6 +1682,121 @@ fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_session(app_id: AppId, session_id: u128, pid: i32, confidence: f32) -> AppSession {
+        AppSession {
+            session_id: uuid::Uuid::from_u128(session_id),
+            app_id,
+            root_pid: pid,
+            cgroup_path: "/noland/test".into(),
+            started_at: "2025-01-02T03:04:05Z".parse().unwrap(),
+            ended_at: None,
+            source: SessionSource::ExecutableDiscovery,
+            identity_confidence: confidence,
+        }
+    }
+
+    #[test]
+    fn active_sessions_exclude_filtered_apps_and_include_all_session_pids() {
+        let db = noland_state_db::StateDb::open_in_memory().unwrap();
+        let game = AppIdentity::new(AppId::steam(480), "Spacewar");
+        let filtered = AppIdentity::new(AppId::desktop("org.kde.kate"), "Kate");
+        db.upsert_app(&game).unwrap();
+        db.upsert_app(&filtered).unwrap();
+
+        let game_session = test_session(game.app_id.clone(), 1, 101, 0.91);
+        let filtered_session = test_session(filtered.app_id.clone(), 2, 202, 0.82);
+        db.insert_session(&game_session).unwrap();
+        db.attach_pid(game_session.session_id, 102, Some(101), None)
+            .unwrap();
+        db.insert_session(&filtered_session).unwrap();
+
+        let result = active_app_sessions(&db).unwrap();
+        assert_eq!(result.sessions.len(), 1);
+        assert_eq!(result.sessions[0].session_id, game_session.session_id);
+        assert_eq!(result.sessions[0].app_id, game.app_id);
+        assert_eq!(result.sessions[0].display_name, "Spacewar");
+        assert_eq!(result.sessions[0].pids, vec![101, 102]);
+        assert_eq!(result.sessions[0].identity_confidence, 0.91);
+    }
+
+    #[test]
+    fn pid_resolution_returns_only_backup_candidates() {
+        let db = noland_state_db::StateDb::open_in_memory().unwrap();
+        let game = AppIdentity::new(AppId::steam(480), "Spacewar");
+        let filtered = AppIdentity::new(AppId::desktop("org.kde.kate"), "Kate");
+        db.upsert_app(&game).unwrap();
+        db.upsert_app(&filtered).unwrap();
+        let game_session = test_session(game.app_id.clone(), 3, 303, 0.93);
+        let filtered_session = test_session(filtered.app_id.clone(), 4, 404, 0.84);
+        db.insert_session(&game_session).unwrap();
+        db.insert_session(&filtered_session).unwrap();
+
+        let resolved = resolve_process_to_app(&db, 303).unwrap().unwrap();
+        assert_eq!(resolved.app_id, game.app_id);
+        assert_eq!(resolved.display_name, "Spacewar");
+        assert_eq!(resolved.session_id, game_session.session_id);
+        assert_eq!(resolved.started_at, game_session.started_at);
+        assert_eq!(resolved.identity_confidence, 0.93);
+        assert!(resolve_process_to_app(&db, 404).unwrap().is_none());
+        assert!(resolve_process_to_app(&db, 505).unwrap().is_none());
+    }
+
+    #[test]
+    fn backup_commit_verification_requires_exact_latest_committed_ids() {
+        let db = noland_state_db::StateDb::open_in_memory().unwrap();
+        let app_id = AppId::steam(480);
+        let first_bundle = uuid::Uuid::from_u128(10);
+        let first_commit = uuid::Uuid::from_u128(11);
+        let latest_bundle = uuid::Uuid::from_u128(20);
+        let latest_commit = uuid::Uuid::from_u128(21);
+        db.record_commit(
+            first_commit,
+            &app_id,
+            first_bundle,
+            "first",
+            None,
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+        db.record_commit(
+            latest_commit,
+            &app_id,
+            latest_bundle,
+            "latest",
+            None,
+            CommitVisibility::Committed,
+        )
+        .unwrap();
+
+        let verified =
+            verify_backup_commit(&db, app_id.clone(), latest_bundle, latest_commit).unwrap();
+        assert!(verified.verified);
+        assert_eq!(verified.app_id, app_id);
+        assert_eq!(verified.bundle_id, latest_bundle);
+        assert_eq!(verified.commit_id, latest_commit);
+        assert!(verify_backup_commit(&db, app_id.clone(), first_bundle, first_commit).is_err());
+        assert!(verify_backup_commit(
+            &db,
+            app_id.clone(),
+            latest_bundle,
+            uuid::Uuid::from_u128(22),
+        )
+        .is_err());
+
+        let pending_bundle = uuid::Uuid::from_u128(30);
+        let pending_commit = uuid::Uuid::from_u128(31);
+        db.record_commit(
+            pending_commit,
+            &app_id,
+            pending_bundle,
+            "pending",
+            None,
+            CommitVisibility::Uploading,
+        )
+        .unwrap();
+        assert!(verify_backup_commit(&db, app_id, pending_bundle, pending_commit).is_err());
+    }
 
     #[test]
     fn refresh_index_only_reconciles_flagged_candidates() {

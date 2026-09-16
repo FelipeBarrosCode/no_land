@@ -1,0 +1,30 @@
+[Unit]
+Description=Noland lifecycle backup and shutdown agent
+After=network-online.target noland-state-agent.service sunshine.service
+Requires=network-online.target noland-state-agent.service
+
+[Service]
+Type=simple
+User=root
+Group=__NOLAND_TARGET_GROUP__
+UMask=0007
+ExecStart=/usr/local/bin/noland-lifecycle-agent
+Restart=always
+RestartSec=2
+StateDirectory=noland/lifecycle
+StateDirectoryMode=0750
+RuntimeDirectory=noland/lifecycle
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=restart
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/home/__NOLAND_TARGET_USER__/.Xauthority
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+MemoryMax=256M
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/noland/lifecycle /run/noland
+
+[Install]
+WantedBy=multi-user.target

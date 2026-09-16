@@ -432,6 +432,9 @@ export function App() {
     (state) => state.savePlatformCredentials,
   );
   const saveIgdbCredentials = useAppStore((state) => state.saveIgdbCredentials);
+  const saveAutoShutdownSettings = useAppStore(
+    (state) => state.saveAutoShutdownSettings,
+  );
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
@@ -734,6 +737,7 @@ export function App() {
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveIgdbCredentials={saveIgdbCredentials}
+                  onSaveAutoShutdownSettings={saveAutoShutdownSettings}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}

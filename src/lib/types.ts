@@ -475,6 +475,19 @@ export interface VastWalletSummary {
   lastUpdatedAt: string | null;
 }
 
+export interface AutoShutdownSettings {
+  enabled: boolean;
+  inactivityHours: number;
+  backupAppLimit: number;
+}
+
+export interface AutoShutdownState {
+  settings: AutoShutdownSettings;
+  lastRunAt: string | null;
+  lastStatus: string;
+  lastError: string | null;
+}
+
 export interface PersistedAppState {
   version: number;
   onboardingCompleted: boolean;
@@ -491,10 +504,32 @@ export interface PersistedAppState {
   moonlightPreferences: MoonlightPreferences;
   sharedStorage: SharedStorageState;
   sharedStorageProfiles?: ProfileReference[];
+  autoShutdown: AutoShutdownState;
   provisionedServers: ProvisionedServerState[];
   postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;
   connectionProvider: ConnectionProvider;
+  lastError: string | null;
+}
+
+export interface LifecycleRankedApp {
+  appId: string;
+  foregroundActiveMs: number;
+  processRuntimeMs: number;
+  launchCount: number;
+  lastActiveAt: string;
+}
+
+export interface LifecycleAgentStatus {
+  enabled: boolean;
+  state: string;
+  lastActivityAt: string | null;
+  idleDurationMs: number;
+  timeoutMs: number;
+  timeRemainingMs: number;
+  timeoutReachedAt: string | null;
+  activeRunId: string | null;
+  rankedApps: LifecycleRankedApp[];
   lastError: string | null;
 }
 

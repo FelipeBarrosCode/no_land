@@ -1,6 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
 import { invokeSafe } from "./tauri";
 import type {
+  AutoShutdownSettings,
+  AutoShutdownState,
+  LifecycleAgentStatus,
   ManualLocationInput,
   MoonlightPreferences,
   OfferCandidate,
@@ -57,6 +60,26 @@ import type {
 
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
+}
+
+export async function getAutoShutdownSettings(): Promise<AutoShutdownState> {
+  return invokeSafe<AutoShutdownState>("get_auto_shutdown_settings");
+}
+
+export async function saveAutoShutdownSettings(
+  settings: AutoShutdownSettings,
+): Promise<PersistedAppState> {
+  return invokeSafe<PersistedAppState>("save_auto_shutdown_settings", {
+    settings,
+  });
+}
+
+export async function getInstanceAutoShutdownStatus(
+  instanceId: number,
+): Promise<LifecycleAgentStatus> {
+  return invokeSafe<LifecycleAgentStatus>("get_instance_auto_shutdown_status", {
+    instanceId,
+  });
 }
 
 export async function completeOnboarding(

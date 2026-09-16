@@ -546,6 +546,9 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            get_auto_shutdown_settings,
+            get_instance_auto_shutdown_status,
+            save_auto_shutdown_settings,
             complete_onboarding,
             refresh_state_agent_index,
             refresh_ip_location,

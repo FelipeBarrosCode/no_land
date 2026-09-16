@@ -9,6 +9,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   completeOnboarding,
   getAppState,
+  saveAutoShutdownSettings as saveAutoShutdownSettingsCommand,
   getRentedInstances,
   getProvisioningLogs,
   runSystemHealthCheck,
@@ -90,6 +91,7 @@ import {
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
 import type {
+  AutoShutdownSettings,
   ManualLocationInput,
   MoonlightPreferences,
   OfferCandidate,
@@ -197,6 +199,7 @@ interface AppStore {
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
   saveIgdbCredentials: (payload: IgdbCredentialsUpdate) => Promise<void>;
+  saveAutoShutdownSettings: (settings: AutoShutdownSettings) => Promise<void>;
   saveServerPreferences: (
     payload: Partial<ServerPreferencesUpdate>,
   ) => Promise<void>;
@@ -1098,6 +1101,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           },
           logs,
           rentedInstances,
+          sharedStorageProfiles: appState.sharedStorageProfiles ?? [],
           vastWalletSummary,
           systemHealth,
           provisioningModalDismissed: false,
@@ -1760,6 +1764,21 @@ export const useAppStore = create<AppStore>((set, get) => {
         async () => {
           const settings = await getSharedStorageSettings();
           set({ sharedStorageSettings: settings });
+        },
+        undefined,
+      );
+    },
+
+    saveAutoShutdownSettings: async (settings) => {
+      await runBusyTask(
+        {
+          key: "settings.auto-shutdown",
+          label: "Saving automatic backup settings",
+          detail: "Updating the inactivity timeout and backup limit.",
+        },
+        async () => {
+          const appState = await saveAutoShutdownSettingsCommand(settings);
+          set({ appState });
         },
         undefined,
       );

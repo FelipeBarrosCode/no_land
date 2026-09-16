@@ -1,6 +1,10 @@
+pub mod auto_shutdown;
 pub mod launch_library;
 pub mod shared_storage;
 
+pub use self::auto_shutdown::{
+    get_auto_shutdown_settings, get_instance_auto_shutdown_status, save_auto_shutdown_settings,
+};
 pub use self::launch_library::{
     get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
     launch_instance_software, update_igdb_credentials,
@@ -3186,7 +3190,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     })
 }
 
-async fn build_remote_exec_for_instance(
+pub(super) async fn build_remote_exec_for_instance(
     context: &AppContext,
     instance_id: u64,
 ) -> Result<RemoteExec, AppError> {

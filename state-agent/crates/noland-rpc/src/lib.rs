@@ -3,12 +3,15 @@
 use std::path::Path;
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use noland_state_core::metrics::MetricsSnapshot;
 use noland_state_core::*;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
+
+pub const MAX_RPC_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RpcRequest {
@@ -37,9 +40,96 @@ pub struct HealthStatus {
     pub unfinished_operations: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ActiveAppSession {
+    pub session_id: Uuid,
+    pub app_id: AppId,
+    pub display_name: String,
+    pub pids: Vec<i32>,
+    pub started_at: DateTime<Utc>,
+    pub identity_confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GetActiveAppSessionsResult {
+    pub sessions: Vec<ActiveAppSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResolvedProcessApp {
+    pub app_id: AppId,
+    pub display_name: String,
+    pub session_id: Uuid,
+    pub started_at: DateTime<Utc>,
+    pub identity_confidence: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyBackupCommitResult {
+    pub verified: bool,
+    pub app_id: AppId,
+    pub bundle_id: Uuid,
+    pub commit_id: Uuid,
+}
+
 #[async_trait]
 pub trait RpcHandler: Send + Sync {
     async fn handle(&self, request: &RpcRequest) -> Result<serde_json::Value>;
+}
+
+/// Calls one newline-framed RPC method over a Unix socket.
+///
+/// The caller owns timeout policy and can wrap this future in `tokio::time::timeout`.
+pub async fn call(
+    path: &Path,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let request_id = Uuid::new_v4().to_string();
+    let request = RpcRequest {
+        id: request_id.clone(),
+        method: method.to_string(),
+        params,
+    };
+    let mut encoded = serde_json::to_vec(&request)?;
+    encoded.push(b'\n');
+
+    let mut stream = UnixStream::connect(path).await?;
+    stream.write_all(&encoded).await?;
+    stream.shutdown().await?;
+
+    let mut response_bytes = Vec::new();
+    let mut reader = BufReader::new(stream).take((MAX_RPC_RESPONSE_BYTES + 1) as u64);
+    reader.read_until(b'\n', &mut response_bytes).await?;
+    if response_bytes.len() > MAX_RPC_RESPONSE_BYTES {
+        return Err(StateError::Invalid(format!(
+            "RPC response exceeds {MAX_RPC_RESPONSE_BYTES} bytes"
+        )));
+    }
+    if response_bytes.is_empty() {
+        return Err(StateError::Invalid(
+            "RPC server returned no response".into(),
+        ));
+    }
+    if response_bytes.last() != Some(&b'\n') {
+        return Err(StateError::Invalid(
+            "RPC server returned an incomplete response".into(),
+        ));
+    }
+
+    let response: RpcResponse = serde_json::from_slice(&response_bytes)?;
+    if response.id != request_id {
+        return Err(StateError::Invalid(format!(
+            "RPC response id mismatch: expected {request_id}, got {}",
+            response.id
+        )));
+    }
+    if let Some(error) = response.error {
+        return Err(StateError::Message(error));
+    }
+    response
+        .result
+        .ok_or_else(|| StateError::Invalid("RPC response contained no result".into()))
 }
 
 pub async fn bind_socket(path: &Path) -> Result<UnixListener> {
