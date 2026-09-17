@@ -11,6 +11,8 @@ Autonomous, fail-safe lifecycle controller for Noland Vast instances. The agent 
 - Treats malformed, missing, unknown, interrupted, cancelled, or unverifiable backup state as unsafe.
 - Never invokes the provider unless every frozen application is verified.
 - Stores only operational metadata in SQLite. Storage credentials, master keys, and Vast API keys are loaded from the tmpfs capability file and are never persisted, returned by status RPC, or intentionally logged.
+- The state-agent Unix peer must be root; commit verification requires exact application, bundle, and commit identities.
+- Capability expiry is checked immediately before every provider attempt.
 
 ## Configuration
 
@@ -24,7 +26,7 @@ The default configuration file is `/etc/noland/lifecycle/config.json`. Fields us
   "backupAppLimit": 3,
   "controllerDeadZone": 0.15,
   "stateAgentSocket": "/run/noland/state-agent.sock",
-  "statusSocket": "/run/noland/lifecycle-agent.sock",
+  "statusSocket": "/run/noland/lifecycle/agent.sock",
   "activitySocket": "/run/noland/sunshine-events.sock",
   "databasePath": "/var/lib/noland/lifecycle/runtime.db",
   "capabilityPath": "/run/noland/lifecycle/storage-capability.json",
@@ -47,4 +49,4 @@ The lifecycle client expects the state-agent methods `GetActiveAppSessions`, `Re
 
 ## Workspace integration
 
-This crate intentionally does not modify the parent workspace. Before adding it as a member, add a compatible workspace `reqwest` dependency with `default-features = false` and `rustls-tls`/`json` available. The crate otherwise consumes existing workspace dependencies.
+This crate is a member of the parent `state-agent` workspace and uses the workspace's existing dependencies. It intentionally has no HTTP client dependency: Vast requests use the system `curl` binary with the bearer token supplied through curl's private stdin configuration.
