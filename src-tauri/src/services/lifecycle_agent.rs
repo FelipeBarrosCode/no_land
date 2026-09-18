@@ -32,7 +32,7 @@ const SYSTEMD_UNIT: &str =
     include_str!("../../../state-agent/systemd/noland-lifecycle-agent.service");
 
 const AGENT_VERSION: &str = "0.1.0";
-const DEPLOYMENT_REVISION: &str = "2";
+const DEPLOYMENT_REVISION: &str = "5";
 const AGENT_BINARY: &str = "/usr/local/bin/noland-lifecycle-agent";
 const AGENT_SERVICE: &str = "noland-lifecycle-agent.service";
 const REVISION_PATH: &str = "/usr/local/share/noland-lifecycle-agent/install-revision";
@@ -965,7 +965,6 @@ impl Drop for LocalStagingDir {
 
 fn materialize_installer(staging: &LocalStagingDir) -> AppResult<PathBuf> {
     if !INSTALLER_TEMPLATE.contains("__NOLAND_LIFECYCLE_UNIT__")
-        || !SYSTEMD_UNIT.contains("__NOLAND_TARGET_USER__")
         || !SYSTEMD_UNIT.contains("__NOLAND_TARGET_GROUP__")
     {
         return Err(AppError::Provisioning(

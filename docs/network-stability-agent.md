@@ -6,7 +6,8 @@ No Land measures the real client-to-stream-host path with authenticated UDP prob
 
 - `network-agent/`: standalone `noland-network-agent` daemon installed beside Sunshine.
 - `src-tauri/src/network_monitor/`: client probe loop, measurement reporter, status event bridge, and three-second disconnect fail-safe.
-- `src/features/moonlight/StreamWindowScreen.tsx`: native notification, warning sound, and non-blocking stream banner.
+- `src/app/App.tsx`: OS-native notification and warning sound listener owned by the main window.
+- `src/features/moonlight/StreamWindowScreen.tsx`: non-blocking in-stream warning banner only.
 
 The client must originate probes because a gaming instance generally cannot initiate traffic through a user's NAT, CGNAT, or firewall. The client measures RTT with `std::time::Instant`; the instance owns the rolling history, metrics, classification, and BAD-state hysteresis.
 

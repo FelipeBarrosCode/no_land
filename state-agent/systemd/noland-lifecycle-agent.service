@@ -17,7 +17,7 @@ RuntimeDirectory=noland/lifecycle
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=restart
 Environment=DISPLAY=:0
-Environment=XAUTHORITY=/home/__NOLAND_TARGET_USER__/.Xauthority
+Environment=XAUTHORITY=/etc/X11/.Xauthority-noland
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

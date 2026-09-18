@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::EphemeralRcloneSession;
 use noland_rpc::{
@@ -14,6 +16,7 @@ use noland_storage::{
     load_catalog, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
 };
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
@@ -1546,21 +1549,122 @@ fn resolve_process_to_app(
     db: &noland_state_db::StateDb,
     pid: i32,
 ) -> Result<Option<ResolvedProcessApp>> {
-    let Some(session) = db.session_for_pid(pid)? else {
-        return Ok(None);
+    if let Some(session) = db.session_for_pid(pid)? {
+        if let Some(app) = db
+            .get_app(&session.app_id)?
+            .and_then(|app| noland_discovery::filter_backup_candidates(vec![app]).pop())
+        {
+            return Ok(Some(ResolvedProcessApp {
+                app_id: app.app_id,
+                display_name: app.display_name,
+                session_id: session.session_id,
+                started_at: session.started_at,
+                identity_confidence: session.identity_confidence,
+            }));
+        }
+        // The database session is stale, incomplete, or filtered. Continue to
+        // the executable fallback instead of treating it as authoritative.
+    }
+
+    // Prefer the indexed identity for directly launched AppImages. The kernel exe link
+    // points into the transient FUSE mount, while argv[0] retains the durable AppImage
+    // path that discovery indexed in shared storage.
+    if let Some(indexed_executable) =
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .and_then(|cmdline| {
+                cmdline
+                    .split(|byte| *byte == 0)
+                    .find(|part| !part.is_empty())
+                    .and_then(|part| std::str::from_utf8(part).ok())
+                    .map(PathBuf::from)
+            })
+    {
+        let indexed_apps = noland_discovery::filter_backup_candidates(db.list_apps()?);
+        if let Some(app) =
+            noland_discovery::resolve_identity_for_executable(&indexed_apps, &indexed_executable)
+        {
+            tracing::info!(
+                pid,
+                app_id = %app.app_id,
+                executable = %indexed_executable.display(),
+                "resolved process to indexed application identity"
+            );
+            return Ok(Some(ResolvedProcessApp {
+                app_id: app.app_id,
+                display_name: app.display_name,
+                session_id: Uuid::new_v4(),
+                started_at: Utc::now(),
+                identity_confidence: app.identity_confidence,
+            }));
+        }
+    }
+
+    // Temporary bridge for native/AppImage processes started after discovery. The
+    // attribution observer remains the source of persistent sessions; this fallback
+    // only supplies the lifecycle foreground tracker with a safe executable identity.
+    let executable = match std::fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(executable) => PathBuf::from(executable),
+        Err(error) => {
+            tracing::warn!(
+                pid,
+                %error,
+                "unable to read process executable; trying process command line"
+            );
+            let Some(executable) =
+                std::fs::read(format!("/proc/{pid}/cmdline"))
+                    .ok()
+                    .and_then(|cmdline| {
+                        cmdline
+                            .split(|byte| *byte == 0)
+                            .find(|part| !part.is_empty())
+                            .and_then(|part| std::str::from_utf8(part).ok())
+                            .map(PathBuf::from)
+                    })
+            else {
+                tracing::warn!(
+                    pid,
+                    "unable to read process command line for lifecycle fallback"
+                );
+                return Ok(None);
+            };
+            executable
+        }
     };
-    let Some(app) = db.get_app(&session.app_id)? else {
+    let executable_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    tracing::info!(pid, executable = %executable.display(), executable_name = %executable_name, "resolving process through executable fallback");
+    if matches!(
+        executable_name.as_str(),
+        "systemd"
+            | "systemd-journald"
+            | "systemd-logind"
+            | "upowerd"
+            | "dbus-daemon"
+            | "dbus-broker"
+            | "polkitd"
+            | "sshd"
+            | "sunshine"
+            | "pipewire"
+            | "wireplumber"
+            | "xorg"
+    ) || executable_name.starts_with("xdg-desktop-portal")
+        || executable_name.starts_with("noland-")
+    {
+        tracing::warn!(pid, executable_name = %executable_name, "rejecting system executable from lifecycle fallback");
         return Ok(None);
-    };
-    let Some(app) = noland_discovery::filter_backup_candidates(vec![app]).pop() else {
-        return Ok(None);
-    };
+    }
+    let app = noland_discovery::fallback_exe_identity(&executable);
+    let now = Utc::now();
     Ok(Some(ResolvedProcessApp {
         app_id: app.app_id,
         display_name: app.display_name,
-        session_id: session.session_id,
-        started_at: session.started_at,
-        identity_confidence: session.identity_confidence,
+        session_id: Uuid::new_v4(),
+        started_at: now,
+        identity_confidence: app.identity_confidence,
     }))
 }
 

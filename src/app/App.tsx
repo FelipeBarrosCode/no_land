@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
@@ -16,6 +17,7 @@ import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
+
 import {
   checkForAppUpdate,
   installPendingAppUpdate,
@@ -517,6 +519,7 @@ export function App() {
     void initialize();
     void bindEvents();
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel === "moonlight-stream") {

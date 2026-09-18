@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_notification::NotificationExt;
 use tokio::sync::RwLock;
 use tracing::warn;
 use uuid::Uuid;
@@ -46,7 +47,10 @@ impl Reporter {
                 *self.latest_stats.write().await = Some(value.clone());
                 self.emit(STATS_EVENT, value);
             }
-            Some("status_changed") => self.emit(STATUS_EVENT, value),
+            Some("status_changed") => {
+                self.notify_if_alert_eligible(&value);
+                self.emit(STATUS_EVENT, value);
+            }
             Some("error") => self.emit(ERROR_EVENT, value),
             Some(message_type) => {
                 self.error(format!(
@@ -94,7 +98,49 @@ impl Reporter {
                 "source": "client_fail_safe"
             }),
         };
+        self.notify_if_alert_eligible(&value);
         self.emit(STATUS_EVENT, value);
+    }
+
+    fn notify_if_alert_eligible(&self, value: &Value) {
+        let is_bad = value.get("current").and_then(Value::as_str) == Some("BAD");
+        let alert_eligible = value
+            .get("alertEligible")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if !is_bad || !alert_eligible {
+            return;
+        }
+
+        let title = if value
+            .get("reasons")
+            .and_then(Value::as_array)
+            .is_some_and(|reasons| {
+                reasons
+                    .iter()
+                    .any(|reason| reason.as_str() == Some("CONNECTION_LOST"))
+            }) {
+            "No Land — Connection lost"
+        } else {
+            "No Land — Connection unstable"
+        };
+        let body = if title.ends_with("Connection lost") {
+            "The connection to your gaming PC appears to be lost."
+        } else {
+            "High latency variation or packet loss may affect streaming."
+        };
+
+        if let Err(error) = self
+            .app
+            .notification()
+            .builder()
+            .title(title)
+            .body(body)
+            .sound("Glass")
+            .show()
+        {
+            warn!(%error, "failed to show native network warning");
+        }
     }
 
     pub(crate) fn error(&self, message: impl Into<String>) {

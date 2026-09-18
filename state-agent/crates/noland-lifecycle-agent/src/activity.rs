@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 #[cfg(target_os = "linux")]
@@ -246,7 +244,7 @@ pub async fn monitor_stream_input_devices(_recorder: Arc<dyn ActivityRecorder>) 
     std::future::pending().await
 }
 
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone)]
 struct StreamInputDevice {
     path: PathBuf,
@@ -260,10 +258,19 @@ fn discover_stream_input_devices() -> Result<Vec<StreamInputDevice>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error.into()),
     };
+    Ok(parse_stream_input_devices(&devices))
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn parse_stream_input_devices(devices: &str) -> Vec<StreamInputDevice> {
     let mut output = Vec::new();
     for block in devices.split("\n\n") {
         let lower = block.to_ascii_lowercase();
-        if !lower.contains("sunshine") && !lower.contains("moonlight") {
+        let is_stream_device = lower.contains("sunshine")
+            || lower.contains("moonlight")
+            || lower.contains("passthrough")
+            || (lower.contains("vendor=beef") && lower.contains("product=dead"));
+        if !is_stream_device {
             continue;
         }
         let source = if lower.contains("controller")
@@ -271,7 +278,7 @@ fn discover_stream_input_devices() -> Result<Vec<StreamInputDevice>> {
             || lower.contains("xbox")
         {
             ActivitySource::Controller
-        } else if lower.contains("touch") {
+        } else if lower.contains("touch") || lower.contains("pen") {
             ActivitySource::Touch
         } else if lower.contains("mouse") {
             ActivitySource::Mouse
@@ -296,7 +303,7 @@ fn discover_stream_input_devices() -> Result<Vec<StreamInputDevice>> {
             }
         }
     }
-    Ok(output)
+    output
 }
 
 #[cfg(target_os = "linux")]
@@ -429,6 +436,51 @@ mod tests {
             Arc::new(clock.clone()),
         ));
         (processor, clock, database)
+    }
+
+    #[test]
+    fn discovers_passthrough_stream_input_devices() {
+        let devices = r#"I: Bus=0011 Vendor=0001 Product=0001 Version=ab41
+N: Name="AT Translated Set 2 keyboard"
+H: Handlers=sysrq kbd event1 leds
+
+I: Bus=0003 Vendor=beef Product=dead Version=0111
+N: Name="Mouse passthrough"
+H: Handlers=mouse1 event7
+
+I: Bus=0003 Vendor=beef Product=dead Version=0111
+N: Name="Keyboard passthrough"
+H: Handlers=sysrq kbd event9
+
+I: Bus=0003 Vendor=beef Product=dead Version=0111
+N: Name="Touch passthrough"
+H: Handlers=mouse3 event10
+
+I: Bus=0003 Vendor=beef Product=dead Version=0111
+N: Name="Pen passthrough"
+H: Handlers=mouse4 event11
+"#;
+
+        let discovered = parse_stream_input_devices(devices);
+        assert_eq!(discovered.len(), 4);
+        assert_eq!(discovered[0].path, PathBuf::from("/dev/input/event7"));
+        assert_eq!(discovered[0].source, ActivitySource::Mouse);
+        assert_eq!(discovered[1].source, ActivitySource::Keyboard);
+        assert_eq!(discovered[2].source, ActivitySource::Touch);
+        assert_eq!(discovered[3].source, ActivitySource::Touch);
+    }
+
+    #[test]
+    fn still_discovers_named_sunshine_controller() {
+        let devices = r#"I: Bus=0003 Vendor=045e Product=028e Version=0114
+N: Name="Sunshine Xbox Controller"
+H: Handlers=js1 event12
+"#;
+
+        let discovered = parse_stream_input_devices(devices);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].path, PathBuf::from("/dev/input/event12"));
+        assert_eq!(discovered[0].source, ActivitySource::Controller);
     }
 
     #[tokio::test]

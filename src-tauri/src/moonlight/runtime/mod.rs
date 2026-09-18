@@ -1455,17 +1455,6 @@ fn runtime_statistics_from_native(
     }
 }
 
-fn should_reset_unexpected_reconnect_budget(
-    state: &SessionState,
-    reconnect_attempted: bool,
-    stable_since: Option<Instant>,
-    now: Instant,
-) -> bool {
-    *state == SessionState::Streaming
-        && reconnect_attempted
-        && stable_since.is_some_and(|since| now.duration_since(since) >= Duration::from_secs(30))
-}
-
 fn should_auto_reconnect(
     state: &SessionState,
     event: &NativeEvent,
@@ -1748,7 +1737,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
         let mut desired_running = false;
         let mut active_generation = 0_u64;
         let mut unexpected_reconnect_attempted = false;
-        let mut unexpected_reconnect_stable_since: Option<Instant> = None;
+
         let mut reconnect_in_flight: Option<ReconnectCause> = None;
         let mut packet_reconnect_pending: Option<PendingPacketReconnect> = None;
         let mut packet_size_controller: Option<AdaptivePacketSizeController> = None;
@@ -1815,17 +1804,11 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     native_runtime.record_reconnect_result(false, true);
                                 }
                                 match completed_reconnect {
-                                    Some(ReconnectCause::UnexpectedFailure) => {
-                                        unexpected_reconnect_stable_since = Some(now);
-                                    }
-                                    Some(ReconnectCause::PacketSize) if unexpected_reconnect_attempted => {
-                                        unexpected_reconnect_stable_since = Some(now);
-                                    }
+                                    Some(ReconnectCause::UnexpectedFailure)
+                                    | Some(ReconnectCause::PacketSize) => {}
                                     None => {
                                         unexpected_reconnect_attempted = false;
-                                        unexpected_reconnect_stable_since = None;
                                     }
-                                    _ => {}
                                 }
                                 if let Some(controller) = packet_size_controller.as_mut() {
                                     controller.on_connected(active_generation, now);
@@ -1834,19 +1817,9 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                         }
                     }
 
-                    if should_reset_unexpected_reconnect_budget(
-                        &state,
-                        unexpected_reconnect_attempted,
-                        unexpected_reconnect_stable_since,
-                        Instant::now(),
-                    ) {
-                        unexpected_reconnect_attempted = false;
-                        unexpected_reconnect_stable_since = None;
-                    }
 
                     if failure_reconnect_requested {
                         unexpected_reconnect_attempted = true;
-                        unexpected_reconnect_stable_since = None;
                         if let Some(mut request) = active_request.clone() {
                             let _ = native_runtime.stop();
                             let _ = native_runtime.drain_events();
@@ -1872,7 +1845,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     packet_reconnect_pending = None;
                                     packet_size_controller = None;
                                     unexpected_reconnect_attempted = false;
-                                    unexpected_reconnect_stable_since = None;
                                     let _ = native_runtime.stop();
                                     let _ = native_runtime.drain_events();
                                     state = SessionState::Idle;
@@ -1891,7 +1863,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                         packet_size_controller = None;
                         reconnect_in_flight = None;
                         unexpected_reconnect_attempted = false;
-                        unexpected_reconnect_stable_since = None;
                         let _ = native_runtime.stop();
                         let _ = native_runtime.drain_events();
                         if state != SessionState::Idle {
@@ -1930,7 +1901,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             packet_size_controller = None;
                             reconnect_in_flight = None;
                             unexpected_reconnect_attempted = false;
-                            unexpected_reconnect_stable_since = None;
                             let _ = native_runtime.stop();
                             let _ = native_runtime.drain_events();
                             if let Ok(next) = transition(&state, SessionSignal::StopRequested) {
@@ -2017,7 +1987,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     packet_size_controller = None;
                                     reconnect_in_flight = None;
                                     unexpected_reconnect_attempted = false;
-                                    unexpected_reconnect_stable_since = None;
                                     state = SessionState::Idle;
                                     let _ = state_tx.send(state.clone());
                                 }
@@ -2048,7 +2017,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 request.session_generation = active_generation;
                                 desired_running = true;
                                 unexpected_reconnect_attempted = false;
-                                unexpected_reconnect_stable_since = None;
                                 reconnect_in_flight = None;
                                 packet_reconnect_pending = None;
                                 packet_size_controller = Some(controller);
@@ -2125,7 +2093,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 desired_running = false;
                                 active_request = None;
                                 unexpected_reconnect_attempted = false;
-                                unexpected_reconnect_stable_since = None;
                                 reconnect_in_flight = None;
                                 packet_reconnect_pending = None;
                                 packet_size_controller = None;
@@ -2212,7 +2179,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     packet_size_controller = None;
                                     reconnect_in_flight = None;
                                     unexpected_reconnect_attempted = false;
-                                    unexpected_reconnect_stable_since = None;
                                     let _ = native_runtime.stop();
                                     let _ = native_runtime.drain_events();
                                     let _ = state_tx.send(SessionState::Idle);
@@ -2237,7 +2203,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     packet_size_controller = None;
                                     reconnect_in_flight = None;
                                     unexpected_reconnect_attempted = false;
-                                    unexpected_reconnect_stable_since = None;
                                     let _ = native_runtime.stop();
                                     let _ = native_runtime.drain_events();
                                     state = SessionState::Idle;
@@ -2347,14 +2312,13 @@ mod tests {
         apply_packet_size, audio_configuration_native, client_refresh_rate_x100,
         next_external_generation, prepare_packet_size_controller, process_native_event,
         resolve_remote_stream_config, should_auto_reconnect, should_evaluate_packet_size_policy,
-        should_reset_unexpected_reconnect_budget, NativeEvent, NativeRuntime, NativeStartRequest,
-        ReconnectCause, RuntimeEventMessage,
+        NativeEvent, NativeRuntime, NativeStartRequest, ReconnectCause, RuntimeEventMessage,
     };
     use std::{
         fs,
         mem::size_of,
         path::PathBuf,
-        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        time::{SystemTime, UNIX_EPOCH},
     };
     use tokio::sync::{broadcast, watch};
 
@@ -2606,29 +2570,6 @@ mod tests {
         assert_eq!(resolved.mode, RemoteStreamMode::ForceLocal);
         assert_eq!(resolved.streaming_remotely, 0);
         assert_eq!(resolved.packet_size, 1392);
-    }
-
-    #[test]
-    fn unexpected_reconnect_budget_resets_only_after_stability() {
-        let start = Instant::now();
-        assert!(!should_reset_unexpected_reconnect_budget(
-            &SessionState::Streaming,
-            true,
-            Some(start),
-            start + Duration::from_secs(29),
-        ));
-        assert!(should_reset_unexpected_reconnect_budget(
-            &SessionState::Streaming,
-            true,
-            Some(start),
-            start + Duration::from_secs(30),
-        ));
-        assert!(!should_reset_unexpected_reconnect_budget(
-            &SessionState::Reconnecting,
-            true,
-            Some(start),
-            start + Duration::from_secs(60),
-        ));
     }
 
     #[test]

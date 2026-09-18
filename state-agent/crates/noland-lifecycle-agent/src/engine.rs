@@ -23,6 +23,33 @@ use crate::{AgentError, Result};
 const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKUP_POLL_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const BACKUP_MAX_ATTEMPTS: u32 = 3;
+const MAX_TRACKED_APPS: usize = 1_024;
+const IGNORED_EXECUTABLES: &[&str] = &[
+    "accounts-daemon",
+    "cron",
+    "dbus-broker",
+    "dbus-daemon",
+    "kdeinit",
+    "kioslave",
+    "networkmanager",
+    "noland-lifecycle-agent",
+    "noland-state-agent",
+    "packagekitd",
+    "pipewire",
+    "polkitd",
+    "pulseaudio",
+    "rtkit-daemon",
+    "sshd",
+    "startplasma",
+    "sunshine",
+    "systemd",
+    "udisksd",
+    "upowerd",
+    "wireplumber",
+    "xorg",
+    "xsettingsd",
+];
+const IGNORED_EXECUTABLE_PREFIXES: &[&str] = &["xdg-desktop-portal", "systemd-"];
 const BACKOFFS: [Duration; 3] = [
     Duration::from_secs(5),
     Duration::from_secs(15),
@@ -138,7 +165,7 @@ impl LifecycleEngine {
             },
             timeout_reached_at: snapshot.timeout_reached_at,
             active_run_id: snapshot.active_run_id,
-            ranked_apps: self.database.ranked_apps(config.backup_app_limit)?,
+            ranked_apps: self.eligible_ranked_apps(config.backup_app_limit)?,
             last_error: snapshot.last_error,
         })
     }
@@ -229,7 +256,7 @@ impl LifecycleEngine {
             self.clock.now_utc(),
             None,
         )?;
-        let apps = self.database.ranked_apps(config.backup_app_limit)?;
+        let apps = self.eligible_ranked_apps(config.backup_app_limit)?;
         if apps.is_empty() {
             self.database.fail_run(
                 None,
@@ -260,19 +287,33 @@ impl LifecycleEngine {
         }
         let now = self.clock.now_utc();
         for session in self.state_agent.get_active_app_sessions().await? {
-            self.database.record_active_session(
-                &session.session_id,
-                &session.app_id,
-                elapsed,
-                now,
-            )?;
+            if is_backup_eligible_app_id(&session.app_id) {
+                self.database.record_active_session(
+                    &session.session_id,
+                    &session.app_id,
+                    elapsed,
+                    now,
+                )?;
+            }
         }
         if let Some(pid) = self.foreground.foreground_pid().await {
             if let Some(app_id) = self.state_agent.resolve_process_to_app(pid).await? {
-                self.database.record_foreground(&app_id, elapsed, now)?;
+                if is_backup_eligible_app_id(&app_id) {
+                    self.database.record_foreground(&app_id, elapsed, now)?;
+                }
             }
         }
         Ok(())
+    }
+
+    fn eligible_ranked_apps(&self, limit: usize) -> Result<Vec<RankedApp>> {
+        Ok(self
+            .database
+            .ranked_apps(MAX_TRACKED_APPS)?
+            .into_iter()
+            .filter(|app| is_backup_eligible_app_id(&app.app_id))
+            .take(limit)
+            .collect())
     }
 
     async fn execute_run(&self, run_id: &str, config: &Config) -> Result<()> {
@@ -577,6 +618,24 @@ fn completion_ids(status: &OperationStatus) -> Result<(String, String)> {
     Ok((bundle_id, commit_id))
 }
 
+fn is_backup_eligible_app_id(app_id: &str) -> bool {
+    let normalized = app_id.trim().to_ascii_lowercase();
+    let Some(executable_id) = normalized.strip_prefix("exe:") else {
+        return true;
+    };
+    let executable = executable_id
+        .rsplit_once(':')
+        .map_or(executable_id, |(name, _)| name)
+        .rsplit('/')
+        .next()
+        .unwrap_or(executable_id);
+
+    !IGNORED_EXECUTABLES.contains(&executable)
+        && !IGNORED_EXECUTABLE_PREFIXES
+            .iter()
+            .any(|prefix| executable.starts_with(prefix))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
@@ -589,6 +648,27 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn backup_eligibility_excludes_system_daemons_but_keeps_user_apps() {
+        for ignored in [
+            "exe:upowerd:25980-6228f901",
+            "exe:systemd:1-session",
+            "exe:xdg-desktop-portal-kde:42-session",
+            "exe:/usr/libexec/polkitd:71-session",
+        ] {
+            assert!(!is_backup_eligible_app_id(ignored), "{ignored}");
+        }
+
+        for eligible in [
+            "exe:hydralauncher:155766-session",
+            "exe:/tmp/.mount_hydra/hydralauncher:155766-session",
+            "desktop:hydralauncher",
+            "steam:12345",
+        ] {
+            assert!(is_backup_eligible_app_id(eligible), "{eligible}");
+        }
+    }
     use crate::activity::ActivityRecorder;
     use crate::capability::{VastCapability, VastProviderKind};
     use crate::clock::ManualClock;
