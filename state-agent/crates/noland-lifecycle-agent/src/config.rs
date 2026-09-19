@@ -52,7 +52,7 @@ impl Default for Config {
             status_socket: "/run/noland/lifecycle/agent.sock".into(),
             activity_socket: "/run/noland/sunshine-events.sock".into(),
             database_path: "/var/lib/noland/lifecycle/runtime.db".into(),
-            capability_path: "/run/noland/lifecycle/storage-capability.json".into(),
+            capability_path: "/var/lib/noland/lifecycle/storage-capability.json".into(),
             vast_base_url: "https://console.vast.ai".into(),
             provider_action: ProviderAction::Destroy,
         }
@@ -73,9 +73,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !(900..=86_400).contains(&self.inactivity_seconds) {
+        if !(300..=86_400).contains(&self.inactivity_seconds) {
             return Err(AgentError::new(
-                "inactivitySeconds must be between 900 and 86400",
+                "inactivitySeconds must be between 300 and 86400",
             ));
         }
         if !(1..=10).contains(&self.backup_app_limit) {
@@ -150,9 +150,9 @@ mod tests {
         };
         assert!(config.validate().is_err());
         config.instance_id = 1;
-        config.inactivity_seconds = 899;
+        config.inactivity_seconds = 299;
         assert!(config.validate().is_err());
-        config.inactivity_seconds = 900;
+        config.inactivity_seconds = 300;
         config.backup_app_limit = 11;
         assert!(config.validate().is_err());
         config.backup_app_limit = 1;

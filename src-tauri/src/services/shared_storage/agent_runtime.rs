@@ -10,7 +10,7 @@ use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
-const REQUIRED_AGENT_API_VERSION: u64 = 14;
+const REQUIRED_AGENT_API_VERSION: u64 = 13;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
     if probe_agent(remote).await.ok().and_then(|health| {
@@ -389,11 +389,12 @@ pub async fn call_agent_raw(
     }
     let rpc_timeout_secs = match method {
         "StartSeal" => 2 * 60 * 60,
+        "GetHealth" => 30,
         _ => 5 * 60,
     };
     let ssh_timeout = Duration::from_secs(rpc_timeout_secs + 60);
     let cmd = format!(
-        "python3 -c 'import glob,os,socket,sys,time; path=sys.argv[1]; now=time.time(); [(os.unlink(p) if p != path and now-os.path.getmtime(p) > 300 else None) for p in glob.glob(\"/run/noland/noland-rpc-*.json\")]; req=open(path,\"rb\").read(); os.unlink(path); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(b\"\".join(iter(lambda:s.recv(65536), b\"\")))' {request}",
+        "python3 -c 'import glob,os,socket,sys,time; path=sys.argv[1]; now=time.time(); [(os.unlink(p) if p != path and now-os.path.getmtime(p) > 300 else None) for p in glob.glob(\"/run/noland/noland-rpc-*.json\")]; req=open(path,\"rb\").read(); os.unlink(path); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(s.makefile(\"rb\").readline(4194305))' {request}",
         timeout = rpc_timeout_secs,
         sock = AGENT_SOCKET,
         request = shell_escape(&remote_request),

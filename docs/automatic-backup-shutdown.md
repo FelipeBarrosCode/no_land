@@ -31,10 +31,10 @@ The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` 
 Automatic shutdown is disabled by default. The desktop settings screen exposes:
 
 - enabled/disabled;
-- inactivity timeout: 0.25–24 hours, default 3 hours;
+- inactivity timeout: 5 minutes–24 hours, default 3 hours;
 - top application count to back up: 1–10, default 3.
 
-The agent uses a 900–86,400 second timeout range. The configured provider action is currently `destroy`; `stop` remains supported by the daemon configuration model for future policy choices.
+The agent uses a 300–86,400 second timeout range (5 minutes to 24 hours). The configured provider action is currently `destroy`; `stop` remains supported by the daemon configuration model for future policy choices.
 
 ## Remote paths and service identity
 
@@ -43,7 +43,7 @@ The lifecycle service is installed as `/etc/systemd/system/noland-lifecycle-agen
 | Purpose | Path |
 | --- | --- |
 | Configuration | `/etc/noland/lifecycle/config.json` |
-| Capability | `/run/noland/lifecycle/storage-capability.json` |
+| Capability | `/var/lib/noland/lifecycle/storage-capability.json` |
 | Status RPC | `/run/noland/lifecycle/agent.sock` |
 | Runtime database | `/var/lib/noland/lifecycle/runtime.db` |
 | Activity socket | `/run/noland/sunshine-events.sock` |
@@ -51,7 +51,7 @@ The lifecycle service is installed as `/etc/systemd/system/noland-lifecycle-agen
 
 The state-agent also runs as `root` with its existing bounded eBPF capabilities and uses the target user's group only for socket access. Its runtime directory and database are root-owned, so a compromised streaming-user process cannot replace the state-agent socket or alter the verification database. The lifecycle RPC client additionally rejects a state-agent peer whose Unix UID is not root.
 
-The lifecycle runtime directory uses `RuntimeDirectoryPreserve=restart`. This is required because the capability is in `/run` and must survive a service restart during configuration. A host reboot removes the tmpfs capability and therefore fails safe; re-provisioning is required before autonomous shutdown can resume.
+The capability is stored in the durable lifecycle state directory with root-only file permissions, so it survives service restarts and host reboots. Re-provisioning is still required after the instance's persistent state is replaced or when the capability expires.
 
 ## Activity and application selection
 

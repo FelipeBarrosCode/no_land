@@ -157,6 +157,22 @@ impl Database {
         Ok(())
     }
 
+    /// Re-arm monitoring after a terminal safety failure. Active runs are
+    /// deliberately left untouched so saving settings cannot interrupt backup
+    /// or shutdown work already in progress.
+    pub fn reset_terminal_failure(&self, now: DateTime<Utc>) -> Result<bool> {
+        let changed = self.connection()?.execute(
+            "UPDATE lifecycle_state
+             SET state = 'MONITORING/IDLE', last_activity_at = ?1,
+                 timeout_reached_at = NULL, active_run_id = NULL,
+                 last_error = NULL, shutdown_started_at = NULL
+             WHERE singleton = 1
+               AND state IN ('BACKUP_FAILED_SAFE', 'SHUTDOWN_FAILED_SAFE')",
+            params![format_time(now)],
+        )?;
+        Ok(changed == 1)
+    }
+
     pub fn record_accepted_activity(&self, now: DateTime<Utc>) -> Result<()> {
         self.connection()?.execute(
             "UPDATE lifecycle_state SET last_activity_at = ?1 WHERE singleton = 1",
@@ -448,6 +464,27 @@ impl Database {
         Ok(())
     }
 
+    pub fn mark_app_skipped(
+        &self,
+        run_id: &str,
+        app_id: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<()> {
+        self.connection()?.execute(
+            "UPDATE backup_apps
+             SET status = 'FAILED', last_error = ?1, updated_at = ?2
+             WHERE run_id = ?3 AND app_id = ?4 AND status != 'VERIFIED'",
+            params![
+                format!("skipped: {reason}"),
+                format_time(now),
+                run_id,
+                app_id
+            ],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_app_failed(
         &self,
         run_id: &str,
@@ -483,13 +520,22 @@ impl Database {
     }
 
     pub fn all_apps_verified(&self, run_id: &str) -> Result<bool> {
-        let (total, verified): (i64, i64) = self.connection()?.query_row(
-            "SELECT COUNT(*), SUM(CASE WHEN status = 'VERIFIED' THEN 1 ELSE 0 END)
+        let (total, verified, skipped): (i64, i64, i64) = self.connection()?.query_row(
+            "SELECT COUNT(*),
+                    SUM(CASE WHEN status = 'VERIFIED' THEN 1 ELSE 0 END),
+                    SUM(CASE WHEN status = 'FAILED' AND last_error LIKE 'skipped: %'
+                             THEN 1 ELSE 0 END)
              FROM backup_apps WHERE run_id = ?1",
             params![run_id],
-            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                ))
+            },
         )?;
-        Ok(total > 0 && total == verified)
+        Ok(verified > 0 && total == verified + skipped)
     }
 
     pub fn snapshot(&self) -> Result<LifecycleSnapshot> {

@@ -8,7 +8,15 @@ import type {
   LifecycleAgentStatus,
 } from "../../lib/types";
 
-const TIMEOUT_OPTIONS = [1, 2, 3, 4, 6, 8] as const;
+const TIMEOUT_OPTIONS = [
+  { value: 1 / 12, label: "5 minutes" },
+  { value: 1, label: "1 hour" },
+  { value: 2, label: "2 hours" },
+  { value: 3, label: "3 hours" },
+  { value: 4, label: "4 hours" },
+  { value: 6, label: "6 hours" },
+  { value: 8, label: "8 hours" },
+] as const;
 
 interface Props {
   state: AutoShutdownState;
@@ -21,9 +29,8 @@ interface Props {
 }
 
 function timeoutModeFor(hours: number): string {
-  return TIMEOUT_OPTIONS.includes(hours as (typeof TIMEOUT_OPTIONS)[number])
-    ? hours.toString()
-    : "custom";
+  const option = TIMEOUT_OPTIONS.find(({ value }) => Math.abs(value - hours) < 0.0001);
+  return option ? option.value.toString() : "custom";
 }
 
 function formatStatus(status: string): string {
@@ -99,7 +106,7 @@ export function AutoShutdownSettings({
   const parsedBackupAppLimit = Number(backupAppLimit);
   const inactivityHoursInvalid =
     !Number.isFinite(inactivityHours) ||
-    inactivityHours < 0.25 ||
+    inactivityHours < 1 / 12 ||
     inactivityHours > 24;
   const backupAppLimitInvalid =
     !Number.isInteger(parsedBackupAppLimit) ||
@@ -155,9 +162,9 @@ export function AutoShutdownSettings({
             onChange={(event) => setTimeoutMode(event.currentTarget.value)}
             className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.2rem] leading-none text-[#dff8ff] outline-none transition focus:border-neon-cyan focus:shadow-[inset_0_0_0_2px_#121731,0_0_0_2px_rgba(68,214,255,0.28)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {TIMEOUT_OPTIONS.map((hours) => (
-              <option key={hours} value={hours}>
-                {hours} {hours === 1 ? "hour" : "hours"}
+            {TIMEOUT_OPTIONS.map(({ value, label }) => (
+              <option key={value} value={value}>
+                {label}
               </option>
             ))}
             <option value="custom">Custom</option>
@@ -169,16 +176,16 @@ export function AutoShutdownSettings({
 
         {timeoutMode === "custom" ? (
           <InputField
-            label="Custom timeout (0.25–24 hours)"
+            label="Custom timeout (5 minutes–24 hours)"
             type="number"
-            min={0.25}
+            min={1 / 12}
             max={24}
-            step={0.25}
+            step={1 / 12}
             value={customHours}
             disabled={busy}
             error={
               inactivityHoursInvalid
-                ? "Enter a finite value from 0.25 to 24"
+                ? "Enter a finite value from 5 minutes to 24 hours"
                 : undefined
             }
             onChange={(event) => setCustomHours(event.currentTarget.value)}

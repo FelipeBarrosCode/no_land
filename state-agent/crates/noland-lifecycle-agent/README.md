@@ -29,7 +29,7 @@ The default configuration file is `/etc/noland/lifecycle/config.json`. Fields us
   "statusSocket": "/run/noland/lifecycle/agent.sock",
   "activitySocket": "/run/noland/sunshine-events.sock",
   "databasePath": "/var/lib/noland/lifecycle/runtime.db",
-  "capabilityPath": "/run/noland/lifecycle/storage-capability.json",
+  "capabilityPath": "/var/lib/noland/lifecycle/storage-capability.json",
   "vastBaseUrl": "https://console.vast.ai",
   "providerAction": "destroy"
 }

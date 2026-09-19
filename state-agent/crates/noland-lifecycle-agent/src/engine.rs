@@ -185,10 +185,17 @@ impl LifecycleEngine {
         *current = new_config;
         let enabled = current.enabled;
         drop(current);
-        if newly_enabled {
+        if enabled {
+            // Saving enabled lifecycle settings is also the explicit user
+            // action to re-arm a previous safe failure. Only terminal safety
+            // states are reset; active backup/shutdown runs remain intact.
             self.database
-                .initialize_monitoring(true, self.clock.now_utc())?;
-            self.activity.reset_for_monitoring()?;
+                .reset_terminal_failure(self.clock.now_utc())?;
+            if newly_enabled {
+                self.database
+                    .initialize_monitoring(true, self.clock.now_utc())?;
+                self.activity.reset_for_monitoring()?;
+            }
         } else if !enabled {
             let snapshot = self.database.snapshot()?;
             if !snapshot.state.run_is_active() {
@@ -478,6 +485,15 @@ impl LifecycleEngine {
                     }
                     continue;
                 }
+                Err(error) if is_missing_app_error(error.public_message()) => {
+                    self.database.mark_app_skipped(
+                        run_id,
+                        &app.app_id,
+                        error.public_message(),
+                        self.clock.now_utc(),
+                    )?;
+                    return Ok(());
+                }
                 Err(error) => {
                     app.attempts += 1;
                     self.database.record_start_failure(
@@ -629,6 +645,13 @@ fn completion_ids(status: &OperationStatus) -> Result<(String, String)> {
     let commit_id = string_field(&status.detail_json, "commit_id", "commitId")
         .ok_or_else(|| AgentError::new("completed backup has no commit ID"))?;
     Ok((bundle_id, commit_id))
+}
+
+fn is_missing_app_error(message: &str) -> bool {
+    let normalized = message.trim().to_ascii_lowercase();
+    normalized.starts_with("not found:")
+        || normalized.contains("app not found")
+        || normalized.contains("application not found")
 }
 
 fn is_backup_eligible_app_id(app_id: &str) -> bool {

@@ -198,7 +198,9 @@ response = json.loads(stream.makefile("rb").readline(65537))
 result = response.get("result") or {}
 if response.get("id") != request["id"] or response.get("error") is not None:
     raise SystemExit(1)
-if result.get("enabled") is not False or result.get("instanceId") != 0:
+# An existing host may already have lifecycle enabled. Installation readiness
+# only requires a valid health response; configuration is applied afterward.
+if not isinstance(result.get("enabled"), bool) or not isinstance(result.get("instanceId"), int):
     raise SystemExit(1)
 __NOLAND_HEALTH_PY__
   then

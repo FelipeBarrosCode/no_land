@@ -21,8 +21,8 @@ use super::{
     app_context::AppContext,
     remote_exec::{ExecOutput, RemoteExec},
     shared_storage::{
-        provider_profiles::shared_profile_manager, rclone_adapter::mint_ephemeral_session,
-        shared_storage_manager::SharedStorageManager,
+        agent_runtime::ensure_state_agent, provider_profiles::shared_profile_manager,
+        rclone_adapter::mint_ephemeral_session, shared_storage_manager::SharedStorageManager,
     },
 };
 
@@ -32,12 +32,12 @@ const SYSTEMD_UNIT: &str =
     include_str!("../../../state-agent/systemd/noland-lifecycle-agent.service");
 
 const AGENT_VERSION: &str = "0.1.0";
-const DEPLOYMENT_REVISION: &str = "6";
+const DEPLOYMENT_REVISION: &str = "12";
 const AGENT_BINARY: &str = "/usr/local/bin/noland-lifecycle-agent";
 const AGENT_SERVICE: &str = "noland-lifecycle-agent.service";
 const REVISION_PATH: &str = "/usr/local/share/noland-lifecycle-agent/install-revision";
 const CONFIG_PATH: &str = "/etc/noland/lifecycle/config.json";
-const CAPABILITY_PATH: &str = "/run/noland/lifecycle/storage-capability.json";
+const CAPABILITY_PATH: &str = "/var/lib/noland/lifecycle/storage-capability.json";
 const STATUS_SOCKET: &str = "/run/noland/lifecycle/agent.sock";
 const MAX_STATUS_BYTES: usize = 1024 * 1024;
 
@@ -153,6 +153,7 @@ impl LifecycleAgentProvisioner {
             context.config.vast_base_url.clone(),
         )?;
 
+        ensure_state_agent(remote, &context.config.audio_target_user).await?;
         ensure_installed_locked(remote, &context.config.audio_target_user).await?;
 
         let staging = LocalStagingDir::create("noland-lifecycle-config")?;
@@ -292,9 +293,9 @@ impl LifecycleConfig {
         backup_app_limit: u8,
         vast_base_url: String,
     ) -> AppResult<Self> {
-        if !inactivity_hours.is_finite() || !(0.25..=24.0).contains(&inactivity_hours) {
+        if !inactivity_hours.is_finite() || !(1.0 / 12.0..=24.0).contains(&inactivity_hours) {
             return Err(AppError::InvalidInput(
-                "Inactivity timeout must be between 0.25 and 24 hours".to_string(),
+                "Inactivity timeout must be between 5 minutes and 24 hours".to_string(),
             ));
         }
         if !(1..=10).contains(&backup_app_limit) {
@@ -664,8 +665,8 @@ printf '%s  %s\n' {capability_sha256} {root_capability} | sha256sum -c -"#,
     );
     let capability_install = if capability.is_some() {
         format!(
-            r#"install -d -o root -g root -m 0750 /run/noland/lifecycle
-capability_temp="$(mktemp /run/noland/lifecycle/.storage-capability.json.XXXXXX)"
+            r#"install -d -o root -g root -m 0750 /var/lib/noland/lifecycle
+capability_temp="$(mktemp /var/lib/noland/lifecycle/.storage-capability.json.XXXXXX)"
 install -o root -g root -m 0600 {root_capability} "$capability_temp"
 mv -f "$capability_temp" {capability_path}
 capability_temp="""#,
@@ -679,16 +680,22 @@ capability_temp="""#,
 import socket
 import sys
 
-request = {"id": "config-readiness", "method": "GetHealth", "params": {}}
+reload_request = {"id": "config-reload", "method": "ReloadConfig", "params": {}}
+health_request = {"id": "config-readiness", "method": "GetHealth", "params": {}}
 stream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 stream.settimeout(2)
 stream.connect(sys.argv[1])
-stream.sendall((json.dumps(request, separators=(",", ":")) + "\n").encode())
-response = json.loads(stream.makefile("rb").readline(65537))
-result = response.get("result") or {}
+reader = stream.makefile("rb")
+stream.sendall((json.dumps(reload_request, separators=(",", ":")) + "\n").encode())
+reload_response = json.loads(reader.readline(65537))
+if reload_response.get("id") != reload_request["id"] or reload_response.get("error") is not None:
+    raise SystemExit(1)
+stream.sendall((json.dumps(health_request, separators=(",", ":")) + "\n").encode())
+health_response = json.loads(reader.readline(65537))
+result = health_response.get("result") or {}
 expected_instance = int(sys.argv[2])
 expected_enabled = sys.argv[3] == "true"
-if response.get("id") != request["id"] or response.get("error") is not None:
+if health_response.get("id") != health_request["id"] or health_response.get("error") is not None:
     raise SystemExit(1)
 if result.get("instanceId") != expected_instance or result.get("enabled") is not expected_enabled:
     raise SystemExit(1)

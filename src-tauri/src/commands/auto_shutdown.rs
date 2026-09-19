@@ -13,10 +13,12 @@ fn validate_auto_shutdown_request(
     settings: &AutoShutdownSettings,
     state: &PersistedAppState,
 ) -> Result<(), AppError> {
-    if !settings.inactivity_hours.is_finite() || !(0.25..=24.0).contains(&settings.inactivity_hours)
+    if !settings.inactivity_hours.is_finite()
+        || !(1.0 / 12.0..=24.0).contains(&settings.inactivity_hours)
     {
         return Err(AppError::InvalidInput(
-            "Inactivity timeout must be a finite number between 0.25 and 24 hours.".to_string(),
+            "Inactivity timeout must be a finite number between 5 minutes and 24 hours."
+                .to_string(),
         ));
     }
 
@@ -259,7 +261,7 @@ mod tests {
     fn settings_validation_accepts_boundaries() {
         let state = PersistedAppState::default();
 
-        for inactivity_hours in [0.25, 24.0] {
+        for inactivity_hours in [1.0 / 12.0, 24.0] {
             for backup_app_limit in [1, 10] {
                 let settings = AutoShutdownSettings {
                     enabled: false,
@@ -275,7 +277,7 @@ mod tests {
     fn settings_validation_rejects_non_finite_and_out_of_range_values() {
         let state = PersistedAppState::default();
 
-        for inactivity_hours in [f32::NAN, f32::INFINITY, 0.24, 24.01] {
+        for inactivity_hours in [f32::NAN, f32::INFINITY, 1.0 / 12.0 - 0.001, 24.01] {
             let settings = AutoShutdownSettings {
                 enabled: false,
                 inactivity_hours,
