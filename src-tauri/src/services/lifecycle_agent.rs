@@ -32,7 +32,7 @@ const SYSTEMD_UNIT: &str =
     include_str!("../../../state-agent/systemd/noland-lifecycle-agent.service");
 
 const AGENT_VERSION: &str = "0.1.0";
-const DEPLOYMENT_REVISION: &str = "5";
+const DEPLOYMENT_REVISION: &str = "6";
 const AGENT_BINARY: &str = "/usr/local/bin/noland-lifecycle-agent";
 const AGENT_SERVICE: &str = "noland-lifecycle-agent.service";
 const REVISION_PATH: &str = "/usr/local/share/noland-lifecycle-agent/install-revision";

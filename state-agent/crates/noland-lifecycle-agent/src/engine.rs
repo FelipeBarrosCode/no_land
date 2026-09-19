@@ -580,10 +580,23 @@ impl LifecycleEngine {
                     return Ok((bundle_id, commit_id));
                 }
                 "FAILED" | "CANCELLED" | "INTERRUPTED" => {
-                    return Err(AgentError::new(format!(
-                        "backup operation ended in unsafe state {}",
-                        status.state
-                    )))
+                    let reason = status
+                        .detail_json
+                        .get("_last_error")
+                        .or_else(|| status.detail_json.get("last_error"))
+                        .or_else(|| status.detail_json.get("error"))
+                        .and_then(Value::as_str)
+                        .filter(|error| !error.trim().is_empty());
+                    return Err(AgentError::new(match reason {
+                        Some(reason) => format!(
+                            "backup operation ended in unsafe state {}: {}",
+                            status.state, reason
+                        ),
+                        None => format!(
+                            "backup operation ended in unsafe state {}",
+                            status.state
+                        ),
+                    }))
                 }
                 "QUEUED" | "DISCOVERING" | "RECONCILING" | "SNAPSHOTTING" | "HASHING"
                 | "PACKING" | "UPLOADING" | "COMMITTING" | "CHECKPOINTING" | "RUNNING" => {}

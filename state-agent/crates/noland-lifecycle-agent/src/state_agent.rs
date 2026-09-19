@@ -174,11 +174,26 @@ impl StateAgentClient for UnixStateAgentClient {
             .and_then(Value::as_str)
             .ok_or_else(|| AgentError::new("operation status has no state"))?
             .to_ascii_uppercase();
-        let detail_json = value
+        let mut detail_json = value
             .get("detail_json")
             .or_else(|| value.get("detailJson"))
             .cloned()
             .unwrap_or_else(|| json!({}));
+        // The state agent persists the actionable failure reason in the
+        // operation's top-level last_error field. Preserve it in the status
+        // object consumed by the lifecycle engine so failures are diagnosable
+        // instead of being reduced to a generic terminal-state message.
+        if let Some(last_error) = value
+            .get("last_error")
+            .or_else(|| value.get("lastError"))
+            .and_then(Value::as_str)
+            .filter(|error| !error.trim().is_empty())
+        {
+            if !detail_json.is_object() {
+                detail_json = json!({});
+            }
+            detail_json["_last_error"] = Value::String(last_error.to_owned());
+        }
         Ok(OperationStatus { state, detail_json })
     }
 
