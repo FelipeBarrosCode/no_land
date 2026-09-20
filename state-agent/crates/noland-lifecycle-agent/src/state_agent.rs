@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -57,6 +58,7 @@ pub struct VerifyRequest {
 #[async_trait]
 pub trait StateAgentClient: Send + Sync {
     async fn get_active_app_sessions(&self) -> Result<Vec<ActiveAppSession>>;
+    async fn list_backup_candidate_app_ids(&self) -> Result<HashSet<String>>;
     async fn resolve_process_to_app(&self, pid: u32) -> Result<Option<String>>;
     async fn start_backup(&self, request: BackupRequest) -> Result<String>;
     async fn get_operation_status(&self, operation_id: &str) -> Result<OperationStatus>;
@@ -124,6 +126,13 @@ impl StateAgentClient for UnixStateAgentClient {
         let value = self.call("GetActiveAppSessions", json!({})).await?;
         let sessions = value.get("sessions").cloned().unwrap_or(value);
         serde_json::from_value(sessions).map_err(Into::into)
+    }
+
+    async fn list_backup_candidate_app_ids(&self) -> Result<HashSet<String>> {
+        let value = self.call("ListBackupCandidateIds", json!({})).await?;
+        let app_ids: Vec<String> = serde_json::from_value(value)
+            .map_err(|_| AgentError::new("state-agent returned invalid backup candidate IDs"))?;
+        Ok(app_ids.into_iter().collect())
     }
 
     async fn resolve_process_to_app(&self, pid: u32) -> Result<Option<String>> {

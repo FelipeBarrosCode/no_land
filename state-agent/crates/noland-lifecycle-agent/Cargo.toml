@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+noland-discovery.workspace = true
 noland-rclone-adapter.workspace = true
 noland-rpc.workspace = true
 

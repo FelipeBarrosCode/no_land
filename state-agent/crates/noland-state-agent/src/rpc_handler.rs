@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 13;
+const AGENT_API_VERSION: u64 = 14;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 
@@ -62,6 +62,13 @@ impl RpcHandler for AgentRpc {
                     .map(serialize_app_identity)
                     .collect::<Result<Vec<_>>>()?;
                 Ok(serde_json::Value::Array(apps))
+            }
+            "ListBackupCandidateIds" => {
+                let app_ids = noland_discovery::filter_backup_candidates(agent.db.list_apps()?)
+                    .into_iter()
+                    .map(|app| app.app_id)
+                    .collect::<Vec<_>>();
+                Ok(serde_json::to_value(app_ids)?)
             }
             "GetActiveAppSessions" => {
                 reconcile_process_state_best_effort(agent);
@@ -1600,9 +1607,9 @@ fn resolve_process_to_app(
         }
     }
 
-    // Temporary bridge for native/AppImage processes started after discovery. The
-    // attribution observer remains the source of persistent sessions; this fallback
-    // only supplies the lifecycle foreground tracker with a safe executable identity.
+    // Last-resort executable lookup. It may only return an identity that is already
+    // persisted in the shared-storage index; synthetic IDs cannot be backed up and
+    // therefore must never enter lifecycle ranking.
     let executable = match std::fs::read_link(format!("/proc/{pid}/exe")) {
         Ok(executable) => PathBuf::from(executable),
         Err(error) => {
@@ -1637,27 +1644,22 @@ fn resolve_process_to_app(
         .unwrap_or_default()
         .to_ascii_lowercase();
     tracing::info!(pid, executable = %executable.display(), executable_name = %executable_name, "resolving process through executable fallback");
-    if matches!(
-        executable_name.as_str(),
-        "systemd"
-            | "systemd-journald"
-            | "systemd-logind"
-            | "upowerd"
-            | "dbus-daemon"
-            | "dbus-broker"
-            | "polkitd"
-            | "sshd"
-            | "sunshine"
-            | "pipewire"
-            | "wireplumber"
-            | "xorg"
-    ) || executable_name.starts_with("xdg-desktop-portal")
-        || executable_name.starts_with("noland-")
-    {
+    if noland_discovery::is_always_ignored_executable_name(&executable_name) {
         tracing::warn!(pid, executable_name = %executable_name, "rejecting system executable from lifecycle fallback");
         return Ok(None);
     }
-    let app = noland_discovery::fallback_exe_identity(&executable);
+    let fallback = noland_discovery::fallback_exe_identity(&executable);
+    let Some(app) = db
+        .get_app(&fallback.app_id)?
+        .and_then(|app| noland_discovery::filter_backup_candidates(vec![app]).pop())
+    else {
+        tracing::info!(
+            pid,
+            app_id = %fallback.app_id,
+            "not ranking unindexed executable for automatic backup"
+        );
+        return Ok(None);
+    };
     let now = Utc::now();
     Ok(Some(ResolvedProcessApp {
         app_id: app.app_id,

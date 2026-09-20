@@ -5,7 +5,9 @@ use crate::{
     models::app_state::{AutoShutdownSettings, AutoShutdownState, PersistedAppState},
     services::{
         app_context::AppContext,
+        instance_lifecycle::InstanceLifecycleService,
         lifecycle_agent::{LifecycleAgentProvisioner, LifecycleAgentStatus},
+        vast_api::VastApiClient,
     },
 };
 
@@ -96,6 +98,22 @@ pub async fn save_auto_shutdown_settings(
     settings: AutoShutdownSettings,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
+    let initial_state = context.load_state().await;
+    if settings.enabled && !initial_state.credentials.vast_api_key.trim().is_empty() {
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            initial_state.credentials.vast_api_key.clone(),
+        );
+        let owned_instances = vast.list_instances().await.map_err(|error| {
+            AppError::Provisioning(format!(
+                "Could not refresh Vast.ai instances before saving automatic backup settings: {error}"
+            ))
+        })?;
+        InstanceLifecycleService::reconcile_owned_instances(context.inner(), &owned_instances)
+            .await?;
+    }
+
     let current_state = context.load_state().await;
     validate_auto_shutdown_request(&settings, &current_state)?;
     let instance_ids = current_state

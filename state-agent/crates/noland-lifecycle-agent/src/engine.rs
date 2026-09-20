@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -24,32 +25,6 @@ const BACKUP_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const BACKUP_POLL_TIMEOUT_MS: u64 = 30 * 60 * 1_000;
 const BACKUP_MAX_ATTEMPTS: u32 = 3;
 const MAX_TRACKED_APPS: usize = 1_024;
-const IGNORED_EXECUTABLES: &[&str] = &[
-    "accounts-daemon",
-    "cron",
-    "dbus-broker",
-    "dbus-daemon",
-    "kdeinit",
-    "kioslave",
-    "networkmanager",
-    "noland-lifecycle-agent",
-    "noland-state-agent",
-    "packagekitd",
-    "pipewire",
-    "polkitd",
-    "pulseaudio",
-    "rtkit-daemon",
-    "sshd",
-    "startplasma",
-    "sunshine",
-    "systemd",
-    "udisksd",
-    "upowerd",
-    "wireplumber",
-    "xorg",
-    "xsettingsd",
-];
-const IGNORED_EXECUTABLE_PREFIXES: &[&str] = &["xdg-desktop-portal", "systemd-"];
 const BACKOFFS: [Duration; 3] = [
     Duration::from_secs(5),
     Duration::from_secs(15),
@@ -109,6 +84,7 @@ pub struct LifecycleEngine {
     clock: Arc<dyn Clock>,
     sleeper: Arc<dyn Sleeper>,
     last_usage_tick_ms: Mutex<u64>,
+    candidate_app_ids: RwLock<HashSet<String>>,
 }
 
 impl LifecycleEngine {
@@ -139,6 +115,7 @@ impl LifecycleEngine {
             clock,
             sleeper,
             last_usage_tick_ms: Mutex::new(now_mono),
+            candidate_app_ids: RwLock::new(HashSet::new()),
         })
     }
 
@@ -189,8 +166,7 @@ impl LifecycleEngine {
             // Saving enabled lifecycle settings is also the explicit user
             // action to re-arm a previous safe failure. Only terminal safety
             // states are reset; active backup/shutdown runs remain intact.
-            self.database
-                .reset_terminal_failure(self.clock.now_utc())?;
+            self.database.reset_terminal_failure(self.clock.now_utc())?;
             if newly_enabled {
                 self.database
                     .initialize_monitoring(true, self.clock.now_utc())?;
@@ -263,7 +239,20 @@ impl LifecycleEngine {
             self.clock.now_utc(),
             None,
         )?;
-        let apps = self.eligible_ranked_apps(config.backup_app_limit)?;
+        let apps = match self.validated_ranked_apps(config.backup_app_limit).await {
+            Ok(apps) => apps,
+            Err(error) => {
+                self.database.fail_run(
+                    None,
+                    LifecycleState::BackupFailedSafe,
+                    &format!(
+                        "unable to validate automatic-backup applications against shared storage: {}",
+                        error.public_message()
+                    ),
+                )?;
+                return Ok(());
+            }
+        };
         if apps.is_empty() {
             self.database.fail_run(
                 None,
@@ -292,9 +281,20 @@ impl LifecycleEngine {
         if elapsed == 0 {
             return Ok(());
         }
+        let sessions = self.state_agent.get_active_app_sessions().await?;
+        let candidate_app_ids = self.state_agent.list_backup_candidate_app_ids().await?;
+        {
+            let mut cached = self
+                .candidate_app_ids
+                .write()
+                .map_err(|_| AgentError::new("backup candidate cache lock poisoned"))?;
+            *cached = candidate_app_ids.clone();
+        }
         let now = self.clock.now_utc();
-        for session in self.state_agent.get_active_app_sessions().await? {
-            if is_backup_eligible_app_id(&session.app_id) {
+        for session in sessions {
+            if candidate_app_ids.contains(&session.app_id)
+                && is_backup_eligible_app_id(&session.app_id)
+            {
                 self.database.record_active_session(
                     &session.session_id,
                     &session.app_id,
@@ -305,7 +305,7 @@ impl LifecycleEngine {
         }
         if let Some(pid) = self.foreground.foreground_pid().await {
             if let Some(app_id) = self.state_agent.resolve_process_to_app(pid).await? {
-                if is_backup_eligible_app_id(&app_id) {
+                if candidate_app_ids.contains(&app_id) && is_backup_eligible_app_id(&app_id) {
                     self.database.record_foreground(&app_id, elapsed, now)?;
                 }
             }
@@ -314,13 +314,31 @@ impl LifecycleEngine {
     }
 
     fn eligible_ranked_apps(&self, limit: usize) -> Result<Vec<RankedApp>> {
+        let candidate_app_ids = self
+            .candidate_app_ids
+            .read()
+            .map_err(|_| AgentError::new("backup candidate cache lock poisoned"))?;
         Ok(self
             .database
             .ranked_apps(MAX_TRACKED_APPS)?
             .into_iter()
-            .filter(|app| is_backup_eligible_app_id(&app.app_id))
+            .filter(|app| {
+                candidate_app_ids.contains(&app.app_id) && is_backup_eligible_app_id(&app.app_id)
+            })
             .take(limit)
             .collect())
+    }
+
+    async fn validated_ranked_apps(&self, limit: usize) -> Result<Vec<RankedApp>> {
+        let candidate_app_ids = self.state_agent.list_backup_candidate_app_ids().await?;
+        {
+            let mut cached = self
+                .candidate_app_ids
+                .write()
+                .map_err(|_| AgentError::new("backup candidate cache lock poisoned"))?;
+            *cached = candidate_app_ids;
+        }
+        self.eligible_ranked_apps(limit)
     }
 
     async fn execute_run(&self, run_id: &str, config: &Config) -> Result<()> {
@@ -485,15 +503,6 @@ impl LifecycleEngine {
                     }
                     continue;
                 }
-                Err(error) if is_missing_app_error(error.public_message()) => {
-                    self.database.mark_app_skipped(
-                        run_id,
-                        &app.app_id,
-                        error.public_message(),
-                        self.clock.now_utc(),
-                    )?;
-                    return Ok(());
-                }
                 Err(error) => {
                     app.attempts += 1;
                     self.database.record_start_failure(
@@ -608,11 +617,8 @@ impl LifecycleEngine {
                             "backup operation ended in unsafe state {}: {}",
                             status.state, reason
                         ),
-                        None => format!(
-                            "backup operation ended in unsafe state {}",
-                            status.state
-                        ),
-                    }))
+                        None => format!("backup operation ended in unsafe state {}", status.state),
+                    }));
                 }
                 "QUEUED" | "DISCOVERING" | "RECONCILING" | "SNAPSHOTTING" | "HASHING"
                 | "PACKING" | "UPLOADING" | "COMMITTING" | "CHECKPOINTING" | "RUNNING" => {}
@@ -647,13 +653,6 @@ fn completion_ids(status: &OperationStatus) -> Result<(String, String)> {
     Ok((bundle_id, commit_id))
 }
 
-fn is_missing_app_error(message: &str) -> bool {
-    let normalized = message.trim().to_ascii_lowercase();
-    normalized.starts_with("not found:")
-        || normalized.contains("app not found")
-        || normalized.contains("application not found")
-}
-
 fn is_backup_eligible_app_id(app_id: &str) -> bool {
     let normalized = app_id.trim().to_ascii_lowercase();
     let Some(executable_id) = normalized.strip_prefix("exe:") else {
@@ -666,10 +665,7 @@ fn is_backup_eligible_app_id(app_id: &str) -> bool {
         .next()
         .unwrap_or(executable_id);
 
-    !IGNORED_EXECUTABLES.contains(&executable)
-        && !IGNORED_EXECUTABLE_PREFIXES
-            .iter()
-            .any(|prefix| executable.starts_with(prefix))
+    !noland_discovery::is_always_ignored_executable_name(executable)
 }
 
 #[cfg(test)]
@@ -692,6 +688,8 @@ mod tests {
             "exe:systemd:1-session",
             "exe:xdg-desktop-portal-kde:42-session",
             "exe:/usr/libexec/polkitd:71-session",
+            "exe:startplasma-x11:6228f901",
+            "exe:/usr/bin/plasmashell:71-session",
         ] {
             assert!(!is_backup_eligible_app_id(ignored), "{ignored}");
         }
@@ -762,16 +760,26 @@ mod tests {
         statuses: Mutex<VecDeque<OperationStatus>>,
         verify: bool,
         starts: AtomicUsize,
+        start_error: Mutex<Option<String>>,
     }
     #[async_trait]
     impl StateAgentClient for FakeStateAgent {
         async fn get_active_app_sessions(&self) -> Result<Vec<ActiveAppSession>> {
             Ok(Vec::new())
         }
+        async fn list_backup_candidate_app_ids(&self) -> Result<HashSet<String>> {
+            Ok(["app", "one", "two"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect())
+        }
         async fn resolve_process_to_app(&self, _pid: u32) -> Result<Option<String>> {
             Ok(None)
         }
         async fn start_backup(&self, _request: BackupRequest) -> Result<String> {
+            if let Some(error) = self.start_error.lock().unwrap().clone() {
+                return Err(AgentError::new(error));
+            }
             let value = self.starts.fetch_add(1, Ordering::SeqCst);
             Ok(format!("operation-{value}"))
         }
@@ -832,6 +840,7 @@ mod tests {
         activity: Arc<ActivityProcessor>,
         clock: ManualClock,
         provider: Arc<FakeProvider>,
+        state_agent: Arc<FakeStateAgent>,
     }
 
     fn harness(statuses: Vec<OperationStatus>, verify: bool) -> Harness {
@@ -867,6 +876,7 @@ mod tests {
             statuses: Mutex::new(statuses.into()),
             verify,
             starts: AtomicUsize::new(0),
+            start_error: Mutex::new(None),
         });
         let sleeper: Arc<dyn Sleeper> = if expire_on_retry {
             Arc::new(ExpiringSleep(clock.clone()))
@@ -877,7 +887,7 @@ mod tests {
             config,
             Arc::clone(&database),
             Arc::clone(&activity),
-            state_agent,
+            state_agent.clone(),
             Arc::new(NoForeground),
             provider.clone(),
             Arc::new(FixedCapability(capability())),
@@ -891,6 +901,7 @@ mod tests {
             activity,
             clock,
             provider,
+            state_agent,
         }
     }
 
@@ -901,6 +912,22 @@ mod tests {
         database
             .record_foreground(app_id, foreground, clock.now_utc())
             .unwrap();
+    }
+
+    #[test]
+    fn ranking_only_contains_shared_storage_candidates() {
+        let harness = harness(vec![], true);
+        add_usage(&harness.database, &harness.clock, "stale-unindexed", 3_000);
+        add_usage(&harness.database, &harness.clock, "one", 2_000);
+        add_usage(&harness.database, &harness.clock, "two", 1_000);
+        *harness.engine.candidate_app_ids.write().unwrap() =
+            ["one", "two"].into_iter().map(str::to_owned).collect();
+
+        let ranked = harness.engine.eligible_ranked_apps(2).unwrap();
+        assert_eq!(
+            ranked.into_iter().map(|app| app.app_id).collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
     }
 
     #[tokio::test]
@@ -958,6 +985,23 @@ mod tests {
         add_usage(&harness.database, &harness.clock, "two", 1_000);
         harness.clock.advance(Duration::from_secs(900));
         harness.engine.tick().await.unwrap();
+        assert_eq!(harness.provider.calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            harness.database.snapshot().unwrap().state,
+            LifecycleState::BackupFailedSafe
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_frozen_app_blocks_provider() {
+        let harness = harness(vec![], true);
+        *harness.state_agent.start_error.lock().unwrap() =
+            Some("not found: app was removed from the shared-storage index".into());
+        add_usage(&harness.database, &harness.clock, "app", 1_000);
+        harness.clock.advance(Duration::from_secs(900));
+
+        harness.engine.tick().await.unwrap();
+
         assert_eq!(harness.provider.calls.load(Ordering::SeqCst), 0);
         assert_eq!(
             harness.database.snapshot().unwrap().state,

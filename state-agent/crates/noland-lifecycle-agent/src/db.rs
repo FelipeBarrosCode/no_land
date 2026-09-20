@@ -464,27 +464,6 @@ impl Database {
         Ok(())
     }
 
-    pub fn mark_app_skipped(
-        &self,
-        run_id: &str,
-        app_id: &str,
-        reason: &str,
-        now: DateTime<Utc>,
-    ) -> Result<()> {
-        self.connection()?.execute(
-            "UPDATE backup_apps
-             SET status = 'FAILED', last_error = ?1, updated_at = ?2
-             WHERE run_id = ?3 AND app_id = ?4 AND status != 'VERIFIED'",
-            params![
-                format!("skipped: {reason}"),
-                format_time(now),
-                run_id,
-                app_id
-            ],
-        )?;
-        Ok(())
-    }
-
     pub fn mark_app_failed(
         &self,
         run_id: &str,
@@ -520,22 +499,14 @@ impl Database {
     }
 
     pub fn all_apps_verified(&self, run_id: &str) -> Result<bool> {
-        let (total, verified, skipped): (i64, i64, i64) = self.connection()?.query_row(
+        let (total, verified): (i64, i64) = self.connection()?.query_row(
             "SELECT COUNT(*),
-                    SUM(CASE WHEN status = 'VERIFIED' THEN 1 ELSE 0 END),
-                    SUM(CASE WHEN status = 'FAILED' AND last_error LIKE 'skipped: %'
-                             THEN 1 ELSE 0 END)
+                    SUM(CASE WHEN status = 'VERIFIED' THEN 1 ELSE 0 END)
              FROM backup_apps WHERE run_id = ?1",
             params![run_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get::<_, Option<i64>>(1)?.unwrap_or(0))),
         )?;
-        Ok(verified > 0 && total == verified + skipped)
+        Ok(verified > 0 && total == verified)
     }
 
     pub fn snapshot(&self) -> Result<LifecycleSnapshot> {
@@ -685,5 +656,33 @@ mod tests {
                 params![run],
             )
             .is_err());
+    }
+
+    #[test]
+    fn every_frozen_app_must_verify() {
+        let db = Database::open_in_memory().unwrap();
+        let apps = vec![
+            RankedApp {
+                app_id: "verified".into(),
+                foreground_active_ms: 2,
+                process_runtime_ms: 2,
+                launch_count: 1,
+                last_active_at: now(2),
+            },
+            RankedApp {
+                app_id: "missing".into(),
+                foreground_active_ms: 1,
+                process_runtime_ms: 1,
+                launch_count: 1,
+                last_active_at: now(1),
+            },
+        ];
+        let run = db.create_run_with_frozen_apps(now(3), &apps).unwrap();
+        db.mark_app_verified(&run, "verified", "bundle", "commit", now(4))
+            .unwrap();
+        db.mark_app_failed(&run, "missing", "not found", now(4))
+            .unwrap();
+
+        assert!(!db.all_apps_verified(&run).unwrap());
     }
 }

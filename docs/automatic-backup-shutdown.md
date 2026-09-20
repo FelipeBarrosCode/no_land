@@ -24,7 +24,7 @@ noland-lifecycle-agent (root systemd service)
 
 The daemon is `state-agent/crates/noland-lifecycle-agent`. It is a separate process from both Sunshine and `noland-state-agent`; a monitor failure must not stop streaming.
 
-The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Existing state-agent API-12 installations are deliberately rejected and reinstalled as API 13 so the trusted service identity change is applied.
+The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Older state-agent installations are deliberately rejected and reinstalled as API 14 so lifecycle selection can be validated against the state-agent's canonical backup-candidate index.
 
 ## Defaults and settings
 
@@ -63,7 +63,7 @@ Preferred activity input is newline-delimited JSON on `/run/noland/sunshine-even
 
 Sources are `keyboard`, `mouse`, `controller`, and `touch`. Synthetic events and controller drift below the configured dead zone do not reset inactivity. On Linux, the daemon also has a fallback scanner for Sunshine/Moonlight virtual input devices under `/dev/input`.
 
-Application usage is attributed through state-agent active sessions and the foreground X11 window. Usage is kept in the runtime database and ranked by foreground activity, then recency/runtime tie-breakers. When the timeout is reached, the top N set is frozen transactionally. Later activity cannot change the selected set for that run.
+Application usage is attributed through state-agent active sessions and the foreground X11 window. Only canonical, persisted identities from the state-agent shared-storage index may enter the ranking; synthetic executable fallbacks and desktop plumbing such as Plasma are excluded. Usage is kept in the runtime database and ranked by foreground activity, then recency/runtime tie-breakers. When the timeout is reached, the ranking is revalidated against the canonical index and the top N valid set is frozen transactionally. Later activity cannot change the selected set for that run.
 
 ## Backup and shutdown safety
 
@@ -94,6 +94,7 @@ The following conditions must never stop or destroy the instance:
 - no ranked applications;
 - incomplete or failed backup;
 - exact commit mismatch;
+- a selected application disappearing from the shared-storage index;
 - state-agent unavailable or untrusted peer;
 - expired/missing capability;
 - lifecycle service restart or crash;
