@@ -34,7 +34,10 @@ export function networkWarningBody(event: NetworkStatusEvent): string {
 }
 
 export async function notifyBadConnection(event: NetworkStatusEvent): Promise<void> {
-  const body = networkWarningBody(event);
+  const connectionLost = event.reasons.includes("CONNECTION_LOST");
+  const body = connectionLost
+    ? networkWarningBody(event)
+    : "Connection unstable. Please get closer to your router or use Ethernet.";
   try {
     let granted = await isPermissionGranted();
     if (!granted) {
@@ -42,7 +45,7 @@ export async function notifyBadConnection(event: NetworkStatusEvent): Promise<vo
     }
     if (granted) {
       await sendNotification({
-        title: event.reasons.includes("CONNECTION_LOST")
+        title: connectionLost
           ? "No Land — Connection lost"
           : "No Land — Connection unstable",
         body,
