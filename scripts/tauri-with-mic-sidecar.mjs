@@ -326,21 +326,7 @@ function buildNativeEnv(targetTriple) {
       join(env.NOLAND_NATIVE_DEPS_PREFIX, 'share', 'pkgconfig'),
       process.env.PKG_CONFIG_PATH,
     ].filter(Boolean).join(':');
-
-    const gstreamerRoot = resolveLinuxGstreamerRoot(targetTriple);
-    if (gstreamerRoot) {
-      env.NOLAND_GSTREAMER_ROOT = gstreamerRoot;
-      env.PKG_CONFIG_PATH = [
-        join(gstreamerRoot, 'lib', 'pkgconfig'),
-        join(gstreamerRoot, 'lib64', 'pkgconfig'),
-        env.PKG_CONFIG_PATH,
-      ].filter(Boolean).join(':');
-      env.LD_LIBRARY_PATH = [
-        join(gstreamerRoot, 'lib'),
-        join(gstreamerRoot, 'lib64'),
-        process.env.LD_LIBRARY_PATH,
-      ].filter(Boolean).join(':');
-    }
+    delete env.NOLAND_GSTREAMER_ROOT;
     return env;
   }
 
@@ -417,15 +403,6 @@ function resolveMacPkgConfigRoots() {
   return [...new Set(roots.filter((candidate) => existsSync(candidate)))];
 }
 
-function resolveLinuxGstreamerRoot(targetTriple) {
-  const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();
-  if (explicit && (existsSync(join(explicit, 'lib')) || existsSync(join(explicit, 'lib64')))) {
-    return explicit;
-  }
-
-  const candidate = join(repoRoot, 'src-tauri', '.native-deps', targetTriple, 'gstreamer');
-  return existsSync(join(candidate, 'lib')) || existsSync(join(candidate, 'lib64')) ? candidate : null;
-}
 
 function resolveWindowsGstreamerRoot(targetTriple) {
   const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();

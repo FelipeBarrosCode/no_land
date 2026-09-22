@@ -178,13 +178,12 @@ function bootstrapLinuxTarget(targetTriple) {
 
   ensureOpus(prefix, targetTriple);
   ensureSdl2(prefix, targetTriple);
-  const gstreamerRoot = ensureLinuxGstreamerRoot(prefix, targetTriple);
 
-  if (gstreamerRoot) {
-    console.log(`Using staged Linux GStreamer root: ${gstreamerRoot}`);
-  } else {
-    console.log('Linux bootstrap prepared project-local Opus. GStreamer/GTK/WebKit/Pulse remain system-provided unless NOLAND_GSTREAMER_ROOT is supplied.');
-  }
+  // Linux GStreamer must remain part of the distro desktop stack shared with
+  // WebKitGTK. Remove artifacts from older builds so they cannot affect
+  // pkg-config, linking, or packaging.
+  rmSync(join(prefix, 'gstreamer'), { recursive: true, force: true });
+  console.log('Linux bootstrap uses system GStreamer/GTK/WebKit/Pulse packages.');
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
   console.log(`  prefix: ${prefix}`);

@@ -163,7 +163,9 @@ if (gstreamerTarget) {
   if (isWindowsTarget(gstreamerTarget) && windowsTargetNeedsGstreamer(gstreamerTarget)) {
     stageWindowsGstreamerRuntime(gstreamerTarget, binariesDir);
   } else if (gstreamerTarget.includes('linux')) {
-    stageLinuxGstreamerRuntime(gstreamerTarget, binariesDir);
+    // Remove artifacts produced by older builds. Linux uses the distro's
+    // GStreamer stack so it remains ABI-compatible with WebKitGTK.
+    rmSync(join(binariesDir, 'gstreamer', gstreamerTarget), { recursive: true, force: true });
   } else if (isWindowsTarget(gstreamerTarget)) {
     console.log(`Skipping bundled Windows GStreamer runtime for ${gstreamerTarget}; microphone passthrough falls back to an unsupported stub on this target.`);
   }
@@ -383,30 +385,6 @@ function stageWindowsGstreamerRuntime(targetTriple, binariesDir) {
   console.log(`Staged Windows GStreamer runtime for packaging: ${destinationRoot}`);
 }
 
-function stageLinuxGstreamerRuntime(targetTriple, binariesDir) {
-  const root = resolveLinuxGstreamerRoot(targetTriple);
-  if (!root) {
-    console.error(`Project-managed Linux GStreamer root was not found for ${targetTriple}. Run bootstrap-native-deps first.`);
-    process.exit(1);
-  }
-
-  const scanner = join(root, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
-  if (!existsSync(scanner)) {
-    console.error(`Project-managed Linux GStreamer runtime is missing gst-plugin-scanner: ${scanner}`);
-    process.exit(1);
-  }
-
-  const destinationRoot = join(binariesDir, 'gstreamer', targetTriple);
-  rmSync(destinationRoot, { recursive: true, force: true });
-  mkdirSync(destinationRoot, { recursive: true });
-
-  copyDirIfExists(join(root, 'lib'), join(destinationRoot, 'lib'));
-  copyDirIfExists(join(root, 'lib64'), join(destinationRoot, 'lib64'));
-  copyDirIfExists(join(root, 'libexec'), join(destinationRoot, 'libexec'));
-
-  console.log(`Staged Linux GStreamer runtime for packaging: ${destinationRoot}`);
-}
-
 
 function writeFileSyncSafe(path, content) {
   mkdirSync(dirname(path), { recursive: true });
@@ -421,15 +399,6 @@ function copyDirIfExists(source, destination) {
 }
 
 
-function resolveLinuxGstreamerRoot(targetTriple) {
-  const explicit = process.env.NOLAND_GSTREAMER_ROOT?.trim();
-  if (explicit && (existsSync(join(explicit, 'lib')) || existsSync(join(explicit, 'lib64')))) {
-    return explicit;
-  }
-
-  const candidate = join(srcTauriDir, '.native-deps', targetTriple, 'gstreamer');
-  return existsSync(join(candidate, 'lib')) || existsSync(join(candidate, 'lib64')) ? candidate : null;
-}
 
 function resolveWindowsLibclangRoot() {
   const explicit = process.env.LIBCLANG_PATH?.trim();
@@ -582,16 +551,7 @@ function buildNativeEnv(targetTriple) {
       join(env.NOLAND_NATIVE_DEPS_PREFIX, 'share', 'pkgconfig'),
       process.env.PKG_CONFIG_PATH,
     ].filter(Boolean).join(':');
-
-    const gstreamerRoot = resolveLinuxGstreamerRoot(targetTriple);
-    if (gstreamerRoot) {
-      env.NOLAND_GSTREAMER_ROOT = gstreamerRoot;
-      env.PKG_CONFIG_PATH = [
-        join(gstreamerRoot, 'lib', 'pkgconfig'),
-        join(gstreamerRoot, 'lib64', 'pkgconfig'),
-        env.PKG_CONFIG_PATH,
-      ].filter(Boolean).join(':');
-    }
+    delete env.NOLAND_GSTREAMER_ROOT;
     return env;
   }
 
