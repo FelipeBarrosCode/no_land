@@ -44,6 +44,7 @@ const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 enum HelperCommand {
     Run,
     Check,
+    Stop,
 }
 
 #[derive(Debug)]
@@ -547,6 +548,14 @@ async fn main() {
         process::exit(1);
     }
 
+    if args.command == HelperCommand::Stop {
+        if let Err(error) = cleanup_stale_runtime_owners(&args.state_dir).await {
+            eprintln!("noland-net-helper: {error:#}");
+            process::exit(1);
+        }
+        return;
+    }
+
     if let Err(error) = run(args).await {
         eprintln!("noland-net-helper: {error:#}");
         process::exit(1);
@@ -741,8 +750,9 @@ fn parse_args() -> Result<Args> {
     let command = match values.next().unwrap_or_default().as_str() {
         "run" => HelperCommand::Run,
         "check" => HelperCommand::Check,
+        "stop" => HelperCommand::Stop,
         _ => bail!(
-            "usage: noland-net-helper <run|check> --config <path> [--state-dir <path>] [--wintun <path>]"
+            "usage: noland-net-helper <run|check|stop> [--config <path>] [--state-dir <path>] [--wintun <path>]"
         ),
     };
 
@@ -761,17 +771,25 @@ fn parse_args() -> Result<Args> {
     }
 
     let state_dir = match command {
-        HelperCommand::Run => state_dir.ok_or_else(|| anyhow!("missing --state-dir path"))?,
+        HelperCommand::Run | HelperCommand::Stop => {
+            state_dir.ok_or_else(|| anyhow!("missing --state-dir path"))?
+        }
         HelperCommand::Check => state_dir.unwrap_or_default(),
     };
 
     Ok(Args {
         command,
-        config_path: config_path.ok_or_else(|| anyhow!("missing --config path"))?,
+        config_path: match command {
+            HelperCommand::Run | HelperCommand::Check => {
+                config_path.ok_or_else(|| anyhow!("missing --config path"))?
+            }
+            HelperCommand::Stop => config_path.unwrap_or_default(),
+        },
         state_dir,
         launch_id: match command {
             HelperCommand::Run => launch_id.ok_or_else(|| anyhow!("missing --launch-id value"))?,
             HelperCommand::Check => launch_id.unwrap_or_else(|| "check".to_string()),
+            HelperCommand::Stop => launch_id.unwrap_or_else(|| "stop".to_string()),
         },
         wintun_path,
     })

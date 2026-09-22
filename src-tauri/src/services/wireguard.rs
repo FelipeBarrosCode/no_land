@@ -326,14 +326,16 @@ fn process_is_alive(pid: u32) -> bool {
             return false;
         }
 
-        let executable = std::fs::read_link(format!("/proc/{pid}/exe"))
+        let executable_matches = std::fs::read_link(format!("/proc/{pid}/exe"))
             .ok()
             .and_then(|path| path.file_name().map(|name| name.to_owned()))
-            .and_then(|name| name.to_str().map(str::to_string));
-        return executable
-            .as_deref()
-            .map(|name| name.starts_with("noland-net-helper"))
-            .unwrap_or(true);
+            .and_then(|name| name.to_str().map(str::to_string))
+            .is_some_and(|name| name.starts_with("noland-net-helper"));
+        let command_matches = std::fs::read_to_string(format!("/proc/{pid}/comm"))
+            .ok()
+            // Linux truncates /proc/<pid>/comm to 15 bytes.
+            .is_some_and(|name| name.trim().starts_with("noland-net-help"));
+        return executable_matches || command_matches;
     }
 
     #[cfg(target_os = "macos")]
@@ -626,6 +628,58 @@ fn wait_for_managed_gotatun_start(
     )))
 }
 
+#[cfg(target_os = "linux")]
+fn force_stop_managed_gotatun_in_runtime(
+    runtime_dir: &Path,
+    initial_status: &GotatunRuntimeStatus,
+) -> AppResult<()> {
+    let helper = resolve_noland_net_helper_binary()?;
+    if !OsDetection::new().command_exists("pkexec") {
+        return Err(AppError::Command(
+            "Noland needs the desktop privilege broker (`pkexec`) to clean up an unresponsive legacy tunnel helper, but it is not available on this Linux desktop."
+                .to_string(),
+        ));
+    }
+
+    info!(
+        pid = initial_status.pid,
+        runtime = %runtime_dir.display(),
+        "Graceful managed GotaTun shutdown timed out; requesting elevated legacy-helper cleanup"
+    );
+    let status = Command::new("pkexec")
+        .arg(helper)
+        .arg("stop")
+        .arg("--state-dir")
+        .arg(runtime_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed launching elevated cleanup for managed GotaTun helper PID {}: {error}",
+                initial_status.pid
+            ))
+        })?;
+    if !status.success() {
+        return Err(AppError::Command(format!(
+            "Elevated cleanup for managed GotaTun helper PID {} exited with status {status}",
+            initial_status.pid
+        )));
+    }
+
+    if process_is_alive(initial_status.pid) {
+        return Err(AppError::Timeout(format!(
+            "Managed GotaTun helper PID {} remained active after elevated cleanup. Restart the computer once to clear this legacy helper.",
+            initial_status.pid
+        )));
+    }
+
+    let _ = std::fs::remove_file(gotatun_stop_request_path_in_runtime(runtime_dir));
+    let _ = std::fs::remove_file(gotatun_status_path_in_runtime(runtime_dir));
+    Ok(())
+}
+
 fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> {
     if !runtime_dir.exists() {
         return Ok(());
@@ -661,6 +715,12 @@ fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> 
         std::thread::sleep(Duration::from_millis(250));
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        return force_stop_managed_gotatun_in_runtime(runtime_dir, &initial_status);
+    }
+
+    #[allow(unreachable_code)]
     Err(AppError::Timeout(format!(
         "Managed GotaTun helper PID {} did not stop within {} seconds. Noland will not start a duplicate tunnel owner; retry after the process exits or restart the computer once to clear this legacy helper.",
         initial_status.pid, GOTATUN_HELPER_STOP_TIMEOUT_SECS
