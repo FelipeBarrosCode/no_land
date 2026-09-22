@@ -8,7 +8,9 @@ import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
+import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import type {
+  AutoShutdownSettings as AutoShutdownSettingsValue,
   MoonlightPreferences,
   PlatformCredentialsUpdate,
   IgdbCredentialsUpdate,
@@ -87,6 +89,9 @@ interface Props {
     payload: PlatformCredentialsUpdate,
   ) => Promise<void>;
   onSaveIgdbCredentials: (payload: IgdbCredentialsUpdate) => Promise<void>;
+  onSaveAutoShutdownSettings: (
+    settings: AutoShutdownSettingsValue,
+  ) => Promise<void>;
   onSaveServerPreferences: (
     payload: Partial<ServerPreferencesUpdate>,
   ) => Promise<void>;
@@ -211,6 +216,7 @@ export function SettingsScreen({
   onSaveApiKey,
   onSavePlatformCredentials,
   onSaveIgdbCredentials,
+  onSaveAutoShutdownSettings,
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
@@ -1134,6 +1140,19 @@ export function SettingsScreen({
           onBeginOauthFlow={onBeginOauthFlow}
           onCompleteOauthFlow={onCompleteOauthFlow}
           onCancelOauthFlow={onCancelOauthFlow}
+        />
+      </div>
+      <div className="mt-6">
+        <AutoShutdownSettings
+          state={appState.autoShutdown}
+          busy={busy}
+          hasActiveStorageProfile={sharedStorageProfiles.some(
+            (profile) => profile.active,
+          )}
+          hasVastApiKey={appState.credentials.vastApiKey.trim().length > 0}
+          hasProvisionedServer={appState.provisionedServers.length > 0}
+          instanceId={appState.provisionedServers[0]?.instanceId ?? null}
+          onSave={onSaveAutoShutdownSettings}
         />
       </div>
     </Card>

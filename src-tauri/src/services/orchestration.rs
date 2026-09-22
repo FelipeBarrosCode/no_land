@@ -25,7 +25,9 @@ use super::{
     audio_latency::AudioLatencyService,
     health_check::run_system_health_report,
     instance_manager::InstanceManager,
+    lifecycle_agent::LifecycleAgentProvisioner,
     moonlight::detect_client_display_for_provisioning,
+    network_agent::NetworkAgentProvisioner,
     nvidia_headless::NvidiaHeadlessService,
     post_wireguard_setup::initialize_post_wireguard_flow,
     remote_exec::RemoteExec,
@@ -50,6 +52,16 @@ async fn provision_microphone_receiver(
     target_user: &str,
 ) -> AppResult<String> {
     MicReceiverProvisioner::install(remote, target_user).await
+}
+
+async fn provision_lifecycle_agent(
+    context: &AppContext,
+    remote: &RemoteExec,
+    instance_id: u64,
+    target_user: &str,
+) -> AppResult<()> {
+    LifecycleAgentProvisioner::ensure_installed(remote, target_user).await?;
+    LifecycleAgentProvisioner::configure_for_instance(context, remote, instance_id).await
 }
 
 fn build_display_profile(
@@ -839,6 +851,18 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         instance.id
     );
     ensure_state_agent(&remote, &target_user).await?;
+    provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
+    let network_agent_remote = remote.clone();
+    let network_agent_instance_id = instance.id;
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = NetworkAgentProvisioner::ensure(&network_agent_remote).await {
+            warn!(
+                instance_id = network_agent_instance_id,
+                %error,
+                "Network-agent provisioning failed without blocking instance setup"
+            );
+        }
+    });
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -1810,6 +1834,18 @@ async fn run_existing_instance_orchestration(
         instance.id
     );
     ensure_state_agent(&remote, &target_user).await?;
+    provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
+    let network_agent_remote = remote.clone();
+    let network_agent_instance_id = instance.id;
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = NetworkAgentProvisioner::ensure(&network_agent_remote).await {
+            warn!(
+                instance_id = network_agent_instance_id,
+                %error,
+                "Network-agent provisioning failed without blocking existing-instance setup"
+            );
+        }
+    });
     ensure_not_cancelled(&context)?;
 
     emit_transition(

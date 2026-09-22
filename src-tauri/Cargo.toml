@@ -25,6 +25,7 @@ base64 = "0.22.1"
 chrono = { version = "0.4.38", features = ["serde"] }
 crossbeam-channel = "0.5.13"
 dirs = "5.0.1"
+futures-util = "0.3"
 keyring = "3.6.1"
 parking_lot = "0.12.3"
 portable-pty = "0.9.0"
@@ -33,6 +34,8 @@ raw-window-handle = "0.6.2"
 rcgen = { version = "0.13.1", features = ["pem", "x509-parser", "ring"] }
 reqwest = { version = "0.12.9", features = ["json", "rustls-tls"], default-features = false }
 hex = "0.4"
+hmac = "0.12"
+rand = "0.8"
 rsa = { version = "0.9.6", features = ["pem"] }
 roxmltree = "0.20.0"
 serde = { version = "1.0.215", features = ["derive"] }
@@ -52,7 +55,8 @@ tauri-plugin-process = "2.0.0"
 tauri-plugin-updater = "2.0.0"
 thiserror = "2.0.3"
 time = { version = "0.3.36", features = ["std"] }
-tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync"] }
+tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync", "net"] }
+tokio-tungstenite = "0.24"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "time"] }
 uuid = { version = "1.11.0", features = ["v4", "serde"] }

@@ -1,6 +1,10 @@
+pub mod auto_shutdown;
 pub mod launch_library;
 pub mod shared_storage;
 
+pub use self::auto_shutdown::{
+    get_auto_shutdown_settings, get_instance_auto_shutdown_status, save_auto_shutdown_settings,
+};
 pub use self::launch_library::{
     get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
     launch_instance_software, update_igdb_credentials,
@@ -64,6 +68,7 @@ use crate::{
         },
         runtime::NativeStartRequest,
     },
+    network_monitor::NetworkMonitor,
     services::{
         app_context::AppContext,
         diagnostics::{write_diagnostic_report, DiagnosticReportResponse},
@@ -75,6 +80,7 @@ use crate::{
         location::LocationService,
         mic_passthrough::MicPassthroughService,
         moonlight::detect_client_display_for_provisioning,
+        network_agent::NetworkAgentProvisioner,
         offer_selector::OfferSelector,
         orchestration::OrchestrationService,
         os_detection::OsDetection,
@@ -489,10 +495,41 @@ fn session_state_name(state: &SessionState) -> &'static str {
     }
 }
 
+async fn ensure_network_agent_for_stream(context: &AppContext, instance_id: u64) {
+    let remote = match build_remote_exec_for_instance(context, instance_id).await {
+        Ok(remote) => remote,
+        Err(error) => {
+            warn!(instance_id, %error, "Could not prepare background network-agent deployment");
+            return;
+        }
+    };
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = NetworkAgentProvisioner::ensure(&remote).await {
+            warn!(
+                instance_id,
+                %error,
+                "Background network-agent deployment failed without affecting streaming"
+            );
+        }
+    });
+}
+
+async fn start_network_monitor(app: &AppHandle, target_host: String) {
+    let monitor = app.state::<NetworkMonitor>().inner().clone();
+    if let Err(error) = monitor.start(app.clone(), target_host.clone()).await {
+        warn!(target_host, %error, "Network monitor could not start; streaming will continue");
+    }
+}
+
+async fn stop_network_monitor(app: &AppHandle) {
+    app.state::<NetworkMonitor>().stop().await;
+}
+
 async fn stop_active_stream_if_needed(
     app: &AppHandle,
     moonlight: &MoonlightManager,
 ) -> Result<(), FrontendError> {
+    stop_network_monitor(app).await;
     let state = moonlight
         .runtime
         .get_state()
@@ -1391,6 +1428,7 @@ async fn start_embedded_stream_for_host(
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
     };
     let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
+    start_network_monitor(app, prepared.host_address.clone()).await;
 
     let state = moonlight
         .runtime
@@ -2026,6 +2064,7 @@ pub(super) async fn start_launch_pc_for_instance(
     moonlight: &MoonlightManager,
 ) -> Result<String, FrontendError> {
     stop_active_stream_if_needed(app, moonlight).await?;
+    ensure_network_agent_for_stream(context, instance_id).await;
     context
         .update_state(|state| {
             if let Some(server) = state
@@ -3151,7 +3190,7 @@ async fn build_remote_exec_from_state(context: &AppContext) -> Result<RemoteExec
     })
 }
 
-async fn build_remote_exec_for_instance(
+pub(super) async fn build_remote_exec_for_instance(
     context: &AppContext,
     instance_id: u64,
 ) -> Result<RemoteExec, AppError> {
@@ -4927,6 +4966,10 @@ pub async fn moonlight_start_stream(
         return Err(moonlight_frontend_error(error));
     }
 
+    let state = context.load_state().await;
+    if let Some(instance_id) = resolve_instance_id_for_embedded_host(&state, &input.host_id) {
+        ensure_network_agent_for_stream(context.inner(), instance_id).await;
+    }
     schedule_microphone_for_game_stream(context.inner(), moonlight.inner(), &input.host_id).await;
 
     stream_window.show().map_err(|error| FrontendError {
@@ -4954,6 +4997,7 @@ pub async fn moonlight_start_stream(
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
     };
     let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
+    start_network_monitor(&app, prepared.host_address.clone()).await;
 
     let state = moonlight
         .runtime
@@ -4977,6 +5021,7 @@ pub async fn moonlight_disconnect_stream(
     context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<MoonlightSessionStateResponse, FrontendError> {
+    stop_network_monitor(&app).await;
     moonlight
         .runtime
         .stop()
@@ -5368,6 +5413,13 @@ pub async fn moonlight_get_input_debug_state(
         scroll_send_attempts: worker.scroll_send_attempts,
         send_errors: worker.send_errors,
     })
+}
+
+#[tauri::command]
+pub async fn network_monitor_get_state(
+    monitor: State<'_, NetworkMonitor>,
+) -> Result<Option<Value>, FrontendError> {
+    Ok(monitor.snapshot().await)
 }
 
 #[tauri::command]

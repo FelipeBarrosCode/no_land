@@ -24,6 +24,7 @@
 typedef struct nl_macos_video_context {
   __unsafe_unretained NSView* view;
   __strong AVSampleBufferDisplayLayer* layer;
+  __strong id resize_observer;
   CMVideoFormatDescriptionRef format_description;
   uint8_t* sps;
   size_t sps_len;
@@ -465,16 +466,61 @@ void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, co
     }
     if (context->layer == nil) {
       context->layer = [NolandSampleDisplayLayer layer];
-      context->layer.videoGravity = AVLayerVideoGravityResizeAspect;
+      // Fill the native fullscreen surface. The requested stream profile already
+      // matches the remote EDID, so preserving aspect here only creates avoidable
+      // black margins during window/fullscreen transitions.
+      context->layer.videoGravity = AVLayerVideoGravityResizeAspectFill;
       context->layer.backgroundColor = NSColor.blackColor.CGColor;
       context->layer.opaque = YES;
       context->layer.needsDisplayOnBoundsChange = YES;
-      context->layer.frame = view.bounds;
       context->layer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
       [view.layer addSublayer:context->layer];
     } else if (context->layer.superlayer != view.layer) {
-      context->layer.frame = view.bounds;
       [view.layer addSublayer:context->layer];
+    }
+
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    context->layer.frame = view.bounds;
+    context->layer.bounds = view.bounds;
+    context->layer.position = CGPointMake(NSMidX(view.bounds), NSMidY(view.bounds));
+    [CATransaction commit];
+
+    if (context->resize_observer != nil) {
+      [[NSNotificationCenter defaultCenter] removeObserver:context->resize_observer];
+      context->resize_observer = nil;
+    }
+    NSWindow* window = view.window;
+    if (window != nil) {
+      context->resize_observer = [[NSNotificationCenter defaultCenter]
+          addObserverForName:NSWindowDidResizeNotification
+                      object:window
+                       queue:NSOperationQueue.mainQueue
+                  usingBlock:^(__unused NSNotification* note) {
+                    NSView* current_view = context->view;
+                    AVSampleBufferDisplayLayer* current_layer = context->layer;
+                    if (current_view == nil || current_layer == nil) {
+                      return;
+                    }
+                    [CATransaction begin];
+                    [CATransaction setDisableActions:YES];
+                    current_layer.frame = current_view.bounds;
+                    current_layer.bounds = current_view.bounds;
+                    current_layer.position = CGPointMake(NSMidX(current_view.bounds), NSMidY(current_view.bounds));
+                    [CATransaction commit];
+                    // Fullscreen changes can finish one run-loop after the window
+                    // resize notification; repeat once against the settled bounds.
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                      if (context->view == current_view && context->layer == current_layer) {
+                        [CATransaction begin];
+                        [CATransaction setDisableActions:YES];
+                        current_layer.frame = current_view.bounds;
+                        current_layer.bounds = current_view.bounds;
+                        current_layer.position = CGPointMake(NSMidX(current_view.bounds), NSMidY(current_view.bounds));
+                        [CATransaction commit];
+                      }
+                    });
+                  }];
     }
   });
 }
@@ -485,6 +531,10 @@ void nl_video_renderer_platform_detach_surface(nl_video_renderer_t* renderer) {
     return;
   }
   nl_run_on_main_sync(^{
+    if (context->resize_observer != nil) {
+      [[NSNotificationCenter defaultCenter] removeObserver:context->resize_observer];
+      context->resize_observer = nil;
+    }
     if (context->layer != nil) {
       [context->layer flushAndRemoveImage];
       [context->layer removeFromSuperlayer];

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
@@ -6,6 +7,7 @@ import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
+import { SocialLinks } from "../components/ui/SocialLinks";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
@@ -15,6 +17,7 @@ import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
+
 import {
   checkForAppUpdate,
   installPendingAppUpdate,
@@ -355,18 +358,21 @@ function UpdateAvailableModal({
           {installError && <p className="mt-4 border border-red-500/30 bg-red-900/20 p-3 text-sm text-red-300">{installError}</p>}
         </Card>
 
-        <div className="mt-4 flex justify-end gap-3">
-          <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
-            Skip for now
-          </Button>
-          <Button
-            variant="secondary"
-            loading={progress !== null}
-            loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
-            onClick={installUpdate}
-          >
-             Install and Restart
-          </Button>
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <SocialLinks />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
+              Skip for now
+            </Button>
+            <Button
+              variant="secondary"
+              loading={progress !== null}
+              loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
+              onClick={installUpdate}
+            >
+              Install and Restart
+            </Button>
+          </div>
         </div>
       </ModalBody>
     </ModalFrame>
@@ -428,6 +434,9 @@ export function App() {
     (state) => state.savePlatformCredentials,
   );
   const saveIgdbCredentials = useAppStore((state) => state.saveIgdbCredentials);
+  const saveAutoShutdownSettings = useAppStore(
+    (state) => state.saveAutoShutdownSettings,
+  );
   const saveServerPreferences = useAppStore(
     (state) => state.saveServerPreferences,
   );
@@ -510,6 +519,7 @@ export function App() {
     void initialize();
     void bindEvents();
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel === "moonlight-stream") {
@@ -730,6 +740,7 @@ export function App() {
                   onSaveApiKey={saveVastApiKey}
                   onSavePlatformCredentials={savePlatformCredentials}
                   onSaveIgdbCredentials={saveIgdbCredentials}
+                  onSaveAutoShutdownSettings={saveAutoShutdownSettings}
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
