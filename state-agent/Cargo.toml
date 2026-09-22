@@ -17,6 +17,7 @@ members = [
     "crates/noland-restore",
     "crates/noland-rpc",
     "crates/noland-state-agent",
+    "crates/noland-lifecycle-agent",
     "crates/noland-testkit",
 ]
 

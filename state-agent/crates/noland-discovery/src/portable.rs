@@ -11,6 +11,8 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
     "noland",
     "systemd",
     "startplasma",
+    "plasmashell",
+    "plasma_session",
     "kdeinit",
     "kioslave",
     "xsettingsd",
@@ -27,6 +29,34 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
     "nvidia-settings",
 ];
 
+const ALWAYS_IGNORE_EXECUTABLES: &[&str] = &[
+    "accounts-daemon",
+    "cron",
+    "dbus-broker",
+    "dbus-daemon",
+    "kdeinit",
+    "kioslave",
+    "networkmanager",
+    "noland-lifecycle-agent",
+    "noland-state-agent",
+    "packagekitd",
+    "pipewire",
+    "polkitd",
+    "pulseaudio",
+    "rtkit-daemon",
+    "sshd",
+    "startplasma",
+    "sunshine",
+    "systemd",
+    "udisksd",
+    "upowerd",
+    "wireplumber",
+    "xorg",
+    "xsettingsd",
+];
+
+const ALWAYS_IGNORE_EXECUTABLE_PREFIXES: &[&str] = &["xdg-desktop-portal", "systemd-"];
+
 pub fn is_backup_candidate(app: &AppIdentity) -> bool {
     !is_always_ignored(app) && !is_steam_runtime(app)
 }
@@ -42,6 +72,34 @@ pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
 fn is_always_ignored(app: &AppIdentity) -> bool {
     let hay = haystack(app);
     ALWAYS_IGNORE_MARKERS.iter().any(|m| hay.contains(m))
+        || std::iter::once(app.display_name.as_str())
+            .chain(app.aliases.iter().map(String::as_str))
+            .any(is_always_ignored_executable_name)
+        || app
+            .canonical_executable
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .is_some_and(is_always_ignored_executable_name)
+}
+
+/// Returns whether an executable belongs to OS/Noland plumbing that must never
+/// become a backup candidate. Callers that only have a process executable use
+/// this entry point so they share the same policy as application discovery.
+pub fn is_always_ignored_executable_name(name: &str) -> bool {
+    let normalized = name
+        .trim()
+        .rsplit('/')
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    ALWAYS_IGNORE_EXECUTABLES.contains(&normalized.as_str())
+        || ALWAYS_IGNORE_EXECUTABLE_PREFIXES
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
+        || ALWAYS_IGNORE_MARKERS
+            .iter()
+            .any(|marker| normalized.contains(marker))
 }
 
 fn is_steam_runtime(app: &AppIdentity) -> bool {
@@ -92,6 +150,7 @@ mod tests {
         let kate = AppIdentity::new(AppId::desktop("org.kde.kate"), "Kate");
         let dolphin = AppIdentity::new(AppId::desktop("org.kde.dolphin"), "Dolphin");
         let plasma = AppIdentity::new(AppId("exe:startplasma-x11:abc".into()), "startplasma-x11");
+        let plasma_shell = AppIdentity::new(AppId("exe:plasmashell:abc".into()), "plasmashell");
         let portal = AppIdentity::new(
             AppId("exe:xdg-desktop-portal:abc".into()),
             "xdg-desktop-portal",
@@ -102,7 +161,27 @@ mod tests {
         assert!(!is_backup_candidate(&kate));
         assert!(!is_backup_candidate(&dolphin));
         assert!(!is_backup_candidate(&plasma));
+        assert!(!is_backup_candidate(&plasma_shell));
         assert!(!is_backup_candidate(&portal));
+    }
+
+    #[test]
+    fn ignores_plasma_executable_variants() {
+        for executable in [
+            "startplasma",
+            "startplasma-x11",
+            "startplasma-wayland",
+            "plasmashell",
+            "plasma_session",
+        ] {
+            assert!(
+                is_always_ignored_executable_name(executable),
+                "{executable}"
+            );
+        }
+        assert!(is_always_ignored_executable_name("systemd-journald"));
+        assert!(is_always_ignored_executable_name("dbus-daemon"));
+        assert!(!is_always_ignored_executable_name("necronator-game"));
     }
 
     #[test]

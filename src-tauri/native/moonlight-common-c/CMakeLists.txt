@@ -44,7 +44,18 @@ if(MSVC)
 elseif(MINGW)
   target_link_libraries(moonlight-common-c PRIVATE -lws2_32 -lwinmm)
 else()
-  target_compile_options(moonlight-common-c PRIVATE -Wall -Wextra -Wno-unused-parameter -Werror)
+  target_compile_options(moonlight-common-c PRIVATE -Wall -Wextra -Wno-unused-parameter)
+
+  # GCC 15 enables additional diagnostics that are useful for auditing but can
+  # vary across the bundled upstream C sources. Keep the existing strict build
+  # for older toolchains while allowing current Ubuntu GCC to compile cleanly.
+  if(CMAKE_C_COMPILER_ID STREQUAL "GNU" AND
+     CMAKE_C_COMPILER_VERSION VERSION_GREATER_EQUAL "15")
+    target_compile_options(moonlight-common-c PRIVATE -Wno-error)
+  else()
+    target_compile_options(moonlight-common-c PRIVATE -Werror)
+  endif()
+
   if (CODE_ANALYSIS AND CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_compile_options(moonlight-common-c PRIVATE -fanalyzer)
   endif()

@@ -16,6 +16,7 @@ src-tauri/binaries/
 mic-sidecar/target/
 vm-cloud-mic-agent/target/
 state-agent/target/
+network-agent/target/
 
 # Local tools and temporary/generated workspace files
 .tmp/
@@ -33,6 +34,7 @@ src-tauri/.local-tools/
 *.err
 *.pcm
 *.wav
+!public/connection-warning.wav
 *.mp3
 *.aac
 *.opus

@@ -24,6 +24,8 @@ pub struct PersistedAppState {
     pub shared_storage_profiles: Vec<crate::models::application_bundle::ProfileReference>,
     #[serde(default)]
     pub shared_storage_credentials: SharedStorageCredentialState,
+    #[serde(default)]
+    pub auto_shutdown: AutoShutdownState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
@@ -52,6 +54,7 @@ impl Default for PersistedAppState {
             shared_storage: SharedStorageState::default(),
             shared_storage_profiles: Vec::new(),
             shared_storage_credentials: SharedStorageCredentialState::default(),
+            auto_shutdown: AutoShutdownState::default(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
@@ -862,6 +865,44 @@ impl Default for SharedStorageSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutoShutdownSettings {
+    pub enabled: bool,
+    pub inactivity_hours: f32,
+    pub backup_app_limit: u8,
+}
+
+impl Default for AutoShutdownSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            inactivity_hours: 3.0,
+            backup_app_limit: 3,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AutoShutdownState {
+    pub settings: AutoShutdownSettings,
+    pub last_run_at: Option<String>,
+    pub last_status: String,
+    pub last_error: Option<String>,
+}
+
+impl Default for AutoShutdownState {
+    fn default() -> Self {
+        Self {
+            settings: AutoShutdownSettings::default(),
+            last_run_at: None,
+            last_status: "never_run".to_string(),
+            last_error: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageSettingsUpdate {
@@ -1178,7 +1219,55 @@ pub struct MicSessionResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{BackupPerformanceMode, MicQualityProfile, SharedStorageBackupSelectionRequest};
+    use super::{
+        AutoShutdownSettings, AutoShutdownState, BackupPerformanceMode, MicQualityProfile,
+        PersistedAppState, SharedStorageBackupSelectionRequest,
+    };
+
+    #[test]
+    fn auto_shutdown_defaults_are_safe() {
+        let state = AutoShutdownState::default();
+
+        assert_eq!(state.settings, AutoShutdownSettings::default());
+        assert!(!state.settings.enabled);
+        assert_eq!(state.settings.inactivity_hours, 3.0);
+        assert_eq!(state.settings.backup_app_limit, 3);
+        assert_eq!(state.last_run_at, None);
+        assert_eq!(state.last_status, "never_run");
+        assert_eq!(state.last_error, None);
+    }
+
+    #[test]
+    fn auto_shutdown_serde_uses_camel_case() {
+        let value = serde_json::to_value(AutoShutdownState::default()).unwrap();
+        let object = value.as_object().unwrap();
+        let settings = object.get("settings").unwrap().as_object().unwrap();
+
+        assert!(object.contains_key("lastRunAt"));
+        assert!(object.contains_key("lastStatus"));
+        assert!(object.contains_key("lastError"));
+        assert!(settings.contains_key("inactivityHours"));
+        assert!(settings.contains_key("backupAppLimit"));
+        assert!(!settings.contains_key("inactivity_hours"));
+        assert!(!settings.contains_key("backup_app_limit"));
+    }
+
+    #[test]
+    fn persisted_state_defaults_auto_shutdown_when_field_is_missing() {
+        let mut value = serde_json::to_value(PersistedAppState::default()).unwrap();
+        value.as_object_mut().unwrap().remove("autoShutdown");
+
+        let state: PersistedAppState = serde_json::from_value(value).unwrap();
+
+        assert_eq!(state.auto_shutdown, AutoShutdownState::default());
+    }
+
+    #[test]
+    fn auto_shutdown_state_defaults_missing_nested_fields() {
+        let state: AutoShutdownState = serde_json::from_str(r#"{"settings":{}}"#).unwrap();
+
+        assert_eq!(state, AutoShutdownState::default());
+    }
 
     #[test]
     fn backup_performance_mode_defaults_to_balanced() {

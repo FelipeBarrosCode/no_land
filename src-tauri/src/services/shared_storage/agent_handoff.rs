@@ -75,7 +75,6 @@ impl SharedStorageManager {
         ensure_state_agent(remote, target_user).await?;
         let session_op = Uuid::new_v4().to_string();
         let session = Self::mint_session(context, &session_op).await?;
-        push_session(remote, target_user, &session).await?;
         let key_hex = Self::master_key_hex(context).await?;
         Ok((session, key_hex))
     }
@@ -875,44 +874,6 @@ fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEnt
         }
     }
     out
-}
-
-async fn push_session(
-    remote: &RemoteExec,
-    target_user: &str,
-    session: &EphemeralRcloneSession,
-) -> AppResult<()> {
-    let dir = format!("/run/noland/storage/{}", session.operation_id);
-    let payload = serde_json::to_string(session)
-        .map_err(|e| AppError::State(format!("serialize session: {e}")))?;
-    let encoded = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        payload.as_bytes(),
-    );
-    let cmd = format!(
-        "sudo mkdir -p {dir} && sudo chmod 700 {dir} && printf %s {b64} | base64 -d | sudo tee {dir}/session.json >/dev/null && sudo python3 -c \"import json; s=json.load(open('{dir}/session.json')); open('{dir}/rclone.conf','w').write(s.get('config_ini',''))\" && sudo chmod 600 {dir}/rclone.conf {dir}/session.json && sudo chown {user}: {dir} {dir}/rclone.conf {dir}/session.json || true",
-        dir = dir,
-        b64 = shell_escape(&encoded),
-        user = shell_escape(target_user),
-    );
-    let output = {
-        let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh(&cmd, Duration::from_secs(30)))
-            .await
-            .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-    };
-    if output.status_code != 0 {
-        return Err(AppError::Provisioning(format!(
-            "Failed to push ephemeral rclone session: {} {}",
-            output.stdout.trim(),
-            output.stderr.trim()
-        )));
-    }
-    Ok(())
-}
-
-fn shell_escape(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]

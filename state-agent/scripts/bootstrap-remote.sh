@@ -112,6 +112,14 @@ if [[ -f "$SRC/systemd/noland-state-agent.service" ]]; then
     require_ebpf_unit_support
     if [[ -n "$TARGET_USER" ]]; then
       TARGET_GROUP="$(id -gn "$TARGET_USER")"
+      # The agent applies restores directly into the interactive user's home.
+      # Running as uid 0 without CAP_DAC_OVERRIDE cannot access mode-0700 user
+      # directories, and granting that capability would unnecessarily broaden
+      # the agent's filesystem access. Migrate its private state instead and
+      # run it as the target user with only the eBPF capabilities below.
+      systemctl stop noland-state-agent.service >/dev/null 2>&1 || true
+      mkdir -p "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
+      chown -R "$TARGET_USER:$TARGET_GROUP" "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
       sed \
         -e "s|^ExecStart=|User=$TARGET_USER\nGroup=$TARGET_GROUP\nExecStart=|" \
         -e "s|Environment=NOLAND_HOME=/home/user|Environment=NOLAND_HOME=/home/$TARGET_USER|" \
@@ -128,9 +136,13 @@ else
 fi
 
 if ! systemctl is-active --quiet noland-state-agent.service; then
-  systemctl --no-pager --full status noland-state-agent.service >&2 || true
+  systemctl --no-pager --full status noland-state-agent.service >&2
   exit 1
 fi
+
+install -d -o root -g root -m 0755 /opt/noland
+ln -sfn "$SRC" /opt/noland/state-agent
+chown -h root:root /opt/noland/state-agent
 
 SOCKET_PATH="$NOLAND_RUN_ROOT/state-agent.sock"
 for _ in $(seq 1 30); do

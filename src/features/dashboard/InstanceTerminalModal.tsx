@@ -20,6 +20,7 @@ interface TerminalOutputEvent {
 
 interface TerminalClosedEvent {
   sessionId: string;
+  exitCode?: number | null;
 }
 
 interface Props {
@@ -97,11 +98,17 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
         if (!sessionId) {
           earlyOutput.push(payload);
         } else if (payload.sessionId === sessionId) {
+          setStatus((current) => current === "connecting" ? "connected" : current);
           terminal.write(payload.data);
         }
       }),
       listen<TerminalClosedEvent>("remote-terminal-closed", ({ payload }) => {
-        if (payload.sessionId === sessionIdRef.current) {
+        if (payload.sessionId !== sessionIdRef.current) return;
+
+        if (typeof payload.exitCode === "number" && payload.exitCode !== 0) {
+          setStatus("error");
+          terminal.writeln(`\r\n\x1b[31mSSH exited with code ${payload.exitCode}. Check the host, port, and SSH key, then refresh the instance connection details.\x1b[0m`);
+        } else {
           setStatus("closed");
           terminal.writeln("\r\n\x1b[33mSSH connection closed.\x1b[0m");
         }
@@ -128,7 +135,9 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
         for (const output of earlyOutput) {
           if (output.sessionId === session.sessionId) terminal.write(output.data);
         }
-        setStatus("connected");
+        if (earlyOutput.some((output) => output.sessionId === session.sessionId)) {
+          setStatus("connected");
+        }
         terminal.focus();
       })
       .catch((error) => {
