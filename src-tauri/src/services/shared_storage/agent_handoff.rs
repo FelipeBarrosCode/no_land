@@ -57,6 +57,10 @@ pub(crate) struct AgentCatalogAppRecord {
     pub icon_path: Option<String>,
     #[serde(default, alias = "latestBundleId")]
     pub latest_bundle_id: Option<String>,
+    #[serde(default, alias = "latestCompleteBundleId")]
+    pub latest_complete_bundle_id: Option<String>,
+    #[serde(default, alias = "latestPersonalStateBundleId")]
+    pub latest_personal_state_bundle_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -655,6 +659,10 @@ impl AgentCatalogAppRecord {
         self.aliases = normalized_aliases(self.aliases, &self.display_name);
         self.icon_path = normalized_optional_string(self.icon_path.take());
         self.latest_bundle_id = normalized_optional_string(self.latest_bundle_id.take());
+        self.latest_complete_bundle_id =
+            normalized_optional_string(self.latest_complete_bundle_id.take());
+        self.latest_personal_state_bundle_id =
+            normalized_optional_string(self.latest_personal_state_bundle_id.take());
         self
     }
 }
@@ -910,6 +918,7 @@ mod tests {
                 "appId": "desktop:org.example.Game",
                 "displayName": "Example Game",
                 "latestBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef",
+                "latestCompleteBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef",
                 "bundles": []
             }]
         }))
@@ -918,6 +927,10 @@ mod tests {
         assert_eq!(apps[0].app_id, "desktop:org.example.Game");
         assert_eq!(
             apps[0].latest_bundle_id.as_deref(),
+            Some("f30a42a8-3dc9-4aea-a71c-f57f4b66bbef")
+        );
+        assert_eq!(
+            apps[0].latest_complete_bundle_id.as_deref(),
             Some("f30a42a8-3dc9-4aea-a71c-f57f4b66bbef")
         );
     }

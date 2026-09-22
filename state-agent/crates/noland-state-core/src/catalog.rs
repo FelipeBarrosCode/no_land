@@ -35,6 +35,12 @@ impl CatalogDocument {
         self.apps.iter_mut().find(|app| &app.app_id == app_id)
     }
 
+    pub fn refresh_bundle_heads(&mut self) {
+        for app in &mut self.apps {
+            app.refresh_bundle_heads();
+        }
+    }
+
     pub fn upsert_bundle(&mut self, app_id: AppId, display_name: String, bundle: CatalogBundle) {
         if let Some(existing) = self.app_mut(&app_id) {
             existing.display_name = display_name;
@@ -46,9 +52,16 @@ impl CatalogDocument {
             {
                 existing.bundles.push(bundle);
             }
+            existing.refresh_bundle_heads();
         } else {
+            let latest_complete_bundle_id =
+                (bundle.mode == BackupMode::CompleteApplication).then_some(bundle.bundle_id);
+            let latest_personal_state_bundle_id =
+                (bundle.mode == BackupMode::PersonalState).then_some(bundle.bundle_id);
             self.apps.push(CatalogApp {
                 latest_bundle_id: bundle.bundle_id,
+                latest_complete_bundle_id,
+                latest_personal_state_bundle_id,
                 app_id: app_id.clone(),
                 display_name,
                 aliases: Vec::new(),
@@ -128,7 +141,33 @@ pub struct CatalogApp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon_path: Option<PathBuf>,
     pub latest_bundle_id: Uuid,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_complete_bundle_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_personal_state_bundle_id: Option<Uuid>,
     pub bundles: Vec<CatalogBundle>,
+}
+
+impl CatalogApp {
+    pub fn refresh_bundle_heads(&mut self) {
+        self.latest_complete_bundle_id =
+            latest_bundle_for_mode(&self.bundles, BackupMode::CompleteApplication);
+        self.latest_personal_state_bundle_id =
+            latest_bundle_for_mode(&self.bundles, BackupMode::PersonalState);
+    }
+
+    pub fn restorable_bundle_id(&self) -> Option<Uuid> {
+        self.latest_complete_bundle_id
+            .or_else(|| latest_bundle_for_mode(&self.bundles, BackupMode::CompleteApplication))
+    }
+}
+
+fn latest_bundle_for_mode(bundles: &[CatalogBundle], mode: BackupMode) -> Option<Uuid> {
+    bundles
+        .iter()
+        .filter(|bundle| bundle.mode == mode)
+        .max_by_key(|bundle| bundle.captured_at)
+        .map(|bundle| bundle.bundle_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -206,5 +245,46 @@ mod tests {
         assert!(app.launcher.is_none());
         assert!(app.canonical_executable.is_none());
         assert!(app.icon_path.is_none());
+        assert!(app.latest_complete_bundle_id.is_none());
+        assert!(app.latest_personal_state_bundle_id.is_none());
+    }
+
+    #[test]
+    fn complete_and_personal_bundle_heads_are_tracked_separately() {
+        let app_id = AppId("desktop:game".into());
+        let mut catalog = CatalogDocument::empty();
+        let complete_id = Uuid::new_v4();
+        let personal_id = Uuid::new_v4();
+        let now = Utc::now();
+        let bundle = |bundle_id, mode, captured_at| CatalogBundle {
+            bundle_id,
+            commit_id: Uuid::new_v4(),
+            parent_bundle_id: None,
+            captured_at,
+            source_instance_id: Uuid::new_v4(),
+            mode,
+            logical_size: 1,
+            stored_incremental_size: 1,
+        };
+
+        catalog.upsert_bundle(
+            app_id.clone(),
+            "Game".into(),
+            bundle(complete_id, BackupMode::CompleteApplication, now),
+        );
+        catalog.upsert_bundle(
+            app_id.clone(),
+            "Game".into(),
+            bundle(
+                personal_id,
+                BackupMode::PersonalState,
+                now + chrono::Duration::seconds(1),
+            ),
+        );
+
+        let app = catalog.app_mut(&app_id).unwrap();
+        assert_eq!(app.latest_bundle_id, personal_id);
+        assert_eq!(app.restorable_bundle_id(), Some(complete_id));
+        assert_eq!(app.latest_personal_state_bundle_id, Some(personal_id));
     }
 }

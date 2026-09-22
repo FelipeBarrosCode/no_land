@@ -1486,6 +1486,8 @@ mod tests {
             launcher: None,
             icon_path: None,
             latest_bundle_id: None,
+            latest_complete_bundle_id: None,
+            latest_personal_state_bundle_id: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&explicit), Some(3_241_660));
 
@@ -1499,6 +1501,8 @@ mod tests {
             launcher: None,
             icon_path: None,
             latest_bundle_id: None,
+            latest_complete_bundle_id: None,
+            latest_personal_state_bundle_id: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&prefixed), Some(3_241_660));
 
@@ -1512,6 +1516,8 @@ mod tests {
             launcher: Some("steam".to_string()),
             icon_path: None,
             latest_bundle_id: None,
+            latest_complete_bundle_id: None,
+            latest_personal_state_bundle_id: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&numeric), Some(3_241_660));
     }
