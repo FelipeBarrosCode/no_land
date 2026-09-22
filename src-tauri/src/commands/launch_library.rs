@@ -16,7 +16,7 @@ use crate::{
         app_context::AppContext,
         launch_library::{
             launch_remote_software, load_launch_library, repair_entry_before_launch,
-            LaunchLibraryEntry,
+            verify_entry_launch_target, LaunchLibraryEntry,
         },
         shared_storage::shared_storage_manager::SharedStorageManager,
         software_artwork::SoftwareArtworkService,
@@ -208,6 +208,24 @@ async fn run_launch(
         )
         .await
         .map_err(|error| format!("Could not restore {}: {error}", entry.item.display_name))?;
+        if let Some(overlay_bundle_id) = entry.personal_state_overlay_bundle_id.as_deref() {
+            SharedStorageManager::start_agent_restore(
+                context,
+                &remote,
+                instance_id,
+                &target_user,
+                app_id,
+                overlay_bundle_id,
+                "personal_state",
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "Restored {}, but could not apply its latest personal state: {error}",
+                    entry.item.display_name
+                )
+            })?;
+        }
         job.restore_performed = true;
         persist_running_job(job).await;
 
@@ -231,9 +249,12 @@ async fn run_launch(
     repair_entry_before_launch(&mut entry)
         .await
         .map_err(|error| error.to_string())?;
+    entry.item.launchable = verify_entry_launch_target(&remote, &target_user, &entry)
+        .await
+        .map_err(|error| error.to_string())?;
     if !entry.item.launchable {
         return Err(format!(
-            "{} has no supported launch metadata. Open Launch PC and start it from the desktop, or reinstall it so Steam/a desktop entry/an executable can be discovered.",
+            "{} does not have a verified executable or Steam installation on this instance. Restore or reinstall it before launching.",
             entry.item.display_name
         ));
     }

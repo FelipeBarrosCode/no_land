@@ -17,7 +17,8 @@ use crate::db::Database;
 use crate::model::{BackupApp, LifecycleState, RankedApp};
 use crate::provider::{ProviderLifecycle, ProviderRequest};
 use crate::state_agent::{
-    BackupRequest, ForegroundPidBackend, OperationStatus, StateAgentClient, VerifyRequest,
+    AutomaticBackupMode, BackupRequest, ForegroundPidBackend, OperationStatus, StateAgentClient,
+    VerifyRequest,
 };
 use crate::{AgentError, Result};
 
@@ -467,6 +468,25 @@ impl LifecycleEngine {
                 .ok_or_else(|| AgentError::new("frozen backup application disappeared"))?;
         }
 
+        // Freeze the mode for every retry in this lifecycle run. A complete
+        // bundle may be committed before verification returns; switching a
+        // retry to personal-state at that point could allow shutdown without
+        // ever verifying the required baseline.
+        let baseline_probe_id = Uuid::new_v4();
+        let backup_mode = if self
+            .state_agent
+            .has_complete_baseline(
+                &app.app_id,
+                capability.session_for_operation(baseline_probe_id),
+                capability.master_key_hex.clone(),
+            )
+            .await?
+        {
+            AutomaticBackupMode::PersonalState
+        } else {
+            AutomaticBackupMode::CompleteApplication
+        };
+
         while app.attempts < BACKUP_MAX_ATTEMPTS {
             if app.attempts > 0 {
                 self.sleeper
@@ -476,6 +496,7 @@ impl LifecycleEngine {
             let requested_operation_id = Uuid::new_v4();
             let request = BackupRequest {
                 app_id: app.app_id.clone(),
+                mode: backup_mode,
                 operation_id: requested_operation_id,
                 session: capability.session_for_operation(requested_operation_id),
                 master_key_hex: capability.master_key_hex.clone(),
@@ -671,11 +692,12 @@ fn is_backup_eligible_app_id(app_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use chrono::TimeZone;
     use noland_rclone_adapter::{
-        session_from_input, AdapterCredential, AdapterInput, ProviderKind, TokenMode,
+        session_from_input, AdapterCredential, AdapterInput, EphemeralRcloneSession, ProviderKind,
+        TokenMode,
     };
     use serde_json::json;
 
@@ -761,6 +783,8 @@ mod tests {
         verify: bool,
         starts: AtomicUsize,
         start_error: Mutex<Option<String>>,
+        complete_baseline: AtomicBool,
+        requested_modes: Mutex<Vec<AutomaticBackupMode>>,
     }
     #[async_trait]
     impl StateAgentClient for FakeStateAgent {
@@ -776,10 +800,19 @@ mod tests {
         async fn resolve_process_to_app(&self, _pid: u32) -> Result<Option<String>> {
             Ok(None)
         }
-        async fn start_backup(&self, _request: BackupRequest) -> Result<String> {
+        async fn has_complete_baseline(
+            &self,
+            _app_id: &str,
+            _session: EphemeralRcloneSession,
+            _master_key_hex: String,
+        ) -> Result<bool> {
+            Ok(self.complete_baseline.load(Ordering::SeqCst))
+        }
+        async fn start_backup(&self, request: BackupRequest) -> Result<String> {
             if let Some(error) = self.start_error.lock().unwrap().clone() {
                 return Err(AgentError::new(error));
             }
+            self.requested_modes.lock().unwrap().push(request.mode);
             let value = self.starts.fetch_add(1, Ordering::SeqCst);
             Ok(format!("operation-{value}"))
         }
@@ -877,6 +910,8 @@ mod tests {
             verify,
             starts: AtomicUsize::new(0),
             start_error: Mutex::new(None),
+            complete_baseline: AtomicBool::new(false),
+            requested_modes: Mutex::new(Vec::new()),
         });
         let sleeper: Arc<dyn Sleeper> = if expire_on_retry {
             Arc::new(ExpiringSleep(clock.clone()))
@@ -954,6 +989,31 @@ mod tests {
         assert_eq!(
             harness.database.snapshot().unwrap().state,
             LifecycleState::Completed
+        );
+    }
+
+    #[tokio::test]
+    async fn automatic_backups_use_baseline_then_personal_state() {
+        let baseline = harness(vec![completed()], true);
+        add_usage(&baseline.database, &baseline.clock, "app", 1_000);
+        baseline.clock.advance(Duration::from_secs(900));
+        baseline.engine.tick().await.unwrap();
+        assert_eq!(
+            *baseline.state_agent.requested_modes.lock().unwrap(),
+            vec![AutomaticBackupMode::CompleteApplication]
+        );
+
+        let overlay = harness(vec![completed()], true);
+        overlay
+            .state_agent
+            .complete_baseline
+            .store(true, Ordering::SeqCst);
+        add_usage(&overlay.database, &overlay.clock, "app", 1_000);
+        overlay.clock.advance(Duration::from_secs(900));
+        overlay.engine.tick().await.unwrap();
+        assert_eq!(
+            *overlay.state_agent.requested_modes.lock().unwrap(),
+            vec![AutomaticBackupMode::PersonalState]
         );
     }
 

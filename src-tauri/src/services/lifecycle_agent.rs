@@ -32,7 +32,7 @@ const SYSTEMD_UNIT: &str =
     include_str!("../../../state-agent/systemd/noland-lifecycle-agent.service");
 
 const AGENT_VERSION: &str = "0.1.0";
-const DEPLOYMENT_REVISION: &str = "13";
+const DEPLOYMENT_REVISION: &str = "14";
 const AGENT_BINARY: &str = "/usr/local/bin/noland-lifecycle-agent";
 const AGENT_SERVICE: &str = "noland-lifecycle-agent.service";
 const REVISION_PATH: &str = "/usr/local/share/noland-lifecycle-agent/install-revision";
@@ -74,15 +74,6 @@ impl LifecycleAgentProvisioner {
     pub async fn ensure_installed(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
         let _guard = DEPLOYMENT_CONFIG_LOCK.lock().await;
         ensure_installed_locked(remote, target_user).await
-    }
-
-    pub async fn configure_for_instance(
-        context: &AppContext,
-        remote: &RemoteExec,
-        instance_id: u64,
-    ) -> AppResult<()> {
-        let settings = context.load_state().await.auto_shutdown.settings;
-        Self::configure_for_instance_settings(context, remote, instance_id, &settings).await
     }
 
     pub async fn configure_for_instance_settings(

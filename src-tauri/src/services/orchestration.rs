@@ -13,8 +13,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            ConnectionProvider, EdidMode, MoonlightPreferences, OrchestrationState,
-            ProvisionedServerState, ProvisionedServerSteps,
+            AutoShutdownSettings, ConnectionProvider, EdidMode, MoonlightPreferences,
+            OrchestrationState, ProvisionedServerState, ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
     },
@@ -61,7 +61,20 @@ async fn provision_lifecycle_agent(
     target_user: &str,
 ) -> AppResult<()> {
     LifecycleAgentProvisioner::ensure_installed(remote, target_user).await?;
-    LifecycleAgentProvisioner::configure_for_instance(context, remote, instance_id).await
+    // Automatic backup/shutdown must never activate implicitly on a newly
+    // provisioned instance. Install the lifecycle configuration in a disabled
+    // state; the user enables it explicitly from the automatic-backup settings.
+    let settings = AutoShutdownSettings {
+        enabled: false,
+        ..AutoShutdownSettings::default()
+    };
+    LifecycleAgentProvisioner::configure_for_instance_settings(
+        context,
+        remote,
+        instance_id,
+        &settings,
+    )
+    .await
 }
 
 fn build_display_profile(

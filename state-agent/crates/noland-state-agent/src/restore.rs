@@ -156,6 +156,13 @@ pub async fn run_restore_with_session(
     metrics.manifest_duration_ms = elapsed_ms(manifest_started);
     let result = match plan {
         Ok(plan) => {
+            if plan.manifest.files.is_empty()
+                && (mode == RestoreMode::CompleteApplication || plan.manifest.tombstones.is_empty())
+            {
+                return Err(StateError::Invalid(format!(
+                    "bundle {bundle_id} contains no restorable files"
+                )));
+            }
             let priority_plan = plan.priority_plan();
             let total_files = u64::try_from(priority_plan.entries.len()).unwrap_or(u64::MAX);
             let ready_to_launch_files = u64::try_from(

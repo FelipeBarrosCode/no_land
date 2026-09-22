@@ -101,14 +101,14 @@ fn copy_stable(src: &Path, dest: &Path) -> Result<bool> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(src, dest)?;
+    copy_file(src, dest)?;
     let second = fs::metadata(src).ok();
     let stable = match (first, second) {
         (Some(a), Some(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
         _ => false,
     };
     if !stable {
-        fs::copy(src, dest)?;
+        copy_file(src, dest)?;
         let third = fs::metadata(src).ok();
         let dest_meta = fs::metadata(dest).ok();
         return Ok(match (third, dest_meta) {
@@ -121,7 +121,7 @@ fn copy_stable(src: &Path, dest: &Path) -> Result<bool> {
 
 fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
     fs::create_dir_all(dest)?;
-    for entry in fs::read_dir(src)? {
+    for entry in read_dir_with_context(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dest.join(entry.file_name());
@@ -131,10 +131,25 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<()> {
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&from, &to)?;
+            copy_file(&from, &to)?;
         }
     }
     Ok(())
+}
+
+fn copy_file(src: &Path, dest: &Path) -> Result<()> {
+    fs::copy(src, dest)
+        .map(|_| ())
+        .map_err(|error| StateError::Message(format!("failed to copy {}: {error}", src.display())))
+}
+
+fn read_dir_with_context(src: &Path) -> Result<fs::ReadDir> {
+    fs::read_dir(src).map_err(|error| {
+        StateError::Message(format!(
+            "failed to read directory {}: {error}",
+            src.display()
+        ))
+    })
 }
 
 fn common_btrfs_parent(sources: &[PathBuf]) -> Option<PathBuf> {

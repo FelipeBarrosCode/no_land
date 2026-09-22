@@ -54,14 +54,22 @@ impl CatalogDocument {
             }
             existing.refresh_bundle_heads();
         } else {
-            let latest_complete_bundle_id =
-                (bundle.mode == BackupMode::CompleteApplication).then_some(bundle.bundle_id);
+            let latest_complete_bundle_id = (bundle.mode == BackupMode::CompleteApplication
+                && bundle.logical_size > 0)
+                .then_some(bundle.bundle_id);
             let latest_personal_state_bundle_id =
                 (bundle.mode == BackupMode::PersonalState).then_some(bundle.bundle_id);
+            let latest_complete_captured_at = (bundle.mode == BackupMode::CompleteApplication
+                && bundle.logical_size > 0)
+                .then_some(bundle.captured_at);
+            let latest_personal_state_captured_at =
+                (bundle.mode == BackupMode::PersonalState).then_some(bundle.captured_at);
             self.apps.push(CatalogApp {
                 latest_bundle_id: bundle.bundle_id,
                 latest_complete_bundle_id,
                 latest_personal_state_bundle_id,
+                latest_complete_captured_at,
+                latest_personal_state_captured_at,
                 app_id: app_id.clone(),
                 display_name,
                 aliases: Vec::new(),
@@ -145,29 +153,42 @@ pub struct CatalogApp {
     pub latest_complete_bundle_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_personal_state_bundle_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_complete_captured_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_personal_state_captured_at: Option<DateTime<Utc>>,
     pub bundles: Vec<CatalogBundle>,
 }
 
 impl CatalogApp {
     pub fn refresh_bundle_heads(&mut self) {
-        self.latest_complete_bundle_id =
-            latest_bundle_for_mode(&self.bundles, BackupMode::CompleteApplication);
-        self.latest_personal_state_bundle_id =
-            latest_bundle_for_mode(&self.bundles, BackupMode::PersonalState);
+        let complete = latest_nonempty_complete_bundle(&self.bundles);
+        self.latest_complete_bundle_id = complete.map(|bundle| bundle.bundle_id);
+        self.latest_complete_captured_at = complete.map(|bundle| bundle.captured_at);
+        let personal = latest_bundle_for_mode(&self.bundles, BackupMode::PersonalState);
+        self.latest_personal_state_bundle_id = personal.map(|bundle| bundle.bundle_id);
+        self.latest_personal_state_captured_at = personal.map(|bundle| bundle.captured_at);
     }
 
     pub fn restorable_bundle_id(&self) -> Option<Uuid> {
-        self.latest_complete_bundle_id
-            .or_else(|| latest_bundle_for_mode(&self.bundles, BackupMode::CompleteApplication))
+        self.latest_complete_bundle_id.or_else(|| {
+            latest_nonempty_complete_bundle(&self.bundles).map(|bundle| bundle.bundle_id)
+        })
     }
 }
 
-fn latest_bundle_for_mode(bundles: &[CatalogBundle], mode: BackupMode) -> Option<Uuid> {
+fn latest_bundle_for_mode(bundles: &[CatalogBundle], mode: BackupMode) -> Option<&CatalogBundle> {
     bundles
         .iter()
         .filter(|bundle| bundle.mode == mode)
         .max_by_key(|bundle| bundle.captured_at)
-        .map(|bundle| bundle.bundle_id)
+}
+
+/// A complete application bundle with no files cannot make an application
+/// restorable; zero-size complete bundles are never a restorable head.
+fn latest_nonempty_complete_bundle(bundles: &[CatalogBundle]) -> Option<&CatalogBundle> {
+    latest_bundle_for_mode(bundles, BackupMode::CompleteApplication)
+        .filter(|bundle| bundle.logical_size > 0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +268,8 @@ mod tests {
         assert!(app.icon_path.is_none());
         assert!(app.latest_complete_bundle_id.is_none());
         assert!(app.latest_personal_state_bundle_id.is_none());
+        assert!(app.latest_complete_captured_at.is_none());
+        assert!(app.latest_personal_state_captured_at.is_none());
     }
 
     #[test]
@@ -286,5 +309,76 @@ mod tests {
         assert_eq!(app.latest_bundle_id, personal_id);
         assert_eq!(app.restorable_bundle_id(), Some(complete_id));
         assert_eq!(app.latest_personal_state_bundle_id, Some(personal_id));
+        assert_eq!(app.latest_complete_captured_at, Some(now));
+        assert_eq!(
+            app.latest_personal_state_captured_at,
+            Some(now + chrono::Duration::seconds(1))
+        );
+    }
+
+    #[test]
+    fn empty_complete_bundles_never_become_the_restorable_head() {
+        let app_id = AppId("desktop:game".into());
+        let mut catalog = CatalogDocument::empty();
+        let empty_id = Uuid::new_v4();
+        let complete_id = Uuid::new_v4();
+        let now = Utc::now();
+        let bundle = |bundle_id, mode, captured_at, logical_size| CatalogBundle {
+            bundle_id,
+            commit_id: Uuid::new_v4(),
+            parent_bundle_id: None,
+            captured_at,
+            source_instance_id: Uuid::new_v4(),
+            mode,
+            logical_size,
+            stored_incremental_size: logical_size,
+        };
+
+        catalog.upsert_bundle(
+            app_id.clone(),
+            "Game".into(),
+            bundle(empty_id, BackupMode::CompleteApplication, now, 0),
+        );
+        let app = catalog.app_mut(&app_id).unwrap();
+        assert_eq!(app.latest_bundle_id, empty_id);
+        assert_eq!(app.restorable_bundle_id(), None);
+        assert_eq!(app.latest_complete_bundle_id, None);
+
+        catalog.upsert_bundle(
+            app_id.clone(),
+            "Game".into(),
+            bundle(
+                complete_id,
+                BackupMode::CompleteApplication,
+                now + chrono::Duration::seconds(1),
+                10,
+            ),
+        );
+        let app = catalog.app_mut(&app_id).unwrap();
+        assert_eq!(app.restorable_bundle_id(), Some(complete_id));
+        assert_eq!(app.latest_complete_bundle_id, Some(complete_id));
+
+        // Reading an old catalog without head fields must apply the same rule.
+        let mut backfilled = CatalogDocument::empty();
+        let bundle = |bundle_id, mode, captured_at, logical_size| CatalogBundle {
+            bundle_id,
+            commit_id: Uuid::new_v4(),
+            parent_bundle_id: None,
+            captured_at,
+            source_instance_id: Uuid::new_v4(),
+            mode,
+            logical_size,
+            stored_incremental_size: logical_size,
+        };
+        backfilled.upsert_bundle(
+            app_id.clone(),
+            "Game".into(),
+            bundle(empty_id, BackupMode::CompleteApplication, now, 0),
+        );
+        backfilled.refresh_bundle_heads();
+        assert_eq!(
+            backfilled.app_mut(&app_id).unwrap().restorable_bundle_id(),
+            None
+        );
     }
 }
