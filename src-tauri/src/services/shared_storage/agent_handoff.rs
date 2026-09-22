@@ -61,6 +61,10 @@ pub(crate) struct AgentCatalogAppRecord {
     pub latest_complete_bundle_id: Option<String>,
     #[serde(default, alias = "latestPersonalStateBundleId")]
     pub latest_personal_state_bundle_id: Option<String>,
+    #[serde(default, alias = "latestCompleteCapturedAt")]
+    pub latest_complete_captured_at: Option<String>,
+    #[serde(default, alias = "latestPersonalStateCapturedAt")]
+    pub latest_personal_state_captured_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -645,6 +649,22 @@ impl AgentAppRecord {
 }
 
 impl AgentCatalogAppRecord {
+    pub(crate) fn personal_state_overlay_bundle_id(&self) -> Option<&str> {
+        let complete_at = self
+            .latest_complete_captured_at
+            .as_deref()?
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .ok()?;
+        let personal_at = self
+            .latest_personal_state_captured_at
+            .as_deref()?
+            .parse::<chrono::DateTime<chrono::Utc>>()
+            .ok()?;
+        (personal_at > complete_at)
+            .then(|| self.latest_personal_state_bundle_id.as_deref())
+            .flatten()
+    }
+
     fn normalize(mut self) -> Self {
         self.display_name = self.display_name.trim().to_string();
         self.canonical_executable = normalized_optional_string(self.canonical_executable.take());
@@ -663,6 +683,10 @@ impl AgentCatalogAppRecord {
             normalized_optional_string(self.latest_complete_bundle_id.take());
         self.latest_personal_state_bundle_id =
             normalized_optional_string(self.latest_personal_state_bundle_id.take());
+        self.latest_complete_captured_at =
+            normalized_optional_string(self.latest_complete_captured_at.take());
+        self.latest_personal_state_captured_at =
+            normalized_optional_string(self.latest_personal_state_captured_at.take());
         self
     }
 }
@@ -919,6 +943,7 @@ mod tests {
                 "displayName": "Example Game",
                 "latestBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef",
                 "latestCompleteBundleId": "f30a42a8-3dc9-4aea-a71c-f57f4b66bbef",
+                "latestCompleteCapturedAt": "2026-09-21T00:00:00Z",
                 "bundles": []
             }]
         }))
@@ -932,6 +957,10 @@ mod tests {
         assert_eq!(
             apps[0].latest_complete_bundle_id.as_deref(),
             Some("f30a42a8-3dc9-4aea-a71c-f57f4b66bbef")
+        );
+        assert_eq!(
+            apps[0].latest_complete_captured_at.as_deref(),
+            Some("2026-09-21T00:00:00Z")
         );
     }
 

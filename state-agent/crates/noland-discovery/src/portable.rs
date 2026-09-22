@@ -1,7 +1,8 @@
 //! Which discovered apps are worth showing or backing up.
 //!
-//! The current product direction is to surface all discovered user software,
-//! while still hiding a small set of explicit system/Noland plumbing entries.
+//! The current product direction is to surface all discovered user software
+//! while hiding explicit system/Noland plumbing entries and process-derived
+//! identities whose executables belong to the operating system.
 
 use noland_state_core::AppIdentity;
 
@@ -11,12 +12,14 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
     "noland",
     "systemd",
     "startplasma",
+    "at-spi",
     "plasmashell",
     "plasma_session",
     "kdeinit",
     "kioslave",
     "xsettingsd",
     "dbus-run-session",
+    "geoclue",
     "xdg-desktop-portal",
     "xdg-document-portal",
     "htop",
@@ -31,9 +34,25 @@ const ALWAYS_IGNORE_MARKERS: &[&str] = &[
 
 const ALWAYS_IGNORE_EXECUTABLES: &[&str] = &[
     "accounts-daemon",
+    "agetty",
+    "avahi-daemon",
+    // Interactive shells are never applications to back up; their fallback
+    // executable identities would otherwise sweep the entire home directory.
+    "bash",
+    "csh",
+    "dash",
+    "fish",
+    "ksh",
+    "sh",
+    "tcsh",
+    "zsh",
     "cron",
     "dbus-broker",
     "dbus-daemon",
+    // Instance infrastructure, not user software.
+    "caddy",
+    "guacd",
+    "vast-caddy",
     "kdeinit",
     "kioslave",
     "networkmanager",
@@ -57,8 +76,65 @@ const ALWAYS_IGNORE_EXECUTABLES: &[&str] = &[
 
 const ALWAYS_IGNORE_EXECUTABLE_PREFIXES: &[&str] = &["xdg-desktop-portal", "systemd-"];
 
+/// Executable locations that belong to the operating system, not to software a
+/// user installed. Process-derived identities whose executables live here must
+/// never become shared-storage backup candidates.
+const SYSTEM_EXECUTABLE_ROOTS: &[&str] = &[
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib32",
+    "/lib64",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/lib",
+    "/usr/lib32",
+    "/usr/lib64",
+    "/usr/libexec",
+];
+
 pub fn is_backup_candidate(app: &AppIdentity) -> bool {
+    // Process-derived fallback identities (exe:*) are only interesting when
+    // they point at software the user installed. System processes must never
+    // enter the ranker or sweep other applications' state.
+    if is_process_derived_identity(app) && !is_user_software_executable(app) {
+        return false;
+    }
     !is_always_ignored(app) && !is_steam_runtime(app)
+}
+
+fn is_process_derived_identity(app: &AppIdentity) -> bool {
+    app.app_id.as_str().starts_with("exe:")
+}
+
+fn is_user_software_executable(app: &AppIdentity) -> bool {
+    let Some(path) = app.canonical_executable.as_deref() else {
+        return false;
+    };
+    if is_system_executable_path(path) {
+        return false;
+    }
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let normalized = name.to_ascii_lowercase();
+    // Chromium-family helper processes share the browser's install directory
+    // but are not software the user launches.
+    if normalized.contains("crashpad") {
+        return false;
+    }
+    true
+}
+
+/// Returns whether an executable path belongs to the operating system rather
+/// than user-installed software. `/usr/local` and `/opt` are deliberately not
+/// system locations: software users install often lands there.
+pub fn is_system_executable_path(path: &std::path::Path) -> bool {
+    let candidate = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let candidate = candidate.to_string_lossy();
+    SYSTEM_EXECUTABLE_ROOTS
+        .iter()
+        .any(|root| candidate.as_ref() == *root || candidate.starts_with(&format!("{root}/")))
 }
 
 pub fn is_system_desktop_path(path: &std::path::Path) -> bool {
@@ -181,7 +257,76 @@ mod tests {
         }
         assert!(is_always_ignored_executable_name("systemd-journald"));
         assert!(is_always_ignored_executable_name("dbus-daemon"));
+        assert!(is_always_ignored_executable_name("agetty"));
+        assert!(is_always_ignored_executable_name("avahi-daemon"));
+        for shell in ["bash", "sh", "dash", "zsh", "fish", "csh", "ksh", "tcsh"] {
+            assert!(is_always_ignored_executable_name(shell), "{shell}");
+        }
         assert!(!is_always_ignored_executable_name("necronator-game"));
+    }
+
+    #[test]
+    fn ignores_system_helpers_identified_by_their_full_executable_path() {
+        let mut geoclue = AppIdentity::new(AppId("exe:agent:test".into()), "agent");
+        geoclue.canonical_executable = Some("/usr/libexec/geoclue-2.0/demos/agent".into());
+        let at_spi = AppIdentity::new(
+            AppId("exe:at-spi-bus-launcher:test".into()),
+            "at-spi-bus-launcher",
+        );
+
+        assert!(!is_backup_candidate(&geoclue));
+        assert!(!is_backup_candidate(&at_spi));
+    }
+
+    #[test]
+    fn system_processes_are_never_backup_candidates_but_user_software_is() {
+        // Operating-system executable locations are excluded regardless of the
+        // explicit name blocklist.
+        for system_exe in [
+            "/usr/bin/bash",
+            "/usr/sbin/agetty",
+            "/usr/libexec/geoclue-2.0/demos/agent",
+            "/bin/sh",
+        ] {
+            let mut app = AppIdentity::new(AppId("exe:system:test".into()), "system");
+            app.canonical_executable = Some(system_exe.into());
+            assert!(!is_backup_candidate(&app), "{system_exe}");
+        }
+
+        // A process-derived identity without any executable cannot be user software.
+        let anonymous = AppIdentity::new(AppId("exe:mystery:test".into()), "mystery");
+        assert!(!is_backup_candidate(&anonymous));
+
+        // Helper processes that share a user app's install directory are not
+        // software the user launches.
+        let mut crashpad =
+            AppIdentity::new(AppId("exe:chrome_crashpad_handler:test".into()), "crashpad");
+        crashpad.canonical_executable = Some("/opt/google/chrome/chrome_crashpad_handler".into());
+        assert!(!is_backup_candidate(&crashpad));
+
+        // Instance infrastructure is excluded by name.
+        let mut guacd = AppIdentity::new(AppId("exe:guacd:test".into()), "guacd");
+        guacd.canonical_executable = Some("/usr/local/bin/guacd".into());
+        assert!(!is_backup_candidate(&guacd));
+
+        // Software users actually install lives outside the system roots.
+        for user_exe in [
+            "/home/user/bin/my-game",
+            "/opt/games/my-game",
+            "/usr/local/bin/my-game",
+            "/opt/google/chrome/chrome",
+        ] {
+            let mut app = AppIdentity::new(AppId("exe:user:test".into()), "my-game");
+            app.canonical_executable = Some(user_exe.into());
+            assert!(is_backup_candidate(&app), "{user_exe}");
+        }
+
+        // The rule only constrains process-derived identities: desktop entries
+        // and Steam apps keep their existing classification.
+        let desktop = AppIdentity::new(AppId::desktop("example-game"), "Example Game");
+        assert!(is_backup_candidate(&desktop));
+        let steam = AppIdentity::new(AppId::steam(480), "Spacewar");
+        assert!(is_backup_candidate(&steam));
     }
 
     #[test]

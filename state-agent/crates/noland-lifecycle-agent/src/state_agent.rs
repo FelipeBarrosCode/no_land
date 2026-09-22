@@ -20,7 +20,21 @@ use crate::{AgentError, Result};
 const STATE_AGENT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const XPROP_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RPC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
-const AUTOMATIC_BACKUP_MODE: &str = "complete_application";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticBackupMode {
+    CompleteApplication,
+    PersonalState,
+}
+
+impl AutomaticBackupMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CompleteApplication => "complete_application",
+            Self::PersonalState => "personal_state",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -38,6 +52,7 @@ pub struct ActiveAppSession {
 #[derive(Clone)]
 pub struct BackupRequest {
     pub app_id: String,
+    pub mode: AutomaticBackupMode,
     pub operation_id: Uuid,
     pub session: EphemeralRcloneSession,
     pub master_key_hex: String,
@@ -63,6 +78,12 @@ pub trait StateAgentClient: Send + Sync {
     async fn get_active_app_sessions(&self) -> Result<Vec<ActiveAppSession>>;
     async fn list_backup_candidate_app_ids(&self) -> Result<HashSet<String>>;
     async fn resolve_process_to_app(&self, pid: u32) -> Result<Option<String>>;
+    async fn has_complete_baseline(
+        &self,
+        app_id: &str,
+        session: EphemeralRcloneSession,
+        master_key_hex: String,
+    ) -> Result<bool>;
     async fn start_backup(&self, request: BackupRequest) -> Result<String>;
     async fn get_operation_status(&self, operation_id: &str) -> Result<OperationStatus>;
     async fn verify_backup_commit(&self, request: VerifyRequest) -> Result<bool>;
@@ -163,16 +184,35 @@ impl StateAgentClient for UnixStateAgentClient {
             .map(str::to_owned))
     }
 
+    async fn has_complete_baseline(
+        &self,
+        app_id: &str,
+        session: EphemeralRcloneSession,
+        master_key_hex: String,
+    ) -> Result<bool> {
+        let value = self
+            .call(
+                "ListCloudCatalog",
+                json!({
+                    "session": session,
+                    "master_key_hex": master_key_hex,
+                }),
+            )
+            .await?;
+        let apps = value
+            .get("apps")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AgentError::new("state-agent returned an invalid cloud catalog"))?;
+        Ok(catalog_has_nonempty_complete_baseline(apps, app_id))
+    }
+
     async fn start_backup(&self, request: BackupRequest) -> Result<String> {
         let value = self
             .call(
                 "StartBackup",
                 json!({
                     "app_id": request.app_id,
-                    // Automatic lifecycle backups must remain independently
-                    // restorable. Pack/chunk deduplication prevents unchanged
-                    // application binaries from being uploaded again.
-                    "mode": AUTOMATIC_BACKUP_MODE,
+                    "mode": request.mode.as_str(),
                     "performance_mode": "balanced",
                     "session": request.session,
                     "master_key_hex": request.master_key_hex,
@@ -238,6 +278,30 @@ impl StateAgentClient for UnixStateAgentClient {
             .await?;
         verification_result_matches(value, &expected_app, &expected_bundle, &expected_commit)
     }
+}
+
+fn catalog_has_nonempty_complete_baseline(apps: &[Value], app_id: &str) -> bool {
+    apps.iter().any(|app| {
+        if app.get("app_id").and_then(Value::as_str) != Some(app_id) {
+            return false;
+        }
+        let Some(head) = app.get("latest_complete_bundle_id").and_then(Value::as_str) else {
+            return false;
+        };
+        app.get("bundles")
+            .and_then(Value::as_array)
+            .is_some_and(|bundles| {
+                bundles.iter().any(|bundle| {
+                    bundle.get("bundle_id").and_then(Value::as_str) == Some(head)
+                        && bundle.get("mode").and_then(Value::as_str)
+                            == Some("complete_application")
+                        && bundle
+                            .get("logical_size")
+                            .and_then(Value::as_u64)
+                            .is_some_and(|size| size > 0)
+                })
+            })
+    })
 }
 
 fn verification_result_matches(
@@ -335,7 +399,33 @@ mod tests {
     }
 
     #[test]
-    fn automatic_backups_are_independently_restorable() {
-        assert_eq!(AUTOMATIC_BACKUP_MODE, "complete_application");
+    fn automatic_backup_modes_use_agent_contract_values() {
+        assert_eq!(
+            AutomaticBackupMode::CompleteApplication.as_str(),
+            "complete_application"
+        );
+        assert_eq!(
+            AutomaticBackupMode::PersonalState.as_str(),
+            "personal_state"
+        );
+    }
+
+    #[test]
+    fn baseline_selection_rejects_empty_complete_bundles() {
+        let app_id = "desktop:game";
+        let bundle_id = Uuid::new_v4().to_string();
+        let catalog = vec![json!({
+            "app_id": app_id,
+            "latest_complete_bundle_id": bundle_id,
+            "bundles": [{
+                "bundle_id": bundle_id,
+                "mode": "complete_application",
+                "logical_size": 0
+            }]
+        })];
+        assert!(!catalog_has_nonempty_complete_baseline(&catalog, app_id));
+        let mut nonempty = catalog;
+        nonempty[0]["bundles"][0]["logical_size"] = json!(1);
+        assert!(catalog_has_nonempty_complete_baseline(&nonempty, app_id));
     }
 }

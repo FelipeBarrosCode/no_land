@@ -1488,6 +1488,8 @@ mod tests {
             latest_bundle_id: None,
             latest_complete_bundle_id: None,
             latest_personal_state_bundle_id: None,
+            latest_complete_captured_at: None,
+            latest_personal_state_captured_at: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&explicit), Some(3_241_660));
 
@@ -1503,6 +1505,8 @@ mod tests {
             latest_bundle_id: None,
             latest_complete_bundle_id: None,
             latest_personal_state_bundle_id: None,
+            latest_complete_captured_at: None,
+            latest_personal_state_captured_at: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&prefixed), Some(3_241_660));
 
@@ -1518,6 +1522,8 @@ mod tests {
             latest_bundle_id: None,
             latest_complete_bundle_id: None,
             latest_personal_state_bundle_id: None,
+            latest_complete_captured_at: None,
+            latest_personal_state_captured_at: None,
         };
         assert_eq!(infer_steam_app_id_from_catalog(&numeric), Some(3_241_660));
     }
