@@ -251,8 +251,6 @@ function verifyLinuxLinkage(root, targetTriple, label) {
     appExecutable,
     ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
       .map((stem) => findRequiredSidecar(root, targetTriple, stem)),
-    findFirstPath(root, (path) => basename(path) === 'gst-plugin-scanner'),
-    findFirstPath(root, (path) => basename(path) === 'libgstreamer-1.0.so.0'),
   ].filter(Boolean);
 
   for (const path of seeds) {
@@ -270,87 +268,57 @@ function verifyLinuxLinkage(root, targetTriple, label) {
     }
   }
 
-  verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv);
-  verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label);
+  verifyLinuxSystemGstreamer(root, label, appExecutable, cleanEnv);
+  verifyNoBundledLinuxDesktopPlatformLibraries(root, label);
 }
 
-function verifyLinuxGstreamerRpaths(root, targetTriple, label, appExecutable, cleanEnv) {
-  const gstreamerRoot = join(root, 'usr', 'lib', productName, 'binaries', 'gstreamer', targetTriple);
-  if (!existsSync(gstreamerRoot)) {
-    fail(`Linux GStreamer runtime is not installed at the Tauri resource path in ${label}: ${gstreamerRoot}`);
+function verifyLinuxSystemGstreamer(root, label, appExecutable, cleanEnv) {
+  const bundledGstreamerArtifact = findFirstPath(root, (path) => {
+    const normalizedPath = normalize(path).split('\\').join('/');
+    const name = basename(path);
+    return normalizedPath.includes('/binaries/gstreamer/')
+      || /^libgstreamer-1\.0\.so/u.test(name)
+      || name === 'gst-plugin-scanner';
+  });
+  if (bundledGstreamerArtifact) {
+    fail(`Linux package contains a bundled GStreamer runtime artifact in ${label}: ${bundledGstreamerArtifact}`);
   }
   if (!appExecutable) {
-    fail(`Could not locate the Linux application executable while verifying GStreamer RPATH in ${label}`);
+    fail(`Could not locate the Linux application executable while verifying GStreamer linkage in ${label}`);
   }
 
   const appDynamic = runCapture('readelf', ['-d', appExecutable]);
-  // linuxdeploy copies direct dependencies into usr/lib and replaces the linked
-  // RPATH with $ORIGIN/../lib. Debian/RPM bundles may retain our resource RPATH.
-  // The clean-environment ldd checks below prove either layout stays in-package.
-  const expectedResourceRpath = `$ORIGIN/../lib/${productName}/binaries/gstreamer/${targetTriple}/lib`;
-  const expectedBundlerRpath = '$ORIGIN/../lib';
-  const hasResourceRpath = appDynamic.stdout.includes('(RPATH)')
-    && appDynamic.stdout.includes(expectedResourceRpath);
-  const hasBundlerRpath = (appDynamic.stdout.includes('(RPATH)') || appDynamic.stdout.includes('(RUNPATH)'))
-    && appDynamic.stdout.includes(expectedBundlerRpath);
-  if (!hasResourceRpath && !hasBundlerRpath) {
-    fail(`Linux application has neither the Noland resource RPATH nor Tauri's packaged-library RUNPATH in ${label}: ${expectedResourceRpath} or ${expectedBundlerRpath}\n${appDynamic.stdout}`);
-  }
-
-  const scanner = join(gstreamerRoot, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
-  const scannerDynamic = runCapture('readelf', ['-d', scanner]);
-  const scannerHasSearchPath = scannerDynamic.stdout.includes('(RPATH)')
-    || scannerDynamic.stdout.includes('(RUNPATH)');
-  if (!scannerHasSearchPath || !scannerDynamic.stdout.includes('$ORIGIN/../../lib')) {
-    fail(`Bundled gst-plugin-scanner does not contain the required relative library search path in ${label}\n${scannerDynamic.stdout}`);
-  }
-
-  const plugin = findFirstPath(join(gstreamerRoot, 'lib', 'gstreamer-1.0'), (path) => basename(path) === 'libgstlibav.so');
-  if (!plugin) {
-    fail(`Could not locate bundled libgstlibav.so in ${label}`);
-  }
-  const pluginDynamic = runCapture('readelf', ['-d', plugin]);
-  const pluginHasSearchPath = pluginDynamic.stdout.includes('(RPATH)')
-    || pluginDynamic.stdout.includes('(RUNPATH)');
-  if (!pluginHasSearchPath || !pluginDynamic.stdout.includes('$ORIGIN/..')) {
-    fail(`Bundled GStreamer plugin does not contain the required relative library search path in ${label}: ${plugin}\n${pluginDynamic.stdout}`);
+  const dynamicSearchPaths = appDynamic.stdout
+    .split(/\r?\n/u)
+    .filter((line) => line.includes('(RPATH)') || line.includes('(RUNPATH)'))
+    .join('\n');
+  if (/gstreamer/iu.test(dynamicSearchPaths)) {
+    fail(`Linux application contains a GStreamer-specific RPATH/RUNPATH in ${label}\n${dynamicSearchPaths}`);
   }
 
   const linkage = runCapture('ldd', [appExecutable], { env: cleanEnv, allowFailure: true });
-  const packagedLibraryRoots = [
-    gstreamerRoot,
-    join(root, 'usr', 'lib'),
-  ].map((path) => normalize(path).split('\\').join('/'));
-  for (const library of ['libgstreamer-1.0.so', 'libgstapp-1.0.so', 'libgstvideo-1.0.so', 'libcrypto.so']) {
+  const normalizedPackageRoot = normalize(root).split('\\').join('/');
+  for (const library of ['libgstreamer-1.0.so', 'libgstapp-1.0.so', 'libgstvideo-1.0.so']) {
     const line = linkage.stdout.split(/\r?\n/u).find((candidate) => candidate.includes(library));
     const resolvedPath = line?.match(/=>\s+(.+)\s+\(0x[0-9a-f]+\)$/iu)?.[1]?.trim();
     const normalizedResolvedPath = resolvedPath
       ? normalize(resolvedPath).split('\\').join('/')
       : '';
-    const resolvesInsidePackage = packagedLibraryRoots.some((path) => (
-      normalizedResolvedPath === path || normalizedResolvedPath.startsWith(`${path}/`)
-    ));
-    if (!line || !resolvesInsidePackage) {
-      fail(`Linux application resolved ${library} outside the extracted package in ${label}\nResolved path: ${resolvedPath ?? 'unknown'}\nExpected one of: ${packagedLibraryRoots.join(', ')}\n${linkage.stdout}`);
+    if (!line || !resolvedPath) {
+      fail(`Linux application did not resolve required system library ${library} in ${label}\n${linkage.stdout}`);
+    }
+    if (normalizedResolvedPath === normalizedPackageRoot || normalizedResolvedPath.startsWith(`${normalizedPackageRoot}/`)) {
+      fail(`Linux application resolved ${library} from inside the package in ${label}: ${resolvedPath}`);
     }
   }
 }
 
-function verifyNoBundledLinuxDesktopPlatformLibraries(root, targetTriple, label) {
-  const gstreamerRoot = join(root, 'usr', 'lib', productName, 'binaries', 'gstreamer', targetTriple);
+function verifyNoBundledLinuxDesktopPlatformLibraries(root, label) {
   const offenders = [];
-  const scopedRuntimeDirs = [
-    join(gstreamerRoot, 'lib'),
-    join(gstreamerRoot, 'lib64'),
-  ];
   const packageLibraryDirs = [
     join(root, 'usr', 'lib'),
     join(root, 'usr', 'lib64'),
   ];
-
-  for (const libDir of scopedRuntimeDirs) {
-    collectForbiddenLinuxLibraries(libDir, offenders, linuxDistroOwnedRuntimeLibraryPatterns());
-  }
 
   // AppImage/linuxdeploy-style usr/lib injection is the most dangerous place for
   // these libraries: AppRun adds it to the dynamic loader path, then host GIO
@@ -381,6 +349,8 @@ function collectForbiddenLinuxLibraries(libDir, offenders, patterns, { recursive
 
 function linuxDistroOwnedRuntimeLibraryPatterns() {
   return [
+    /^libgstreamer-1\.0\.so/u,
+    /^libgst/u,
     /^libglib-2\.0\.so/u,
     /^libgobject-2\.0\.so/u,
     /^libgio-2\.0\.so/u,

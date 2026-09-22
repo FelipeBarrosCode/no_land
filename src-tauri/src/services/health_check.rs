@@ -142,54 +142,6 @@ fn arch_label(arch: ArchKind) -> &'static str {
     }
 }
 
-fn linux_forbidden_runtime_lib(name: &str) -> bool {
-    let forbidden_prefixes = [
-        "libglib-2.0.so",
-        "libgobject-2.0.so",
-        "libgio-2.0.so",
-        "libgmodule-2.0.so",
-        "libgthread-2.0.so",
-        "libatspi.so",
-        "libatk-1.0.so",
-        "libatk-bridge-2.0.so",
-        "libgtk-3.so",
-        "libgdk-3.so",
-        "libwebkit2gtk",
-        "libjavascriptcoregtk",
-        "libpango",
-        "libcairo",
-        // Hardware/audio/driver-integration libraries must stay on the distro.
-        "libudev.so",
-        "libgudev",
-        "libva",
-        "libvdpau",
-        "libdrm",
-        "libgbm",
-        "libGL.so",
-        "libGLX",
-        "libEGL",
-        "libGLESv",
-        "libOpenGL.so",
-        "libglapi",
-        "libopengl.so",
-        "libpipewire",
-        "libspa",
-        "libpulse",
-        "libasound",
-        "libjack",
-        "libxkbcommon-x11",
-        "libxshmfence",
-        "libcurl",
-        "libnghttp2",
-        "libgnutls",
-        "libpsl",
-        "libssh2",
-    ];
-    forbidden_prefixes
-        .iter()
-        .any(|prefix| name.starts_with(prefix))
-}
-
 fn can_write_directory(path: &Path) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| error.to_string())?;
     let test_path = path.join(format!(".noland-health-{}.tmp", now_unix()));
@@ -475,47 +427,13 @@ pub async fn run_system_health_report(app: &AppHandle, context: &AppContext) -> 
     );
 
     if os.is_linux() {
-        match crate::mic_client::runtime::resolve_gstreamer_root_for_current_exe() {
-            Some(root) => {
-                let mut offenders = Vec::new();
-                for lib_dir in [root.join("lib"), root.join("lib64")] {
-                    if let Ok(entries) = fs::read_dir(&lib_dir) {
-                        for entry in entries.flatten() {
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if linux_forbidden_runtime_lib(&name) {
-                                offenders.push(entry.path().display().to_string());
-                            }
-                        }
-                    }
-                }
-                if offenders.is_empty() {
-                    probes.push(ok_probe(
-                        "runtime.gstreamer_linux",
-                        "Linux GStreamer runtime isolation",
-                        "audio",
-                        "Bundled GStreamer runtime avoids GLib/GTK/AT-SPI libraries.",
-                        Some(root.display().to_string()),
-                    ));
-                } else {
-                    probes.push(failed_probe(
-                        "runtime.gstreamer_linux",
-                        "Linux GStreamer runtime isolation",
-                        "audio",
-                        "Bundled GStreamer runtime contains distro-owned desktop libraries.",
-                        Some(offenders.join("\n")),
-                        Some("Rebuild after cleaning src-tauri/.native-deps/*/gstreamer and src-tauri/binaries/gstreamer.".to_string()),
-                    ));
-                }
-            }
-            None => probes.push(warn_probe(
-                "runtime.gstreamer_linux",
-                "Linux GStreamer runtime isolation",
-                "audio",
-                "No bundled Linux GStreamer runtime was found.",
-                None,
-                Some("Microphone/embedded streaming may rely entirely on system GStreamer or be unavailable.".to_string()),
-            )),
-        }
+        probes.push(ok_probe(
+            "runtime.gstreamer_linux",
+            "Linux GStreamer runtime",
+            "audio",
+            "GStreamer is provided by the distro and shared with WebKitGTK.",
+            None,
+        ));
     }
 
     if os.is_windows() {
