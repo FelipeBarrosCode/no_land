@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 15;
+const AGENT_API_VERSION: u64 = 16;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 

@@ -1,4 +1,6 @@
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,6 +20,7 @@ use crate::{AgentError, Result};
 const STATE_AGENT_RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const XPROP_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_RPC_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
+const AUTOMATIC_BACKUP_MODE: &str = "complete_application";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,12 +85,20 @@ impl UnixStateAgentClient {
             params,
         };
         let operation = async {
+            let socket_metadata = std::fs::symlink_metadata(&self.socket_path)?;
+            if !socket_metadata.file_type().is_socket() {
+                return Err(AgentError::new(
+                    "configured state-agent endpoint is not a Unix socket",
+                ));
+            }
+            let expected_uid = socket_metadata.uid();
             let mut stream = UnixStream::connect(&self.socket_path).await?;
             let peer = stream.peer_cred()?;
-            if peer.uid() != 0 {
-                return Err(AgentError::new(
-                    "state-agent Unix socket peer is not the trusted root service",
-                ));
+            if peer.uid() != expected_uid {
+                return Err(AgentError::new(format!(
+                    "state-agent Unix peer uid {} does not match socket owner uid {expected_uid}",
+                    peer.uid()
+                )));
             }
             let mut encoded = serde_json::to_vec(&request)?;
             encoded.push(b'\n');
@@ -158,7 +169,10 @@ impl StateAgentClient for UnixStateAgentClient {
                 "StartBackup",
                 json!({
                     "app_id": request.app_id,
-                    "mode": "personal_state",
+                    // Automatic lifecycle backups must remain independently
+                    // restorable. Pack/chunk deduplication prevents unchanged
+                    // application binaries from being uploaded again.
+                    "mode": AUTOMATIC_BACKUP_MODE,
                     "performance_mode": "balanced",
                     "session": request.session,
                     "master_key_hex": request.master_key_hex,
@@ -318,5 +332,10 @@ mod tests {
             &commit_id.to_string(),
         )
         .unwrap());
+    }
+
+    #[test]
+    fn automatic_backups_are_independently_restorable() {
+        assert_eq!(AUTOMATIC_BACKUP_MODE, "complete_application");
     }
 }

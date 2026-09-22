@@ -24,7 +24,7 @@ noland-lifecycle-agent (root systemd service)
 
 The daemon is `state-agent/crates/noland-lifecycle-agent`. It is a separate process from both Sunshine and `noland-state-agent`; a monitor failure must not stop streaming.
 
-The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Older state-agent installations are deliberately rejected and reinstalled as API 14 so lifecycle selection can be validated against the state-agent's canonical backup-candidate index.
+The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Older state-agent installations are deliberately rejected and reinstalled as API 16 so lifecycle selection can be validated against the state-agent's canonical backup-candidate index and catalog bundle heads.
 
 ## Defaults and settings
 
@@ -49,7 +49,7 @@ The lifecycle service is installed as `/etc/systemd/system/noland-lifecycle-agen
 | Activity socket | `/run/noland/sunshine-events.sock` |
 | State-agent RPC | `/run/noland/state-agent.sock` |
 
-The state-agent also runs as `root` with its existing bounded eBPF capabilities and uses the target user's group only for socket access. Its runtime directory and database are root-owned, so a compromised streaming-user process cannot replace the state-agent socket or alter the verification database. The lifecycle RPC client additionally rejects a state-agent peer whose Unix UID is not root.
+The state-agent runs as the target desktop user with only `CAP_BPF` and `CAP_PERFMON`. This lets restore publication obey the same ownership boundary as the streamed desktop without granting `CAP_DAC_OVERRIDE`. Its runtime directory and database are owned by that user. The lifecycle service remains the root-owned policy boundary and only connects to the configured local state-agent socket.
 
 The capability is stored in the durable lifecycle state directory with root-only file permissions, so it survives service restarts and host reboots. Re-provisioning is still required after the instance's persistent state is replaced or when the capability expires.
 
@@ -69,7 +69,7 @@ Application usage is attributed through state-agent active sessions and the fore
 
 For each frozen application, the lifecycle agent:
 
-1. starts a `personal_state` backup through state-agent;
+1. starts a `complete_application` backup through state-agent; unchanged binaries and content are reused through the main repository's content-addressed pack/chunk index rather than uploaded again;
 2. polls the operation until a known terminal state;
 3. treats missing, unknown, interrupted, failed, or cancelled status as unsafe;
 4. asks state-agent to verify the exact application, bundle UUID, and commit UUID;
@@ -110,7 +110,7 @@ Do not run the final destroy test against a valuable instance. Use a disposable 
 
 1. Deploy state-agent and lifecycle assets through the desktop provisioning flow.
 2. Confirm:
-   - `noland-state-agent.service` is `root:<target-group>`;
+   - `noland-state-agent.service` is `<target-user>:<target-group>` and retains only `CAP_BPF` and `CAP_PERFMON`;
    - `noland-lifecycle-agent.service` is `root:<target-group>`;
    - the two socket directories are not writable by the streaming user;
    - the lifecycle status socket is `/run/noland/lifecycle/agent.sock`;
