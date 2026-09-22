@@ -28,6 +28,7 @@ use super::{
         reconnect_local_wireguard_client, setup_local_wireguard_client,
         verify_managed_gotatun_tunnel,
     },
+    wireguard_mtu::tune_connected_tunnel,
 };
 
 const TUNNEL_HOST: &str = "10.77.0.1";
@@ -258,6 +259,51 @@ pub async fn setup_wireguard_app_handoff(
         OrchestrationState::WireGuardVerifying,
         "Managed tunnel activated",
         Some(activation_message),
+        false,
+    )
+    .await;
+
+    let (remote, _) = sunshine_ssh_remote(context).await?;
+    let mtu_selection = match tune_connected_tunnel(
+        config_path.clone(),
+        remote.clone(),
+        context.config.wireguard.server_interface_name.clone(),
+        remote.ssh_host.clone(),
+        TUNNEL_HOST.to_string(),
+        context.config.wireguard.tunnel_mtu,
+    )
+    .await
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            set_setup_failure(
+                context,
+                SetupStage::WireguardVerifying,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "wireguard_mtu_tuning_failed",
+                "The secure tunnel connected, but its MTU could not be safely applied.",
+                Some(error.to_string()),
+                true,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    info!(
+        tunnel_mtu = mtu_selection.mtu,
+        path_mtu = mtu_selection.path_mtu,
+        source = mtu_selection.source,
+        "selected and applied WireGuard MTU over the connected tunnel"
+    );
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Secure tunnel MTU selected",
+        Some(format!(
+            "Connected-path probing selected MTU {} (source: {}).",
+            mtu_selection.mtu, mtu_selection.source
+        )),
         false,
     )
     .await;

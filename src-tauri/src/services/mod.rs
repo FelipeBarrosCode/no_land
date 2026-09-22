@@ -17,6 +17,7 @@ pub mod nvidia_headless;
 pub mod offer_selector;
 pub mod orchestration;
 pub mod os_detection;
+mod package_manager;
 
 pub mod post_wireguard_setup;
 pub mod reboot_helper;
@@ -30,3 +31,4 @@ pub mod state_store;
 pub mod sunshine;
 pub mod vast_api;
 pub mod wireguard;
+mod wireguard_mtu;

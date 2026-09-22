@@ -13,6 +13,12 @@ The client must originate probes because a gaming instance generally cannot init
 
 Monitoring is observational. Agent installation, UDP, WebSocket, classification, notification, or UI failures do not stop or alter Moonlight streaming.
 
+## WireGuard MTU selection
+
+WireGuard provisioning renders both endpoints with a temporary 1440-byte discovery MTU, establishes and verifies the encrypted tunnel, and only then runs bounded don't-fragment probes to the private server address. A binary search finds the largest reliable four-byte-aligned inner packet, subtracts a 16-byte safety margin, and applies the same selected MTU to the local and remote WireGuard configs. If the selected value differs, the remote interface is updated and the managed local tunnel performs one controlled reconnect. The operational result is capped at 1420 bytes.
+
+Selections are cached for 24 hours per instance and outer network-path fingerprint (destination, source address, and interface). A changed route or interface invalidates the cache. If DNS, route detection, `ping`, ICMP responses, or reliable probing are unavailable, the connected tunnel is rewritten to the fail-safe MTU 1280. Failure to apply the safe value blocks setup instead of leaving an unvalidated discovery MTU active. This provisioning-time PMTU selection is separate from Moonlight's optional in-stream adaptive packet-size controller.
+
 ## Network path and ports
 
 The systemd service resolves the IPv4 address assigned to `wg0` and binds only to that address:

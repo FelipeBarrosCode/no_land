@@ -855,119 +855,7 @@ impl WireGuardService {
         remote: &RemoteExec,
         max_wait_secs: u64,
     ) -> AppResult<bool> {
-        let surgical_script = format!(
-            r#"#!/bin/bash
-set -uo pipefail
-
-LOCK_FILES="/var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/cache/apt/archives/lock /var/lib/apt/lists/lock"
-MAX_WAIT={max_wait_secs}
-
-check_lock() {{
-    for lock in $LOCK_FILES; do
-        if sudo fuser "$lock" >/dev/null 2>&1; then
-            return 1
-        fi
-    done
-    return 0
-}}
-
-# Phase 1: Quick check (0-3 seconds)
-if check_lock; then
-    echo "LOCK_FREE"
-    exit 0
-fi
-
-# Phase 2: Aggressive kill (unattended-upgrades often auto-restarts)
-echo "LOCK_HELD: killing competing apt processes..."
-sudo systemctl stop unattended-upgrades 2>/dev/null || true
-sudo systemctl mask unattended-upgrades 2>/dev/null || true
-sudo pkill -9 -f unattended-upgrades 2>/dev/null || true
-sudo pkill -9 -f apt.systemd.daily 2>/dev/null || true
-sudo pkill -9 -f "[a]pt-get" 2>/dev/null || true
-sudo pkill -9 -f "[d]pkg" 2>/dev/null || true
-sleep 2
-
-# Phase 3: Fix broken dpkg state and remove stale locks
-echo "Fixing dpkg state..."
-sudo dpkg --configure -a 2>/dev/null || true
-for lock in $LOCK_FILES; do
-    if [ -f "$lock" ]; then
-        sudo rm -f "$lock" 2>/dev/null || true
-    fi
-done
-
-# Phase 4: Check again after cleanup
-sleep 1
-if check_lock; then
-    echo "LOCK_FREE_AFTER_KILL"
-    exit 0
-fi
-
-# Phase 5: Patient wait with timeout
-echo "Still locked after cleanup, waiting up to ${{MAX_WAIT}}s..."
-check_count=0
-while ! check_lock; do
-    check_count=$((check_count + 1))
-    if [ $((check_count % 15)) -eq 0 ]; then
-        echo "Still waiting for package manager lock... ${{check_count}}s elapsed"
-    fi
-    sleep 1
-    if [ $check_count -ge $MAX_WAIT ]; then
-        echo "TIMEOUT: Package manager lock not released after ${{MAX_WAIT}} seconds"
-        # Unmask so future boots are not broken
-        sudo systemctl unmask unattended-upgrades 2>/dev/null || true
-        exit 1
-    fi
-done
-
-# Unmask so future boots are not broken
-sudo systemctl unmask unattended-upgrades 2>/dev/null || true
-echo "LOCK_RELEASED_AFTER_WAIT ${{check_count}}"
-exit 0"#
-        );
-
-        for attempt in 1..=3 {
-            let remote = remote.clone();
-            let surgical_script = surgical_script.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                remote.ssh(&surgical_script, Duration::from_secs(max_wait_secs + 30))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??;
-
-            if result.status_code == 0 {
-                let stdout = result.stdout.trim();
-                if stdout.contains("LOCK_FREE") || stdout.contains("LOCK_RELEASED") {
-                    info!("dpkg lock acquired: {}", stdout);
-                    return Ok(true);
-                }
-
-                info!("dpkg lock check returned unexpected output: {}", stdout);
-                return Ok(false);
-            }
-
-            let stderr = result.stderr.trim();
-            let stdout = result.stdout.trim();
-            let retryable_ssh_failure = result.status_code == 255
-                || stderr.contains("Connection closed")
-                || stderr.contains("Broken pipe")
-                || stderr.contains("Operation timed out")
-                || stderr.contains("kex_exchange_identification")
-                || stdout.contains("LOCK_HELD");
-
-            info!(
-                "dpkg lock wait attempt {} returned {}: stdout={} stderr={}",
-                attempt, result.status_code, stdout, stderr
-            );
-
-            if !retryable_ssh_failure || attempt == 3 {
-                return Ok(false);
-            }
-
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-
-        Ok(false)
+        super::package_manager::wait_for_dpkg_lock(remote, max_wait_secs).await
     }
 
     async fn wait_for_package_manager_ready(&self, remote: &RemoteExec) -> AppResult<()> {
@@ -1076,8 +964,17 @@ exit 0"#
         self.setup_cpu_governor(remote).await?;
         self.wait_for_package_manager_ready(remote).await?;
         let primary_interface = self.detect_primary_interface(remote).await?;
-        let server_config =
-            self.render_server_config(&server_private, &client_public, server_listen_port);
+        let bootstrap_mtu = super::wireguard_mtu::BOOTSTRAP_TUNNEL_MTU;
+        info!(
+            tunnel_mtu = bootstrap_mtu,
+            "using temporary WireGuard MTU until connected-path probing completes"
+        );
+        let server_config = self.render_server_config(
+            &server_private,
+            &client_public,
+            server_listen_port,
+            bootstrap_mtu,
+        );
         let server_tunnel_host = strip_cidr(&self.defaults.server_tunnel_ip);
         #[cfg(target_os = "windows")]
         let client_listen_port = 0;
@@ -1091,10 +988,10 @@ exit 0"#
         let client_config = self.render_client_config(
             &client_private,
             &server_public,
-            endpoint_host,
-            endpoint_port,
+            (endpoint_host, endpoint_port),
             &format!("{server_tunnel_host}/32"),
             client_listen_port,
+            bootstrap_mtu,
         );
 
         self.setup_queue_management_persistent(remote).await?;
@@ -1564,13 +1461,14 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         server_private: &str,
         client_public: &str,
         server_listen_port: u16,
+        tunnel_mtu: u16,
     ) -> String {
         format!(
             "[Interface]\nAddress = {}\nListenPort = {}\nPrivateKey = {}\nMTU = {}\n\n[Peer]\nPublicKey = {}\nAllowedIPs = {}\n",
             self.defaults.server_tunnel_ip,
             server_listen_port,
             server_private,
-            self.defaults.tunnel_mtu,
+            tunnel_mtu,
             client_public,
             self.defaults.client_tunnel_ip,
         )
@@ -1610,10 +1508,10 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
         &self,
         client_private: &str,
         server_public: &str,
-        endpoint_host: &str,
-        endpoint_port: u16,
+        endpoint: (&str, u16),
         allowed_ips: &str,
         client_listen_port: u16,
+        tunnel_mtu: u16,
     ) -> String {
         let listen_port_line = if client_listen_port == 0 {
             String::new()
@@ -1625,10 +1523,10 @@ net.ipv4.conf.{wg_iface}.rp_filter=0
             self.defaults.client_tunnel_ip,
             client_private,
             listen_port_line,
-            self.defaults.tunnel_mtu,
+            tunnel_mtu,
             server_public,
-            endpoint_host,
-            endpoint_port,
+            endpoint.0,
+            endpoint.1,
             allowed_ips,
             self.defaults.persistent_keepalive_secs,
         )
