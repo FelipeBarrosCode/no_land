@@ -83,6 +83,7 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
       run('dpkg-deb', ['-x', deb, extractRoot]);
       const label = `deb package ${basename(deb)}`;
       verifyBundleTree(extractRoot, targetTriple, label);
+      verifyDebSystemRuntimeDependencies(deb, label);
       verifyLinuxLinkage(extractRoot, targetTriple, label);
     });
   }
@@ -504,6 +505,31 @@ function verifyRequiredRuntimeFiles(root, targetTriple, label) {
   }
 }
 
+function verifyDebSystemRuntimeDependencies(deb, label) {
+  const depends = runCapture('dpkg-deb', ['-f', deb, 'Depends']).stdout.trim();
+  const declaredPackages = new Set(
+    depends
+      .split(',')
+      .flatMap((group) => group.split('|'))
+      .map((entry) => entry.trim().split(/[\s(]/u)[0].split(':')[0])
+      .filter(Boolean),
+  );
+  const requiredPackages = [
+    'libgstreamer1.0-0',
+    'gstreamer1.0-plugins-base',
+    'gstreamer1.0-plugins-good',
+    'gstreamer1.0-plugins-bad',
+    'gstreamer1.0-gl',
+    'gstreamer1.0-libav',
+    'gstreamer1.0-pipewire',
+    'gstreamer1.0-x',
+  ];
+  const missing = requiredPackages.filter((packageName) => !declaredPackages.has(packageName));
+  if (missing.length > 0) {
+    fail(`Linux package does not declare required system runtime dependencies in ${label}: ${missing.join(', ')}\nDepends: ${depends}`);
+  }
+}
+
 function verifyBundledMicReceiverSource(root, label) {
   const receiverDir = findFirstPath(root, (path) => basename(path) === 'vm-cloud-mic-agent' && existsSync(join(path, 'Cargo.toml')));
   if (!receiverDir) {
@@ -644,26 +670,10 @@ function requiredRuntimeFileCandidates(targetTriple) {
     ];
   }
 
-  return [
-    ['gst-plugin-scanner'],
-    ['libgstreamer-1.0.so.0', 'libgstreamer-1.0.so'],
-    ['libgstapp-1.0.so.0', 'libgstapp-1.0.so'],
-    ['libgstvideo-1.0.so.0', 'libgstvideo-1.0.so'],
-    ['libcrypto.so.3', 'libcrypto.so'],
-    ['libgstautodetect.so'],
-    ['libgstplayback.so'],
-    ['libgstvideoconvertscale.so', 'libgstvideoconvert.so'],
-    ['libgstvideoparsersbad.so'],
-    ['libgstlibav.so'],
-    ['libgstximagesink.so'],
-    ['libgstwaylandsink.so'],
-    ['libgstpipewire.so'],
-    ['libgstaudioconvert.so'],
-    ['libgstaudioresample.so'],
-    ['libgstopus.so'],
-    ['libgstrtp.so'],
-    ['libgstudp.so'],
-  ];
+  // Linux packages intentionally use the distro's GStreamer/WebKitGTK stack.
+  // Their runtime coverage is verified through package dependencies and ldd,
+  // not by requiring copied shared libraries inside the application bundle.
+  return [];
 }
 
 function chooseTargetReleaseDir(targetTriple) {
