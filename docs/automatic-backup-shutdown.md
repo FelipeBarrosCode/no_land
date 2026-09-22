@@ -24,7 +24,7 @@ noland-lifecycle-agent (root systemd service)
 
 The daemon is `state-agent/crates/noland-lifecycle-agent`. It is a separate process from both Sunshine and `noland-state-agent`; a monitor failure must not stop streaming.
 
-The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Older state-agent installations are deliberately rejected and reinstalled as API 16 so lifecycle selection can be validated against the state-agent's canonical backup-candidate index and catalog bundle heads.
+The desktop provisioning flow is in `src-tauri/src/services/lifecycle_agent.rs` and is invoked by orchestration after the state-agent is deployed. Older state-agent installations are deliberately rejected and reinstalled as API 17 so lifecycle selection can be validated against the state-agent's canonical backup-candidate index and catalog bundle heads.
 
 ## Defaults and settings
 
@@ -33,6 +33,8 @@ Automatic shutdown is disabled by default. The desktop settings screen exposes:
 - enabled/disabled;
 - inactivity timeout: 5 minutes–24 hours, default 3 hours;
 - top application count to back up: 1–10, default 3.
+
+Newly provisioned instances always receive a **disabled** lifecycle configuration, regardless of the saved desktop toggle. Automatic backup and shutdown only activate after the user explicitly enables them from the settings screen, which applies the configuration to the provisioned instances. Re-enabling after a terminal safe failure is likewise an explicit settings action.
 
 The agent uses a 300–86,400 second timeout range (5 minutes to 24 hours). The configured provider action is currently `destroy`; `stop` remains supported by the daemon configuration model for future policy choices.
 
@@ -69,11 +71,13 @@ Application usage is attributed through state-agent active sessions and the fore
 
 For each frozen application, the lifecycle agent:
 
-1. starts a `complete_application` backup through state-agent; unchanged binaries and content are reused through the main repository's content-addressed pack/chunk index rather than uploaded again;
+1. reads the application's committed catalog history and starts a non-empty `complete_application` baseline when none exists; after that baseline, it writes `personal_state` overlays through the same state-agent/shared-storage repository;
 2. polls the operation until a known terminal state;
 3. treats missing, unknown, interrupted, failed, or cancelled status as unsafe;
 4. asks state-agent to verify the exact application, bundle UUID, and commit UUID;
 5. retries bounded backup failures, then enters `BACKUP_FAILED_SAFE`.
+
+The selected mode is frozen across retries so a just-committed baseline cannot cause an unverified retry to switch to a state-only snapshot. Restore applies the latest complete baseline first, then the latest personal-state bundle only when that bundle was captured after the baseline. Empty complete bundles are rejected, and launchability is checked against the actual executable, desktop entry, or Steam installation rather than remembered catalog metadata alone.
 
 The Vast action is unreachable unless every frozen application is in `VERIFIED` state. The capability is revalidated immediately before every provider attempt, including retries. Provider failures end in `SHUTDOWN_FAILED_SAFE`; they do not cause an unsafe retry loop or a local desktop dependency.
 

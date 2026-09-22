@@ -23,6 +23,7 @@ pub(crate) struct LaunchLibraryEntry {
     pub desktop_entry_id: Option<String>,
     pub steam_app_id: Option<u32>,
     pub launcher: Option<String>,
+    pub personal_state_overlay_bundle_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,7 +54,23 @@ pub(crate) async fn load_launch_library(
             Vec::new()
         }
     };
-    let entries = merge_launch_library(local, catalog);
+    let mut entries = merge_launch_library(local, catalog);
+    for entry in &mut entries {
+        if entry.item.installed && entry.item.launchable {
+            entry.item.launchable = match verify_entry_launch_target(remote, target_user, entry)
+                .await
+            {
+                Ok(verified) => verified,
+                Err(error) => {
+                    warn!(app_id = %entry.item.app_id, %error, "Could not verify installed launch target");
+                    false
+                }
+            };
+            if !entry.item.launchable {
+                entry.item.launch_method.clear();
+            }
+        }
+    }
     let response = LaunchLibraryResponse {
         instance_id,
         launch_pc_available,
@@ -187,6 +204,7 @@ fn merge_launch_library(
             desktop_entry_id: app.desktop_entry_id,
             steam_app_id: app.steam_app_id,
             launcher: app.launcher,
+            personal_state_overlay_bundle_id: None,
         };
         refresh_launchability(&mut entry);
         merged.insert(entry.item.app_id.clone(), entry);
@@ -194,6 +212,8 @@ fn merge_launch_library(
 
     for app in catalog {
         if let Some(existing) = merged.get_mut(&app.app_id) {
+            existing.personal_state_overlay_bundle_id =
+                app.personal_state_overlay_bundle_id().map(str::to_owned);
             existing.item.in_shared_storage = true;
             // A personal-state snapshot can restore settings but cannot make a
             // missing application launchable. Launch cards must use a complete
@@ -236,6 +256,8 @@ fn merge_launch_library(
 
         let display_name = non_empty_or(&app.display_name, &app.app_id);
         let restore_required = app.latest_complete_bundle_id.is_some();
+        let personal_state_overlay_bundle_id =
+            app.personal_state_overlay_bundle_id().map(str::to_owned);
         let mut entry = LaunchLibraryEntry {
             item: LaunchLibraryItem {
                 app_id: app.app_id,
@@ -254,6 +276,7 @@ fn merge_launch_library(
             desktop_entry_id: app.desktop_entry_id,
             steam_app_id: app.steam_app_id,
             launcher: app.launcher,
+            personal_state_overlay_bundle_id,
         };
         refresh_launchability(&mut entry);
         entry.item.launchable = restore_required && entry.item.launchable;
@@ -295,7 +318,7 @@ fn repair_entry_launch_metadata(entry: &mut LaunchLibraryEntry) {
 }
 
 pub(crate) async fn repair_entry_before_launch(entry: &mut LaunchLibraryEntry) -> AppResult<()> {
-    refresh_launchability(entry);
+    repair_entry_launch_metadata(entry);
     if entry.item.launchable || !needs_steam_title_lookup(entry) {
         return Ok(());
     }
@@ -307,6 +330,93 @@ pub(crate) async fn repair_entry_before_launch(entry: &mut LaunchLibraryEntry) -
         refresh_launchability(entry);
     }
     Ok(())
+}
+
+pub(crate) async fn verify_entry_launch_target(
+    remote: &RemoteExec,
+    target_user: &str,
+    entry: &LaunchLibraryEntry,
+) -> AppResult<bool> {
+    let Some(plan) = launch_plan(entry) else {
+        return Ok(false);
+    };
+    let script = match plan {
+        LaunchPlan::Executable(executable) => format!(
+            "path={}\ncase \"$path\" in */*) case \"$path\" in *.[jJ][aA][rR]|*.[eE][xX][eE]) test -f \"$path\" ;; *) test -f \"$path\" -a -x \"$path\" ;; esac ;; *) command -v \"$path\" >/dev/null 2>&1 ;; esac",
+            shell_quote(&executable)
+        ),
+        LaunchPlan::Desktop(desktop_id) => format!(
+            r#"python3 - <<'PY'
+import os
+import pathlib
+import shlex
+import shutil
+
+desktop_id = {desktop_id}
+roots = [
+    pathlib.Path.home() / '.local/share/applications',
+    pathlib.Path('/usr/local/share/applications'),
+    pathlib.Path('/usr/share/applications'),
+]
+for root in roots:
+    desktop = root / f'{{desktop_id}}.desktop'
+    if not desktop.is_file():
+        continue
+    exec_line = next((line.split('=', 1)[1].strip() for line in desktop.read_text(errors='ignore').splitlines() if line.startswith('Exec=')), '')
+    try:
+        args = shlex.split(exec_line)
+    except ValueError:
+        continue
+    while args and ('=' in args[0] and not args[0].startswith('/')):
+        args.pop(0)
+    if args and args[0] == 'env':
+        args.pop(0)
+        while args and ('=' in args[0] and not args[0].startswith('/')):
+            args.pop(0)
+    if not args:
+        continue
+    executable = os.path.expanduser(args[0])
+    if ('/' in executable and os.path.isfile(executable) and os.access(executable, os.X_OK)) or shutil.which(executable):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY"#,
+            desktop_id = shell_quote(&desktop_id)
+        ),
+        LaunchPlan::Steam(app_id) => format!(
+            r#"python3 - <<'PY'
+import pathlib
+import re
+
+app_id = {app_id}
+roots = [
+    pathlib.Path.home() / '.steam/steam/steamapps',
+    pathlib.Path.home() / '.steam/debian-installation/steamapps',
+    pathlib.Path.home() / '.local/share/Steam/steamapps',
+    pathlib.Path.home() / '.var/app/com.valvesoftware.Steam/data/Steam/steamapps',
+]
+for root in roots:
+    manifest = root / f'appmanifest_{{app_id}}.acf'
+    if not manifest.is_file():
+        continue
+    match = re.search(r'"installdir"\s+"([^"]+)"', manifest.read_text(errors='ignore'), re.I)
+    if not match:
+        continue
+    install = root / 'common' / match.group(1)
+    if install.is_dir() and any(path.is_file() for path in install.rglob('*')):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY"#
+        ),
+    };
+    let output = run_remote_user_script(
+        remote,
+        target_user,
+        &script,
+        Duration::from_secs(20),
+        "launch target verification failed",
+    )
+    .await?;
+    Ok(output.status_code == 0)
 }
 
 fn launch_plan(entry: &LaunchLibraryEntry) -> Option<LaunchPlan> {
@@ -1006,6 +1116,8 @@ mod tests {
                 latest_bundle_id: Some("bundle-1".to_string()),
                 latest_complete_bundle_id: Some("bundle-1".to_string()),
                 latest_personal_state_bundle_id: None,
+                latest_complete_captured_at: Some("2026-09-21T00:00:00Z".to_string()),
+                latest_personal_state_captured_at: None,
             }],
         );
 
@@ -1035,6 +1147,8 @@ mod tests {
                 latest_bundle_id: Some("state-only".to_string()),
                 latest_complete_bundle_id: None,
                 latest_personal_state_bundle_id: Some("state-only".to_string()),
+                latest_complete_captured_at: None,
+                latest_personal_state_captured_at: Some("2026-09-21T00:00:00Z".to_string()),
             }],
         );
 
@@ -1042,6 +1156,37 @@ mod tests {
         assert!(!entries[0].item.restore_required);
         assert!(!entries[0].item.launchable);
         assert!(entries[0].item.latest_bundle_id.is_none());
+    }
+
+    #[test]
+    fn newer_personal_state_is_selected_as_a_post_baseline_overlay() {
+        let entries = merge_launch_library(
+            vec![],
+            vec![AgentCatalogAppRecord {
+                app_id: "desktop:game".to_string(),
+                display_name: "Game".to_string(),
+                aliases: vec![],
+                canonical_executable: Some("/opt/game/game".to_string()),
+                desktop_entry_id: None,
+                steam_app_id: None,
+                launcher: Some("native".to_string()),
+                icon_path: None,
+                latest_bundle_id: Some("state".to_string()),
+                latest_complete_bundle_id: Some("baseline".to_string()),
+                latest_personal_state_bundle_id: Some("state".to_string()),
+                latest_complete_captured_at: Some("2026-09-21T00:00:00Z".to_string()),
+                latest_personal_state_captured_at: Some("2026-09-21T00:01:00Z".to_string()),
+            }],
+        );
+
+        assert_eq!(
+            entries[0].item.latest_bundle_id.as_deref(),
+            Some("baseline")
+        );
+        assert_eq!(
+            entries[0].personal_state_overlay_bundle_id.as_deref(),
+            Some("state")
+        );
     }
 
     #[test]
@@ -1097,6 +1242,7 @@ mod tests {
             desktop_entry_id: None,
             steam_app_id: Some(3241660),
             launcher: Some("steam".to_string()),
+            personal_state_overlay_bundle_id: None,
         };
 
         let terms = executable_search_terms(&entry);
@@ -1133,6 +1279,7 @@ mod tests {
             desktop_entry_id: Some("net.lutris.Lutris".to_string()),
             steam_app_id: None,
             launcher: Some("native".to_string()),
+            personal_state_overlay_bundle_id: None,
         };
 
         let terms = executable_search_terms(&entry);
@@ -1309,6 +1456,7 @@ mod tests {
             desktop_entry_id: Some("  ".to_string()),
             steam_app_id: None,
             launcher: Some("  ".to_string()),
+            personal_state_overlay_bundle_id: None,
         };
 
         repair_entry_launch_metadata(&mut entry);
@@ -1339,6 +1487,7 @@ mod tests {
             desktop_entry_id: None,
             steam_app_id: Some(42),
             launcher: Some("steam".to_string()),
+            personal_state_overlay_bundle_id: None,
         };
 
         assert_eq!(steam_install_dir_hint(&entry, 42), "O_Brien_ The _ Test");
@@ -1364,6 +1513,7 @@ mod tests {
             desktop_entry_id: Some("net.lutris.Lutris".to_string()),
             steam_app_id: None,
             launcher: Some("lutris".to_string()),
+            personal_state_overlay_bundle_id: None,
         };
 
         assert_eq!(launch_plan(&entry), None);

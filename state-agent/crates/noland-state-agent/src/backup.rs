@@ -1119,6 +1119,12 @@ pub async fn run_backup(
     manifest.tombstones.sort_by(|left, right| {
         (&left.logical_root, &left.relative_path).cmp(&(&right.logical_root, &right.relative_path))
     });
+    if mode == BackupMode::CompleteApplication && manifest.files.is_empty() {
+        return Err(StateError::Invalid(format!(
+            "complete application backup for {app_id} contains no application files; \
+             the application is not installed on this instance"
+        )));
+    }
     noland_restore::embed_restore_plan(&mut manifest, restore_mode_for_backup(mode));
     metrics.packing_duration_ms = elapsed_ms(packing_started);
 
@@ -1890,7 +1896,7 @@ mod tests {
             })
             .unwrap();
 
-        let manifest = run_backup_to_local(
+        let error = run_backup_to_local(
             &agent,
             &app_id,
             BackupMode::CompleteApplication,
@@ -1898,8 +1904,11 @@ mod tests {
             &MasterKey::generate(),
         )
         .await
-        .unwrap();
-        assert!(manifest.files.is_empty());
+        .expect_err("agent-owned storage must never become backup content");
+        assert!(
+            error.to_string().contains("contains no application files"),
+            "unexpected error: {error}"
+        );
         std::fs::remove_dir_all(root).ok();
     }
 
