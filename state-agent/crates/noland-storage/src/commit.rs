@@ -160,12 +160,18 @@ pub async fn load_catalog(
     let _ = std::fs::remove_file(&tmp);
     let commit_id = pointer.trim();
     if commit_id.is_empty() {
-        return recover_latest_catalog(provider, master).await;
+        let mut catalog = recover_latest_catalog(provider, master).await?;
+        catalog.refresh_bundle_heads();
+        return Ok(catalog);
     }
-    match fetch_catalog_commit(provider, master, commit_id).await {
-        Ok(doc) => Ok(doc),
-        Err(_) => recover_latest_catalog(provider, master).await,
-    }
+    let mut catalog = match fetch_catalog_commit(provider, master, commit_id).await {
+        Ok(doc) => doc,
+        Err(_) => recover_latest_catalog(provider, master).await?,
+    };
+    // Catalog schema v1 did not persist mode-specific heads. Reconstruct them
+    // from bundle history whenever an old catalog is read.
+    catalog.refresh_bundle_heads();
+    Ok(catalog)
 }
 
 async fn fetch_catalog_commit(

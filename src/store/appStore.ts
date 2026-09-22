@@ -748,7 +748,7 @@ async function handleSharedStorageRestoreCompleted(
   }
   notifiedRestoreOperations.add(event.operationId);
   get().clearBackgroundStorageAction(event.operationId);
-  await notifyStorageCompletion(`${event.displayName || "Your shared storage restore"} is ready to go.`);
+  await notifyStorageCompletion(`${event.displayName || "Your shared storage restore"} restore completed.`);
 }
 
 function applySharedStorageProgress(

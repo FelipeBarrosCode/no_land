@@ -195,7 +195,10 @@ fn merge_launch_library(
     for app in catalog {
         if let Some(existing) = merged.get_mut(&app.app_id) {
             existing.item.in_shared_storage = true;
-            existing.item.latest_bundle_id = app.latest_bundle_id;
+            // A personal-state snapshot can restore settings but cannot make a
+            // missing application launchable. Launch cards must use a complete
+            // application head only.
+            existing.item.latest_bundle_id = app.latest_complete_bundle_id;
             existing
                 .item
                 .source_labels
@@ -232,7 +235,7 @@ fn merge_launch_library(
         }
 
         let display_name = non_empty_or(&app.display_name, &app.app_id);
-        let restore_required = app.latest_bundle_id.is_some();
+        let restore_required = app.latest_complete_bundle_id.is_some();
         let mut entry = LaunchLibraryEntry {
             item: LaunchLibraryItem {
                 app_id: app.app_id,
@@ -240,7 +243,7 @@ fn merge_launch_library(
                 aliases: unique_aliases(app.aliases, &display_name),
                 installed: false,
                 in_shared_storage: true,
-                latest_bundle_id: app.latest_bundle_id,
+                latest_bundle_id: app.latest_complete_bundle_id,
                 source_labels: vec!["Shared storage".to_string()],
                 launchable: false,
                 launch_method: String::new(),
@@ -1001,6 +1004,8 @@ mod tests {
                 launcher: Some("steam".to_string()),
                 icon_path: None,
                 latest_bundle_id: Some("bundle-1".to_string()),
+                latest_complete_bundle_id: Some("bundle-1".to_string()),
+                latest_personal_state_bundle_id: None,
             }],
         );
 
@@ -1012,6 +1017,31 @@ mod tests {
         assert_eq!(item.launch_method, "steam");
         assert_eq!(item.latest_bundle_id.as_deref(), Some("bundle-1"));
         assert!(item.aliases.contains(&"Spacewar Cloud".to_string()));
+    }
+
+    #[test]
+    fn personal_state_only_cloud_entry_is_not_claimed_as_launchable() {
+        let entries = merge_launch_library(
+            vec![],
+            vec![AgentCatalogAppRecord {
+                app_id: "desktop:pcsx2".to_string(),
+                display_name: "PCSX2".to_string(),
+                aliases: vec![],
+                canonical_executable: Some("/home/user/Downloads/pcsx2.AppImage".to_string()),
+                desktop_entry_id: None,
+                steam_app_id: None,
+                launcher: Some("app_image".to_string()),
+                icon_path: None,
+                latest_bundle_id: Some("state-only".to_string()),
+                latest_complete_bundle_id: None,
+                latest_personal_state_bundle_id: Some("state-only".to_string()),
+            }],
+        );
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].item.restore_required);
+        assert!(!entries[0].item.launchable);
+        assert!(entries[0].item.latest_bundle_id.is_none());
     }
 
     #[test]
