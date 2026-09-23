@@ -960,9 +960,23 @@ fn load_runtime_status(path: &Path) -> Option<RuntimeStatus> {
     serde_json::from_str(&content).ok()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_state(stat: &str) -> Option<char> {
+    // The comm field may contain spaces or ')', so use the final delimiter
+    // before the single-character process state.
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
 #[cfg(target_os = "linux")]
 fn process_exists(pid: u32) -> bool {
     if pid == 0 {
+        return false;
+    }
+    if fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| linux_process_state(&stat))
+        .is_some_and(|state| matches!(state, 'Z' | 'X' | 'x'))
+    {
         return false;
     }
     let executable_matches = fs::read_link(format!("/proc/{pid}/exe"))
@@ -1257,11 +1271,27 @@ fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_fingerprint, owner_lock_path, parse_tunnel_config, prefix_to_netmask};
+    use super::{
+        config_fingerprint, linux_process_state, owner_lock_path, parse_tunnel_config,
+        prefix_to_netmask,
+    };
     #[cfg(target_os = "windows")]
     use super::{resolve_effective_listen_port, udp_port_probe_ok};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use std::{fs, net::Ipv4Addr};
+
+    #[test]
+    fn parses_linux_process_state_after_complex_command_name() {
+        assert_eq!(
+            linux_process_state("8604 (noland-net-helper) S 1 2 3"),
+            Some('S')
+        );
+        assert_eq!(
+            linux_process_state("8604 (helper ) name) Z 1 2 3"),
+            Some('Z')
+        );
+        assert_eq!(linux_process_state("invalid"), None);
+    }
 
     #[test]
     fn parses_noland_wireguard_config() {

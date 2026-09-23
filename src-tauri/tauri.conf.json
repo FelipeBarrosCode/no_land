@@ -28,6 +28,12 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
+    "publisher": "Noland",
+    "homepage": "https://github.com/FelipeBarrosCode/no_land",
+    "license": "GPL-3.0-only",
+    "category": "Network",
+    "shortDescription": "Connect to and manage remote Linux workstations",
+    "longDescription": "Noland Connect is a desktop client for connecting to and managing remote Linux workstations, including remote applications, networking, and backup workflows.",
     "targets": "all",
     "externalBin": [
       "binaries/noland-net-helper",
@@ -53,6 +59,9 @@
     ],
     "linux": {
       "deb": {
+        "files": {
+          "/usr/share/metainfo/com.noland.connect.metainfo.xml": "packaging/com.noland.connect.metainfo.xml"
+        },
         "depends": [
           "openssh-client",
           "xdg-utils",

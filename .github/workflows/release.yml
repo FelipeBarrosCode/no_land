@@ -143,7 +143,8 @@ jobs:
             libssl-dev \
             libopus-dev \
             libpulse-dev \
-            patchelf
+            patchelf \
+            lintian
 
 
       - name: Check Apple signing secret presence
@@ -293,6 +294,10 @@ jobs:
       - name: Verify bundled sidecars and runtime
         run: node scripts/verify-bundled-sidecars.mjs --target ${{ matrix.target }}
 
+      - name: Validate Debian package
+        if: matrix.platform == 'linux'
+        run: bash scripts/validate-deb.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle"
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -335,6 +340,14 @@ jobs:
           WINDOWS_STORE_PATH_PREFIX: no_land
         run: |
           node scripts/prepare-release-assets.mjs "${{ needs.version.outputs.release_tag }}"
+          cd release-publish
+          shopt -s nullglob
+          debs=( *.deb )
+          if [[ "${#debs[@]}" -eq 0 ]]; then
+            echo "No Debian package was prepared for the release." >&2
+            exit 1
+          fi
+          sha256sum -- "${debs[@]}" > SHA256SUMS
 
 
       - name: Publish GitHub release assets
