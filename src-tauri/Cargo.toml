@@ -2,11 +2,14 @@
 members = [".", "crates/noland-net-helper"]
 resolver = "2"
 
+[profile.release]
+strip = "symbols"
+
 [package]
 name = "noland-connect"
 version = "0.1.0"
 description = "Noland Connect desktop app"
-authors = ["Noland"]
+authors = ["Noland <FelipeBarrosCode@users.noreply.github.com>"]
 edition = "2021"
 default-run = "noland-connect"
 

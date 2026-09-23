@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -13,6 +13,9 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
+if (mode === 'build' && target?.includes('linux')) {
+  prepareLinuxDebMetadata();
+}
 const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriArgs, '--target', target];
 const windowsTargetConfig = resolveWindowsTargetConfig(target, tauriArgsWithTarget);
 const linuxBundleConfig = resolveLinuxBundleConfig(target, tauriArgsWithTarget);
@@ -24,6 +27,24 @@ const prepEnv = {
   ...nativeEnv,
   ...(target ? { NOLAND_MIC_SENDER_TARGET: target } : {}),
 };
+
+function prepareLinuxDebMetadata() {
+  const config = JSON.parse(readFileSync(resolve(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+  const epoch = Number.parseInt(process.env.SOURCE_DATE_EPOCH ?? '', 10);
+  const releasedAt = Number.isFinite(epoch) ? new Date(epoch * 1000) : new Date();
+  const timestamp = releasedAt.toUTCString().replace('GMT', '+0000');
+  const changelog = [
+    `noland-connect (${config.version}) stable; urgency=medium`,
+    '',
+    `  * Release Noland Connect ${config.version}.`,
+    '',
+    ` -- ${config.bundle.publisher}  ${timestamp}`,
+    '',
+  ].join('\n');
+  const changelogPath = resolve(repoRoot, 'src-tauri', 'packaging', 'changelog');
+  writeFileSync(changelogPath, changelog, 'utf8');
+  console.log(`[tauri-with-mic-sidecar] Prepared Debian changelog for ${config.version}`);
+}
 
 const prep = spawnSync(process.execPath, prepArgs, {
   cwd: repoRoot,
