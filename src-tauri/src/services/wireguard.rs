@@ -696,14 +696,24 @@ fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> 
         return Ok(());
     }
 
-    std::fs::write(gotatun_stop_request_path_in_runtime(runtime_dir), b"stop\n").map_err(
-        |error| {
-            AppError::Command(format!(
-                "Failed requesting managed GotaTun tunnel shutdown for PID {}: {error}",
-                initial_status.pid
-            ))
-        },
-    )?;
+    if let Err(error) = std::fs::write(gotatun_stop_request_path_in_runtime(runtime_dir), b"stop\n")
+    {
+        #[cfg(target_os = "linux")]
+        {
+            warn!(
+                pid = initial_status.pid,
+                runtime = %runtime_dir.display(),
+                error = %error,
+                "Could not write managed GotaTun stop request; falling back to elevated cleanup"
+            );
+            return force_stop_managed_gotatun_in_runtime(runtime_dir, &initial_status);
+        }
+        #[cfg(not(target_os = "linux"))]
+        return Err(AppError::Command(format!(
+            "Failed requesting managed GotaTun tunnel shutdown for PID {}: {error}",
+            initial_status.pid
+        )));
+    }
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(GOTATUN_HELPER_STOP_TIMEOUT_SECS) {
