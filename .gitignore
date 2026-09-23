@@ -10,6 +10,7 @@ src-tauri/native/build/
 
 # Packaging staging area recreated by prepare-mic-sidecar.mjs
 src-tauri/binaries/
+src-tauri/packaging/changelog
 
 # Sidecar and agent build outputs
 .tmp-sidecar-isolated/
@@ -57,4 +58,3 @@ src-tauri/platform/*
 *.pdb
 *.ilk
 *.dmp
-

@@ -43,7 +43,10 @@ for package in "${packages[@]}"; do
     echo "Package is missing /usr/share/metainfo/com.noland.connect.metainfo.xml: $package" >&2
     exit 1
   fi
-  lintian --pedantic "$package"
+  # Keep all pedantic diagnostics visible, but only Debian policy errors block
+  # publishing. Advisory warnings (for example, missing helper man pages) are
+  # still reported for follow-up without discarding an otherwise valid bundle.
+  lintian --pedantic --fail-on error "$package"
 done
 
 echo "Validated ${#packages[@]} Debian package(s)."

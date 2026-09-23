@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "Noland production microphone media sidecar"
 
+[profile.release]
+strip = "symbols"
+
 [[bin]]
 name = "noland-mic-sender"
 path = "src/main.rs"
