@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>com.noland.connect</id>
+  <name>Noland Connect</name>
+  <summary>Connect to and manage remote Linux workstations</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <description>
+    <p>
+      Noland Connect is a desktop client for connecting to and managing remote
+      Linux workstations, including remote applications, networking, and backup
+      workflows.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/FelipeBarrosCode/no_land</url>
+  <url type="bugtracker">https://github.com/FelipeBarrosCode/no_land/issues</url>
+  <url type="vcs-browser">https://github.com/FelipeBarrosCode/no_land</url>
+  <launchable type="desktop-id">com.noland.connect.desktop</launchable>
+  <categories>
+    <category>Network</category>
+    <category>Utility</category>
+  </categories>
+  <keywords>
+    <keyword>remote</keyword>
+    <keyword>workstation</keyword>
+    <keyword>SSH</keyword>
+    <keyword>backup</keyword>
+  </keywords>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <content_rating type="oars-1.1"/>
+</component>
