@@ -312,6 +312,13 @@ fn gotatun_runtime_unix_timestamp() -> u64 {
         .as_secs()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_state(stat: &str) -> Option<char> {
+    // /proc/<pid>/stat wraps comm in parentheses. The command may itself
+    // contain spaces or ')', so split at the final delimiter before state.
+    stat.rsplit_once(") ")?.1.chars().next()
+}
+
 fn process_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -319,6 +326,17 @@ fn process_is_alive(pid: u32) -> bool {
 
     #[cfg(target_os = "linux")]
     {
+        // kill(pid, 0) and /proc/<pid>/comm both continue to succeed for a
+        // zombie. A terminated elevated helper cannot own the TUN device, so
+        // treating that unreaped process as active prevents tunnel recovery.
+        if std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| linux_process_state(&stat))
+            .is_some_and(|state| matches!(state, 'Z' | 'X' | 'x'))
+        {
+            return false;
+        }
+
         let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
         let alive =
             result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
@@ -474,7 +492,7 @@ fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResu
                     .to_string(),
             ));
         };
-        Command::new(broker)
+        let mut child = Command::new(broker)
             .arg(&helper)
             .args(["run", "--config"])
             .arg(config_path)
@@ -491,6 +509,14 @@ fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResu
                     "Failed launching the bundled Noland GotaTun helper through {broker}: {error}"
                 ))
             })?;
+        // Rust does not reap a process when Child is dropped. pkexec normally
+        // remains attached to the long-running helper, so wait off-thread and
+        // prevent an exited helper from lingering as a zombie in this app.
+        std::thread::spawn(move || {
+            if let Err(error) = child.wait() {
+                warn!(error = %error, "Failed reaping elevated Noland GotaTun launcher");
+            }
+        });
         return Ok(());
     }
 
@@ -2663,13 +2689,26 @@ fn shell_single_quote_escape(content: &str) -> String {
 }
 
 #[cfg(test)]
-mod windows_launch_tests {
+mod tests {
     use std::path::Path;
 
     use super::{
         build_windows_tunnel_launch_script, gotatun_runtime_dir, has_recent_handshake,
-        windows_command_line_quote, GOTATUN_RUNTIME_DIR_NAME,
+        linux_process_state, windows_command_line_quote, GOTATUN_RUNTIME_DIR_NAME,
     };
+
+    #[test]
+    fn parses_linux_process_state_after_complex_command_name() {
+        assert_eq!(
+            linux_process_state("8604 (noland-net-helper) S 1 2 3"),
+            Some('S')
+        );
+        assert_eq!(
+            linux_process_state("8604 (helper ) name) Z 1 2 3"),
+            Some('Z')
+        );
+        assert_eq!(linux_process_state("invalid"), None);
+    }
 
     #[test]
     fn instance_configs_share_one_global_gotatun_runtime() {
