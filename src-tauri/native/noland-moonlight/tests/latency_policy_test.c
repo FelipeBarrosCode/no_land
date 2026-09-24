@@ -209,7 +209,64 @@ static void test_bounded_telemetry_and_wrap(void) {
   nl_latency_telemetry_cleanup(&telemetry);
 }
 
+static void test_performance_windows(void) {
+  nl_latency_telemetry_t telemetry;
+  nl_performance_stats_t performance;
+  nl_video_frame_metadata_t frame;
+  uint32_t frames[] = {UINT32_MAX - 1U, UINT32_MAX, 1U};
+  bool initialized = nl_latency_telemetry_init(&telemetry);
+  assert(initialized);
+  if (!initialized) return;
+  nl_latency_telemetry_reset(&telemetry, true, 60, 0, 0);
+  memset(&frame, 0, sizeof(frame));
+  for (size_t i = 0; i < 3; ++i) {
+    uint64_t now = 1000000U + i * 10000U;
+    frame.frame_number = (int32_t)frames[i];
+    frame.full_length = 1000;
+    frame.host_processing_latency = 25;
+    frame.receive_time_us = now - 1000U;
+    frame.enqueue_time_us = now - 500U;
+    frame.presentation_time_us = i + 1U;
+    nl_latency_telemetry_record_decode_submit(&telemetry, &frame, now, 0);
+    nl_latency_telemetry_record_decoder_output(&telemetry, i + 1U, now + 1000U, 0, false);
+    nl_latency_telemetry_record_render_submit(&telemetry, i + 1U, now + 3000U);
+  }
+  nl_latency_telemetry_performance(&telemetry, 1500000U, &performance);
+  assert(performance.samples == 0); /* A full measurement window is required. */
+  nl_latency_telemetry_performance(&telemetry, 2000000U, &performance);
+  assert(performance.samples == 3);
+  assert(performance.incoming_fps == 3.0);
+  assert(performance.decoded_fps == 3.0);
+  assert(performance.submitted_fps == 3.0);
+  assert(performance.video_mbps > 0.0239 && performance.video_mbps < 0.0241);
+  assert(performance.missing_frames_percent == 25.0); /* Wrap + one missing frame. */
+  assert(performance.host_processing_ms == 2.5);
+  assert(performance.reassembly_ms == 0.5);
+  assert(performance.decode_ms == 1.0);
+  assert(performance.render_queue_ms == 2.0);
+  nl_latency_telemetry_performance(&telemetry, 3000000U, &performance);
+  assert(performance.incoming_fps == 0.0 && performance.decoded_fps == 0.0);
+  assert(performance.video_mbps == 0.0 && performance.decode_ms == -1.0);
+
+  nl_latency_telemetry_reset(&telemetry, true, 60, 0, 0);
+  frame.frame_number = 900; /* A reconnect must not count a sequence gap. */
+  frame.host_processing_latency = 0;
+  frame.receive_time_us = 0;
+  frame.enqueue_time_us = 0;
+  nl_latency_telemetry_record_decode_submit(&telemetry, &frame, 4000000U, 0);
+  nl_latency_telemetry_record_render_submit(&telemetry, frame.presentation_time_us, 4000100U);
+  nl_latency_telemetry_performance(&telemetry, 5000000U, &performance);
+  assert(performance.missing_frames_percent == 0.0);
+  assert(performance.decoded_fps == -1.0); /* macOS's opaque decoder */
+  assert(performance.submitted_fps == 1.0);
+  assert(performance.host_processing_ms == -1.0);
+  assert(performance.reassembly_ms == -1.0);
+  assert(performance.render_queue_ms == -1.0);
+  nl_latency_telemetry_cleanup(&telemetry);
+}
+
 int main(void) {
+  test_performance_windows();
   test_deadline_policy();
   test_pacing_resolution();
   test_bounded_telemetry_and_wrap();

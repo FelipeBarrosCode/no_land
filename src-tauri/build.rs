@@ -395,6 +395,24 @@ pub const nl_result_NL_RESULT_NOT_READY: nl_result_t = 3;
 pub const nl_result_NL_RESULT_INVALID_STATE: nl_result_t = 4;
 pub const nl_result_NL_RESULT_QUEUE_EMPTY: nl_result_t = 5;
 
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct nl_performance_stats_t {
+    pub incoming_fps: f64,
+    pub decoded_fps: f64,
+    pub submitted_fps: f64,
+    pub video_mbps: f64,
+    pub missing_frames_percent: f64,
+    pub host_processing_ms: f64,
+    pub reassembly_ms: f64,
+    pub decode_ms: f64,
+    pub render_queue_ms: f64,
+    pub width: u32,
+    pub height: u32,
+    pub video_format: u32,
+    pub samples: u32,
+}
+
 pub type nl_stream_state_t = ::std::os::raw::c_uint;
 pub const nl_stream_state_NL_STREAM_STATE_IDLE: nl_stream_state_t = 0;
 pub const nl_stream_state_NL_STREAM_STATE_STARTING: nl_stream_state_t = 1;
@@ -607,6 +625,9 @@ unsafe extern "C" {
     pub fn nl_runtime_detach_surface(runtime: *mut nl_runtime_t) -> nl_result_t;
     pub fn nl_runtime_poll_event(runtime: *mut nl_runtime_t, output: *mut nl_event_t) -> nl_result_t;
     pub fn nl_runtime_read_stats(runtime: *mut nl_runtime_t, output: *mut nl_stats_t) -> nl_result_t;
+    pub fn nl_runtime_read_performance(runtime: *mut nl_runtime_t, output: *mut nl_performance_stats_t);
+    pub fn nl_sizeof_performance_stats() -> usize;
+    pub fn nl_runtime_set_overlay_text(runtime: *mut nl_runtime_t, text: *const ::std::os::raw::c_char);
     pub fn nl_runtime_record_reconnect_result(runtime: *mut nl_runtime_t, attempt_started: bool, succeeded: bool);
     pub fn nl_desktop_input_install(surface: *const nl_surface_descriptor_t) -> ::std::os::raw::c_int;
     pub fn nl_desktop_input_uninstall();

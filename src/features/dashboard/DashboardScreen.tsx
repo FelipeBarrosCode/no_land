@@ -40,6 +40,7 @@ import { SharedStorageExportModal } from "../shared-storage-manager/SharedStorag
 import { InstanceCardActions } from "../shared-storage-manager/InstanceCardActions";
 import { InstanceDisplayModal } from "./InstanceDisplayModal";
 import { InstanceMoonlightOptionsModal } from "./InstanceMoonlightOptionsModal";
+import { InstancePerformanceToggle } from "./InstancePerformanceToggle";
 import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageSyncModal";
 import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
 import { InstanceTerminalModal } from "./InstanceTerminalModal";
@@ -822,6 +823,7 @@ export function DashboardScreen({
                       )}
                     </div>
                   )}
+                  <InstancePerformanceToggle instance={instance} />
                   <div className="mt-3">
                     <InstanceCardActions
                       instance={instance}

@@ -322,6 +322,10 @@ export async function getRentedInstances(): Promise<RentedInstanceSummary[]> {
   return invokeSafe<RentedInstanceSummary[]>("get_rented_instances");
 }
 
+export async function setInstancePerformanceOverlay(instanceId: number, enabled: boolean): Promise<boolean> {
+  return invokeSafe<boolean>("set_instance_performance_overlay", { instanceId, enabled });
+}
+
 export async function updateVastApiKey(
   apiKey: string,
 ): Promise<PersistedAppState> {

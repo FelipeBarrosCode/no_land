@@ -40,6 +40,13 @@ static int nl_video_renderer_platform_submit_frame_noop(nl_video_renderer_t* ren
   return DR_OK;
 }
 
+#if !defined(__linux__)
+void nl_video_renderer_platform_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
+  (void)renderer;
+  (void)text;
+}
+#endif
+
 #if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
 void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
   nl_video_renderer_platform_attach_surface_noop(renderer, surface);
@@ -117,6 +124,13 @@ void nl_video_renderer_set_frame_processor(nl_video_renderer_t* renderer, nl_vid
   }
   renderer->frame_processor = processor;
   renderer->frame_processor_user_data = user_data;
+}
+
+void nl_video_renderer_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
+  if (renderer == NULL) {
+    return;
+  }
+  nl_video_renderer_platform_set_overlay_text(renderer, text);
 }
 
 void nl_video_renderer_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {

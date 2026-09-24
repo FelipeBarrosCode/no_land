@@ -15,6 +15,7 @@
 #define NL_INPUT_MAX_BYTES (8U * 1024U * 1024U)
 #define NL_DECODER_NAME_MAX 64
 #define NL_SINK_NAME_MAX 64
+#define NL_OVERLAY_TEXT_MAX 2048
 #define NL_SINK_INDEX_NONE (-1)
 #define NL_X11_SINK_COUNT 3
 #define NL_WAYLAND_SINK_COUNT 1
@@ -48,6 +49,7 @@ typedef struct nl_linux_video_context {
   GstElement* decoder;
   GstElement* render_queue;
   GstElement* sink;
+  GstElement* overlay;
   nl_video_renderer_t* renderer;
   uintptr_t window_handle;
   uintptr_t display_handle;
@@ -76,6 +78,7 @@ typedef struct nl_linux_video_context {
   bool backpressure_active;
   char decoder_name[NL_DECODER_NAME_MAX];
   char sink_name[NL_SINK_NAME_MAX];
+  char overlay_text[NL_OVERLAY_TEXT_MAX];
 } nl_linux_video_context_t;
 
 static const char* const NL_H264_HARDWARE_DECODERS[] = {
@@ -539,6 +542,7 @@ static void nl_linux_destroy_pipeline(nl_linux_video_context_t* context) {
   context->decoder = NULL;
   context->render_queue = NULL;
   context->sink = NULL;
+  context->overlay = NULL;
   context->decoder_name[0] = '\0';
   context->sink_name[0] = '\0';
   nl_linux_reset_latency_state(context);
@@ -597,6 +601,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   GstElement* decoder = NULL;
   GstElement* render_queue = NULL;
   GstElement* converter = NULL;
+  GstElement* overlay = NULL;
   GstElement* sink = NULL;
   GstBus* bus = NULL;
   GstCaps* caps = NULL;
@@ -622,13 +627,14 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   parser = gst_element_factory_make(codec->parser, "noland-parser");
   decoder = gst_element_factory_make(decoder_name, "noland-decoder");
   render_queue = gst_element_factory_make("queue", "noland-render-queue");
+  overlay = gst_element_factory_make("textoverlay", "noland-overlay");
   sink = gst_element_factory_make(sink_description.name, "noland-sink");
   if (sink_description.needs_converter) {
     converter = gst_element_factory_make("videoconvert", "noland-converter");
   }
 
   if (pipeline == NULL || appsrc == NULL || parser == NULL || decoder == NULL ||
-      render_queue == NULL || sink == NULL ||
+      render_queue == NULL || sink == NULL || overlay == NULL ||
       (sink_description.needs_converter && converter == NULL)) {
     g_printerr("[noland-video] missing GStreamer element for decoder=%s sink=%s\n",
                decoder_name,
@@ -657,6 +663,22 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   if (g_object_class_find_property(G_OBJECT_GET_CLASS(parser), "config-interval") != NULL) {
     g_object_set(parser, "config-interval", -1, NULL);
   }
+  g_object_set(overlay,
+               "halignment", 0,
+               "valignment", 1,
+               "line-alignment", 0,
+               "xpos", 16,
+               "ypos", 16,
+               "shaded-background", TRUE,
+               "font-desc", "monospace 12",
+               NULL);
+  {
+    char overlay_text[NL_OVERLAY_TEXT_MAX];
+    pthread_mutex_lock(&context->mutex);
+    snprintf(overlay_text, sizeof(overlay_text), "%s", context->overlay_text);
+    pthread_mutex_unlock(&context->mutex);
+    g_object_set(overlay, "text", overlay_text, NULL);
+  }
 
   caps = gst_caps_new_simple(codec->media_type,
                              "stream-format", G_TYPE_STRING, codec->stream_format,
@@ -679,6 +701,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
                      decoder,
                      render_queue,
                      converter,
+                     overlay,
                      sink,
                      NULL);
   } else {
@@ -687,6 +710,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
                      parser,
                      decoder,
                      render_queue,
+                     overlay,
                      sink,
                      NULL);
   }
@@ -698,6 +722,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
                                decoder,
                                render_queue,
                                converter,
+                               overlay,
                                sink,
                                NULL)) {
       g_printerr("[noland-video] failed to link decoder=%s to sink=%s with conversion\n",
@@ -709,6 +734,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
                                     parser,
                                     decoder,
                                     render_queue,
+                                    overlay,
                                     sink,
                                     NULL)) {
     g_printerr("[noland-video] failed to link decoder=%s directly to sink=%s\n",
@@ -755,6 +781,7 @@ static int nl_linux_build_pipeline(nl_linux_video_context_t* context,
   context->decoder = decoder;
   context->render_queue = render_queue;
   context->sink = sink;
+  context->overlay = overlay;
   context->using_software_decoder = software_decoder;
   context->sink_index = sink_index;
   snprintf(context->decoder_name, sizeof(context->decoder_name), "%s", decoder_name);
@@ -1067,6 +1094,17 @@ static void* nl_linux_frame_thread(void* data) {
     nl_linux_process_bus_messages(renderer);
   }
   return NULL;
+}
+
+void nl_video_renderer_platform_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
+  nl_linux_video_context_t* context = nl_linux_context(renderer);
+  if (context == NULL || text == NULL) return;
+  pthread_mutex_lock(&context->mutex);
+  snprintf(context->overlay_text, sizeof(context->overlay_text), "%s", text);
+  if (context->overlay != NULL) {
+    g_object_set(context->overlay, "text", context->overlay_text, NULL);
+  }
+  pthread_mutex_unlock(&context->mutex);
 }
 
 void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer,
