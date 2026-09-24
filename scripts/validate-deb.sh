@@ -43,6 +43,14 @@ for package in "${packages[@]}"; do
     echo "Package is missing /usr/share/metainfo/com.noland.connect.metainfo.xml: $package" >&2
     exit 1
   fi
+  if ! grep -Fq 'usr/share/applications/Noland Connect.desktop' <<<"$contents"; then
+    echo "Package is missing the Linux desktop entry used by AppStream: $package" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'usr/share/icons/hicolor/512x512/apps/noland-connect.png' <<<"$contents"; then
+    echo "Package is missing the 512x512 Linux store/application icon: $package" >&2
+    exit 1
+  fi
   if ! grep -Fq 'usr/share/doc/noland-connect/changelog.gz' <<<"$contents"; then
     echo "Package is missing /usr/share/doc/noland-connect/changelog.gz: $package" >&2
     exit 1

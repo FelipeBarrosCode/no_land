@@ -28,8 +28,8 @@
   "bundle": {
     "active": true,
     "createUpdaterArtifacts": true,
-    "publisher": "Noland <FelipeBarrosCode@users.noreply.github.com>",
-    "homepage": "https://github.com/FelipeBarrosCode/no_land",
+    "publisher": "No Land - Felipe Barros Moura <FelipeBarrosCode@users.noreply.github.com>",
+    "homepage": "https://no-land.net",
     "license": "GPL-3.0-only",
     "category": "Utility",
     "shortDescription": "Connect to and manage remote Linux workstations",
@@ -144,8 +144,10 @@
     },
     "icon": [
       "icons/32x32.png",
+      "icons/64x64.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
+      "icons/icon.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ]

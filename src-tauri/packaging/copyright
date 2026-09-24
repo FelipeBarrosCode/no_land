@@ -1,9 +1,9 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Noland Connect
-Source: https://github.com/FelipeBarrosCode/no_land
+Source: https://no-land.net
 
 Files: *
-Copyright: 2026 Noland
+Copyright: 2026 No Land and Felipe Barros Moura
 License: GPL-3.0-only
  This program is free software: you can redistribute it and/or modify it
  under the terms of the GNU General Public License as published by the Free
