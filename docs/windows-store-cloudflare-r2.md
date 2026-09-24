@@ -64,3 +64,33 @@ The release job also publishes helper files in the GitHub release:
 - `windows-store-x64-submission.md`
 
 Use the generated package URL in Microsoft Partner Center.
+
+## Azure Artifact Signing
+
+Windows installers are Authenticode-signed after the architecture-specific
+builds complete. Both x64 and ARM64 installers are signed from a supported x64
+Windows runner, verified with `Get-AuthenticodeSignature`, and then have their
+Tauri updater signatures regenerated before publication.
+
+The signing job uses these Artifact Signing resources:
+
+- Endpoint: `https://eus.codesigning.azure.net/`
+- Signing account: `Noland`
+- Certificate profile: `Noland`
+- Timestamp service: `http://timestamp.acs.microsoft.com`
+
+Configure these secrets on the GitHub `Secrets` environment:
+
+- `AZURE_CLIENT_ID`
+- `AZURE_TENANT_ID`
+- `AZURE_SUBSCRIPTION_ID`
+
+The Entra service principal must have the **Artifact Signing Certificate
+Profile Signer** role on the `Noland` certificate profile. Its GitHub OIDC
+federated credential must allow this environment subject:
+
+`repo:FelipeBarrosCode/no_land:environment:Secrets`
+
+No Azure client secret or exported signing certificate is used. Unsigned
+Windows build artifacts are staged under an `unsigned-` artifact name, which
+the release job deliberately excludes.
