@@ -1,5 +1,4 @@
 use std::{
-    io::ErrorKind,
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -64,11 +63,28 @@ impl SshKeyService {
         let private_key_path = keys_dir.join(&self.key_name);
         let public_key_path = keys_dir.join(format!("{}.pub", &self.key_name));
 
-        if private_key_path.exists() && public_key_path.exists() {
+        if private_key_path.exists() {
+            let derived_public_key = derive_public_key(&ssh_keygen_bin, &private_key_path).await?;
+            let stored_public_key = fs::read_to_string(&public_key_path)
+                .await
+                .unwrap_or_default();
+            if normalize_key(&stored_public_key) != normalize_key(&derived_public_key) {
+                fs::write(
+                    &public_key_path,
+                    format!("{} noland-connect\n", normalize_key(&derived_public_key)),
+                )
+                .await?;
+            }
             return Ok(SshKeyPaths {
                 private_key_path,
                 public_key_path,
             });
+        }
+
+        // A public key without its private half can never authenticate. Remove
+        // it before generating a complete replacement pair.
+        if public_key_path.exists() {
+            fs::remove_file(&public_key_path).await?;
         }
 
         let private_path_string = private_key_path.display().to_string();
@@ -113,41 +129,6 @@ impl SshKeyService {
         })
     }
 
-    pub async fn regenerate_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
-        let keys_dir = root_dir.join("keys");
-        fs::create_dir_all(&keys_dir).await?;
-
-        let private_key_path = keys_dir.join(&self.key_name);
-        let public_key_path = keys_dir.join(format!("{}.pub", &self.key_name));
-
-        if let Err(error) = fs::remove_file(&private_key_path).await {
-            if error.kind() != ErrorKind::NotFound {
-                return Err(AppError::from(error));
-            }
-        }
-
-        if let Err(error) = fs::remove_file(&public_key_path).await {
-            if error.kind() != ErrorKind::NotFound {
-                return Err(AppError::from(error));
-            }
-        }
-
-        self.ensure_keypair(root_dir).await
-    }
-
-    pub async fn regenerate_and_upload_public_key(
-        &self,
-        root_dir: &Path,
-        vast_api: &VastApiClient,
-    ) -> AppResult<(SshKeyPaths, bool)> {
-        let key_paths = self.regenerate_keypair(root_dir).await?;
-        let uploaded = self
-            .upload_public_key_if_missing(vast_api, &key_paths.public_key_path)
-            .await?;
-
-        Ok((key_paths, uploaded))
-    }
-
     pub async fn load_key_into_agent(&self, key_path: &Path, _passphrase: &str) -> AppResult<()> {
         if !key_path.exists() {
             return Err(AppError::NotFound(format!(
@@ -186,6 +167,49 @@ impl SshKeyService {
         vast_api.upload_ssh_key(&public_key).await?;
         Ok(true)
     }
+}
+
+async fn derive_public_key(ssh_keygen_bin: &Path, private_key_path: &Path) -> AppResult<String> {
+    let ssh_keygen_bin = ssh_keygen_bin.to_path_buf();
+    let private_key_path = private_key_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut command = Command::new(&ssh_keygen_bin);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &ssh_keygen_bin,
+            "ssh-runtime",
+            OsDetection::new().managed_binary_target_triple(),
+        );
+        configure_no_window(&mut command);
+        let output = command
+            .stdin(Stdio::null())
+            .arg("-y")
+            .arg("-f")
+            .arg(&private_key_path)
+            .output()
+            .map_err(|error| {
+                AppError::Command(format!(
+                    "Failed deriving the managed SSH public key from {}: {error}",
+                    private_key_path.display()
+                ))
+            })?;
+        if !output.status.success() {
+            return Err(AppError::Command(format!(
+                "Could not validate managed SSH private key {}: {}",
+                private_key_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let public_key = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if normalize_key(&public_key).is_empty() {
+            return Err(AppError::InvalidInput(
+                "Managed SSH private key produced an empty public key".to_string(),
+            ));
+        }
+        Ok(public_key)
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("ssh-keygen task join failure: {error}")))?
 }
 
 pub fn normalize_ssh_state_from_disk(

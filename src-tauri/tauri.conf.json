@@ -68,6 +68,7 @@
         "depends": [
           "libc6",
           "openssh-client",
+          "iproute2",
           "xdg-utils",
           "procps",
           "libwebkit2gtk-4.1-0",

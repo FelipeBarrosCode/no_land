@@ -2809,6 +2809,7 @@ dependencies = [
  "dirs 5.0.1",
  "flate2",
  "form_urlencoded",
+ "fs2",
  "futures-util",
  "hex",
  "hmac",

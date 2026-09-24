@@ -408,6 +408,33 @@ impl VastApiClient {
         Ok(())
     }
 
+    pub async fn attach_ssh_key(&self, instance_id: u64, public_key: &str) -> AppResult<()> {
+        let url = format!(
+            "{}/api/v0/instances/{instance_id}/ssh",
+            self.base_url.trim_end_matches('/')
+        );
+        let payload = json!({ "ssh_key": public_key });
+
+        info!(
+            "Vast request attach_ssh_key instance_id={} endpoint={} key_length={}",
+            instance_id,
+            url,
+            public_key.len()
+        );
+        let started = Instant::now();
+        let response = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|error| map_send_error("POST", &url, error))?;
+
+        let _ = parse_response(response, "POST", &url, started).await?;
+        Ok(())
+    }
+
     pub async fn pause_instance(&self, instance_id: u64) -> AppResult<VastInstance> {
         let url = format!(
             "{}/api/v0/instances/{instance_id}/",
