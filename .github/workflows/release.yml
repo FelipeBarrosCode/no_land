@@ -299,10 +299,159 @@ jobs:
         run: bash scripts/validate-deb.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle"
 
       - name: Upload build artifacts
+        if: matrix.platform != 'windows'
         uses: actions/upload-artifact@v4
         with:
           name: tauri-${{ matrix.platform }}-${{ matrix.arch }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+
+      - name: Upload unsigned Windows artifacts for signing
+        if: matrix.platform == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-tauri-windows-${{ matrix.arch }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+
+
+  windows-sign:
+    name: Sign Windows ${{ matrix.arch }} artifacts
+    needs:
+      - version
+      - build
+    environment: Secrets
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+          - arch: arm64
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Tauri signer
+        run: npm ci
+
+      - name: Download unsigned Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: unsigned-tauri-windows-${{ matrix.arch }}
+          path: windows-bundle
+
+      - name: Require Azure OIDC configuration
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          $missing = @()
+          foreach ($name in @('AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $missing += $name
+            }
+          }
+          if ($missing.Count -gt 0) {
+            throw "Missing GitHub environment secrets required for Azure Artifact Signing: $($missing -join ', ')"
+          }
+
+      - name: Azure login with GitHub OIDC
+        uses: azure/login@v3
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows installers with Azure Artifact Signing
+        uses: azure/artifact-signing-action@v2
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: Noland
+          certificate-profile-name: Noland
+          files-folder: ${{ github.workspace }}\windows-bundle
+          files-folder-filter: exe,msi
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Noland Connect
+          description-url: https://no-land.net
+          exclude-environment-credential: true
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: false
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify Windows Authenticode signatures
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem -Path windows-bundle -Recurse -File |
+            Where-Object { $_.Extension -in @('.exe', '.msi') })
+          if ($files.Count -eq 0) {
+            throw 'No Windows installers were found to verify.'
+          }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') {
+              throw "Invalid Authenticode signature on $($file.FullName): $($signature.Status) $($signature.StatusMessage)"
+            }
+            Write-Host "Verified $($file.Name): $($signature.SignerCertificate.Subject)"
+          }
+
+      - name: Regenerate Tauri updater signatures
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw 'TAURI_SIGNING_PRIVATE_KEY is required to regenerate signatures for Authenticode-signed updater installers.'
+          }
+          $signedUpdaterCount = 0
+          $installers = @(Get-ChildItem -Path windows-bundle -Recurse -File |
+            Where-Object { $_.Extension -in @('.exe', '.msi') })
+          foreach ($installer in $installers) {
+            $signaturePath = "$($installer.FullName).sig"
+            if (-not (Test-Path -LiteralPath $signaturePath)) {
+              continue
+            }
+            Remove-Item -LiteralPath $signaturePath -Force
+            & node node_modules/@tauri-apps/cli/tauri.js signer sign $installer.FullName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $signaturePath)) {
+              throw "Failed regenerating Tauri updater signature for $($installer.FullName)"
+            }
+            if ((Get-Item -LiteralPath $signaturePath).Length -eq 0) {
+              throw "Generated an empty Tauri updater signature for $($installer.FullName)"
+            }
+            $signedUpdaterCount += 1
+          }
+          if ($signedUpdaterCount -eq 0) {
+            throw 'No Windows updater installer signature was regenerated.'
+          }
+
+      - name: Upload signed Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tauri-windows-${{ matrix.arch }}
+          path: windows-bundle
           if-no-files-found: error
 
 
@@ -312,6 +461,7 @@ jobs:
     needs:
       - version
       - build
+      - windows-sign
     runs-on: ubuntu-latest
 
     steps:
@@ -324,6 +474,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: release-assets
+          pattern: tauri-*
 
       - name: Create git release tag
         shell: bash

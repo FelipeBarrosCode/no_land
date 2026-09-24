@@ -9,7 +9,7 @@ strip = "symbols"
 name = "noland-connect"
 version = "0.1.0"
 description = "Noland Connect desktop app"
-authors = ["Noland <FelipeBarrosCode@users.noreply.github.com>"]
+authors = ["No Land - Felipe Barros Moura <FelipeBarrosCode@users.noreply.github.com>"]
 edition = "2021"
 default-run = "noland-connect"
 
