@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Instant};
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
@@ -17,20 +17,26 @@ const ERROR_EVENT: &str = "network-monitor://error";
 pub(crate) struct Reporter {
     app: AppHandle,
     session_id: Uuid,
-    latest_stats: Arc<RwLock<Option<Value>>>,
+    latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
+    last_report: Arc<RwLock<Option<Instant>>>,
 }
 
 impl Reporter {
     pub(crate) fn new(
         app: AppHandle,
         session_id: Uuid,
-        latest_stats: Arc<RwLock<Option<Value>>>,
+        latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
     ) -> Self {
         Self {
             app,
             session_id,
             latest_stats,
+            last_report: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub(crate) async fn measurements_reported(&self) {
+        *self.last_report.write().await = Some(Instant::now());
     }
 
     pub(crate) async fn forward_agent_text(&self, text: &str) {
@@ -44,7 +50,14 @@ impl Reporter {
 
         match value.get("type").and_then(Value::as_str) {
             Some("stats_update") => {
-                *self.latest_stats.write().await = Some(value.clone());
+                if value["sessionId"].as_str() != Some(self.session_id.to_string().as_str()) {
+                    return;
+                }
+                // Agent heartbeats can repeat old statistics. Freshness follows
+                // actual client measurement reports, including measured timeouts.
+                if let Some(measured_at) = *self.last_report.read().await {
+                    *self.latest_stats.write().await = Some((measured_at, value.clone()));
+                }
                 self.emit(STATS_EVENT, value);
             }
             Some("status_changed") => {

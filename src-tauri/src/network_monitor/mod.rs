@@ -48,7 +48,7 @@ pub struct NetworkMonitorSession {
 pub struct NetworkMonitor {
     lifecycle: Arc<Mutex<()>>,
     inner: Arc<Mutex<MonitorState>>,
-    latest_stats: Arc<RwLock<Option<Value>>>,
+    latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
 }
 
 #[derive(Default)]
@@ -103,7 +103,26 @@ impl NetworkMonitor {
     }
 
     pub async fn snapshot(&self) -> Option<Value> {
-        self.latest_stats.read().await.clone()
+        self.latest_stats
+            .read()
+            .await
+            .as_ref()
+            .map(|(_, value)| value.clone())
+    }
+
+    pub async fn fresh_snapshot(&self) -> Option<Value> {
+        self.latest_stats
+            .read()
+            .await
+            .as_ref()
+            .filter(|(received, value)| {
+                received.elapsed() < Duration::from_secs(3)
+                    && value["metrics"]["last60Seconds"]["sent"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        >= 2
+            })
+            .map(|(_, value)| value.clone())
     }
 
     async fn stop_current(&self) {
@@ -120,6 +139,7 @@ impl NetworkMonitor {
                 warn!(%error, "network monitor task ended unexpectedly");
             }
         }
+        *self.latest_stats.write().await = None;
     }
 }
 
@@ -141,7 +161,7 @@ async fn run_monitor(
     app: AppHandle,
     session: NetworkMonitorSession,
     token: [u8; 32],
-    latest_stats: Arc<RwLock<Option<Value>>>,
+    latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
     mut cancel: watch::Receiver<bool>,
 ) {
     let reporter = Reporter::new(app, session.session_id, latest_stats);
@@ -352,6 +372,7 @@ async fn run_connected(
                 if let Err(error) = send_result {
                     return ConnectedResult::Disconnected(format!("WebSocket send failed: {error}"));
                 }
+                reporter.measurements_reported().await;
             }
             _ = health_tick.tick() => {
                 check_fail_safe(fail_safe, reporter, Instant::now());
@@ -501,5 +522,29 @@ async fn wait_to_retry(cancel: &mut watch::Receiver<bool>) -> bool {
     tokio::select! {
         _ = cancelled(cancel) => false,
         _ = sleep(RECONNECT_DELAY) => true,
+    }
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn overlay_rejects_empty_stale_and_stopped_probe_data() {
+        let monitor = NetworkMonitor::default();
+        assert!(monitor.fresh_snapshot().await.is_none());
+        let data = json!({ "metrics": { "last60Seconds": { "sent": 2, "received": 0, "lossPercent": 100.0 } } });
+        *monitor.latest_stats.write().await = Some((Instant::now(), data.clone()));
+        // Measured loss remains valid data even without a successful response.
+        assert!(monitor.fresh_snapshot().await.is_some());
+        *monitor.latest_stats.write().await = Some((Instant::now() - Duration::from_secs(4), data));
+        assert!(monitor.fresh_snapshot().await.is_none());
+        *monitor.latest_stats.write().await = Some((
+            Instant::now(),
+            json!({ "metrics": { "last60Seconds": { "sent": 0 } } }),
+        ));
+        assert!(monitor.fresh_snapshot().await.is_none());
+        monitor.stop().await;
+        assert!(monitor.snapshot().await.is_none());
     }
 }

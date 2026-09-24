@@ -874,7 +874,7 @@ export function SettingsScreen({
             </div>
             <div>
               <SelectField
-                label="Performance Overlay"
+                label="Default Performance Overlay"
                 value={clientForm.showperfoverlay}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -882,8 +882,8 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Shows a live HUD with stream stats like FPS, latency, and
-                bitrate.
+                Default for instances without a saved choice. Each instance card
+                controls its live FPS, latency, jitter and bitrate overlay.
               </SettingHelp>
             </div>
             <div>

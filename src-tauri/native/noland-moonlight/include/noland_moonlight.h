@@ -128,6 +128,23 @@ typedef struct nl_event {
   char message[256];
 } nl_event_t;
 
+/* One-second measured windows. Negative timings/FPS mean unavailable. */
+typedef struct nl_performance_stats {
+  double incoming_fps;
+  double decoded_fps;
+  double submitted_fps;
+  double video_mbps;
+  double missing_frames_percent;
+  double host_processing_ms;
+  double reassembly_ms;
+  double decode_ms;
+  double render_queue_ms;
+  uint32_t width;
+  uint32_t height;
+  uint32_t video_format;
+  uint32_t samples;
+} nl_performance_stats_t;
+
 typedef struct nl_stats {
   nl_stream_state_t state;
   uint64_t start_count;
@@ -216,6 +233,7 @@ int32_t nl_runtime_smoke_test(void);
 size_t nl_sizeof_start_request(void);
 size_t nl_sizeof_event(void);
 size_t nl_sizeof_stats(void);
+size_t nl_sizeof_performance_stats(void);
 
 nl_result_t nl_runtime_start(nl_runtime_t* runtime, const nl_start_request_t* request);
 nl_result_t nl_runtime_request_stop(nl_runtime_t* runtime);
@@ -223,6 +241,8 @@ nl_result_t nl_runtime_attach_surface(nl_runtime_t* runtime, const nl_surface_de
 nl_result_t nl_runtime_detach_surface(nl_runtime_t* runtime);
 nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output);
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output);
+void nl_runtime_read_performance(nl_runtime_t* runtime, nl_performance_stats_t* output);
+void nl_runtime_set_overlay_text(nl_runtime_t* runtime, const char* text);
 void nl_runtime_record_reconnect_result(nl_runtime_t* runtime, bool attempt_started, bool succeeded);
 
 int nl_desktop_input_install(const nl_surface_descriptor_t* surface);

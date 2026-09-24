@@ -365,6 +365,7 @@ export interface MoonlightHostLatencyPreferencesResponse {
 }
 
 export interface RentedInstanceSummary {
+  performanceOverlayEnabled: boolean;
   instanceId: number;
   label: string;
   status: string;
