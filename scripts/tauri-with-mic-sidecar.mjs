@@ -155,6 +155,18 @@ if (!tauri || tauri.error || tauri.status !== 0) {
   process.exit(tauri?.status ?? 1);
 }
 
+if (process.platform === 'linux' && mode === 'build') {
+  const bundleDir = resolve(repoRoot, 'src-tauri', 'target', target, 'release', 'bundle');
+  const finalizeDeb = spawnSync('bash', [resolve(repoRoot, 'scripts', 'finalize-deb.sh'), '--bundle-dir', bundleDir], {
+    cwd: repoRoot,
+    stdio: 'inherit',
+    env: nativeEnv,
+  });
+  if (finalizeDeb.status !== 0) {
+    process.exit(finalizeDeb.status ?? 1);
+  }
+}
+
 if (process.platform === 'darwin' && mode === 'build') {
   const targetTriple = target ?? 'aarch64-apple-darwin';
   console.log(`[tauri-with-mic-sidecar] Starting macOS bundle dependency fix for ${targetTriple}`);

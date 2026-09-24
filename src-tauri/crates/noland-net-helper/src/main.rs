@@ -5,19 +5,15 @@
 
 use std::{
     fs::{self, File, OpenOptions},
+    io::{Seek, SeekFrom, Write},
     net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
     path::{Path, PathBuf},
-    process,
+    process::{self, Command},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(all(unix, not(target_os = "linux")))]
-use std::process::Command;
-#[cfg(target_os = "windows")]
-use std::{
-    io::Write,
-    process::{Command, Stdio},
-};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::process::Stdio;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -38,7 +34,9 @@ const INTERFACE_NAME: &str = "nolandwg0";
 const STATUS_FILE_NAME: &str = "status.json";
 const STOP_REQUEST_FILE_NAME: &str = "stop.request";
 const OWNER_LOCK_FILE_NAME: &str = "owner.lock";
+const TRANSITION_LOCK_FILE_NAME: &str = "transition.lock";
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
+const DEVICE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelperCommand {
@@ -78,6 +76,10 @@ struct RuntimeStatus {
     engine: String,
     active: bool,
     pid: u32,
+    #[serde(default)]
+    process_start_ticks: u64,
+    #[serde(default)]
+    boot_id: String,
     interface_name: String,
     config_path: String,
     #[serde(default)]
@@ -98,10 +100,13 @@ struct RuntimeStatus {
 
 impl RuntimeStatus {
     fn starting(args: &Args, config_fingerprint: String) -> Self {
+        let identity = current_process_identity();
         Self {
             engine: "gotatun-embedded-0.7.1".to_string(),
             active: false,
-            pid: process::id(),
+            pid: identity.pid,
+            process_start_ticks: identity.process_start_ticks,
+            boot_id: identity.boot_id,
             interface_name: String::new(),
             config_path: args.config_path.display().to_string(),
             launch_id: args.launch_id.clone(),
@@ -117,6 +122,24 @@ impl RuntimeStatus {
             error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessIdentity {
+    pid: u32,
+    #[serde(default)]
+    process_start_ticks: u64,
+    #[serde(default)]
+    boot_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnerRecord {
+    identity: ProcessIdentity,
+    launch_id: String,
+    state_dir: String,
 }
 
 /// Probe whether a UDP port can be bound on both wildcard IPv4 and IPv6 the way
@@ -549,6 +572,13 @@ async fn main() {
     }
 
     if args.command == HelperCommand::Stop {
+        let _transition_lock = match acquire_transition_lock(&args.state_dir) {
+            Ok(lock) => lock,
+            Err(error) => {
+                eprintln!("noland-net-helper: {error:#}");
+                process::exit(1);
+            }
+        };
         if let Err(error) = cleanup_stale_runtime_owners(&args.state_dir).await {
             eprintln!("noland-net-helper: {error:#}");
             process::exit(1);
@@ -563,8 +593,9 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<()> {
-    cleanup_stale_runtime_owners(&args.state_dir).await?;
-    let owner_lock = acquire_owner_lock(&args.state_dir)?;
+    let transition_lock = acquire_transition_lock(&args.state_dir)?;
+    let mut owner_lock = acquire_owner_lock(&args.state_dir)?;
+    write_owner_record(&mut owner_lock, &args)?;
     cleanup_platform_network_state(&args)?;
     let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
     let _ = fs::remove_file(&stop_request_path);
@@ -572,6 +603,7 @@ async fn run(args: Args) -> Result<()> {
     let config_fingerprint = config_fingerprint(&args.config_path)?;
     let mut initial_status = RuntimeStatus::starting(&args, config_fingerprint.clone());
     write_status(&status_path, &initial_status)?;
+    drop(transition_lock);
 
     let result = run_tunnel(&args, &status_path, &config_fingerprint).await;
     if let Err(error) = &result {
@@ -579,6 +611,7 @@ async fn run(args: Args) -> Result<()> {
         initial_status.updated_at_unix = unix_timestamp();
         let _ = write_status(&status_path, &initial_status);
     }
+    let _ = clear_owner_record(&mut owner_lock);
     drop(owner_lock);
     result
 }
@@ -673,10 +706,13 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         .await
         .context("failed starting embedded GotaTun device")?;
 
+    let identity = current_process_identity();
     let mut status = RuntimeStatus {
         engine: "gotatun-embedded-0.7.1".to_string(),
         active: true,
-        pid: process::id(),
+        pid: identity.pid,
+        process_start_ticks: identity.process_start_ticks,
+        boot_id: identity.boot_id,
         interface_name,
         config_path: args.config_path.display().to_string(),
         launch_id: args.launch_id.clone(),
@@ -699,6 +735,39 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
     write_status(status_path, &status)?;
 
     let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .context("failed installing SIGTERM handler")?;
+        loop {
+            tokio::select! {
+                _ = device.wait() => {
+                    status.error = Some("embedded GotaTun device stopped after an unrecoverable runtime error".to_string());
+                    break;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    break;
+                }
+                _ = terminate.recv() => {
+                    break;
+                }
+                _ = sleep(STATUS_INTERVAL) => {
+                    if stop_request_path.exists() {
+                        break;
+                    }
+                    refresh_status_from_device(&device, &mut status).await;
+                    if let Err(error) = write_status_with_retry(status_path, &status, 5) {
+                        eprintln!(
+                            "noland-net-helper: status heartbeat write failed; keeping the tunnel active: {error:#}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(windows)]
     loop {
         tokio::select! {
             _ = device.wait() => {
@@ -722,7 +791,15 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         }
     }
 
-    device.stop().await;
+    if tokio::time::timeout(DEVICE_STOP_TIMEOUT, device.stop())
+        .await
+        .is_err()
+    {
+        status.error = Some(format!(
+            "embedded GotaTun device shutdown exceeded {} seconds",
+            DEVICE_STOP_TIMEOUT.as_secs()
+        ));
+    }
     status.active = false;
     status.updated_at_unix = unix_timestamp();
     if let Err(error) = write_status_with_retry(status_path, &status, 5) {
@@ -941,6 +1018,10 @@ fn owner_lock_path(state_dir: &Path) -> PathBuf {
     runtime_root(state_dir).join(OWNER_LOCK_FILE_NAME)
 }
 
+fn transition_lock_path(state_dir: &Path) -> PathBuf {
+    runtime_root(state_dir).join(TRANSITION_LOCK_FILE_NAME)
+}
+
 fn runtime_directories(state_dir: &Path) -> Vec<PathBuf> {
     let root = runtime_root(state_dir);
     let mut runtimes = vec![root.join("gotatun-runtime")];
@@ -960,11 +1041,79 @@ fn load_runtime_status(path: &Path) -> Option<RuntimeStatus> {
     serde_json::from_str(&content).ok()
 }
 
+fn load_owner_record(state_dir: &Path) -> Option<OwnerRecord> {
+    let content = fs::read_to_string(owner_lock_path(state_dir)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn push_unique_identity(owners: &mut Vec<ProcessIdentity>, identity: ProcessIdentity) {
+    if identity.pid == 0 || identity.pid == process::id() {
+        return;
+    }
+    if let Some(index) = owners.iter().position(|owner| owner.pid == identity.pid) {
+        let existing = &owners[index];
+        if existing.process_start_ticks == identity.process_start_ticks {
+            return;
+        }
+        // Prefer an exact /proc start-time identity from owner.lock over a
+        // legacy PID-only status entry for the same numeric PID.
+        if existing.process_start_ticks == 0 && identity.process_start_ticks != 0 {
+            owners[index] = identity;
+            return;
+        }
+        if identity.process_start_ticks == 0 {
+            return;
+        }
+    }
+    owners.push(identity);
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn linux_process_state(stat: &str) -> Option<char> {
     // The comm field may contain spaces or ')', so use the final delimiter
     // before the single-character process state.
     stat.rsplit_once(") ")?.1.chars().next()
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_start_ticks(stat: &str) -> Option<u64> {
+    // The remainder starts at field 3 (state); starttime is field 22.
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_id() -> String {
+    fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
+fn current_process_identity() -> ProcessIdentity {
+    #[cfg(target_os = "linux")]
+    {
+        let pid = process::id();
+        let process_start_ticks = fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| linux_process_start_ticks(&stat))
+            .unwrap_or_default();
+        return ProcessIdentity {
+            pid,
+            process_start_ticks,
+            boot_id: linux_boot_id(),
+        };
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    ProcessIdentity {
+        pid: process::id(),
+        ..ProcessIdentity::default()
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -989,6 +1138,69 @@ fn process_exists(pid: u32) -> bool {
     }
     let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+fn process_matches_identity(identity: &ProcessIdentity) -> bool {
+    if identity.pid == 0 || identity.pid == process::id() {
+        return false;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = fs::read_to_string(format!("/proc/{}/stat", identity.pid)) else {
+            return false;
+        };
+        if linux_process_state(&stat).is_some_and(|state| matches!(state, 'Z' | 'X' | 'x')) {
+            return false;
+        }
+        if identity.process_start_ticks != 0
+            && linux_process_start_ticks(&stat) != Some(identity.process_start_ticks)
+        {
+            return false;
+        }
+        if !identity.boot_id.is_empty() && identity.boot_id != linux_boot_id() {
+            return false;
+        }
+    }
+
+    process_exists(identity.pid)
+}
+
+#[cfg(target_os = "linux")]
+fn discover_scoped_legacy_helpers(state_dir: &Path) -> Vec<ProcessIdentity> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let expected_root = runtime_root(state_dir);
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
+        .filter(|pid| *pid != process::id() && process_exists(*pid))
+        .filter_map(|pid| {
+            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+            let arguments = cmdline
+                .split(|byte| *byte == 0)
+                .filter(|value| !value.is_empty())
+                .map(|value| std::ffi::OsString::from_vec(value.to_vec()))
+                .collect::<Vec<_>>();
+            let helper_state_dir = arguments.windows(2).find_map(|pair| {
+                (pair[0] == "--state-dir").then(|| PathBuf::from(pair[1].clone()))
+            })?;
+            (runtime_root(&helper_state_dir) == expected_root).then(|| {
+                let process_start_ticks = fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .ok()
+                    .and_then(|stat| linux_process_start_ticks(&stat))
+                    .unwrap_or_default();
+                ProcessIdentity {
+                    pid,
+                    process_start_ticks,
+                    boot_id: linux_boot_id(),
+                }
+            })
+        })
+        .collect()
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -1022,97 +1234,62 @@ fn process_exists(pid: u32) -> bool {
 }
 
 #[cfg(unix)]
-fn terminate_stale_helper(pid: u32) {
-    if pid == 0 || pid == process::id() {
-        return;
+fn signal_stale_helper(identity: &ProcessIdentity, signal: libc::c_int) -> Result<()> {
+    if !process_matches_identity(identity) {
+        return Ok(());
     }
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGKILL);
+    let result = unsafe { libc::kill(identity.pid as libc::pid_t, signal) };
+    if result == 0 {
+        return Ok(());
     }
-}
-
-#[cfg(target_os = "linux")]
-fn discover_helper_pids() -> Vec<u32> {
-    let Ok(entries) = fs::read_dir("/proc") else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .filter_map(|entry| entry.file_name().to_string_lossy().parse::<u32>().ok())
-        .filter(|pid| *pid != process::id() && process_exists(*pid))
-        .collect()
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn discover_helper_pids() -> Vec<u32> {
-    Command::new("pgrep")
-        .args(["-x", "noland-net-helper"])
-        .output()
-        .ok()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| line.trim().parse::<u32>().ok())
-                .filter(|pid| *pid != process::id())
-                .collect()
-        })
-        .unwrap_or_default()
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        return Ok(());
+    }
+    Err(error).with_context(|| {
+        format!(
+            "failed sending signal {signal} to Noland helper PID {}",
+            identity.pid
+        )
+    })
 }
 
 #[cfg(target_os = "windows")]
-fn discover_helper_pids() -> Vec<u32> {
-    let mut command = Command::new("tasklist.exe");
-    configure_hidden_windows_command(&mut command);
-    command
-        .args([
-            "/FI",
-            "IMAGENAME eq noland-net-helper.exe",
-            "/FO",
-            "CSV",
-            "/NH",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .ok()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(|line| {
-                    let fields = line.split(',').collect::<Vec<_>>();
-                    fields
-                        .get(1)
-                        .map(|value| value.trim().trim_matches('"'))
-                        .and_then(|value| value.parse::<u32>().ok())
-                })
-                .filter(|pid| *pid != process::id())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-#[cfg(target_os = "windows")]
-fn terminate_stale_helper(pid: u32) {
-    if pid == 0 || pid == process::id() {
-        return;
+fn signal_stale_helper(identity: &ProcessIdentity, _signal: i32) -> Result<()> {
+    if !process_matches_identity(identity) {
+        return Ok(());
     }
     let mut command = Command::new("taskkill.exe");
     configure_hidden_windows_command(&mut command);
-    let _ = command
-        .args(["/PID", &pid.to_string(), "/T", "/F"])
+    let status = command
+        .args(["/PID", &identity.pid.to_string(), "/T", "/F"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .status()
+        .context("failed launching taskkill for stale Noland helper")?;
+    if !status.success() && process_matches_identity(identity) {
+        bail!(
+            "taskkill could not terminate stale Noland helper PID {}",
+            identity.pid
+        );
+    }
+    Ok(())
 }
 
 async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
     let runtimes = runtime_directories(state_dir);
-    let mut owner_pids = discover_helper_pids();
+    let mut owners = Vec::<ProcessIdentity>::new();
     for runtime in &runtimes {
         if let Some(status) = load_runtime_status(&runtime.join(STATUS_FILE_NAME)) {
-            if status.pid != process::id() && !owner_pids.contains(&status.pid) {
-                owner_pids.push(status.pid);
-            }
+            push_unique_identity(
+                &mut owners,
+                ProcessIdentity {
+                    pid: status.pid,
+                    process_start_ticks: status.process_start_ticks,
+                    boot_id: status.boot_id,
+                },
+            );
         }
         if runtime.exists() {
             fs::write(runtime.join(STOP_REQUEST_FILE_NAME), b"stop\n").with_context(|| {
@@ -1123,29 +1300,64 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
             })?;
         }
     }
+    if let Some(owner) = load_owner_record(state_dir) {
+        push_unique_identity(&mut owners, owner.identity);
+    }
+    #[cfg(target_os = "linux")]
+    for owner in discover_scoped_legacy_helpers(state_dir) {
+        push_unique_identity(&mut owners, owner);
+    }
 
     for _ in 0..20 {
-        if owner_pids.iter().all(|pid| !process_exists(*pid)) {
+        if owners.iter().all(|owner| !process_matches_identity(owner)) {
             break;
         }
         sleep(Duration::from_millis(250)).await;
     }
-    for pid in owner_pids
+
+    #[cfg(unix)]
+    for owner in owners
         .iter()
-        .copied()
-        .filter(|pid| process_exists(*pid))
+        .filter(|owner| process_matches_identity(owner))
     {
-        terminate_stale_helper(pid);
+        signal_stale_helper(owner, libc::SIGTERM)?;
+    }
+    #[cfg(unix)]
+    for _ in 0..8 {
+        if owners.iter().all(|owner| !process_matches_identity(owner)) {
+            break;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+
+    for owner in owners
+        .iter()
+        .filter(|owner| process_matches_identity(owner))
+    {
+        #[cfg(unix)]
+        signal_stale_helper(owner, libc::SIGKILL)?;
+        #[cfg(target_os = "windows")]
+        signal_stale_helper(owner, 0)?;
     }
     for _ in 0..20 {
-        if owner_pids.iter().all(|pid| !process_exists(*pid)) {
+        if owners.iter().all(|owner| !process_matches_identity(owner)) {
             break;
         }
         sleep(Duration::from_millis(250)).await;
     }
-    if let Some(pid) = owner_pids.into_iter().find(|pid| process_exists(*pid)) {
+    if let Some(owner) = owners.into_iter().find(process_matches_identity) {
+        #[cfg(target_os = "linux")]
+        let state = fs::read_to_string(format!("/proc/{}/stat", owner.pid))
+            .ok()
+            .and_then(|stat| linux_process_state(&stat))
+            .map(|state| state.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(not(target_os = "linux"))]
+        let state = "unknown".to_string();
         bail!(
-            "stale Noland GotaTun helper PID {pid} could not be terminated during elevated cleanup"
+            "stale Noland GotaTun helper PID {} (state={state}, start_ticks={}) could not be terminated during elevated cleanup",
+            owner.pid,
+            owner.process_start_ticks
         );
     }
 
@@ -1153,6 +1365,8 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
         let _ = fs::remove_file(runtime.join(STOP_REQUEST_FILE_NAME));
         let _ = fs::remove_file(runtime.join(STATUS_FILE_NAME));
     }
+    clear_owner_record_path(state_dir)?;
+    cleanup_orphaned_linux_interface()?;
     Ok(())
 }
 
@@ -1171,7 +1385,12 @@ fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
+    cleanup_orphaned_linux_interface()
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "linux")))]
 fn cleanup_platform_network_state(_args: &Args) -> Result<()> {
     Ok(())
 }
@@ -1180,6 +1399,7 @@ fn acquire_owner_lock(state_dir: &Path) -> Result<File> {
     let lock_path = owner_lock_path(state_dir);
     let lock_file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&lock_path)
@@ -1196,6 +1416,89 @@ fn acquire_owner_lock(state_dir: &Path) -> Result<File> {
         )
     })?;
     Ok(lock_file)
+}
+
+fn acquire_transition_lock(state_dir: &Path) -> Result<File> {
+    let lock_path = transition_lock_path(state_dir);
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| {
+            format!(
+                "failed opening tunnel transition lock {}",
+                lock_path.display()
+            )
+        })?;
+    lock_file.lock_exclusive().with_context(|| {
+        format!(
+            "failed acquiring tunnel transition lock {}",
+            lock_path.display()
+        )
+    })?;
+    Ok(lock_file)
+}
+
+fn write_owner_record(lock_file: &mut File, args: &Args) -> Result<()> {
+    let record = OwnerRecord {
+        identity: current_process_identity(),
+        launch_id: args.launch_id.clone(),
+        state_dir: args.state_dir.display().to_string(),
+    };
+    lock_file.set_len(0)?;
+    lock_file.seek(SeekFrom::Start(0))?;
+    serde_json::to_writer_pretty(&mut *lock_file, &record)?;
+    lock_file.write_all(b"\n")?;
+    lock_file.sync_data()?;
+    Ok(())
+}
+
+fn clear_owner_record(lock_file: &mut File) -> Result<()> {
+    lock_file.set_len(0)?;
+    lock_file.seek(SeekFrom::Start(0))?;
+    lock_file.sync_data()?;
+    Ok(())
+}
+
+fn clear_owner_record_path(state_dir: &Path) -> Result<()> {
+    let path = owner_lock_path(state_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    let file = OpenOptions::new().write(true).open(&path)?;
+    file.set_len(0)?;
+    file.sync_data()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_orphaned_linux_interface() -> Result<()> {
+    if !Path::new("/sys/class/net").join(INTERFACE_NAME).exists() {
+        return Ok(());
+    }
+    let ip = ["/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"]
+        .into_iter()
+        .find(|candidate| Path::new(candidate).is_file())
+        .ok_or_else(|| anyhow!("iproute2 is required to remove orphaned {INTERFACE_NAME}"))?;
+    let output = Command::new(ip)
+        .args(["link", "delete", INTERFACE_NAME])
+        .stdin(Stdio::null())
+        .output()
+        .context("failed launching iproute2 for orphaned tunnel cleanup")?;
+    if !output.status.success() && Path::new("/sys/class/net").join(INTERFACE_NAME).exists() {
+        bail!(
+            "failed removing orphaned Linux tunnel interface {INTERFACE_NAME}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn cleanup_orphaned_linux_interface() -> Result<()> {
+    Ok(())
 }
 
 fn config_fingerprint(config_path: &Path) -> Result<String> {
@@ -1272,8 +1575,8 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        config_fingerprint, linux_process_state, owner_lock_path, parse_tunnel_config,
-        prefix_to_netmask,
+        config_fingerprint, linux_process_start_ticks, linux_process_state, owner_lock_path,
+        parse_tunnel_config, prefix_to_netmask, push_unique_identity, ProcessIdentity,
     };
     #[cfg(target_os = "windows")]
     use super::{resolve_effective_listen_port, udp_port_probe_ok};
@@ -1291,6 +1594,31 @@ mod tests {
             Some('Z')
         );
         assert_eq!(linux_process_state("invalid"), None);
+        assert_eq!(
+            linux_process_start_ticks(
+                "8604 (helper ) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242"
+            ),
+            Some(4242)
+        );
+    }
+
+    #[test]
+    fn exact_process_identity_replaces_legacy_pid_only_identity() {
+        let mut owners = vec![ProcessIdentity {
+            pid: 8604,
+            process_start_ticks: 0,
+            boot_id: String::new(),
+        }];
+        push_unique_identity(
+            &mut owners,
+            ProcessIdentity {
+                pid: 8604,
+                process_start_ticks: 4242,
+                boot_id: "boot-a".to_string(),
+            },
+        );
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].process_start_ticks, 4242);
     }
 
     #[test]

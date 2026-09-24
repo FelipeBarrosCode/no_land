@@ -43,6 +43,10 @@ for package in "${packages[@]}"; do
     echo "Package is missing /usr/share/metainfo/com.noland.connect.metainfo.xml: $package" >&2
     exit 1
   fi
+  if ! grep -Fq 'usr/share/doc/noland-connect/changelog.gz' <<<"$contents"; then
+    echo "Package is missing /usr/share/doc/noland-connect/changelog.gz: $package" >&2
+    exit 1
+  fi
   # Keep all pedantic diagnostics visible, but only Debian policy errors block
   # publishing. Advisory warnings (for example, missing helper man pages) are
   # still reported for follow-up without discarding an otherwise valid bundle.

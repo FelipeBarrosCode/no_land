@@ -8,6 +8,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use fs2::FileExt;
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -97,6 +98,12 @@ struct GotatunRuntimeStatus {
     engine: String,
     active: bool,
     pid: u32,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    process_start_ticks: u64,
+    #[serde(default)]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    boot_id: String,
     interface_name: String,
     config_path: String,
     #[serde(default)]
@@ -123,6 +130,7 @@ const LEGACY_LOCAL_CONFIG_NAME: &str = "nolandwg0.conf";
 const GOTATUN_RUNTIME_DIR_NAME: &str = "gotatun-runtime";
 const GOTATUN_STATUS_FILE_NAME: &str = "status.json";
 const GOTATUN_STOP_REQUEST_FILE_NAME: &str = "stop.request";
+const GOTATUN_LIFECYCLE_LOCK_FILE_NAME: &str = "lifecycle.lock";
 const GOTATUN_HELPER_READY_TIMEOUT_SECS: u64 = 30;
 const GOTATUN_HELPER_STOP_TIMEOUT_SECS: u64 = 15;
 static ACTIVE_GOTATUN_STATUS_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
@@ -246,6 +254,44 @@ fn gotatun_runtime_dir(config_path: &Path) -> PathBuf {
     root.join(GOTATUN_RUNTIME_DIR_NAME)
 }
 
+fn gotatun_lifecycle_lock_path(config_path: &Path) -> PathBuf {
+    gotatun_runtime_dir(config_path)
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(GOTATUN_LIFECYCLE_LOCK_FILE_NAME)
+}
+
+fn acquire_gotatun_lifecycle_lock(config_path: &Path) -> AppResult<std::fs::File> {
+    let lock_path = gotatun_lifecycle_lock_path(config_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            AppError::Command(format!(
+                "Failed creating managed tunnel lifecycle directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed opening managed tunnel lifecycle lock {}: {error}",
+                lock_path.display()
+            ))
+        })?;
+    file.try_lock_exclusive().map_err(|error| {
+        AppError::Command(format!(
+            "Another Noland process is already changing the managed tunnel (lock: {}, error: {error}). Wait for that operation to finish and retry.",
+            lock_path.display()
+        ))
+    })?;
+    Ok(file)
+}
+
 fn legacy_gotatun_runtime_dirs(config_path: &Path) -> Vec<PathBuf> {
     let Some(root) = wireguard_root_from_config_path(config_path) else {
         return Vec::new();
@@ -319,6 +365,24 @@ fn linux_process_state(stat: &str) -> Option<char> {
     stat.rsplit_once(") ")?.1.chars().next()
 }
 
+#[cfg(any(target_os = "linux", test))]
+fn linux_process_start_ticks(stat: &str) -> Option<u64> {
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+#[cfg(target_os = "linux")]
+fn linux_boot_id() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 fn process_is_alive(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -379,6 +443,27 @@ fn process_is_alive(pid: u32) -> bool {
 
     #[allow(unreachable_code)]
     false
+}
+
+fn process_matches_gotatun_status(status: &GotatunRuntimeStatus) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", status.pid)) else {
+            return false;
+        };
+        if linux_process_state(&stat).is_some_and(|state| matches!(state, 'Z' | 'X' | 'x')) {
+            return false;
+        }
+        if status.process_start_ticks != 0
+            && linux_process_start_ticks(&stat) != Some(status.process_start_ticks)
+        {
+            return false;
+        }
+        if !status.boot_id.is_empty() && status.boot_id != linux_boot_id() {
+            return false;
+        }
+    }
+    process_is_alive(status.pid)
 }
 
 fn config_fingerprint(config_path: &Path) -> AppResult<String> {
@@ -655,10 +740,7 @@ fn wait_for_managed_gotatun_start(
 }
 
 #[cfg(target_os = "linux")]
-fn force_stop_managed_gotatun_in_runtime(
-    runtime_dir: &Path,
-    initial_status: &GotatunRuntimeStatus,
-) -> AppResult<()> {
+fn run_elevated_gotatun_cleanup(runtime_dir: &Path, pid: Option<u32>) -> AppResult<()> {
     let helper = resolve_noland_net_helper_binary()?;
     if !OsDetection::new().command_exists("pkexec") {
         return Err(AppError::Command(
@@ -668,36 +750,57 @@ fn force_stop_managed_gotatun_in_runtime(
     }
 
     info!(
-        pid = initial_status.pid,
+        pid = pid.unwrap_or_default(),
         runtime = %runtime_dir.display(),
-        "Graceful managed GotaTun shutdown timed out; requesting elevated legacy-helper cleanup"
+        "Requesting elevated managed GotaTun owner and network cleanup"
     );
-    let status = Command::new("pkexec")
+    let output = Command::new("pkexec")
         .arg(helper)
         .arg("stop")
         .arg("--state-dir")
         .arg(runtime_dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
         .map_err(|error| {
             AppError::Command(format!(
-                "Failed launching elevated cleanup for managed GotaTun helper PID {}: {error}",
-                initial_status.pid
+                "Failed launching elevated managed GotaTun cleanup{}: {error}",
+                pid.map(|pid| format!(" for helper PID {pid}"))
+                    .unwrap_or_default()
             ))
         })?;
-    if !status.success() {
+    if !output.status.success() {
         return Err(AppError::Command(format!(
-            "Elevated cleanup for managed GotaTun helper PID {} exited with status {status}",
-            initial_status.pid
+            "Elevated managed GotaTun cleanup{} exited with status {}: {}",
+            pid.map(|pid| format!(" for helper PID {pid}"))
+                .unwrap_or_default(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
+    Ok(())
+}
 
-    if process_is_alive(initial_status.pid) {
+#[cfg(target_os = "linux")]
+fn force_stop_managed_gotatun_in_runtime(
+    runtime_dir: &Path,
+    initial_status: &GotatunRuntimeStatus,
+) -> AppResult<()> {
+    run_elevated_gotatun_cleanup(runtime_dir, Some(initial_status.pid))?;
+
+    if process_matches_gotatun_status(initial_status) {
+        #[cfg(target_os = "linux")]
+        let process_state = std::fs::read_to_string(format!("/proc/{}/stat", initial_status.pid))
+            .ok()
+            .and_then(|stat| linux_process_state(&stat))
+            .map(|state| state.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(not(target_os = "linux"))]
+        let process_state = "unknown".to_string();
         return Err(AppError::Timeout(format!(
-            "Managed GotaTun helper PID {} remained active after elevated cleanup. Restart the computer once to clear this legacy helper.",
-            initial_status.pid
+            "Managed GotaTun helper PID {} remained active after elevated cleanup (state={}, start_ticks={}). If state is D, Linux is waiting on an uninterruptible kernel operation and a reboot may be required; otherwise retry cleanup.",
+            initial_status.pid, process_state, initial_status.process_start_ticks
         )));
     }
 
@@ -716,10 +819,17 @@ fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> 
         let _ = std::fs::remove_file(gotatun_stop_request_path_in_runtime(runtime_dir));
         return Ok(());
     };
-    if !process_is_alive(initial_status.pid) {
-        let _ = std::fs::remove_file(gotatun_stop_request_path_in_runtime(runtime_dir));
-        let _ = std::fs::remove_file(&status_path);
-        return Ok(());
+    if !process_matches_gotatun_status(&initial_status) {
+        #[cfg(target_os = "linux")]
+        {
+            return force_stop_managed_gotatun_in_runtime(runtime_dir, &initial_status);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = std::fs::remove_file(gotatun_stop_request_path_in_runtime(runtime_dir));
+            let _ = std::fs::remove_file(&status_path);
+            return Ok(());
+        }
     }
 
     if let Err(error) = std::fs::write(gotatun_stop_request_path_in_runtime(runtime_dir), b"stop\n")
@@ -743,7 +853,7 @@ fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> 
 
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(GOTATUN_HELPER_STOP_TIMEOUT_SECS) {
-        if !process_is_alive(initial_status.pid) {
+        if !process_matches_gotatun_status(&initial_status) {
             let _ = std::fs::remove_file(gotatun_stop_request_path_in_runtime(runtime_dir));
             let _ = std::fs::remove_file(&status_path);
             return Ok(());
@@ -764,7 +874,14 @@ fn request_managed_gotatun_stop_in_runtime(runtime_dir: &Path) -> AppResult<()> 
 }
 
 fn request_managed_gotatun_stop(config_path: &Path) -> AppResult<()> {
-    request_managed_gotatun_stop_in_runtime(&gotatun_runtime_dir(config_path))
+    let runtime_dir = gotatun_runtime_dir(config_path);
+    #[cfg(target_os = "linux")]
+    if runtime_dir.exists()
+        && load_gotatun_runtime_status(&gotatun_status_path_in_runtime(&runtime_dir)).is_none()
+    {
+        return run_elevated_gotatun_cleanup(&runtime_dir, None);
+    }
+    request_managed_gotatun_stop_in_runtime(&runtime_dir)
 }
 
 fn windows_dev_auto_repair_tunnel_enabled() -> bool {
@@ -783,6 +900,7 @@ fn stop_legacy_managed_gotatun_helpers(config_path: &Path) -> AppResult<()> {
 }
 
 fn replace_managed_gotatun_tunnel(config_path: &Path, success_message: &str) -> AppResult<String> {
+    let _lifecycle_lock = acquire_gotatun_lifecycle_lock(config_path)?;
     info!(
         config = %config_path.display(),
         "Preparing managed GotaTun tunnel replacement"
@@ -827,6 +945,7 @@ fn reconnect_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
 }
 
 fn teardown_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
+    let _lifecycle_lock = acquire_gotatun_lifecycle_lock(config_path)?;
     remember_active_gotatun_config(config_path);
     stop_legacy_managed_gotatun_helpers(config_path)?;
     request_managed_gotatun_stop(config_path)?;
@@ -837,16 +956,14 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
     let expected = load_expected_local_tunnel(config_path)?;
     let expected_fingerprint = config_fingerprint(config_path)?;
-    let auto_repair = windows_dev_auto_repair_tunnel_enabled();
+    let auto_repair = cfg!(target_os = "linux") || windows_dev_auto_repair_tunnel_enabled();
     let repair_stale_runtime = |reason: &str| -> AppResult<String> {
         if auto_repair {
             info!(
-                "Windows dev mode auto-repairing managed GotaTun runtime for {}: {}",
+                "Auto-repairing managed GotaTun runtime for {}: {}",
                 config_path.display(),
                 reason
             );
-            stop_legacy_managed_gotatun_helpers(config_path)?;
-            request_managed_gotatun_stop(config_path)?;
             return reconnect_managed_gotatun_tunnel(config_path);
         }
         Err(AppError::Command(reason.to_string()))
@@ -861,7 +978,7 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
         }
     };
     let status_age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
-    if !status.active || status_age > 5 {
+    if !status.active || status_age > 5 || !process_matches_gotatun_status(&status) {
         return repair_stale_runtime(&format!(
             "The managed GotaTun helper is not actively reporting (pid={}, status_age={}s). Use Reconnect to replace stale runtime state.",
             status.pid, status_age
@@ -2694,7 +2811,8 @@ mod tests {
 
     use super::{
         build_windows_tunnel_launch_script, gotatun_runtime_dir, has_recent_handshake,
-        linux_process_state, windows_command_line_quote, GOTATUN_RUNTIME_DIR_NAME,
+        linux_process_start_ticks, linux_process_state, windows_command_line_quote,
+        GOTATUN_RUNTIME_DIR_NAME,
     };
 
     #[test]
@@ -2708,6 +2826,12 @@ mod tests {
             Some('Z')
         );
         assert_eq!(linux_process_state("invalid"), None);
+        assert_eq!(
+            linux_process_start_ticks(
+                "8604 (helper ) name) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 4242"
+            ),
+            Some(4242)
+        );
     }
 
     #[test]

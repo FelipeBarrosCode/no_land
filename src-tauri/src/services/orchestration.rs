@@ -2511,10 +2511,6 @@ async fn wait_for_ssh_acceptance(
 ) -> AppResult<()> {
     ensure_private_key_path_exists(Path::new(&remote.private_key_path))?;
 
-    let app_data_dir = context.state_store.path().parent().ok_or_else(|| {
-        AppError::State("Could not resolve app data directory from state file path".to_string())
-    })?;
-
     let passphrase = {
         let state = context.state.read().await;
         state.credentials.app_password.clone()
@@ -2531,7 +2527,8 @@ async fn wait_for_ssh_acceptance(
         .load_key_into_agent(Path::new(&remote.private_key_path), &passphrase)
         .await?;
 
-    let mut regenerated_after_auth_failure = false;
+    let mut resynced_after_auth_failure = false;
+    let mut key_sync_warning = None;
 
     for attempt in 1..=context.config.ssh_connect_probe_attempts {
         if context.cancel_requested.load(Ordering::SeqCst) {
@@ -2552,40 +2549,49 @@ async fn wait_for_ssh_acceptance(
         }
 
         if looks_like_ssh_auth_failure(&probe.stderr) {
-            if !regenerated_after_auth_failure {
+            if !resynced_after_auth_failure {
                 emit_transition(
                     app,
                     context,
                     OrchestrationState::UploadingSshKeyToVast,
-                    "SSH auth failed; regenerating and re-syncing key",
+                    "SSH auth failed; re-attaching the existing managed key",
                     Some(format!(
-                        "Attempt {attempt}/{}; detected auth failure, rotating key once",
+                        "Attempt {attempt}/{}; preserving the private key and syncing its verified public key",
                         context.config.ssh_connect_probe_attempts
                     )),
                     false,
                 )
                 .await;
 
-                let (new_key_paths, uploaded) = ssh_service
-                    .regenerate_and_upload_public_key(app_data_dir, vast)
+                let public_key_path = {
+                    let state = context.state.read().await;
+                    PathBuf::from(&state.ssh.public_key_path)
+                };
+                let public_key = fs::read_to_string(&public_key_path).map_err(|error| {
+                    AppError::State(format!(
+                        "Could not read verified managed SSH public key {}: {error}",
+                        public_key_path.display()
+                    ))
+                })?;
+                let uploaded = ssh_service
+                    .upload_public_key_if_missing(vast, &public_key_path)
                     .await?;
-
+                if let Err(error) = vast.attach_ssh_key(instance_id, public_key.trim()).await {
+                    warn!(
+                        instance_id,
+                        error = %error,
+                        "Could not attach managed SSH key directly to instance"
+                    );
+                    key_sync_warning = Some(error.to_string());
+                }
                 context
                     .update_state(|state| {
-                        state.ssh.private_key_path =
-                            new_key_paths.private_key_path.display().to_string();
-                        state.ssh.public_key_path =
-                            new_key_paths.public_key_path.display().to_string();
                         state.ssh.uploaded_to_vast = uploaded || state.ssh.uploaded_to_vast;
                         state.last_error = None;
                     })
                     .await?;
 
-                ssh_service
-                    .load_key_into_agent(new_key_paths.private_key_path.as_path(), &passphrase)
-                    .await?;
-
-                regenerated_after_auth_failure = true;
+                resynced_after_auth_failure = true;
 
                 if attempt < context.config.ssh_connect_probe_attempts {
                     sleep(context.config.ssh_connect_probe_interval).await;
@@ -2593,11 +2599,21 @@ async fn wait_for_ssh_acceptance(
                 }
             }
 
+            if attempt < context.config.ssh_connect_probe_attempts {
+                sleep(context.config.ssh_connect_probe_interval).await;
+                continue;
+            }
+
+            let sync_details = key_sync_warning
+                .as_deref()
+                .map(|warning| format!(" Direct instance key attachment also failed: {warning}."))
+                .unwrap_or_default();
             return Err(AppError::Provisioning(format!(
-                "SSH authentication failed for {}@{}:{} after key re-sync. Retrying will not help until credentials/instance SSH key state is fixed. stderr: {}",
+                "SSH authentication failed for {}@{}:{} after safely re-syncing the existing key. The private key was preserved. Vast VM keys cannot be replaced after creation, so this instance may need to be destroyed and recreated with the current managed key.{} stderr: {}",
                 remote.ssh_user,
                 remote.ssh_host,
                 remote.ssh_port,
+                sync_details,
                 probe.stderr.trim()
             )));
         }
