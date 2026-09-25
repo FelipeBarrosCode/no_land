@@ -119,8 +119,17 @@ fn find_state_agent_source_dir() -> AppResult<PathBuf> {
         "usr/lib/noland-connect/resources/state-agent",
         "usr/lib/noland-connect/resources/_up_/state-agent",
         "usr/lib/noland-connect/_up_/state-agent",
+        "usr/lib/Noland Connect/resources/state-agent",
+        "usr/lib/Noland Connect/resources/_up_/state-agent",
+        "usr/lib/Noland Connect/_up_/state-agent",
         "lib/noland-connect/resources/state-agent",
         "lib/noland-connect/resources/_up_/state-agent",
+        "lib/noland-connect/_up_/state-agent",
+        "lib/Noland Connect/resources/state-agent",
+        "lib/Noland Connect/resources/_up_/state-agent",
+        "lib/Noland Connect/_up_/state-agent",
+        ".local/lib/Noland Connect/_up_/state-agent",
+        ".local/lib/noland-connect/_up_/state-agent",
     ];
 
     for seed in state_agent_source_search_seeds() {

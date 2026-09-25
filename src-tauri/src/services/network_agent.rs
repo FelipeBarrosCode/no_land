@@ -378,8 +378,17 @@ fn find_network_agent_source_dir() -> AppResult<PathBuf> {
         "usr/lib/noland-connect/resources/network-agent",
         "usr/lib/noland-connect/resources/_up_/network-agent",
         "usr/lib/noland-connect/_up_/network-agent",
+        "usr/lib/Noland Connect/resources/network-agent",
+        "usr/lib/Noland Connect/resources/_up_/network-agent",
+        "usr/lib/Noland Connect/_up_/network-agent",
         "lib/noland-connect/resources/network-agent",
         "lib/noland-connect/resources/_up_/network-agent",
+        "lib/noland-connect/_up_/network-agent",
+        "lib/Noland Connect/resources/network-agent",
+        "lib/Noland Connect/resources/_up_/network-agent",
+        "lib/Noland Connect/_up_/network-agent",
+        ".local/lib/Noland Connect/_up_/network-agent",
+        ".local/lib/noland-connect/_up_/network-agent",
     ];
 
     for seed in network_agent_source_search_seeds() {
