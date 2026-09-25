@@ -58,3 +58,9 @@ src-tauri/platform/*
 *.pdb
 *.ilk
 *.dmp
+/scratch.py
+/silly
+/*.exp
+/*.tar.gz
+diagnostic-reports/
+
