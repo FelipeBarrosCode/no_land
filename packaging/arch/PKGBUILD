@@ -1,0 +1,33 @@
+# Maintainer: Felipe Barros Moura <contact@no-land.net>
+# Contributor: Shidox <https://github.com/Shidohs>
+pkgname=noland-connect-bin
+pkgver=0.1.8
+pkgrel=1
+pkgdesc="Cloud gaming platform that provisions GPU-powered Linux PCs on demand (Vast.ai + Sunshine/Moonlight)"
+arch=('x86_64')
+url="https://no-land.net"
+license=('GPL-3.0-only')
+depends=(
+    'gstreamer'
+    'gst-plugins-base'
+    'gst-plugins-good'
+    'gst-plugins-bad'
+    'webkit2gtk-4.1'
+    'openssl'
+    'wireguard-tools'
+    'openssh'
+)
+provides=('noland-connect')
+conflicts=('noland-connect')
+source=("https://github.com/FelipeBarrosCode/no_land/releases/download/v${pkgver}/Noland.Connect_${pkgver}_amd64.deb")
+sha256sums=('SKIP')
+
+package() {
+    # Extract data archive from deb package
+    ar p "Noland.Connect_${pkgver}_amd64.deb" data.tar.zst | bsdtar -xf - -C "${pkgdir}"
+
+    # Ensure executable permissions for binaries
+    chmod +x "${pkgdir}/usr/bin/noland-connect"
+    chmod +x "${pkgdir}/usr/bin/noland-mic-sender"
+    chmod +x "${pkgdir}/usr/bin/noland-net-helper"
+}

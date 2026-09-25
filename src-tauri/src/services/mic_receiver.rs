@@ -247,6 +247,14 @@ fn find_receiver_source_dir() -> AppResult<PathBuf> {
         "../resources/_up_/vm-cloud-mic-agent",
         "usr/lib/noland-connect/resources/vm-cloud-mic-agent",
         "usr/lib/noland-connect/resources/_up_/vm-cloud-mic-agent",
+        "usr/lib/Noland Connect/resources/vm-cloud-mic-agent",
+        "usr/lib/Noland Connect/resources/_up_/vm-cloud-mic-agent",
+        "lib/noland-connect/resources/vm-cloud-mic-agent",
+        "lib/noland-connect/resources/_up_/vm-cloud-mic-agent",
+        "lib/Noland Connect/resources/vm-cloud-mic-agent",
+        "lib/Noland Connect/resources/_up_/vm-cloud-mic-agent",
+        ".local/lib/Noland Connect/_up_/vm-cloud-mic-agent",
+        ".local/lib/noland-connect/_up_/vm-cloud-mic-agent",
     ];
 
     for seed in receiver_source_search_seeds() {
