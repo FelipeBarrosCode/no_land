@@ -12,7 +12,7 @@
 
 **GPU orchestration · automated provisioning · low-latency streaming · networking · remote storage**
 
-[Website](https://no-land.net) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Configuration](docs/configuration.md)
+[Website](https://no-land.net) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Configuration](docs/configuration.md) · [Discord](https://discord.gg/yafxvA6EBR)
 
 </div>
 
