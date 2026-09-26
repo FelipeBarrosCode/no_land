@@ -1,4 +1,5 @@
 pub mod desktop_input;
+pub mod performance_overlay;
 pub mod window;
 
 pub use desktop_input::{

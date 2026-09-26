@@ -60,7 +60,9 @@ use crate::{
             NolandLatencyConfigPatch, PairingStatus, SessionState, StreamPreferences,
             StreamPreferencesPatch,
         },
-        infrastructure::gamestream::ReqwestGameStreamHttpClient,
+        infrastructure::{
+            gamestream::ReqwestGameStreamHttpClient, persistence::MoonlightStateRepository,
+        },
         platform::{
             activate_native_stream_input, close_stream_window, create_or_reuse_stream_window,
             deactivate_native_stream_input, install_native_stream_input,
@@ -1272,6 +1274,79 @@ async fn schedule_microphone_for_game_stream(
     });
 }
 
+async fn prepare_performance_overlay(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: &str,
+    preferences: &mut StreamPreferences,
+) -> Result<(), FrontendError> {
+    let default_enabled = context
+        .state
+        .read()
+        .await
+        .moonlight_preferences
+        .showperfoverlay
+        != 0;
+    if let Ok(mut active) = moonlight.performance_overlay.lock() {
+        let configuration = moonlight.repository.snapshot().unwrap_or_else(|error| {
+            warn!(%error, "Performance overlay preference unavailable; using the global default");
+            crate::moonlight::domain::MoonlightConfiguration::default()
+        });
+        let enabled = crate::moonlight::platform::performance_overlay::preference(
+            &configuration,
+            host_id,
+            default_enabled,
+        );
+        preferences.window.show_statistics = enabled;
+        *active = Some((host_id.to_owned(), enabled));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_instance_performance_overlay(
+    app: AppHandle,
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+    instance_id: u64,
+    enabled: bool,
+) -> Result<bool, FrontendError> {
+    let state = context.load_state().await;
+    let host_id = state
+        .provisioned_servers
+        .iter()
+        .find(|server| server.instance_id == instance_id)
+        .map(|server| server.embedded_moonlight_host_id.clone())
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| embedded_moonlight_host_id(instance_id));
+    let mut active = moonlight.performance_overlay.lock().map_err(|_| {
+        moonlight_frontend_error(crate::moonlight::domain::MoonlightError::Persistence(
+            "overlay state lock poisoned".into(),
+        ))
+    })?;
+    moonlight
+        .repository
+        .update(|configuration| {
+            crate::moonlight::platform::performance_overlay::set_preference(
+                configuration,
+                &host_id,
+                enabled,
+            );
+            Ok(())
+        })
+        .map_err(moonlight_frontend_error)?;
+    if let Some((active_host, visible)) = active.as_mut() {
+        if *active_host == host_id {
+            *visible = enabled;
+        }
+    }
+    let _ = app.emit(
+        "moonlight://overlay-changed",
+        serde_json::json!({"instanceId": instance_id, "enabled": enabled}),
+    );
+    Ok(enabled)
+}
+
 async fn start_embedded_stream_for_host(
     app: &AppHandle,
     context: &AppContext,
@@ -1284,7 +1359,7 @@ async fn start_embedded_stream_for_host(
         .map_err(moonlight_frontend_error)?;
     let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
         .map_err(moonlight_frontend_error)?;
-    let prepared = match moonlight_launch::start_stream_request(
+    let mut prepared = match moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
         &client,
@@ -1330,6 +1405,7 @@ async fn start_embedded_stream_for_host(
         Err(error) => return Err(moonlight_frontend_error(error)),
     };
 
+    prepare_performance_overlay(context, moonlight, &host_id, &mut prepared.preferences).await?;
     moonlight
         .input
         .set_mouse_mode(match prepared.preferences.input.mouse_mode {
@@ -2429,6 +2505,13 @@ pub async fn get_rented_instances(
     };
 
     let state = context.state.read().await.clone();
+    let overlay_configuration = moonlight
+        .repository
+        .snapshot()
+        .unwrap_or_else(|error| {
+            warn!(%error, "Moonlight configuration unavailable while listing instances; overlay defaults apply");
+            crate::moonlight::domain::MoonlightConfiguration::default()
+        });
     let mut instances = instances_source
         .into_iter()
         .filter(|instance| {
@@ -2451,6 +2534,12 @@ pub async fn get_rented_instances(
                 &host_id,
             ));
             RentedInstanceSummary {
+                performance_overlay_enabled:
+                    crate::moonlight::platform::performance_overlay::preference(
+                        &overlay_configuration,
+                        &host_id,
+                        state.moonlight_preferences.showperfoverlay != 0,
+                    ),
                 instance_id: instance.id,
                 label: if instance.label.is_empty() {
                     format!("Instance {}", instance.id)
@@ -4883,7 +4972,7 @@ pub async fn moonlight_start_stream(
         .map_err(moonlight_frontend_error)?;
     let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
         .map_err(moonlight_frontend_error)?;
-    let prepared = moonlight_launch::start_stream_request(
+    let mut prepared = moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
         &client,
@@ -4895,6 +4984,13 @@ pub async fn moonlight_start_stream(
     .await
     .map_err(moonlight_frontend_error)?;
 
+    prepare_performance_overlay(
+        context.inner(),
+        moonlight.inner(),
+        &input.host_id,
+        &mut prepared.preferences,
+    )
+    .await?;
     moonlight
         .input
         .set_mouse_mode(match prepared.preferences.input.mouse_mode {
@@ -5327,7 +5423,9 @@ pub async fn moonlight_update_host_latency_preferences(
                 overrides.latency = Some(latency_patch);
                 host.preferences_override = Some(overrides);
             } else {
-                host.preferences_override = None;
+                if let Some(overrides) = host.preferences_override.as_mut() {
+                    overrides.latency = None;
+                }
             }
             Ok(host.clone())
         },

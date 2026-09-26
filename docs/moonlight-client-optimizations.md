@@ -71,7 +71,8 @@ vsyncEnabled
 
 Safety defaults:
 
-- telemetry: enabled only in debug builds;
+- telemetry: the persisted diagnostic default remains debug-only; the embedded
+  runtime now collects bounded frame timings during streaming for live performance-overlay toggles;
 - adaptive late drop: off;
 - adaptive GameStream packet sizing: off pending live path/impairment validation;
 - adaptive decoder/back-pressure policy: off;
@@ -103,7 +104,9 @@ The native collector owns a fixed 1,200-record ring (five seconds at 240 FPS). E
 
 The collector samples upstream RTP/FEC counters at the existing 250 ms Rust polling cadence. Lightweight network sampling remains active when the optional per-frame timing ring is disabled. Unsigned subtraction provides wrap-safe interval deltas. No packet or frame JSON is created in the hot path. The existing video-frame event no longer formats a per-frame string and remains coalesced in the fixed 64-event native ring.
 
-The stream window listens to aggregate `moonlight://statistics` events. The diagnostic panel appears when native timing telemetry or adaptive packet sizing is active. It shows stream/display rates, pacing, queues, decode/render dwell, RTP/FEC deltas, local drop reasons, back-pressure, smoothing budget, reconnect totals, path classification/MTU hint, controller state/confidence, and selected packet size.
+Aggregate `moonlight://statistics` events remain available to frontend consumers.
+The live native stream window now uses the per-instance [performance overlay](./performance-overlay.md).
+The older React diagnostic panel is a prototype and is not mounted by the native window.
 
 `renderSubmitTimeUs` means the platform's render submission point (`Present`, GDI submission, pre-sink buffer, or AV sample-layer enqueue). It is not labeled scanout time.
 

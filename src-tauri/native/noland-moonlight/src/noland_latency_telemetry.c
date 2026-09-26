@@ -109,6 +109,11 @@ void nl_latency_telemetry_reset(nl_latency_telemetry_t* telemetry, bool enabled,
       ? ((uint64_t)telemetry->smoothing_queue_capacity * 1000000ULL) / stream_fps
       : 0U;
   telemetry->pending_core_video_frames = -1;
+  telemetry->performance.decoded_fps = -1;
+  telemetry->performance.host_processing_ms = -1;
+  telemetry->performance.reassembly_ms = -1;
+  telemetry->performance.decode_ms = -1;
+  telemetry->performance.render_queue_ms = -1;
   nl_telemetry_unlock(telemetry);
 }
 
@@ -119,6 +124,28 @@ void nl_latency_telemetry_record_decode_submit(nl_latency_telemetry_t* telemetry
   }
   nl_telemetry_lock(telemetry);
   record = &telemetry->records[telemetry->next_record];
+  if (telemetry->performance_started_us == 0U) telemetry->performance_started_us = now_us;
+  telemetry->received_frames++;
+  if (frame->full_length > 0) telemetry->received_bytes += (uint64_t)frame->full_length;
+  if (telemetry->has_previous_frame) {
+    uint32_t delta = (uint32_t)frame->frame_number - telemetry->previous_frame_number;
+    /* Ignore duplicate/out-of-order frames; subtraction also handles wrap. */
+    if (delta > 0U && delta < 0x80000000U) {
+      telemetry->missing_frames += delta - 1U;
+      telemetry->previous_frame_number = (uint32_t)frame->frame_number;
+    }
+  } else {
+    telemetry->has_previous_frame = 1U;
+    telemetry->previous_frame_number = (uint32_t)frame->frame_number;
+  }
+  if (frame->host_processing_latency != 0U) {
+    telemetry->host_total += frame->host_processing_latency;
+    telemetry->host_samples++;
+  }
+  if (frame->receive_time_us != 0U && frame->enqueue_time_us >= frame->receive_time_us) {
+    telemetry->reassembly_total += frame->enqueue_time_us - frame->receive_time_us;
+    telemetry->reassembly_samples++;
+  }
   memset(record, 0, sizeof(*record));
   record->frame_number = (uint32_t)frame->frame_number;
   record->host_processing_latency_tenth_ms = frame->host_processing_latency;
@@ -155,6 +182,14 @@ void nl_latency_telemetry_record_decoder_output(nl_latency_telemetry_t* telemetr
   nl_telemetry_lock(telemetry);
   record = nl_find_record_locked(telemetry, presentation_time_us);
   if (record != NULL) {
+    if ((record->validity & NL_FRAME_TIMING_VALID_DECODER_OUTPUT_TIME) == 0U) {
+      telemetry->decoded_frames++;
+      telemetry->has_decoder_output = 1U;
+      if ((record->validity & NL_FRAME_TIMING_VALID_DECODER_SUBMIT_TIME) != 0U && now_us >= record->decoder_submit_time_us) {
+        telemetry->decode_total += now_us - record->decoder_submit_time_us;
+        telemetry->decode_samples++;
+      }
+    }
     record->decoder_output_time_us = now_us;
     record->render_queue_depth_at_output = render_queue_depth;
     record->decoder_back_pressured = backpressured ? 1U : 0U;
@@ -175,12 +210,18 @@ void nl_latency_telemetry_record_render_submit(nl_latency_telemetry_t* telemetry
   nl_telemetry_lock(telemetry);
   record = nl_find_record_locked(telemetry, presentation_time_us);
   if (record != NULL) {
+    if ((record->validity & NL_FRAME_TIMING_VALID_RENDER_SUBMIT_TIME) == 0U &&
+        (record->validity & NL_FRAME_TIMING_VALID_DECODER_OUTPUT_TIME) != 0U && now_us >= record->decoder_output_time_us) {
+      telemetry->dwell_total += now_us - record->decoder_output_time_us;
+      telemetry->dwell_samples++;
+    }
     record->render_submit_time_us = now_us;
     if (now_us != 0U) {
       record->validity |= NL_FRAME_TIMING_VALID_RENDER_SUBMIT_TIME;
     }
   }
   telemetry->rendered_frame_count += 1U;
+  telemetry->submitted_frames++;
   nl_telemetry_unlock(telemetry);
 }
 
@@ -383,6 +424,34 @@ void nl_latency_telemetry_snapshot(nl_latency_telemetry_t* telemetry, nl_latency
   output->configured_pacing_mode = telemetry->configured_pacing_mode;
   output->effective_pacing_mode = telemetry->effective_pacing_mode;
   output->ring_count = (uint32_t)telemetry->record_count;
+  nl_telemetry_unlock(telemetry);
+}
+
+void nl_latency_telemetry_performance(nl_latency_telemetry_t* telemetry, uint64_t now_us, nl_performance_stats_t* output) {
+  nl_telemetry_lock(telemetry);
+  if (telemetry->performance_started_us != 0U && now_us >= telemetry->performance_started_us &&
+      now_us - telemetry->performance_started_us >= 1000000U) {
+    double seconds = (double)(now_us - telemetry->performance_started_us) / 1000000.0;
+    uint64_t total = telemetry->received_frames + telemetry->missing_frames;
+    telemetry->performance.incoming_fps = telemetry->received_frames / seconds;
+    telemetry->performance.decoded_fps = telemetry->has_decoder_output ? telemetry->decoded_frames / seconds : -1;
+    telemetry->performance.submitted_fps = telemetry->submitted_frames / seconds;
+    telemetry->performance.video_mbps = telemetry->received_bytes * 8.0 / seconds / 1000000.0;
+    telemetry->performance.missing_frames_percent = total ? telemetry->missing_frames * 100.0 / total : 0;
+    telemetry->performance.host_processing_ms = telemetry->host_samples ? telemetry->host_total / (10.0 * telemetry->host_samples) : -1;
+    telemetry->performance.reassembly_ms = telemetry->reassembly_samples ? telemetry->reassembly_total / (1000.0 * telemetry->reassembly_samples) : -1;
+    telemetry->performance.decode_ms = telemetry->decode_samples ? telemetry->decode_total / (1000.0 * telemetry->decode_samples) : -1;
+    telemetry->performance.render_queue_ms = telemetry->dwell_samples ? telemetry->dwell_total / (1000.0 * telemetry->dwell_samples) : -1;
+    telemetry->performance.samples = (uint32_t)telemetry->received_frames;
+    telemetry->received_frames = telemetry->decoded_frames = telemetry->submitted_frames = 0;
+    telemetry->received_bytes = telemetry->missing_frames = 0;
+    telemetry->host_total = telemetry->host_samples = 0;
+    telemetry->reassembly_total = telemetry->reassembly_samples = 0;
+    telemetry->decode_total = telemetry->decode_samples = 0;
+    telemetry->dwell_total = telemetry->dwell_samples = 0;
+    telemetry->performance_started_us = now_us;
+  }
+  *output = telemetry->performance;
   nl_telemetry_unlock(telemetry);
 }
 

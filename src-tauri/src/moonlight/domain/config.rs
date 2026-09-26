@@ -37,6 +37,9 @@ pub struct MoonlightConfiguration {
     pub defaults: StreamPreferences,
     #[serde(default)]
     pub hosts: BTreeMap<String, PersistedHost>,
+    /// Preferences selected from a card before the streaming host is registered.
+    #[serde(default)]
+    pub pending_statistics: BTreeMap<String, bool>,
     pub last_selected_host_id: Option<String>,
 }
 
@@ -47,6 +50,7 @@ impl Default for MoonlightConfiguration {
             identity: None,
             defaults: StreamPreferences::default(),
             hosts: BTreeMap::new(),
+            pending_statistics: BTreeMap::new(),
             last_selected_host_id: None,
         }
     }

@@ -67,6 +67,9 @@ void nl_video_renderer_platform_start(nl_video_renderer_t* renderer);
 void nl_video_renderer_platform_stop(nl_video_renderer_t* renderer);
 void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer);
 int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame);
+void nl_video_renderer_platform_set_overlay_text(nl_video_renderer_t* renderer, const char* text);
+
+void nl_video_renderer_set_overlay_text(nl_video_renderer_t* renderer, const char* text);
 
 #ifdef __cplusplus
 }

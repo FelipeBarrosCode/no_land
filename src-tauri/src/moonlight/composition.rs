@@ -28,6 +28,7 @@ pub async fn bootstrap_default_services(
 }
 
 pub struct MoonlightManager {
+    pub performance_overlay: Arc<Mutex<Option<(String, bool)>>>,
     pub repository: Arc<JsonMoonlightStateRepository>,
     pub secret_store: Arc<dyn SecretStore>,
     pub pairing_sessions: PairingSessionStore,
@@ -45,6 +46,7 @@ impl MoonlightManager {
         let runtime = spawn_runtime_actor(app_data_dir.clone());
         let input = InputManager::new(runtime.clone());
         Self {
+            performance_overlay: Arc::new(Mutex::new(None)),
             repository: Arc::new(JsonMoonlightStateRepository::new(state_path)),
             secret_store: Arc::new(FileSecretStore::new(identity_dir)),
             pairing_sessions: PairingSessionStore::default(),

@@ -61,7 +61,16 @@ pub async fn register_host(
             pairing: None,
             server_info_cache: None,
             apps_cache: None,
-            preferences_override: None,
+            preferences_override: configuration
+                .pending_statistics
+                .remove(&request.host_id)
+                .map(|enabled| super::super::domain::StreamPreferencesPatch {
+                    window: Some(super::super::domain::WindowPreferencesPatch {
+                        show_statistics: Some(enabled),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
             last_selected_app_id: None,
         };
 
@@ -244,6 +253,66 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(host.host_id, "host-1");
+    }
+
+    #[tokio::test]
+    async fn overlay_choice_survives_registration_restart_and_unrelated_preferences() {
+        use crate::moonlight::{
+            domain::NolandLatencyConfigPatch,
+            infrastructure::persistence::MoonlightStateRepository,
+            platform::performance_overlay::{preference, set_preference},
+        };
+        let path = temp_state_path("overlay-persistence");
+        let repo = JsonMoonlightStateRepository::new(path.clone());
+        repo.update(|configuration| {
+            set_preference(configuration, "instance-42", false);
+            Ok(())
+        })
+        .unwrap();
+        register_host(
+            &repo,
+            RegisterHostRequest {
+                host_id: "instance-42".into(),
+                display_name: "Test".into(),
+                addresses: HostAddresses {
+                    overlay: Some("10.77.0.1".into()),
+                    lan: None,
+                    external: None,
+                },
+                ports: HostPorts {
+                    http: 47989,
+                    https: None,
+                },
+                explicit_address_type: None,
+            },
+        )
+        .await
+        .unwrap();
+        repo.update(|configuration| {
+            let host = configuration.hosts.get_mut("instance-42").unwrap();
+            host.preferences_override.as_mut().unwrap().latency = Some(NolandLatencyConfigPatch {
+                adaptive_packet_size_enabled: Some(true),
+                ..Default::default()
+            });
+            set_preference(configuration, "instance-42", true);
+            Ok(())
+        })
+        .unwrap();
+        let restored = JsonMoonlightStateRepository::new(path).snapshot().unwrap();
+        assert!(preference(&restored, "instance-42", false));
+        assert!(restored.pending_statistics.is_empty());
+        assert_eq!(
+            restored.hosts["instance-42"]
+                .preferences_override
+                .as_ref()
+                .unwrap()
+                .latency
+                .as_ref()
+                .unwrap()
+                .adaptive_packet_size_enabled,
+            Some(true)
+        );
+        assert!(!preference(&restored, "instance-43", false));
     }
 
     #[tokio::test]

@@ -114,6 +114,35 @@ static void noland_macos_run_on_main_sync(dispatch_block_t block) {
 static const void *kNolandMacosStreamInputBridgeKey = &kNolandMacosStreamInputBridgeKey;
 static const void *kNolandMacosStreamContainerViewKey = &kNolandMacosStreamContainerViewKey;
 static BOOL kNolandDebugOverlayEnabled = NO;
+static const void *kNolandPerformanceOverlayKey = &kNolandPerformanceOverlayKey;
+
+// Called on the AppKit thread; CALayer does not intercept stream input.
+void noland_performance_overlay_update(void *handle, const char *text) {
+    NSView *view = (__bridge NSView *)handle;
+    if (view == nil || text == NULL) return;
+    CATextLayer *layer = objc_getAssociatedObject(view, kNolandPerformanceOverlayKey);
+    if (layer == nil && text[0] != '\0') {
+        layer = [CATextLayer layer];
+        layer.font = (__bridge CFTypeRef)[NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+        layer.fontSize = 12;
+        layer.foregroundColor = NSColor.whiteColor.CGColor;
+        layer.backgroundColor = [NSColor colorWithWhite:0.03 alpha:0.9].CGColor;
+        layer.cornerRadius = 5;
+        layer.zPosition = 10000;
+        layer.wrapped = YES;
+        [view.layer addSublayer:layer];
+        objc_setAssociatedObject(view, kNolandPerformanceOverlayKey, layer, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    if (layer == nil) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.hidden = text[0] == '\0';
+    layer.contentsScale = view.window.backingScaleFactor;
+    CGFloat height = MIN(250, MAX(0, NSHeight(view.bounds) - 24));
+    layer.frame = CGRectMake(12, MAX(12, NSHeight(view.bounds) - height - 12), MIN(570, MAX(0, NSWidth(view.bounds) - 24)), height);
+    layer.string = [NSString stringWithUTF8String:text];
+    [CATransaction commit];
+}
 static NSHashTable<NolandMacosStreamInputBridge *> *kNolandStreamInputBridges = nil;
 
 static NSHashTable<NolandMacosStreamInputBridge *> *noland_stream_input_bridges(void) {
