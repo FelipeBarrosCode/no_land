@@ -22,6 +22,7 @@ tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
 noland-rclone-adapter = { path = "../state-agent/crates/noland-rclone-adapter" }
+arboard = { version = "3.4", default-features = false }
 async-trait = "0.1.83"
 aes = "0.8.4"
 base64 = "0.22.1"
