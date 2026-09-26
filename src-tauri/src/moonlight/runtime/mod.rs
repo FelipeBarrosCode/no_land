@@ -45,6 +45,9 @@ pub enum RuntimeCommand {
     Stop {
         response: oneshot::Sender<Result<(), MoonlightError>>,
     },
+    /// Composites or clears the in-pipeline performance text (Linux).
+    #[cfg(target_os = "linux")]
+    SetOverlayText { text: String },
     AttachSurface {
         surface: NativeSurfaceDescriptor,
         response: oneshot::Sender<Result<(), MoonlightError>>,
@@ -119,6 +122,9 @@ pub enum RuntimeCommand {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatistics {
+    #[serde(skip)]
+    pub sampled_at: std::time::Instant,
+    pub performance: crate::moonlight::performance::PerformanceStatistics,
     pub state: String,
     pub start_count: u64,
     pub stop_count: u64,
@@ -484,6 +490,15 @@ impl MoonlightRuntimeHandle {
         self.statistics.borrow().clone()
     }
 
+    /// Replaces the platform-composited performance text. A no-op while idle.
+    #[cfg(target_os = "linux")]
+    pub async fn set_overlay_text(&self, text: String) -> Result<(), MoonlightError> {
+        self.commands
+            .send(RuntimeCommand::SetOverlayText { text })
+            .await
+            .map_err(|_| MoonlightError::Persistence("runtime actor is unavailable".to_string()))
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEventMessage> {
         self.events.subscribe()
     }
@@ -637,7 +652,8 @@ impl NativeRuntime {
             remote_input_aes_iv: request.remote_input_iv.map(|value| value as i8),
             session_generation: request.session_generation,
             latency_config: native::nl_latency_config_t {
-                telemetry_enabled: u8::from(request.preferences.latency.telemetry_enabled),
+                // Aggregate performance measurements must be ready for a live toggle.
+                telemetry_enabled: 1,
                 adaptive_late_frame_drop_enabled: u8::from(
                     request.preferences.latency.adaptive_late_frame_drop_enabled,
                 ),
@@ -873,6 +889,7 @@ impl NativeRuntime {
         let result = unsafe { native::nl_runtime_read_stats(self.raw, &mut output) };
         map_native_result(result, "nl_runtime_read_stats")?;
         Ok(NativeStats {
+            performance: unsafe { crate::moonlight::performance::read(self.raw) },
             state: output.state,
             start_count: output.start_count,
             stop_count: output.stop_count,
@@ -991,6 +1008,20 @@ impl NativeRuntime {
     }
 }
 
+impl NativeRuntime {
+    /// Replaces the Linux in-pipeline overlay text; a no-op on other platforms.
+    #[cfg(target_os = "linux")]
+    fn set_overlay_text(&self, text: &str) {
+        if self.raw.is_null() {
+            return;
+        }
+        let Ok(text) = std::ffi::CString::new(text) else {
+            return;
+        };
+        unsafe { native::nl_runtime_set_overlay_text(self.raw, text.as_ptr()) };
+    }
+}
+
 impl Drop for NativeRuntime {
     fn drop(&mut self) {
         if !self.raw.is_null() {
@@ -1002,6 +1033,7 @@ impl Drop for NativeRuntime {
 
 #[derive(Debug, Clone)]
 struct NativeStats {
+    performance: crate::moonlight::performance::PerformanceStatistics,
     state: native::nl_stream_state_t,
     start_count: u64,
     stop_count: u64,
@@ -1351,6 +1383,8 @@ fn runtime_statistics_from_native(
     let _ = stats.state;
     let controller_snapshot = packet_size_controller.map(AdaptivePacketSizeController::snapshot);
     RuntimeStatistics {
+        sampled_at: std::time::Instant::now(),
+        performance: stats.performance.clone(),
         state: session_state_label(state),
         start_count: stats.start_count,
         stop_count: stats.stop_count,
@@ -1619,6 +1653,8 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<RuntimeCommand>(32);
     let (state_tx, state_rx) = watch::channel(SessionState::Idle);
     let (stats_tx, stats_rx) = watch::channel(RuntimeStatistics {
+        sampled_at: std::time::Instant::now(),
+        performance: Default::default(),
         state: session_state_label(&SessionState::Idle),
         start_count: 0,
         stop_count: 0,
@@ -2287,6 +2323,10 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                         RuntimeCommand::GetState { response } => {
                             let _ = response.send(state.clone());
                         }
+                        #[cfg(target_os = "linux")]
+                        RuntimeCommand::SetOverlayText { text } => {
+                            native_runtime.set_overlay_text(&text);
+                        }
 
                     }
                 }
@@ -2324,6 +2364,9 @@ mod tests {
 
     #[test]
     fn handwritten_native_bindings_match_c_abi_sizes() {
+        assert_eq!(size_of::<native::nl_performance_stats_t>(), unsafe {
+            native::nl_sizeof_performance_stats()
+        });
         assert_eq!(size_of::<native::nl_start_request_t>(), unsafe {
             native::nl_sizeof_start_request()
         },);

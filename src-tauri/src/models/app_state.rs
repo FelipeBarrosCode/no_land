@@ -587,6 +587,8 @@ pub struct ServerPreferencesUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RentedInstanceSummary {
+    #[serde(default)]
+    pub performance_overlay_enabled: bool,
     pub instance_id: u64,
     pub label: String,
     pub status: String,

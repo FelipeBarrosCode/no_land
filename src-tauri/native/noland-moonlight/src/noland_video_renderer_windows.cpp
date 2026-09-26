@@ -28,6 +28,74 @@
 
 using Microsoft::WRL::ComPtr;
 
+// A click-through child surface stays above both the DXGI and GDI presenters.
+static LRESULT CALLBACK nl_performance_overlay_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
+  if (message == WM_NCHITTEST) return HTTRANSPARENT;
+  if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
+  if (message == WM_ERASEBKGND) return 1;
+  if (message == WM_PAINT) {
+    PAINTSTRUCT paint;
+    HDC dc = BeginPaint(hwnd, &paint);
+    RECT rect;
+    GetClientRect(hwnd, &rect);
+    HBRUSH background = CreateSolidBrush(RGB(8, 12, 22));
+    FillRect(dc, &rect, background);
+    DeleteObject(background);
+    SetTextColor(dc, RGB(240, 245, 255));
+    SetBkMode(dc, TRANSPARENT);
+    int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+    HFONT font = CreateFontW(-MulDiv(10, dpi, 72), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, FIXED_PITCH, L"Consolas");
+    HGDIOBJ old_font = SelectObject(dc, font);
+    wchar_t text[4096] = {};
+    GetWindowTextW(hwnd, text, 4096);
+    InflateRect(&rect, -10, -8);
+    DrawTextW(dc, text, -1, &rect, DT_LEFT | DT_TOP | DT_NOPREFIX);
+    SelectObject(dc, old_font);
+    DeleteObject(font);
+    EndPaint(hwnd, &paint);
+    return 0;
+  }
+  return DefWindowProcW(hwnd, message, wp, lp);
+}
+
+extern "C" void noland_performance_overlay_update(void* handle, const char* text) {
+  HWND parent = static_cast<HWND>(handle);
+  if (!IsWindow(parent) || text == nullptr) return;
+  const wchar_t* class_name = L"NoLandPerformanceOverlay";
+  HWND overlay = FindWindowExW(parent, nullptr, class_name, nullptr);
+  if (text[0] == '\0') {
+    if (overlay != nullptr) ShowWindow(overlay, SW_HIDE);
+    return;
+  }
+  if (overlay == nullptr) {
+    WNDCLASSW window_class = {};
+    window_class.lpfnWndProc = nl_performance_overlay_proc;
+    window_class.hInstance = GetModuleHandleW(nullptr);
+    window_class.lpszClassName = class_name;
+    RegisterClassW(&window_class);
+    overlay = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
+                             class_name, L"", WS_CHILD, 12, 12, 640, 310,
+                             parent, nullptr, window_class.hInstance, nullptr);
+    if (overlay == nullptr) return;
+    SetLayeredWindowAttributes(overlay, 0, 235, LWA_ALPHA);
+  }
+  wchar_t wide[4096] = {};
+  MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, 4096);
+  SetWindowTextW(overlay, wide);
+  HDC dc = GetDC(parent);
+  int dpi = GetDeviceCaps(dc, LOGPIXELSY);
+  ReleaseDC(parent, dc);
+  RECT bounds;
+  GetClientRect(parent, &bounds);
+  SetWindowPos(overlay, HWND_TOP, 12, 12,
+               std::max(1L, std::min(bounds.right - 24, (LONG)MulDiv(640, dpi, 96))),
+               std::max(1L, std::min(bounds.bottom - 24, (LONG)MulDiv(310, dpi, 96))),
+               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  InvalidateRect(overlay, nullptr, FALSE);
+}
+
 struct nl_windows_input_view {
   ComPtr<ID3D11Texture2D> texture;
   UINT subresource;

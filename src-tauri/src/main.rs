@@ -441,7 +441,9 @@ fn main() {
             moonlight_manager
                 .runtime
                 .start_event_bridge(app.handle().clone());
+            let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
+            moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
             let app_handle = app.handle().clone();
             let resume_context = context.clone();
@@ -645,6 +647,7 @@ fn main() {
             get_instance_mic_status,
             list_microphones,
             moonlight_get_configuration,
+            set_instance_performance_overlay,
             moonlight_register_host,
             moonlight_refresh_host,
             moonlight_begin_pairing,
