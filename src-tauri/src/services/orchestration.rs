@@ -5,6 +5,7 @@ use std::{
     time::Duration,
 };
 
+use chrono::Utc;
 use tauri::AppHandle;
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -14,7 +15,8 @@ use crate::{
     models::{
         app_state::{
             AutoShutdownSettings, ConnectionProvider, EdidMode, MoonlightPreferences,
-            OrchestrationState, ProvisionedServerState, ProvisionedServerSteps,
+            NetworkEndpoint, OrchestrationState, PathAvailability, ProvisionedServerState,
+            ProvisionedServerSteps,
         },
         events::ProvisioningEvent,
     },
@@ -23,6 +25,7 @@ use crate::{
 use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
+    connection_manager::{automatic_selection_enabled, ConnectionManager},
     health_check::run_system_health_report,
     instance_manager::InstanceManager,
     lifecycle_agent::LifecycleAgentProvisioner,
@@ -75,6 +78,45 @@ async fn provision_lifecycle_agent(
         &settings,
     )
     .await
+}
+
+async fn persist_direct_network_metadata(
+    context: &AppContext,
+    instance_id: u64,
+    endpoint_host: &str,
+    endpoint_port: u16,
+    probe_host: &str,
+    probe_port: u16,
+) -> AppResult<()> {
+    let updated_at = Utc::now().to_rfc3339();
+    let credential_ref = context.load_state().await.cloudflare_turn.credential_ref;
+    context
+        .update_state(|state| {
+            let turn_enabled = state.cloudflare_turn.enabled;
+            if let Some(server) = state
+                .provisioned_servers
+                .iter_mut()
+                .find(|server| server.instance_id == instance_id)
+            {
+                server.network.client_revision = server.network.client_revision.saturating_add(1);
+                server.network.updated_at = Some(updated_at.clone());
+                server.network.direct.endpoint = Some(NetworkEndpoint {
+                    host: endpoint_host.to_string(),
+                    port: endpoint_port,
+                });
+                server.network.direct.probe_endpoint = (probe_port != 0).then(|| NetworkEndpoint {
+                    host: probe_host.to_string(),
+                    port: probe_port,
+                });
+                server.network.direct.effective_mtu = Some(context.config.wireguard.tunnel_mtu);
+                server.network.direct.availability = PathAvailability::Preparing;
+                server.network.cloudflare_turn.enabled = turn_enabled;
+                server.network.cloudflare_turn.credential_ref =
+                    turn_enabled.then(|| credential_ref.clone());
+            }
+        })
+        .await?;
+    Ok(())
 }
 
 fn build_display_profile(
@@ -868,7 +910,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     let network_agent_remote = remote.clone();
     let network_agent_instance_id = instance.id;
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = NetworkAgentProvisioner::ensure(&network_agent_remote).await {
+        if let Err(error) =
+            NetworkAgentProvisioner::ensure(&network_agent_remote, network_agent_instance_id).await
+        {
             warn!(
                 instance_id = network_agent_instance_id,
                 %error,
@@ -1176,6 +1220,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             instance.wireguard_port = refreshed_instance.wireguard_port;
             instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
             instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
+            instance.network_probe_port = refreshed_instance.network_probe_port;
+            instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
+            instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
             info!(
                 "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
                 instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
@@ -1409,6 +1456,15 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
         result
     };
+    persist_direct_network_metadata(
+        &context,
+        instance.id,
+        &endpoint_host,
+        endpoint_port,
+        &instance.network_probe_endpoint_host(),
+        instance.network_probe_port,
+    )
+    .await?;
     if !cached_wireguard_endpoint_matches(
         wireguard_result.client_config_path.as_path(),
         &endpoint_host,
@@ -1522,6 +1578,17 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         &wireguard_result.client_config_path,
     )
     .await?;
+    if automatic_selection_enabled() {
+        if let Err(error) =
+            ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await
+        {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Direct WireGuard is ready; optional TURN provisioning evaluation failed"
+            );
+        }
+    }
 
     Ok(())
 }
@@ -1851,7 +1918,9 @@ async fn run_existing_instance_orchestration(
     let network_agent_remote = remote.clone();
     let network_agent_instance_id = instance.id;
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = NetworkAgentProvisioner::ensure(&network_agent_remote).await {
+        if let Err(error) =
+            NetworkAgentProvisioner::ensure(&network_agent_remote, network_agent_instance_id).await
+        {
             warn!(
                 instance_id = network_agent_instance_id,
                 %error,
@@ -2152,6 +2221,9 @@ async fn run_existing_instance_orchestration(
             instance.wireguard_port = refreshed_instance.wireguard_port;
             instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
             instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
+            instance.network_probe_port = refreshed_instance.network_probe_port;
+            instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
+            instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
             info!(
                 "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
                 instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
@@ -2385,6 +2457,15 @@ async fn run_existing_instance_orchestration(
 
         result
     };
+    persist_direct_network_metadata(
+        &context,
+        instance.id,
+        &endpoint_host,
+        endpoint_port,
+        &instance.network_probe_endpoint_host(),
+        instance.network_probe_port,
+    )
+    .await?;
     if !cached_wireguard_endpoint_matches(
         wireguard_result.client_config_path.as_path(),
         &endpoint_host,
@@ -2498,6 +2579,17 @@ async fn run_existing_instance_orchestration(
         &wireguard_result.client_config_path,
     )
     .await?;
+    if automatic_selection_enabled() {
+        if let Err(error) =
+            ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await
+        {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Direct WireGuard is ready; optional TURN provisioning evaluation failed"
+            );
+        }
+    }
 
     Ok(())
 }

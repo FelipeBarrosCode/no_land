@@ -1,0 +1,117 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HostNetworkState",
+  "type": "object",
+  "required": [
+    "agentVersion",
+    "allocationGeneration",
+    "hostRevision",
+    "instanceId",
+    "schemaVersion",
+    "sessionId",
+    "turnStatus",
+    "updatedAt"
+  ],
+  "properties": {
+    "agentVersion": {
+      "type": "string"
+    },
+    "allocationExpiresAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allocationGeneration": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "credentialExpiresAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hostRevision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "instanceId": {
+      "type": "string"
+    },
+    "observedTransport": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TransportKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "relayEndpoint": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NetworkEndpoint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "turnStatus": {
+      "$ref": "#/definitions/TurnRuntimeStatus"
+    },
+    "updatedAt": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "NetworkEndpoint": {
+      "type": "object",
+      "required": [
+        "host",
+        "port"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "TransportKind": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "cloudflare_turn"
+      ]
+    },
+    "TurnRuntimeStatus": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "awaiting_credentials",
+        "preparing",
+        "ready",
+        "degraded",
+        "failed"
+      ]
+    }
+  }
+}

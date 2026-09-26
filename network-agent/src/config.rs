@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::PathBuf};
 
 use clap::Parser;
 
@@ -12,6 +12,37 @@ pub struct Config {
 
     #[arg(long, env = "NOLAND_WS_ADDR", default_value = "127.0.0.1:6202")]
     pub ws_addr: SocketAddr,
+
+    #[arg(long, env = "NOLAND_INSTANCE_ID", default_value = "local")]
+    pub instance_id: String,
+
+    #[arg(
+        long,
+        env = "NOLAND_CONTROL_SOCKET",
+        default_value = "/run/noland-network-agent/control.sock"
+    )]
+    pub control_socket: PathBuf,
+
+    #[arg(
+        long,
+        env = "NOLAND_CONTROL_SECRET_PATH",
+        default_value = "/run/credentials/noland-network-agent.service/control-secret"
+    )]
+    pub control_secret_path: PathBuf,
+
+    #[arg(
+        long,
+        env = "NOLAND_TURN_STATE_PATH",
+        default_value = "/var/lib/noland-network-agent/network-state.json"
+    )]
+    pub turn_state_path: PathBuf,
+
+    #[arg(
+        long,
+        env = "NOLAND_KERNEL_WIREGUARD_ADDR",
+        default_value = "127.0.0.1:51820"
+    )]
+    pub kernel_wireguard_addr: SocketAddr,
 
     #[arg(long, env = "NOLAND_MAX_SESSIONS", default_value_t = 128)]
     pub max_sessions: usize,
