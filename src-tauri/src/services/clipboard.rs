@@ -39,10 +39,8 @@ else
 fi
 "#;
 
-const WINDOWS_SET_CLIPBOARD: &str =
-    r#"powershell.exe -NoProfile -NonInteractive -Command "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text""#;
-const WINDOWS_GET_CLIPBOARD: &str =
-    r#"powershell.exe -NoProfile -NonInteractive -Command "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -Raw))""#;
+const WINDOWS_SET_CLIPBOARD: &str = r#"powershell.exe -NoProfile -NonInteractive -Command "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text""#;
+const WINDOWS_GET_CLIPBOARD: &str = r#"powershell.exe -NoProfile -NonInteractive -Command "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -Raw))""#;
 
 #[derive(Debug, Clone, Copy)]
 enum RemotePlatform {
@@ -54,7 +52,9 @@ pub fn read_local_text() -> AppResult<String> {
     let mut clipboard = Clipboard::new()
         .map_err(|error| AppError::Command(format!("Could not open local clipboard: {error}")))?;
     let content = clipboard.get_text().map_err(|error| {
-        AppError::Command(format!("Local clipboard does not contain readable text: {error}"))
+        AppError::Command(format!(
+            "Local clipboard does not contain readable text: {error}"
+        ))
     })?;
     validate_text(&content)?;
     Ok(content)

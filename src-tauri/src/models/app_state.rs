@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub use noland_network_contracts::state::{
+    ConnectionPreference, InstanceNetworkState, NetworkEndpoint, PathAvailability, TransportKind,
+};
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedAppState {
@@ -26,6 +30,8 @@ pub struct PersistedAppState {
     pub shared_storage_credentials: SharedStorageCredentialState,
     #[serde(default)]
     pub auto_shutdown: AutoShutdownState,
+    #[serde(default)]
+    pub cloudflare_turn: CloudflareTurnSettingsState,
     pub provisioned_servers: Vec<ProvisionedServerState>,
     #[serde(default)]
     pub post_wireguard_setup: PostWireGuardSetupState,
@@ -38,7 +44,7 @@ pub struct PersistedAppState {
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             onboarding_completed: false,
             has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
@@ -55,6 +61,7 @@ impl Default for PersistedAppState {
             shared_storage_profiles: Vec::new(),
             shared_storage_credentials: SharedStorageCredentialState::default(),
             auto_shutdown: AutoShutdownState::default(),
+            cloudflare_turn: CloudflareTurnSettingsState::default(),
             provisioned_servers: Vec::new(),
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
@@ -62,6 +69,33 @@ impl Default for PersistedAppState {
             last_error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareTurnSettingsState {
+    pub enabled: bool,
+    #[serde(default = "default_cloudflare_turn_credential_ref")]
+    pub credential_ref: String,
+    #[serde(default)]
+    pub last_validated_at: Option<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl Default for CloudflareTurnSettingsState {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            credential_ref: default_cloudflare_turn_credential_ref(),
+            last_validated_at: None,
+            last_error: None,
+        }
+    }
+}
+
+fn default_cloudflare_turn_credential_ref() -> String {
+    "secure-store://cloudflare-turn/default".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -691,6 +725,8 @@ pub struct ProvisionedServerState {
     pub mic_auto_connect: bool,
     #[serde(default)]
     pub display: RemoteDisplayState,
+    #[serde(default)]
+    pub network: InstanceNetworkState,
     pub last_state: OrchestrationState,
     pub last_error: Option<String>,
     pub steps: ProvisionedServerSteps,
@@ -747,6 +783,7 @@ impl ProvisionedServerState {
             mic_forwarding_enabled: false,
             mic_auto_connect: true,
             display: RemoteDisplayState::default(),
+            network: InstanceNetworkState::default(),
             last_state: OrchestrationState::Idle,
             last_error: None,
             steps: ProvisionedServerSteps::default(),

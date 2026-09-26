@@ -444,6 +444,12 @@ export function App() {
     (state) => state.saveMoonlightPreferences,
   );
   const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
+  const cloudflareTurnSettings = useAppStore((state) => state.cloudflareTurnSettings);
+  const cloudflareTurnTestResult = useAppStore((state) => state.cloudflareTurnTestResult);
+  const loadCloudflareTurnSettings = useAppStore((state) => state.loadCloudflareTurnSettings);
+  const testCloudflareTurnSettings = useAppStore((state) => state.testCloudflareTurnSettings);
+  const saveCloudflareTurnSettings = useAppStore((state) => state.saveCloudflareTurnSettings);
+  const clearCloudflareTurnSettings = useAppStore((state) => state.clearCloudflareTurnSettings);
   const regenerateEdid = useAppStore((state) => state.regenerateEdid);
   const storageProviders = useAppStore((state) => state.storageProviders);
   const sharedStorageProfiles = useAppStore(
@@ -744,6 +750,12 @@ export function App() {
                   onSaveServerPreferences={saveServerPreferences}
                   onSaveMoonlightPreferences={saveMoonlightPreferences}
                   onSaveSshCredentials={saveSshCredentials}
+                  cloudflareTurnSettings={cloudflareTurnSettings}
+                  cloudflareTurnTestResult={cloudflareTurnTestResult}
+                  onLoadCloudflareTurnSettings={loadCloudflareTurnSettings}
+                  onTestCloudflareTurnSettings={testCloudflareTurnSettings}
+                  onSaveCloudflareTurnSettings={saveCloudflareTurnSettings}
+                  onClearCloudflareTurnSettings={clearCloudflareTurnSettings}
                   onRegenerateEdid={regenerateEdid}
                 />
               ) : (

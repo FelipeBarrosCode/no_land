@@ -24,9 +24,17 @@ use gotatun::{
     x25519::{PublicKey, StaticSecret},
 };
 use ipnetwork::IpNetwork;
+use noland_network_contracts::control::{
+    HelperError, HelperMethod, HelperRequest, HelperResponse, SetInterfaceMtuParams,
+    SetPeerEndpointParams,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::time::sleep;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    sync::{mpsc, oneshot},
+    time::sleep,
+};
 use tun::AbstractDevice;
 
 #[cfg(not(target_os = "macos"))]
@@ -37,6 +45,10 @@ const OWNER_LOCK_FILE_NAME: &str = "owner.lock";
 const TRANSITION_LOCK_FILE_NAME: &str = "transition.lock";
 const STATUS_INTERVAL: Duration = Duration::from_secs(1);
 const DEVICE_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_CONTROL_REQUEST_BYTES: usize = 64 * 1024;
+
+#[cfg(unix)]
+const CONTROL_SOCKET_FILE_NAME: &str = "control.sock";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelperCommand {
@@ -88,9 +100,13 @@ struct RuntimeStatus {
     allowed_ips: Vec<String>,
     endpoint: String,
     #[serde(default)]
+    control_endpoint: String,
+    #[serde(default)]
     config_fingerprint: String,
     #[serde(default)]
     listen_port: u16,
+    #[serde(default)]
+    mtu: u16,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -113,8 +129,10 @@ impl RuntimeStatus {
             peer_public_key: String::new(),
             allowed_ips: Vec::new(),
             endpoint: String::new(),
+            control_endpoint: control_endpoint(args),
             config_fingerprint,
             listen_port: 0,
+            mtu: 0,
             latest_handshake_age_secs: None,
             rx_bytes: 0,
             tx_bytes: 0,
@@ -122,6 +140,11 @@ impl RuntimeStatus {
             error: None,
         }
     }
+}
+
+struct ControlCall {
+    request: HelperRequest,
+    response: oneshot::Sender<HelperResponse>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,6 +639,169 @@ async fn run(args: Args) -> Result<()> {
     result
 }
 
+#[cfg(unix)]
+fn control_endpoint(args: &Args) -> String {
+    args.state_dir
+        .join(CONTROL_SOCKET_FILE_NAME)
+        .display()
+        .to_string()
+}
+
+#[cfg(windows)]
+fn control_endpoint(args: &Args) -> String {
+    format!(r"\\.\pipe\noland-net-{}", args.launch_id)
+}
+
+#[cfg(unix)]
+async fn run_control_listener(
+    endpoint: String,
+    state_dir: PathBuf,
+    sender: mpsc::Sender<ControlCall>,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use tokio::net::UnixListener;
+
+    let path = PathBuf::from(&endpoint);
+    let _ = fs::remove_file(&path);
+    let listener = UnixListener::bind(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+
+    // Elevated helpers create the socket as root. Transfer ownership to the
+    // owner of the app-managed state directory so only that desktop user can
+    // issue runtime mutations.
+    if let Ok(metadata) = fs::metadata(&state_dir) {
+        if let Ok(path) = std::ffi::CString::new(path.as_os_str().as_bytes()) {
+            let result = unsafe { libc::chown(path.as_ptr(), metadata.uid(), metadata.gid()) };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+    }
+
+    loop {
+        let (stream, _) = listener.accept().await?;
+        let sender = sender.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_control_stream(stream, sender).await {
+                eprintln!("noland-net-helper: control connection failed: {error}");
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
+async fn run_control_listener(
+    endpoint: String,
+    _state_dir: PathBuf,
+    sender: mpsc::Sender<ControlCall>,
+) -> std::io::Result<()> {
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    loop {
+        let server = ServerOptions::new().create(&endpoint)?;
+        server.connect().await?;
+        let sender = sender.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_control_stream(server, sender).await {
+                eprintln!("noland-net-helper: control connection failed: {error}");
+            }
+        });
+    }
+}
+
+async fn serve_control_stream<S>(stream: S, sender: mpsc::Sender<ControlCall>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader);
+    let mut bytes = Vec::new();
+    let read = reader.read_until(b'\n', &mut bytes).await?;
+    if read == 0 {
+        return Ok(());
+    }
+    if bytes.len() > MAX_CONTROL_REQUEST_BYTES {
+        writer
+            .write_all(b"{\"error\":{\"code\":\"request_too_large\",\"message\":\"control request exceeds 64 KiB\",\"retryable\":false}}\n")
+            .await?;
+        return Ok(());
+    }
+
+    let request = match serde_json::from_slice::<HelperRequest>(&bytes) {
+        Ok(request) => request,
+        Err(error) => {
+            let response = HelperResponse {
+                request_id: uuid::Uuid::nil(),
+                launch_id: None,
+                result: None,
+                error: Some(HelperError {
+                    code: "invalid_request".to_string(),
+                    message: format!("invalid control request: {error}"),
+                    retryable: false,
+                }),
+            };
+            writer.write_all(&serde_json::to_vec(&response)?).await?;
+            writer.write_all(b"\n").await?;
+            return Ok(());
+        }
+    };
+    let request_id = request.request_id;
+    let (response_tx, response_rx) = oneshot::channel();
+    if sender
+        .send(ControlCall {
+            request,
+            response: response_tx,
+        })
+        .await
+        .is_err()
+    {
+        let response = helper_error_response(
+            request_id,
+            None,
+            "helper_unavailable",
+            "tunnel runtime is shutting down",
+            true,
+        );
+        writer.write_all(&serde_json::to_vec(&response)?).await?;
+        writer.write_all(b"\n").await?;
+        return Ok(());
+    }
+
+    let response = response_rx.await.unwrap_or_else(|_| {
+        helper_error_response(
+            request_id,
+            None,
+            "helper_unavailable",
+            "tunnel runtime did not answer the control request",
+            true,
+        )
+    });
+    writer.write_all(&serde_json::to_vec(&response)?).await?;
+    writer.write_all(b"\n").await?;
+    writer.shutdown().await?;
+    Ok(())
+}
+
+fn helper_error_response(
+    request_id: uuid::Uuid,
+    launch_id: Option<uuid::Uuid>,
+    code: &str,
+    message: &str,
+    retryable: bool,
+) -> HelperResponse {
+    HelperResponse {
+        request_id,
+        launch_id,
+        result: None,
+        error: Some(HelperError {
+            code: code.to_string(),
+            message: message.to_string(),
+            retryable,
+        }),
+    }
+}
+
 async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -> Result<()> {
     let tunnel_config = parse_tunnel_config(&args.config_path)?;
     #[cfg(target_os = "windows")]
@@ -706,6 +892,14 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         .await
         .context("failed starting embedded GotaTun device")?;
 
+    let (control_tx, mut control_rx) = mpsc::channel::<ControlCall>(16);
+    let control_endpoint = control_endpoint(args);
+    let mut control_task = tokio::spawn(run_control_listener(
+        control_endpoint.clone(),
+        args.state_dir.clone(),
+        control_tx,
+    ));
+
     let identity = current_process_identity();
     let mut status = RuntimeStatus {
         engine: "gotatun-embedded-0.7.1".to_string(),
@@ -723,8 +917,10 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
             .map(ToString::to_string)
             .collect(),
         endpoint: tunnel_config.endpoint.to_string(),
+        control_endpoint,
         config_fingerprint: config_fingerprint.to_string(),
         listen_port: effective_listen_port,
+        mtu: tunnel_config.mtu,
         latest_handshake_age_secs: None,
         rx_bytes: 0,
         tx_bytes: 0,
@@ -752,6 +948,29 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                 _ = terminate.recv() => {
                     break;
                 }
+                listener_result = &mut control_task => {
+                    status.error = Some(match listener_result {
+                        Ok(Ok(())) => "local control listener stopped unexpectedly".to_string(),
+                        Ok(Err(error)) => format!("local control listener failed: {error}"),
+                        Err(error) => format!("local control listener task failed: {error}"),
+                    });
+                    break;
+                }
+                call = control_rx.recv() => {
+                    let Some(call) = call else {
+                        status.error = Some("local control channel closed unexpectedly".to_string());
+                        break;
+                    };
+                    handle_control_call(
+                        call,
+                        args,
+                        config_fingerprint,
+                        &tunnel_config,
+                        &mut device,
+                        &mut status,
+                        status_path,
+                    ).await;
+                }
                 _ = sleep(STATUS_INTERVAL) => {
                     if stop_request_path.exists() {
                         break;
@@ -776,6 +995,29 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
             }
             _ = tokio::signal::ctrl_c() => {
                 break;
+            }
+            listener_result = &mut control_task => {
+                status.error = Some(match listener_result {
+                    Ok(Ok(())) => "local control listener stopped unexpectedly".to_string(),
+                    Ok(Err(error)) => format!("local control listener failed: {error}"),
+                    Err(error) => format!("local control listener task failed: {error}"),
+                });
+                break;
+            }
+            call = control_rx.recv() => {
+                let Some(call) = call else {
+                    status.error = Some("local control channel closed unexpectedly".to_string());
+                    break;
+                };
+                handle_control_call(
+                    call,
+                    args,
+                    config_fingerprint,
+                    &tunnel_config,
+                    &mut device,
+                    &mut status,
+                    status_path,
+                ).await;
             }
             _ = sleep(STATUS_INTERVAL) => {
                 if stop_request_path.exists() {
@@ -806,6 +1048,281 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         eprintln!("noland-net-helper: failed writing final tunnel status: {error:#}");
     }
     let _ = fs::remove_file(stop_request_path);
+    control_task.abort();
+    #[cfg(unix)]
+    let _ = fs::remove_file(&status.control_endpoint);
+    Ok(())
+}
+
+async fn handle_control_call(
+    call: ControlCall,
+    args: &Args,
+    config_fingerprint: &str,
+    tunnel_config: &TunnelConfig,
+    device: &mut Device<DefaultDeviceTransports>,
+    status: &mut RuntimeStatus,
+    status_path: &Path,
+) {
+    let request_id = call.request.request_id;
+    let launch_id = args.launch_id.parse::<uuid::Uuid>().ok();
+    let response = if call.request.expected_launch_id.to_string() != args.launch_id {
+        helper_error_response(
+            request_id,
+            launch_id,
+            "helper_state_mismatch",
+            "the expected helper launch ID is stale",
+            false,
+        )
+    } else if call.request.expected_config_fingerprint != config_fingerprint {
+        helper_error_response(
+            request_id,
+            launch_id,
+            "helper_state_mismatch",
+            "the expected WireGuard config fingerprint is stale",
+            false,
+        )
+    } else {
+        match call.request.method {
+            HelperMethod::GetRuntime => HelperResponse {
+                request_id,
+                launch_id,
+                result: serde_json::to_value(&*status).ok(),
+                error: None,
+            },
+            HelperMethod::SetPeerEndpoint => {
+                match serde_json::from_value::<SetPeerEndpointParams>(call.request.params) {
+                    Ok(params) => {
+                        apply_peer_endpoint(
+                            request_id,
+                            launch_id,
+                            params,
+                            tunnel_config,
+                            device,
+                            status,
+                            status_path,
+                        )
+                        .await
+                    }
+                    Err(error) => helper_error_response(
+                        request_id,
+                        launch_id,
+                        "invalid_request",
+                        &format!("invalid set_peer_endpoint parameters: {error}"),
+                        false,
+                    ),
+                }
+            }
+            HelperMethod::SetInterfaceMtu => {
+                match serde_json::from_value::<SetInterfaceMtuParams>(call.request.params) {
+                    Ok(params) if (576..=9000).contains(&params.mtu) => {
+                        match apply_interface_mtu(&status.interface_name, params.mtu) {
+                            Ok(()) => {
+                                status.mtu = params.mtu;
+                                status.updated_at_unix = unix_timestamp();
+                                let _ = write_status_with_retry(status_path, status, 5);
+                                HelperResponse {
+                                    request_id,
+                                    launch_id,
+                                    result: Some(serde_json::json!({
+                                        "mtu": params.mtu,
+                                        "transitionId": params.transition_id,
+                                        "appliedAtUnix": status.updated_at_unix,
+                                    })),
+                                    error: None,
+                                }
+                            }
+                            Err(error) => helper_error_response(
+                                request_id,
+                                launch_id,
+                                "mtu_apply_failed",
+                                &error.to_string(),
+                                true,
+                            ),
+                        }
+                    }
+                    Ok(_) => helper_error_response(
+                        request_id,
+                        launch_id,
+                        "invalid_request",
+                        "interface MTU must be between 576 and 9000",
+                        false,
+                    ),
+                    Err(error) => helper_error_response(
+                        request_id,
+                        launch_id,
+                        "invalid_request",
+                        &format!("invalid set_interface_mtu parameters: {error}"),
+                        false,
+                    ),
+                }
+            }
+            HelperMethod::ForceHandshake => helper_error_response(
+                request_id,
+                launch_id,
+                "unsupported_operation",
+                "GotaTun does not expose an explicit force-handshake operation; tunnel validation sends traffic instead",
+                false,
+            ),
+        }
+    };
+    let _ = call.response.send(response);
+}
+
+async fn apply_peer_endpoint(
+    request_id: uuid::Uuid,
+    launch_id: Option<uuid::Uuid>,
+    params: SetPeerEndpointParams,
+    tunnel_config: &TunnelConfig,
+    device: &mut Device<DefaultDeviceTransports>,
+    status: &mut RuntimeStatus,
+    status_path: &Path,
+) -> HelperResponse {
+    let requested_key = match decode_key(&params.peer_public_key) {
+        Ok(key) if key == tunnel_config.peer_public_key => key,
+        Ok(_) => {
+            return helper_error_response(
+                request_id,
+                launch_id,
+                "helper_state_mismatch",
+                "the requested peer key does not match the running tunnel",
+                false,
+            )
+        }
+        Err(error) => {
+            return helper_error_response(
+                request_id,
+                launch_id,
+                "invalid_request",
+                &error.to_string(),
+                false,
+            )
+        }
+    };
+    if let Err(error) = params.endpoint.validate() {
+        return helper_error_response(request_id, launch_id, "invalid_endpoint", error, false);
+    }
+    let endpoint = match resolve_network_endpoint(&params.endpoint.host, params.endpoint.port) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return helper_error_response(
+                request_id,
+                launch_id,
+                "invalid_endpoint",
+                &error.to_string(),
+                true,
+            )
+        }
+    };
+    let previous_endpoint = status.endpoint.clone();
+    let peer_key = PublicKey::from(requested_key);
+    match device
+        .modify_peer(&peer_key, |peer| peer.set_endpoint(Some(endpoint)))
+        .await
+    {
+        Ok(true) => {
+            status.endpoint = endpoint.to_string();
+            status.updated_at_unix = unix_timestamp();
+            if let Err(error) = write_status_with_retry(status_path, status, 5) {
+                return helper_error_response(
+                    request_id,
+                    launch_id,
+                    "state_persistence_failed",
+                    &format!("endpoint changed but runtime status could not be persisted: {error}"),
+                    true,
+                );
+            }
+            HelperResponse {
+                request_id,
+                launch_id,
+                result: Some(serde_json::json!({
+                    "previousEndpoint": previous_endpoint,
+                    "activeEndpoint": endpoint.to_string(),
+                    "transitionId": params.transition_id,
+                    "appliedAtUnix": status.updated_at_unix,
+                })),
+                error: None,
+            }
+        }
+        Ok(false) => helper_error_response(
+            request_id,
+            launch_id,
+            "helper_state_mismatch",
+            "the configured peer no longer exists in the running tunnel",
+            false,
+        ),
+        Err(error) => helper_error_response(
+            request_id,
+            launch_id,
+            "endpoint_apply_failed",
+            &format!("GotaTun rejected the endpoint update: {error}"),
+            true,
+        ),
+    }
+}
+
+fn resolve_network_endpoint(host: &str, port: u16) -> Result<SocketAddr> {
+    let value = if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    };
+    resolve_endpoint(&value)
+}
+
+#[cfg(target_os = "linux")]
+fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
+    let output = Command::new("ip")
+        .args([
+            "link",
+            "set",
+            "dev",
+            interface_name,
+            "mtu",
+            &mtu.to_string(),
+        ])
+        .output()
+        .context("failed launching ip to update tunnel MTU")?;
+    if !output.status.success() {
+        bail!(
+            "ip rejected tunnel MTU update: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
+    let output = Command::new("ifconfig")
+        .args([interface_name, "mtu", &mtu.to_string()])
+        .output()
+        .context("failed launching ifconfig to update tunnel MTU")?;
+    if !output.status.success() {
+        bail!(
+            "ifconfig rejected tunnel MTU update: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
+    let mut command = Command::new("netsh.exe");
+    configure_hidden_windows_command(&mut command);
+    let output = command
+        .args(["interface", "ipv4", "set", "subinterface"])
+        .arg(interface_name)
+        .arg(format!("mtu={mtu}"))
+        .arg("store=active")
+        .output()
+        .context("failed launching netsh to update tunnel MTU")?;
+    if !output.status.success() {
+        bail!(
+            "netsh rejected tunnel MTU update: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     Ok(())
 }
 

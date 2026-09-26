@@ -1,22 +1,35 @@
 use std::{
     net::SocketAddr,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{anyhow, Context};
 use futures_util::{SinkExt, StreamExt};
+use noland_network_contracts::control::{AuthHello, CONTROL_SUBPROTOCOL};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
     net::{TcpListener, TcpStream},
     time::{interval, MissedTickBehavior},
 };
-use tokio_tungstenite::{accept_async, tungstenite::Message, WebSocketStream};
+use tokio_tungstenite::{
+    accept_hdr_async,
+    tungstenite::{
+        handshake::server::{Request, Response},
+        http::HeaderValue,
+        Message,
+    },
+    WebSocketStream,
+};
 use uuid::Uuid;
 
 use crate::{
     classifier::{classify, thresholds::ClassifierThresholds, Classification, ReasonCode},
+    remote_control::RemoteControl,
     telemetry::{
         metrics::{snapshot, MetricsSnapshot},
         sample::MeasurementSample,
@@ -95,14 +108,17 @@ pub async fn run(
     addr: SocketAddr,
     shared: SharedState,
     thresholds: Arc<ClassifierThresholds>,
+    remote_control: Option<Arc<RemoteControl>>,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
         let shared = shared.clone();
         let thresholds = thresholds.clone();
+        let remote_control = remote_control.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_connection(stream, shared, thresholds).await {
+            if let Err(error) = handle_connection(stream, shared, thresholds, remote_control).await
+            {
                 eprintln!("WebSocket connection closed: {error:#}");
             }
         });
@@ -113,14 +129,44 @@ async fn handle_connection(
     stream: TcpStream,
     shared: SharedState,
     thresholds: Arc<ClassifierThresholds>,
+    remote_control: Option<Arc<RemoteControl>>,
 ) -> anyhow::Result<()> {
-    let mut websocket = accept_async(stream)
+    let selected_control = Arc::new(AtomicBool::new(false));
+    let selected_control_for_handshake = selected_control.clone();
+    let control_available = remote_control.is_some();
+    let mut websocket =
+        accept_hdr_async(stream, move |request: &Request, mut response: Response| {
+            let offered_control = request
+                .headers()
+                .get("sec-websocket-protocol")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| {
+                    value
+                        .split(',')
+                        .any(|protocol| protocol.trim() == CONTROL_SUBPROTOCOL)
+                });
+            if offered_control && control_available {
+                response.headers_mut().insert(
+                    "sec-websocket-protocol",
+                    HeaderValue::from_static(CONTROL_SUBPROTOCOL),
+                );
+                selected_control_for_handshake.store(true, Ordering::Release);
+            }
+            Ok(response)
+        })
         .await
         .context("WebSocket handshake failed")?;
     let first = websocket
         .next()
         .await
         .ok_or_else(|| anyhow!("connection closed before auth"))??;
+    if selected_control.load(Ordering::Acquire) {
+        let remote_control = remote_control
+            .context("privileged control is unavailable because no host secret is installed")?;
+        let hello = parse_json_message::<AuthHello>(first)
+            .context("first control message must be AuthHello")?;
+        return remote_control.handle(websocket, hello).await;
+    }
     let ClientMessage::Auth { session_id, token } = parse_client_message(first)? else {
         send_error(
             &mut websocket,
@@ -222,6 +268,10 @@ async fn handle_connection(
 }
 
 fn parse_client_message(message: Message) -> anyhow::Result<ClientMessage> {
+    parse_json_message(message)
+}
+
+fn parse_json_message<T: serde::de::DeserializeOwned>(message: Message) -> anyhow::Result<T> {
     match message {
         Message::Text(text) => serde_json::from_str(text.as_ref()).context("invalid JSON message"),
         _ => Err(anyhow!("expected a text JSON message")),

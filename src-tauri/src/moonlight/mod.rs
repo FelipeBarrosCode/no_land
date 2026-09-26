@@ -3,8 +3,8 @@ pub mod application;
 pub mod composition;
 pub mod domain;
 pub mod infrastructure;
-pub mod platform;
 pub mod performance;
+pub mod platform;
 pub mod runtime;
 
 #[allow(

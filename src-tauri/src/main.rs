@@ -392,6 +392,11 @@ fn main() {
                 app_data_dir.join("software-artwork-cache.json"),
             );
             let context = AppContext::new(config, state_store, initial_state);
+            let automatic_network_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                services::connection_manager::run_connection_maintenance(automatic_network_context)
+                    .await;
+            });
             let mut shared_storage_progress = context.shared_storage_progress.subscribe();
             let mut shared_storage_restore_completed =
                 context.shared_storage_restore_completed.subscribe();
@@ -587,6 +592,12 @@ fn main() {
             get_vast_wallet_summary,
             update_vast_api_key,
             update_platform_credentials,
+            get_cloudflare_turn_settings,
+            save_cloudflare_turn_settings,
+            test_cloudflare_turn_settings,
+            clear_cloudflare_turn_settings,
+            get_instance_connection_status,
+            set_instance_connection_preference,
             update_server_preferences,
             update_moonlight_preferences,
             set_instance_moonlight_pipeline_enabled,
