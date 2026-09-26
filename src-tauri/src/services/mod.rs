@@ -1,6 +1,7 @@
 pub mod app_config;
 pub mod app_context;
 pub mod audio_latency;
+pub mod clipboard;
 pub mod diagnostics;
 pub mod display_profile;
 pub mod health_check;

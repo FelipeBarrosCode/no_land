@@ -79,7 +79,7 @@ install_first_available_package() {
 ensure_packages() {
   export DEBIAN_FRONTEND=noninteractive
   run_root "DEBIAN_FRONTEND=noninteractive apt-get update -y"
-  run_root "DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget ca-certificates gnupg software-properties-common xdg-utils unzip python3 tar xz-utils cabextract p7zip-full flatpak zstd"
+  run_root "DEBIAN_FRONTEND=noninteractive apt-get install -y curl wget ca-certificates gnupg software-properties-common xdg-utils unzip python3 tar xz-utils cabextract p7zip-full flatpak zstd xclip"
 
   install_first_available_package libfuse2 libfuse2t64 || true
   install_first_available_package fuse3 fuse || true
