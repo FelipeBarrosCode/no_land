@@ -4,9 +4,11 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 
 import {
   moonlightDisconnectStream,
+  moonlightGetClipboardFromRemote,
   moonlightGetActiveInputMode,
   moonlightGetInputDebugState,
   moonlightGetSessionState,
+  moonlightSendClipboardToRemote,
 } from "../../lib/backend";
 import {
   networkWarningBody,
@@ -132,6 +134,8 @@ export function StreamWindowScreen() {
   const [latencyStats, setLatencyStats] = useState<LatencyStatistics | null>(null);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
+  const [clipboardBusy, setClipboardBusy] = useState<"send" | "get" | null>(null);
+  const [clipboardStatus, setClipboardStatus] = useState<string | null>(null);
   const [showHud, setShowHud] = useState(true);
   const [networkWarning, setNetworkWarning] = useState<NetworkStatusEvent | null>(null);
   const networkWarningTimeoutRef = useRef<number | null>(null);
@@ -321,6 +325,26 @@ export function StreamWindowScreen() {
     }
   };
 
+  const handleClipboard = async (direction: "send" | "get") => {
+    if (clipboardBusy) {
+      return;
+    }
+    setClipboardBusy(direction);
+    setClipboardStatus(null);
+    try {
+      const result = direction === "send"
+        ? await moonlightSendClipboardToRemote()
+        : await moonlightGetClipboardFromRemote();
+      setClipboardStatus(
+        `${direction === "send" ? "Sent" : "Received"} ${result.byteCount} bytes`,
+      );
+    } catch (error) {
+      setClipboardStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setClipboardBusy(null);
+    }
+  };
+
   return (
     <main className="relative h-dvh w-full overflow-hidden bg-transparent text-white">
       <div className="pointer-events-none absolute inset-0 select-none">
@@ -358,6 +382,22 @@ export function StreamWindowScreen() {
           <div className="flex items-center gap-2">
             <button
               type="button"
+              onClick={() => void handleClipboard("send")}
+              disabled={clipboardBusy !== null || disconnecting}
+              className="rounded border border-violet-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-violet-100 shadow-[0_0_18px_rgba(196,181,253,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
+            >
+              {clipboardBusy === "send" ? "Sending…" : "Send clipboard to remote"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleClipboard("get")}
+              disabled={clipboardBusy !== null || disconnecting}
+              className="rounded border border-violet-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-violet-100 shadow-[0_0_18px_rgba(196,181,253,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
+            >
+              {clipboardBusy === "get" ? "Getting…" : "Get clipboard from remote"}
+            </button>
+            <button
+              type="button"
               onClick={() => setShowHud((value) => !value)}
               className="rounded border border-cyan-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90"
             >
@@ -377,6 +417,11 @@ export function StreamWindowScreen() {
           {disconnectError ? (
             <div className="max-w-md rounded border border-red-400/70 bg-red-950/80 px-3 py-2 font-mono text-xs text-red-100 shadow-[0_0_18px_rgba(248,113,113,0.18)] backdrop-blur-sm">
               {disconnectError}
+            </div>
+          ) : null}
+          {clipboardStatus ? (
+            <div className="max-w-md rounded border border-violet-300/70 bg-slate-950/80 px-3 py-2 font-mono text-xs text-violet-100 shadow-[0_0_18px_rgba(196,181,253,0.18)] backdrop-blur-sm">
+              {clipboardStatus}
             </div>
           ) : null}
         </div>

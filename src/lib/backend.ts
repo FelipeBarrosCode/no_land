@@ -451,6 +451,19 @@ export async function moonlightDisconnectStream(): Promise<{
   return invokeSafe<{ state: string }>("moonlight_disconnect_stream");
 }
 
+export interface ClipboardTransferResponse {
+  id: string;
+  byteCount: number;
+}
+
+export async function moonlightSendClipboardToRemote(): Promise<ClipboardTransferResponse> {
+  return invokeSafe<ClipboardTransferResponse>("moonlight_send_clipboard_to_remote");
+}
+
+export async function moonlightGetClipboardFromRemote(): Promise<ClipboardTransferResponse> {
+  return invokeSafe<ClipboardTransferResponse>("moonlight_get_clipboard_from_remote");
+}
+
 export async function moonlightSendRelativeMouse(input: {
   deltaX: number;
   deltaY: number;

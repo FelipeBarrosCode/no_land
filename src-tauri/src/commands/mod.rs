@@ -73,6 +73,7 @@ use crate::{
     network_monitor::NetworkMonitor,
     services::{
         app_context::AppContext,
+        clipboard,
         diagnostics::{write_diagnostic_report, DiagnosticReportResponse},
         display_profile::{
             build_display_profile, DisplayModeSpec, DisplayProfile, DisplayProfileSource,
@@ -5064,6 +5065,9 @@ pub async fn moonlight_start_stream(
 
     let state = context.load_state().await;
     if let Some(instance_id) = resolve_instance_id_for_embedded_host(&state, &input.host_id) {
+        if let Ok(mut active_instance) = moonlight.active_stream_instance_id.lock() {
+            *active_instance = Some(instance_id);
+        }
         ensure_network_agent_for_stream(context.inner(), instance_id).await;
     }
     schedule_microphone_for_game_stream(context.inner(), moonlight.inner(), &input.host_id).await;
@@ -5155,6 +5159,70 @@ pub async fn moonlight_disconnect_stream(
         .map_err(moonlight_frontend_error)?;
     Ok(MoonlightSessionStateResponse {
         state: session_state_name(&state).to_string(),
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardTransferResponse {
+    pub id: String,
+    pub byte_count: usize,
+}
+
+async fn active_stream_remote(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+) -> Result<RemoteExec, AppError> {
+    let session = moonlight.runtime.get_state().await.map_err(|error| {
+        AppError::Command(format!("Could not read Moonlight session state: {error}"))
+    })?;
+    if !matches!(session, SessionState::Streaming | SessionState::Reconnecting) {
+        return Err(AppError::InvalidInput(
+            "Clipboard transfer is only available during an active stream".to_string(),
+        ));
+    }
+    let instance_id = moonlight
+        .active_stream_instance_id
+        .lock()
+        .ok()
+        .and_then(|instance| *instance)
+        .ok_or_else(|| {
+            AppError::InvalidInput("Active stream instance is unavailable".to_string())
+        })?;
+    build_remote_exec_for_instance(context, instance_id).await
+}
+
+#[tauri::command]
+pub async fn moonlight_send_clipboard_to_remote(
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<ClipboardTransferResponse, FrontendError> {
+    let remote = active_stream_remote(context.inner(), moonlight.inner()).await?;
+    let content = clipboard::read_local_text()?;
+    let byte_count = content.len();
+    tokio::task::spawn_blocking(move || clipboard::write_remote_text(&remote, content))
+        .await
+        .map_err(|error| AppError::Command(format!("Clipboard task failed: {error}")))??;
+    Ok(ClipboardTransferResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        byte_count,
+    })
+}
+
+#[tauri::command]
+pub async fn moonlight_get_clipboard_from_remote(
+    context: State<'_, AppContext>,
+    moonlight: State<'_, MoonlightManager>,
+) -> Result<ClipboardTransferResponse, FrontendError> {
+    let remote = active_stream_remote(context.inner(), moonlight.inner()).await?;
+    let content = tokio::task::spawn_blocking(move || clipboard::read_remote_text(&remote))
+        .await
+        .map_err(|error| AppError::Command(format!("Clipboard task failed: {error}")))??;
+    let byte_count = content.len();
+    clipboard::write_local_text(&content)?;
+    Ok(ClipboardTransferResponse {
+        id: uuid::Uuid::new_v4().to_string(),
+        byte_count,
     })
 }
 

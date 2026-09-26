@@ -655,6 +655,8 @@ fn main() {
             moonlight_list_apps,
             moonlight_start_stream,
             moonlight_disconnect_stream,
+            moonlight_send_clipboard_to_remote,
+            moonlight_get_clipboard_from_remote,
             moonlight_start_input_capture,
             moonlight_stop_input_capture,
             moonlight_update_video_geometry,
