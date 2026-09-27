@@ -25,6 +25,7 @@ use crate::{
 use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
+    cloudflare_turn,
     connection_manager::{automatic_selection_enabled, ConnectionManager},
     health_check::run_system_health_report,
     instance_manager::InstanceManager,
@@ -78,6 +79,19 @@ async fn provision_lifecycle_agent(
         &settings,
     )
     .await
+}
+
+async fn turn_credentials_configured(context: &AppContext) -> bool {
+    let enabled = context.load_state().await.cloudflare_turn.enabled;
+    if !enabled {
+        return false;
+    }
+    tokio::task::spawn_blocking(cloudflare_turn::load_secret)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .is_some()
 }
 
 async fn persist_direct_network_metadata(
@@ -907,19 +921,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     );
     ensure_state_agent(&remote, &target_user).await?;
     provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
-    let network_agent_remote = remote.clone();
-    let network_agent_instance_id = instance.id;
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) =
-            NetworkAgentProvisioner::ensure(&network_agent_remote, network_agent_instance_id).await
-        {
-            warn!(
-                instance_id = network_agent_instance_id,
-                %error,
-                "Network-agent provisioning failed without blocking instance setup"
-            );
-        }
-    });
+    if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance.id).await {
+        warn!(
+            instance_id = instance.id,
+            %error,
+            "Network-agent provisioning failed without blocking instance setup"
+        );
+    }
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -1578,6 +1586,15 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         &wireguard_result.client_config_path,
     )
     .await?;
+    if turn_credentials_configured(&context).await {
+        if let Err(error) = ConnectionManager::evaluate_runtime(&context, instance.id).await {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Optional TURN allocation/probing failed; Direct WireGuard remains usable"
+            );
+        }
+    }
     if automatic_selection_enabled() {
         if let Err(error) =
             ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await
@@ -1915,19 +1932,13 @@ async fn run_existing_instance_orchestration(
     );
     ensure_state_agent(&remote, &target_user).await?;
     provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
-    let network_agent_remote = remote.clone();
-    let network_agent_instance_id = instance.id;
-    tauri::async_runtime::spawn(async move {
-        if let Err(error) =
-            NetworkAgentProvisioner::ensure(&network_agent_remote, network_agent_instance_id).await
-        {
-            warn!(
-                instance_id = network_agent_instance_id,
-                %error,
-                "Network-agent provisioning failed without blocking existing-instance setup"
-            );
-        }
-    });
+    if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance.id).await {
+        warn!(
+            instance_id = instance.id,
+            %error,
+            "Network-agent provisioning failed without blocking existing-instance setup"
+        );
+    }
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -2579,6 +2590,15 @@ async fn run_existing_instance_orchestration(
         &wireguard_result.client_config_path,
     )
     .await?;
+    if turn_credentials_configured(&context).await {
+        if let Err(error) = ConnectionManager::evaluate_runtime(&context, instance.id).await {
+            warn!(
+                instance_id = instance.id,
+                %error,
+                "Optional TURN allocation/probing failed; Direct WireGuard remains usable"
+            );
+        }
+    }
     if automatic_selection_enabled() {
         if let Err(error) =
             ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await

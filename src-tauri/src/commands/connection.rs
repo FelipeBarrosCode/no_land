@@ -13,6 +13,7 @@ use crate::{
             CloudflareTurnTestResult,
         },
         connection_manager::ConnectionManager,
+        network_agent::NetworkAgentProvisioner,
     },
 };
 
@@ -74,6 +75,10 @@ pub async fn get_instance_connection_status(
     context: State<'_, AppContext>,
 ) -> Result<InstanceConnectionStatusResponse, FrontendError> {
     let state = context.load_state().await;
+    let turn_credentials_available = tokio::task::spawn_blocking(cloudflare_turn::load_secret)
+        .await
+        .map_err(|error| AppError::State(format!("Secure storage task failed: {error}")))??
+        .is_some();
     let server = state
         .provisioned_servers
         .iter()
@@ -82,8 +87,7 @@ pub async fn get_instance_connection_status(
     Ok(InstanceConnectionStatusResponse {
         instance_id,
         network: server.network.clone(),
-        manual_turn_switching_enabled: crate::services::connection_manager::turn_switching_enabled(
-        ),
+        manual_turn_switching_enabled: state.cloudflare_turn.enabled && turn_credentials_available,
         automatic_selection_enabled:
             crate::services::connection_manager::automatic_selection_enabled(),
     })
@@ -124,13 +128,6 @@ pub async fn set_instance_connection_preference(
             )
             .into());
         }
-        if !crate::services::connection_manager::turn_switching_enabled() {
-            return Err(AppError::InvalidInput(
-                "Cloudflare TURN switching remains locked until relay interoperability and throughput are verified on this build"
-                    .to_string(),
-            )
-            .into());
-        }
     }
 
     let updated_at = Utc::now().to_rfc3339();
@@ -148,6 +145,13 @@ pub async fn set_instance_connection_preference(
             .await?;
         }
         ConnectionPreference::CloudflareTurn => {
+            // Network-agent installation was intentionally non-blocking during
+            // provisioning so direct WireGuard could succeed independently.
+            // A manual TURN request is the explicit point where the host
+            // bridge must become available, so finish that deployment here.
+            let remote =
+                super::build_remote_exec_for_instance(context.inner(), instance_id).await?;
+            NetworkAgentProvisioner::ensure(&remote, instance_id).await?;
             ConnectionManager::switch(
                 context.inner(),
                 instance_id,
@@ -191,8 +195,11 @@ pub async fn set_instance_connection_preference(
     Ok(InstanceConnectionStatusResponse {
         instance_id,
         network,
-        manual_turn_switching_enabled: crate::services::connection_manager::turn_switching_enabled(
-        ),
+        manual_turn_switching_enabled: turn_enabled
+            && tokio::task::spawn_blocking(cloudflare_turn::load_secret)
+                .await
+                .map_err(|error| AppError::State(format!("Secure storage task failed: {error}")))??
+                .is_some(),
         automatic_selection_enabled:
             crate::services::connection_manager::automatic_selection_enabled(),
     })

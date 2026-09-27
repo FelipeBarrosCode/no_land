@@ -284,6 +284,18 @@ fn gotatun_runtime_dir(config_path: &Path) -> PathBuf {
     } else {
         parent
     };
+    #[cfg(unix)]
+    {
+        // Unix domain sockets have a small platform-defined path limit
+        // (SUN_LEN). macOS development paths under ~/Library/Containers can
+        // exceed it before the helper even starts. Keep the runtime metadata
+        // and control socket in a short deterministic directory while still
+        // sharing one runtime per WireGuard root.
+        let digest = Sha256::digest(root.as_os_str().to_string_lossy().as_bytes());
+        return PathBuf::from("/tmp").join(format!("noland-g-{}", hex::encode(&digest[..8])));
+    }
+
+    #[cfg(not(unix))]
     root.join(GOTATUN_RUNTIME_DIR_NAME)
 }
 
@@ -1782,6 +1794,12 @@ ufw status | grep -q "{}/udp (out)" || ufw allow out {}/udp comment 'WireGuard o
 # network agent. Vast maps this fixed internal UDP port independently of WG.
 ufw status | grep -q "6201/udp" || ufw allow 6201/udp comment 'Noland authenticated network probe'
 
+# The network agent host-control WebSocket is reachable only through the
+# private WireGuard interface. Restrict it to the single configured client
+# address; without this rule UFW's default deny blocks TURN preparation and
+# reports a misleading host-control timeout.
+ufw status | grep -q "6202/tcp on {}" || ufw allow in on {} from {} to {} port 6202 proto tcp comment 'Noland network control'
+
 # Allow forwarding between public NIC and WireGuard interface
 ufw route allow in on {} out on {} comment 'WG ingress forward' >/dev/null 2>&1 || true
 ufw route allow in on {} out on {} comment 'WG egress forward' >/dev/null 2>&1 || true
@@ -1817,6 +1835,10 @@ ufw status | grep -q "deny in on {} to any port 47998,47999,48000,48002 proto ud
             self.defaults.server_interface_name,
             primary_interface,
             primary_interface,
+            primary_interface,
+            primary_interface,
+            allowed_client_ip,
+            allowed_client_ip,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name,
@@ -3065,6 +3087,14 @@ mod tests {
     #[test]
     fn instance_configs_share_one_global_gotatun_runtime() {
         let config = Path::new("wireguard/47458589/nolandwg0.conf");
+        #[cfg(unix)]
+        assert!(gotatun_runtime_dir(config)
+            .to_string_lossy()
+            .starts_with("/tmp/noland-g-"));
+        #[cfg(unix)]
+        return;
+
+        #[cfg(not(unix))]
         assert_eq!(
             gotatun_runtime_dir(config),
             Path::new("wireguard").join(GOTATUN_RUNTIME_DIR_NAME)

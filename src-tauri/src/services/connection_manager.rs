@@ -35,6 +35,7 @@ use super::{
 };
 
 const TURN_EFFECTIVE_MTU: u16 = 1200;
+const DIRECT_PROBE_PORT: u16 = 6201;
 const TARGET_PROBE_ATTEMPTS: u64 = 3;
 const TUNNEL_VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
 const EVALUATION_SAMPLE_COUNT: u64 = 60;
@@ -230,8 +231,10 @@ impl ConnectionManager {
         }
 
         let direct_endpoint = server.network.direct.probe_endpoint.clone();
-        let relay_target = if server.network.cloudflare_turn.enabled && turn_switching_enabled() {
-            match ensure_relay_target(context, &server.network, &mut control, &host_status).await {
+        let relay_target = if server.network.cloudflare_turn.enabled {
+            match ensure_relay_target(context, &server.network, &mut control, &host_status, false)
+                .await
+            {
                 Ok(target) => Some(target),
                 Err(error) => {
                     tracing::warn!(instance_id, %error, "TURN path preparation failed during transport evaluation");
@@ -707,9 +710,19 @@ async fn prepare_target(
             let endpoint = network.direct.endpoint.clone().ok_or_else(|| {
                 AppError::State("Direct WireGuard endpoint is unavailable".to_string())
             })?;
-            let probe_endpoint = network.direct.probe_endpoint.clone().ok_or_else(|| {
-                AppError::State("Direct network probe endpoint is unavailable".to_string())
-            })?;
+            // Vast does not publicly expose every internal port. If there is
+            // no explicit UDP mapping, validate the agent through the
+            // currently active WireGuard path and let post-switch handshake
+            // validation verify the public Direct endpoint.
+            let probe_endpoint = network
+                .direct
+                .probe_endpoint
+                .clone()
+                .filter(|probe| probe.port != DIRECT_PROBE_PORT)
+                .unwrap_or_else(|| NetworkEndpoint {
+                    host: "10.77.0.1".to_string(),
+                    port: DIRECT_PROBE_PORT,
+                });
             let target = TargetPlan {
                 endpoint,
                 probe_endpoint,
@@ -750,16 +763,58 @@ async fn prepare_target(
             let mut control = HostControl::connect(instance_id, host, remote).await?;
             let host_status = control.get_status().await?;
             validate_host_identity(instance_id, &host_status)?;
-            let target = ensure_relay_target(context, network, &mut control, &host_status).await?;
+            let mut target =
+                ensure_relay_target(context, network, &mut control, &host_status, false).await?;
             let (probe_session_id, token) =
                 install_evaluation_probe(&mut control, TransportKind::CloudflareTurn).await?;
-            validate_probe_target(
+            if let Err(first_error) = validate_probe_target(
                 &target.probe_endpoint,
                 ProbePath::CloudflareTurn,
                 probe_session_id,
                 &token,
             )
-            .await?;
+            .await
+            {
+                // A TURN allocation can become unusable while its temporary
+                // credential is still fresh (for example after a relay or
+                // NAT path interruption). Do not repeatedly probe a dead
+                // endpoint: replace it once, then report the original and
+                // replacement failures together if the fresh allocation also
+                // cannot be validated.
+                tracing::warn!(
+                    instance_id,
+                    %first_error,
+                    endpoint = ?target.probe_endpoint,
+                    "TURN probe failed; replacing the allocation before rollback"
+                );
+                target = ensure_relay_target(
+                    context,
+                    network,
+                    &mut control,
+                    &host_status,
+                    true,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::Timeout(format!(
+                        "Initial TURN probe failed ({first_error}); fresh allocation failed: {error}"
+                    ))
+                })?;
+                let (fresh_probe_session_id, fresh_token) =
+                    install_evaluation_probe(&mut control, TransportKind::CloudflareTurn).await?;
+                validate_probe_target(
+                    &target.probe_endpoint,
+                    ProbePath::CloudflareTurn,
+                    fresh_probe_session_id,
+                    &fresh_token,
+                )
+                .await
+                .map_err(|error| {
+                    AppError::Timeout(format!(
+                        "Initial TURN probe failed ({first_error}); fresh TURN probe failed: {error}"
+                    ))
+                })?;
+            }
             Ok(target)
         }
     }
@@ -812,6 +867,7 @@ async fn ensure_relay_target(
     network: &InstanceNetworkState,
     control: &mut HostControl,
     host_status: &HostNetworkStatus,
+    force_new_allocation: bool,
 ) -> AppResult<TargetPlan> {
     let public_ip = cloudflare_turn::discover_client_public_ip(&context.http_client).await?;
     let credential_expires_at = host_status
@@ -832,7 +888,7 @@ async fn ensure_relay_target(
         && credential_expires_at
             .is_some_and(|expires_at| expires_at > Utc::now() + ChronoDuration::minutes(10))
         && bridge_matches;
-    if reusable {
+    if !force_new_allocation && reusable {
         if let (Some(endpoint), Some(credential_expires_at)) = (
             host_status.state.relay_endpoint.clone(),
             host_status.state.credential_expires_at.clone(),

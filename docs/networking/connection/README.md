@@ -49,12 +49,12 @@ relay preference does not declare that the relay is active.
 
 ## Rollout switches
 
-- `NOLAND_ENABLE_VERIFIED_TURN_SWITCHING=1` unlocks manual TURN selection only
-  after bridge interoperability and transactional Direct ↔ TURN rollback have
-  been verified for the build.
+- Manual TURN selection is available when TURN is enabled and validated
+  credentials are present in secure storage. The switch remains transactional
+  and commits only after bridge interoperability checks pass.
 - `NOLAND_ENABLE_AUTOMATIC_TRANSPORT_SELECTION=1` additionally starts the
-  selected-instance `gaming-v1` evaluator every 30 seconds. It has no effect
-  unless manual TURN switching is also unlocked.
+  selected-instance `gaming-v1` evaluator every 30 seconds. It remains
+  separately gated from manual switching.
 
 Each evaluation installs short-lived in-memory probe sessions, samples direct
 and relay paths concurrently, persists non-secret metrics and the decision, and
