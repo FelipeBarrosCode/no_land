@@ -31,8 +31,8 @@ RUST_EOF
 rustc /tmp/test_parse.rs -o /tmp/test_parse && /tmp/test_parse"
 expect {
     "Enter passphrase for key" {
-        send "Casa8301\r"
-        exp_continue
+        send_user "SSH key is not loaded. Run: ssh-add ~/vastai\n"
+        exit 1
     }
     eof
 }

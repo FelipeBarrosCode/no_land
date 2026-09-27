@@ -65,3 +65,5 @@ src-tauri/platform/*
 *.pdb
 *.ilk
 *.dmp
+
+/tools/debug/artifacts/
