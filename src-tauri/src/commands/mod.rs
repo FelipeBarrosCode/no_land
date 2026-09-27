@@ -1,9 +1,15 @@
 pub mod auto_shutdown;
+pub mod connection;
 pub mod launch_library;
 pub mod shared_storage;
 
 pub use self::auto_shutdown::{
     get_auto_shutdown_settings, get_instance_auto_shutdown_status, save_auto_shutdown_settings,
+};
+pub use self::connection::{
+    clear_cloudflare_turn_settings, get_cloudflare_turn_settings, get_instance_connection_status,
+    save_cloudflare_turn_settings, set_instance_connection_preference,
+    test_cloudflare_turn_settings,
 };
 pub use self::launch_library::{
     get_instance_launch_library, get_launch_instance_software_job, get_software_artwork,
@@ -507,7 +513,7 @@ async fn ensure_network_agent_for_stream(context: &AppContext, instance_id: u64)
         }
     };
     tauri::async_runtime::spawn(async move {
-        if let Err(error) = NetworkAgentProvisioner::ensure(&remote).await {
+        if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance_id).await {
             warn!(
                 instance_id,
                 %error,
@@ -5176,7 +5182,10 @@ async fn active_stream_remote(
     let session = moonlight.runtime.get_state().await.map_err(|error| {
         AppError::Command(format!("Could not read Moonlight session state: {error}"))
     })?;
-    if !matches!(session, SessionState::Streaming | SessionState::Reconnecting) {
+    if !matches!(
+        session,
+        SessionState::Streaming | SessionState::Reconnecting
+    ) {
         return Err(AppError::InvalidInput(
             "Clipboard transfer is only available during an active stream".to_string(),
         ));

@@ -1,0 +1,132 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RpcResponse",
+  "type": "object",
+  "required": [
+    "controlSessionId",
+    "hostRevision",
+    "protocolVersion",
+    "requestId",
+    "sequence"
+  ],
+  "properties": {
+    "controlSessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NetworkError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "hostRevision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "protocolVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "result": true,
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "definitions": {
+    "NetworkError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/NetworkErrorCode"
+        },
+        "details": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "transitionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "NetworkErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "unsupported_method",
+        "control_operation_failed",
+        "unsupported_protocol_version",
+        "unauthorized",
+        "replayed_request",
+        "request_id_conflict",
+        "stale_revision",
+        "transition_in_progress",
+        "invalid_endpoint",
+        "helper_unavailable",
+        "helper_state_mismatch",
+        "direct_probe_unavailable",
+        "turn_credentials_missing",
+        "turn_credentials_invalid",
+        "turn_credentials_expired",
+        "turn_server_unreachable",
+        "turn_allocation_failed",
+        "turn_allocation_lost",
+        "turn_permission_failed",
+        "turn_bridge_unavailable",
+        "insufficient_samples",
+        "target_validation_failed",
+        "tunnel_validation_failed",
+        "sunshine_validation_failed",
+        "rollback_failed",
+        "state_persistence_failed",
+        "both_transports_unavailable"
+      ]
+    },
+    "TransportKind": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "cloudflare_turn"
+      ]
+    }
+  }
+}

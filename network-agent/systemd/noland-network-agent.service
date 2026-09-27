@@ -9,6 +9,16 @@ ExecStart=/usr/local/libexec/noland-network-agent-bind-wg0
 Restart=always
 RestartSec=3
 DynamicUser=true
+RuntimeDirectory=noland-network-agent
+RuntimeDirectoryMode=0700
+StateDirectory=noland-network-agent
+StateDirectoryMode=0700
+LoadCredential=control-secret:/etc/noland-network-agent/control-secret
+# The agent's default points at systemd's credential directory. Do not use the
+# %d specifier here: older supported systemd versions reject it as an invalid
+# slot and silently omit the environment assignment.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -22,7 +32,7 @@ ProtectKernelTunables=true
 ProtectHostname=true
 ProtectProc=invisible
 ProcSubset=pid
-RestrictAddressFamilies=AF_INET AF_NETLINK
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 RestrictNamespaces=true
 LockPersonality=true
 MemoryDenyWriteExecute=true

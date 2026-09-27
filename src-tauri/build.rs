@@ -52,6 +52,7 @@ fn main() {
             println!("cargo:rustc-link-lib=framework=AppKit");
             println!("cargo:rustc-link-lib=framework=ApplicationServices");
         }
+        write_static_noland_moonlight_bindings();
         tauri_build::build();
         return;
     }
@@ -376,14 +377,18 @@ fn main() {
         }
     }
 
+    write_static_noland_moonlight_bindings();
+
+    tauri_build::build()
+}
+
+fn write_static_noland_moonlight_bindings() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is not set"));
     fs::write(
         out_dir.join("noland_moonlight_bindings.rs"),
         static_noland_moonlight_bindings(),
     )
     .expect("failed to write noland moonlight bindings");
-
-    tauri_build::build()
 }
 
 fn static_noland_moonlight_bindings() -> &'static str {

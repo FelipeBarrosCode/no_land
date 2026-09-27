@@ -93,6 +93,162 @@ export interface PostWireGuardSetupState {
 
 export type ConnectionProvider = "wireguard";
 
+export type ConnectionPreference = "auto" | "direct" | "cloudflare_turn";
+export type TransportKind = "direct" | "cloudflare_turn";
+export type PathAvailability =
+  | "unknown"
+  | "preparing"
+  | "ready"
+  | "degraded"
+  | "unavailable";
+export type TransitionPhase =
+  | "idle"
+  | "validating_target"
+  | "applying_endpoint"
+  | "validating_tunnel"
+  | "committing"
+  | "rolling_back"
+  | "completed"
+  | "failed";
+export type EvaluationReason =
+  | "relay_lower_latency"
+  | "relay_more_stable"
+  | "relay_wins_both"
+  | "direct_lower_latency"
+  | "direct_more_stable"
+  | "direct_wins_both"
+  | "paths_equivalent"
+  | "insufficient_samples"
+  | "direct_unavailable"
+  | "relay_unavailable"
+  | "manual_preference"
+  | "emergency_failover";
+
+export interface NetworkEndpoint {
+  host: string;
+  port: number;
+}
+
+export interface PathMetrics {
+  sampleCount: number;
+  sampleAgeMs: number;
+  medianRttMs: number | null;
+  p95RttMs: number | null;
+  p99RttMs: number | null;
+  jitterMs: number;
+  lossPercent: number;
+  spikePercent: number;
+  reorderingPercent: number | null;
+}
+
+export interface PathEvaluation {
+  metrics: PathMetrics;
+  stabilityPenalty: number;
+  confidence: number;
+  scoreable: boolean;
+}
+
+export interface ConnectionEvaluation {
+  evaluationId: string;
+  policyVersion: string;
+  evaluatedAt: string;
+  selected: TransportKind | null;
+  reason: EvaluationReason;
+  direct: PathEvaluation;
+  cloudflareTurn: PathEvaluation;
+  comparison: {
+    latencyAdvantage: number;
+    stabilityAdvantage: number;
+    latencyWeight: number;
+    stabilityWeight: number;
+    confidence: number;
+    turnAdvantage: number;
+  };
+}
+
+export interface ConnectionNetworkError {
+  code: string;
+  message: string;
+  retryable: boolean;
+  transport: TransportKind | null;
+  transitionId: string | null;
+  details: string | null;
+}
+
+export interface ConnectionTransition {
+  transitionId: string;
+  requestedTransport: TransportKind;
+  previousTransport: TransportKind | null;
+  effectiveTransport: TransportKind | null;
+  phase: TransitionPhase;
+  startedAt: string;
+  completedAt: string | null;
+  error: ConnectionNetworkError | null;
+}
+
+export interface InstanceNetworkState {
+  schemaVersion: number;
+  clientRevision: number;
+  updatedAt: string | null;
+  preference: ConnectionPreference;
+  activeTransport: TransportKind | null;
+  fallbackReason: EvaluationReason | null;
+  direct: {
+    endpoint: NetworkEndpoint | null;
+    probeEndpoint: NetworkEndpoint | null;
+    effectiveMtu: number | null;
+    availability: PathAvailability;
+  };
+  cloudflareTurn: {
+    enabled: boolean;
+    credentialRef: string | null;
+    relayEndpoint: NetworkEndpoint | null;
+    allocationGeneration: number;
+    allocationExpiresAt: string | null;
+    credentialExpiresAt: string | null;
+    effectiveMtu: number | null;
+    availability: PathAvailability;
+  };
+  lastEvaluation: ConnectionEvaluation | null;
+  lastTransition: ConnectionTransition | null;
+}
+
+export interface InstanceConnectionStatusResponse {
+  instanceId: number;
+  network: InstanceNetworkState;
+  manualTurnSwitchingEnabled: boolean;
+  automaticSelectionEnabled: boolean;
+}
+
+export interface CloudflareTurnSettingsState {
+  enabled: boolean;
+  credentialRef: string;
+  lastValidatedAt: string | null;
+  lastError: string | null;
+}
+
+export interface CloudflareTurnSettingsUpdate {
+  enabled: boolean;
+  keyId: string;
+  apiToken: string;
+}
+
+export interface CloudflareTurnSettingsResponse {
+  enabled: boolean;
+  status: "disabled" | "valid" | "missing";
+  keyIdHint: string | null;
+  tokenSet: boolean;
+  credentialRef: string;
+  lastValidatedAt: string | null;
+  lastError: string | null;
+}
+
+export interface CloudflareTurnTestResult {
+  valid: boolean;
+  udpUrls: string[];
+  credentialExpiresAt: string;
+}
+
 export interface CredentialsState {
   appUsername: string;
   appPassword: string;
@@ -196,6 +352,12 @@ export interface WireGuardState {
   serverPublicKey: string;
   clientPublicKey: string;
   configPath: string;
+  clientPrivateKeyFingerprint: string;
+  clientPublicKeyFingerprint: string;
+  serverPublicKeyFingerprint: string;
+  endpointHost: string;
+  endpointPort: number;
+  lastRuntimeInterface: string;
 }
 
 export interface SunshineState {
@@ -295,6 +457,7 @@ export interface ProvisionedServerState {
   micForwardingEnabled: boolean;
   micAutoConnect: boolean;
   display: RemoteDisplayState;
+  network: InstanceNetworkState;
   lastState: OrchestrationState;
   lastError: string | null;
   steps: ProvisionedServerSteps;
@@ -506,6 +669,7 @@ export interface PersistedAppState {
   sharedStorage: SharedStorageState;
   sharedStorageProfiles?: ProfileReference[];
   autoShutdown: AutoShutdownState;
+  cloudflareTurn: CloudflareTurnSettingsState;
   provisionedServers: ProvisionedServerState[];
   postWireguardSetup: PostWireGuardSetupState;
   orchestrationState: OrchestrationState;

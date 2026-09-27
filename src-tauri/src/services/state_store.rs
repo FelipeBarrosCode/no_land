@@ -7,7 +7,11 @@ use tracing::warn;
 
 use crate::{
     errors::{AppError, AppResult},
-    models::app_state::{ConnectionProvider, PersistedAppState},
+    models::app_state::{
+        ConnectionProvider, NetworkEndpoint, PathAvailability, PersistedAppState, TransportKind,
+        WireGuardSetupStatus,
+    },
+    utils::atomic_file::write_atomically,
 };
 
 #[async_trait]
@@ -43,11 +47,30 @@ impl JsonStateStore {
         reconcile_json(&mut baseline, &raw_value);
 
         let mut migrated: PersistedAppState = serde_json::from_value(baseline)?;
+        let current_instance_id = migrated.instance.instance_id;
+        let direct_endpoint = (!migrated.wireguard.endpoint_host.trim().is_empty()
+            && migrated.wireguard.endpoint_port != 0)
+            .then(|| NetworkEndpoint {
+                host: migrated.wireguard.endpoint_host.clone(),
+                port: migrated.wireguard.endpoint_port,
+            });
         for server in &mut migrated.provisioned_servers {
             server.connection_provider = ConnectionProvider::Wireguard;
             server.embedded_moonlight_pipeline_enabled = true;
             if server.embedded_moonlight_host_id.trim().is_empty() {
                 server.embedded_moonlight_host_id = format!("instance-{}", server.instance_id);
+            }
+            if Some(server.instance_id) == current_instance_id
+                && server.network.direct.endpoint.is_none()
+            {
+                server.network.direct.endpoint = direct_endpoint.clone();
+                if server.network.direct.endpoint.is_some()
+                    && migrated.post_wireguard_setup.wireguard_setup_status
+                        == WireGuardSetupStatus::Connected
+                {
+                    server.network.direct.availability = PathAvailability::Ready;
+                    server.network.active_transport = Some(TransportKind::Direct);
+                }
             }
         }
         migrated.connection_provider = ConnectionProvider::Wireguard;
@@ -164,8 +187,13 @@ impl StateStore for JsonStateStore {
             root_map.insert(key, value);
         }
 
-        let body = serde_json::to_string_pretty(&Value::Object(root_map))?;
-        fs::write(&self.state_path, body).await?;
+        let body = serde_json::to_vec_pretty(&Value::Object(root_map))?;
+        let state_path = self.state_path.clone();
+        tokio::task::spawn_blocking(move || write_atomically(&state_path, &body))
+            .await
+            .map_err(|error| {
+                AppError::State(format!("Atomic state writer task failed: {error}"))
+            })??;
         Ok(())
     }
 
@@ -227,6 +255,7 @@ mod tests {
     use super::{JsonStateStore, StateStore};
     use crate::models::app_state::{
         ConnectionProvider, OrchestrationState, PersistedAppState, ProvisionedServerState,
+        TransportKind, WireGuardSetupStatus,
     };
 
     fn temp_state_path(name: &str) -> PathBuf {
@@ -274,6 +303,32 @@ mod tests {
             migrated.orchestration_state,
             OrchestrationState::WireGuardConnected
         );
+    }
+
+    #[test]
+    fn v2_active_tunnel_migrates_to_a_verified_direct_transport() {
+        let store = JsonStateStore::new(PathBuf::from("state.json"), 3);
+        let mut state = PersistedAppState::default();
+        state.version = 2;
+        state.instance.instance_id = Some(42);
+        state.wireguard.endpoint_host = "203.0.113.20".to_string();
+        state.wireguard.endpoint_port = 51820;
+        state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Connected;
+        state
+            .provisioned_servers
+            .push(ProvisionedServerState::new(42));
+
+        let migrated = store
+            .migrate_value(serde_json::to_value(state).unwrap())
+            .unwrap();
+        let network = &migrated.provisioned_servers[0].network;
+        assert_eq!(migrated.version, 3);
+        assert_eq!(network.active_transport, Some(TransportKind::Direct));
+        assert_eq!(
+            network.direct.endpoint.as_ref().unwrap().host,
+            "203.0.113.20"
+        );
+        assert_eq!(network.direct.endpoint.as_ref().unwrap().port, 51820);
     }
 
     #[tokio::test]

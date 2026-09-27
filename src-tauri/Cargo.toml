@@ -21,6 +21,7 @@ cmake = "0.1.51"
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
+noland-network-contracts = { path = "../network-contracts" }
 noland-rclone-adapter = { path = "../state-agent/crates/noland-rclone-adapter" }
 arboard = { version = "3.4", default-features = false }
 async-trait = "0.1.83"
@@ -30,7 +31,14 @@ chrono = { version = "0.4.38", features = ["serde"] }
 crossbeam-channel = "0.5.13"
 dirs = "5.0.1"
 futures-util = "0.3"
-keyring = "3.6.1"
+keyring = {
+    version = "3.6.1",
+    features = [
+        "apple-native",
+        "windows-native",
+        "linux-native-sync-persistent",
+    ],
+}
 parking_lot = "0.12.3"
 portable-pty = "0.9.0"
 rand_core = "0.6.4"

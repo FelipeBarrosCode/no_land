@@ -200,6 +200,12 @@ pub struct VastInstance {
     pub wireguard_listen_port: u16,
     #[serde(default)]
     pub wireguard_host_ip: String,
+    #[serde(default)]
+    pub network_probe_port: u16,
+    #[serde(default = "default_network_probe_listen_port")]
+    pub network_probe_listen_port: u16,
+    #[serde(default)]
+    pub network_probe_host_ip: String,
     pub ssh_command: String,
     pub public_ip: String,
     pub gpu_name: String,
@@ -247,6 +253,12 @@ impl VastInstance {
             .unwrap_or_else(|| extract_ssh_port_from_ports(value));
         let (wireguard_listen_port, wireguard_port, wireguard_host_ip) =
             extract_wireguard_mapping_from_ports(value);
+        let network_probe_listen_port = default_network_probe_listen_port();
+        let network_probe_port =
+            extract_port_from_ports(value, &format!("{network_probe_listen_port}/udp"), 0);
+        let network_probe_host_ip =
+            extract_host_ip_from_ports(value, &format!("{network_probe_listen_port}/udp"))
+                .unwrap_or_default();
 
         let ssh_command = field_as_str(
             value,
@@ -290,6 +302,9 @@ impl VastInstance {
             wireguard_port,
             wireguard_listen_port,
             wireguard_host_ip,
+            network_probe_port,
+            network_probe_listen_port,
+            network_probe_host_ip,
             ssh_command,
             public_ip,
             gpu_name: value
@@ -350,6 +365,15 @@ impl VastInstance {
         }
 
         self.ssh_host.trim().to_string()
+    }
+
+    pub fn network_probe_endpoint_host(&self) -> String {
+        if let Some(host) = normalize_host_ip(&self.network_probe_host_ip) {
+            if is_routable_host_ip(&host) {
+                return host;
+            }
+        }
+        self.wireguard_endpoint_host()
     }
 }
 
@@ -520,7 +544,22 @@ fn default_wireguard_listen_port() -> u16 {
     51820
 }
 
+fn default_network_probe_listen_port() -> u16 {
+    6201
+}
+
 fn extract_wireguard_mapping_from_ports(value: &Value) -> (u16, u16, String) {
+    let default_listen_port = default_wireguard_listen_port();
+    let default_key = format!("{default_listen_port}/udp");
+    let default_host_port = extract_port_from_ports(value, &default_key, 0);
+    if default_host_port != 0 {
+        return (
+            default_listen_port,
+            default_host_port,
+            extract_host_ip_from_ports(value, &default_key).unwrap_or_default(),
+        );
+    }
+
     if let Some(ports_map) = value.get("ports").and_then(Value::as_object) {
         for (key, entry) in ports_map {
             let (container_port, protocol) = parse_port_key(key);
@@ -543,11 +582,7 @@ fn extract_wireguard_mapping_from_ports(value: &Value) -> (u16, u16, String) {
         }
     }
 
-    (
-        default_wireguard_listen_port(),
-        extract_port_from_ports(value, "51820/udp", 0),
-        extract_host_ip_from_ports(value, "51820/udp").unwrap_or_default(),
-    )
+    (default_listen_port, 0, String::new())
 }
 
 fn extract_port_from_ports(value: &Value, key: &str, default: u16) -> u16 {

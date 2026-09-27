@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -9,6 +9,12 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use fs2::FileExt;
+use noland_network_contracts::{
+    control::{
+        HelperMethod, HelperRequest, HelperResponse, SetInterfaceMtuParams, SetPeerEndpointParams,
+    },
+    state::NetworkEndpoint,
+};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -112,14 +118,41 @@ struct GotatunRuntimeStatus {
     allowed_ips: Vec<String>,
     endpoint: String,
     #[serde(default)]
+    control_endpoint: String,
+    #[serde(default)]
     config_fingerprint: String,
     #[serde(default)]
     listen_port: u16,
+    #[serde(default)]
+    mtu: u16,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
     updated_at_unix: u64,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedEndpointUpdate {
+    pub previous_endpoint: String,
+    pub active_endpoint: String,
+    pub transition_id: uuid::Uuid,
+    pub applied_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedTunnelRuntime {
+    pub active: bool,
+    pub launch_id: String,
+    pub config_fingerprint: String,
+    pub peer_public_key: String,
+    pub endpoint: String,
+    pub mtu: u16,
+    pub latest_handshake_age_secs: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
@@ -251,6 +284,18 @@ fn gotatun_runtime_dir(config_path: &Path) -> PathBuf {
     } else {
         parent
     };
+    #[cfg(unix)]
+    {
+        // Unix domain sockets have a small platform-defined path limit
+        // (SUN_LEN). macOS development paths under ~/Library/Containers can
+        // exceed it before the helper even starts. Keep the runtime metadata
+        // and control socket in a short deterministic directory while still
+        // sharing one runtime per WireGuard root.
+        let digest = Sha256::digest(root.as_os_str().to_string_lossy().as_bytes());
+        return PathBuf::from("/tmp").join(format!("noland-g-{}", hex::encode(&digest[..8])));
+    }
+
+    #[cfg(not(unix))]
     root.join(GOTATUN_RUNTIME_DIR_NAME)
 }
 
@@ -349,6 +394,197 @@ fn load_gotatun_runtime_status(path: &Path) -> Option<GotatunRuntimeStatus> {
 fn load_active_gotatun_runtime_status() -> Option<GotatunRuntimeStatus> {
     let path = active_gotatun_status_path().lock().ok()?.clone()?;
     load_gotatun_runtime_status(&path)
+}
+
+pub fn set_managed_gotatun_peer_endpoint(
+    config_path: &Path,
+    endpoint: NetworkEndpoint,
+    transition_id: uuid::Uuid,
+) -> AppResult<ManagedEndpointUpdate> {
+    endpoint
+        .validate()
+        .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint.clone(),
+        method: HelperMethod::SetPeerEndpoint,
+        params: serde_json::to_value(SetPeerEndpointParams {
+            peer_public_key: status.peer_public_key.clone(),
+            endpoint,
+            transition_id,
+        })?,
+    };
+    let response = call_gotatun_control(&status.control_endpoint, &request)?;
+    decode_helper_result(response)
+}
+
+pub fn set_managed_gotatun_mtu(
+    config_path: &Path,
+    mtu: u16,
+    transition_id: uuid::Uuid,
+) -> AppResult<()> {
+    if !(576..=9000).contains(&mtu) {
+        return Err(AppError::InvalidInput(
+            "Managed tunnel MTU must be between 576 and 9000".to_string(),
+        ));
+    }
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint.clone(),
+        method: HelperMethod::SetInterfaceMtu,
+        params: serde_json::to_value(SetInterfaceMtuParams { mtu, transition_id })?,
+    };
+    let response = call_gotatun_control(&status.control_endpoint, &request)?;
+    let _: serde_json::Value = decode_helper_result(response)?;
+    Ok(())
+}
+
+pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunnelRuntime> {
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint,
+        method: HelperMethod::GetRuntime,
+        params: serde_json::json!({}),
+    };
+    decode_helper_result(call_gotatun_control(&status.control_endpoint, &request)?)
+}
+
+fn require_active_gotatun_control(config_path: &Path) -> AppResult<GotatunRuntimeStatus> {
+    let status_path = gotatun_status_path(config_path);
+    let status = load_gotatun_runtime_status(&status_path).ok_or_else(|| {
+        AppError::State(format!(
+            "Managed tunnel runtime status is unavailable at {}",
+            status_path.display()
+        ))
+    })?;
+    let age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
+    if !status.active || age > 5 || !process_matches_gotatun_status(&status) {
+        return Err(AppError::State(
+            "Managed tunnel helper is not active or its status is stale".to_string(),
+        ));
+    }
+    if status.control_endpoint.trim().is_empty()
+        || status.launch_id.trim().is_empty()
+        || status.config_fingerprint.trim().is_empty()
+    {
+        return Err(AppError::State(
+            "Managed tunnel helper does not expose the endpoint-control contract".to_string(),
+        ));
+    }
+    Ok(status)
+}
+
+fn call_gotatun_control(
+    control_endpoint: &str,
+    request: &HelperRequest,
+) -> AppResult<HelperResponse> {
+    #[cfg(unix)]
+    {
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(control_endpoint).map_err(|error| {
+                AppError::Command(format!(
+                    "Could not connect to managed tunnel control socket {control_endpoint}: {error}"
+                ))
+            })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(AppError::from)?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(AppError::from)?;
+        return exchange_helper_request(&mut stream, request);
+    }
+
+    #[cfg(windows)]
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(control_endpoint)
+            {
+                Ok(mut pipe) => return exchange_helper_request(&mut pipe, request),
+                Err(error) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    let _ = error;
+                }
+                Err(error) => {
+                    return Err(AppError::Command(format!(
+                        "Could not connect to managed tunnel named pipe {control_endpoint}: {error}"
+                    )))
+                }
+            }
+        }
+    }
+}
+
+fn exchange_helper_request<S: Read + Write>(
+    stream: &mut S,
+    request: &HelperRequest,
+) -> AppResult<HelperResponse> {
+    let mut body = serde_json::to_vec(request)?;
+    body.push(b'\n');
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response)?;
+    if response.len() > 64 * 1024 {
+        return Err(AppError::State(
+            "Managed tunnel control response exceeded 64 KiB".to_string(),
+        ));
+    }
+    let response: HelperResponse = serde_json::from_str(&response).map_err(|error| {
+        AppError::Serialization(format!(
+            "Managed tunnel returned an invalid control response: {error}"
+        ))
+    })?;
+    if response.request_id != request.request_id {
+        return Err(AppError::State(format!(
+            "Managed tunnel response ID mismatch: expected {}, got {}",
+            request.request_id, response.request_id
+        )));
+    }
+    Ok(response)
+}
+
+fn decode_helper_result<T: for<'de> Deserialize<'de>>(response: HelperResponse) -> AppResult<T> {
+    if let Some(error) = response.error {
+        return Err(AppError::Command(format!(
+            "Managed tunnel control failed ({}): {}",
+            error.code, error.message
+        )));
+    }
+    let result = response.result.ok_or_else(|| {
+        AppError::State("Managed tunnel control response omitted its result".to_string())
+    })?;
+    serde_json::from_value(result).map_err(AppError::from)
 }
 
 fn gotatun_runtime_unix_timestamp() -> u64 {
@@ -1554,6 +1790,16 @@ ufw status | grep -q "{}/udp" || ufw allow {}/udp comment 'WireGuard'
 # Ensure WireGuard response traffic can always exit
 ufw status | grep -q "{}/udp (out)" || ufw allow out {}/udp comment 'WireGuard outbound'
 
+# Public direct-path probes are HMAC-authenticated and rate limited by the
+# network agent. Vast maps this fixed internal UDP port independently of WG.
+ufw status | grep -q "6201/udp" || ufw allow 6201/udp comment 'Noland authenticated network probe'
+
+# The network agent host-control WebSocket is reachable only through the
+# private WireGuard interface. Restrict it to the single configured client
+# address; without this rule UFW's default deny blocks TURN preparation and
+# reports a misleading host-control timeout.
+ufw status | grep -q "6202/tcp on {}" || ufw allow in on {} from {} to {} port 6202 proto tcp comment 'Noland network control'
+
 # Allow forwarding between public NIC and WireGuard interface
 ufw route allow in on {} out on {} comment 'WG ingress forward' >/dev/null 2>&1 || true
 ufw route allow in on {} out on {} comment 'WG egress forward' >/dev/null 2>&1 || true
@@ -1589,6 +1835,10 @@ ufw status | grep -q "deny in on {} to any port 47998,47999,48000,48002 proto ud
             self.defaults.server_interface_name,
             primary_interface,
             primary_interface,
+            primary_interface,
+            primary_interface,
+            allowed_client_ip,
+            allowed_client_ip,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name,
             self.defaults.server_interface_name,
@@ -2837,6 +3087,14 @@ mod tests {
     #[test]
     fn instance_configs_share_one_global_gotatun_runtime() {
         let config = Path::new("wireguard/47458589/nolandwg0.conf");
+        #[cfg(unix)]
+        assert!(gotatun_runtime_dir(config)
+            .to_string_lossy()
+            .starts_with("/tmp/noland-g-"));
+        #[cfg(unix)]
+        return;
+
+        #[cfg(not(unix))]
         assert_eq!(
             gotatun_runtime_dir(config),
             Path::new("wireguard").join(GOTATUN_RUNTIME_DIR_NAME)
