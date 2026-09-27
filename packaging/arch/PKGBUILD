@@ -20,7 +20,7 @@ depends=(
 provides=('noland-connect')
 conflicts=('noland-connect')
 source=("https://github.com/FelipeBarrosCode/no_land/releases/download/v${pkgver}/Noland.Connect_${pkgver}_amd64.deb")
-sha256sums=('SKIP')
+sha256sums=('891ad5c6f825612052ad064cdf7e4dc071181b45f5d86581fd02fd7705a82e16')
 
 package() {
     # Extract data archive from deb package

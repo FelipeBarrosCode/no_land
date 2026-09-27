@@ -70,4 +70,4 @@ src-tauri/platform/*
 /*.exp
 /*.tar.gz
 diagnostic-reports/
-
+/tools/debug/artifacts/
