@@ -14,7 +14,11 @@ RuntimeDirectoryMode=0700
 StateDirectory=noland-network-agent
 StateDirectoryMode=0700
 LoadCredential=control-secret:/etc/noland-network-agent/control-secret
-Environment=NOLAND_CONTROL_SECRET_PATH=%d/control-secret
+# The agent's default points at systemd's credential directory. Do not use the
+# %d specifier here: older supported systemd versions reject it as an invalid
+# slot and silently omit the environment assignment.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true

@@ -33,7 +33,7 @@ const AGENT_SERVICE: &str = "noland-network-agent.service";
 const AGENT_REVISION_PATH: &str = "/usr/local/share/noland-network-agent/install-revision";
 const CONTROL_SECRET_PATH: &str = "/etc/noland-network-agent/control-secret";
 const CONTROL_SECRET_KEYRING_SERVICE: &str = "com.noland.connect.network-control";
-const DEPLOYMENT_REVISION: &str = "3";
+const DEPLOYMENT_REVISION: &str = "4";
 const NETWORK_AGENT_MANIFEST: &str = include_str!("../../../network-agent/Cargo.toml");
 
 static DEPLOYMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { errorMessage } from "../../lib/errorMessage";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -401,7 +402,7 @@ export function SettingsScreen({
       const status = await setInstanceConnectionPreference(instanceId, preference);
       setConnectionStatuses((current) => ({ ...current, [instanceId]: status }));
     } catch (error) {
-      setConnectionStatusError(error instanceof Error ? error.message : String(error));
+      setConnectionStatusError(errorMessage(error));
     } finally {
       setSwitchingInstanceId(null);
     }
@@ -1413,7 +1414,7 @@ export function SettingsScreen({
           (server) => !connectionStatuses[server.instanceId]?.manualTurnSwitchingEnabled,
         ) ? (
           <p className="mt-3 text-[0.95rem] text-[#8fb4d4]">
-            TURN selection stays hidden until this build passes relay interoperability and transactional rollback verification.
+            TURN selection is available when Cloudflare TURN is enabled and the validated credentials are present in secure storage.
           </p>
         ) : null}
       </div>
