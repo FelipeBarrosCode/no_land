@@ -10,6 +10,8 @@ use std::{
 };
 
 use flate2::{write::GzEncoder, Compression};
+use keyring::Entry;
+use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -29,7 +31,9 @@ const LOCAL_INSTALLER_NAME: &str = "noland-network-agent-install.sh";
 const AGENT_BINARY_PATH: &str = "/usr/local/bin/noland-network-agent";
 const AGENT_SERVICE: &str = "noland-network-agent.service";
 const AGENT_REVISION_PATH: &str = "/usr/local/share/noland-network-agent/install-revision";
-const DEPLOYMENT_REVISION: &str = "1";
+const CONTROL_SECRET_PATH: &str = "/etc/noland-network-agent/control-secret";
+const CONTROL_SECRET_KEYRING_SERVICE: &str = "com.noland.connect.network-control";
+const DEPLOYMENT_REVISION: &str = "4";
 const NETWORK_AGENT_MANIFEST: &str = include_str!("../../../network-agent/Cargo.toml");
 
 static DEPLOYMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -38,8 +42,14 @@ pub struct NetworkAgentProvisioner;
 
 impl NetworkAgentProvisioner {
     /// Ensure the standalone network agent is installed and enabled on the remote VM.
-    pub async fn ensure(remote: &RemoteExec) -> AppResult<()> {
+    pub async fn ensure(remote: &RemoteExec, instance_id: u64) -> AppResult<()> {
         let _deployment_guard = DEPLOYMENT_LOCK.lock().await;
+        let control_secret = load_or_create_control_secret(instance_id)?;
+        let secret_staging = LocalStagingDir::create()?;
+        let secret_path = secret_staging.path().join("control-secret");
+        write_private_file(&secret_path, format!("{control_secret}\n").as_bytes())?;
+        ensure_remote_control_secret(remote, &secret_path).await?;
+
         let expected_version = expected_agent_version()?;
         let expected_revision = format!("{expected_version}-{DEPLOYMENT_REVISION}");
         if probe_existing(remote, &expected_version, &expected_revision).await? {
@@ -101,7 +111,7 @@ rm -f {remote_archive} {remote_installer}
 printf '%s  %s\n' {archive_sha256} {root_archive} | sha256sum -c -
 printf '%s  %s\n' {installer_sha256} {root_installer} | sha256sum -c -
 chmod 0700 {root_installer}
-{root_installer} {root_archive} {remote_build} {expected_revision}"#,
+{root_installer} {root_archive} {remote_build} {expected_revision} {instance_id}"#,
             root_staging = shell_single_quote(&root_staging),
             remote_archive = shell_single_quote(&remote_archive),
             remote_installer = shell_single_quote(&remote_installer),
@@ -111,6 +121,7 @@ chmod 0700 {root_installer}
             archive_sha256 = shell_single_quote(&archive_sha256),
             installer_sha256 = shell_single_quote(&installer_sha256),
             expected_revision = shell_single_quote(&expected_revision),
+            instance_id = shell_single_quote(&instance_id.to_string()),
         );
         let output = run_root_script(remote, install_script, Duration::from_secs(30 * 60)).await?;
         if output.status_code != 0 {
@@ -133,6 +144,136 @@ chmod 0700 {root_installer}
         );
         Ok(())
     }
+}
+
+fn load_or_create_control_secret(instance_id: u64) -> AppResult<String> {
+    let account = format!("instance-{instance_id}");
+    let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
+        AppError::State(format!(
+            "Could not access secure storage for the instance control credential: {error}"
+        ))
+    })?;
+    match entry.get_password() {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            if value.len() == 64 && hex::decode(&value).is_ok_and(|bytes| bytes.len() == 32) {
+                return Ok(value);
+            }
+            return Err(AppError::State(
+                "Stored instance control credential is invalid".to_string(),
+            ));
+        }
+        Err(keyring::Error::NoEntry) => {}
+        Err(error) => {
+            return Err(AppError::State(format!(
+                "Could not read the instance control credential from secure storage: {error}"
+            )))
+        }
+    }
+
+    let mut secret = [0_u8; 32];
+    OsRng.fill_bytes(&mut secret);
+    let encoded = hex::encode(secret);
+    entry.set_password(&encoded).map_err(|error| {
+        AppError::State(format!(
+            "Could not save the instance control credential in secure storage: {error}"
+        ))
+    })?;
+    Ok(encoded)
+}
+
+pub fn load_instance_control_secret(instance_id: u64) -> AppResult<[u8; 32]> {
+    let account = format!("instance-{instance_id}");
+    let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
+        AppError::State(format!(
+            "Could not access secure storage for the instance control credential: {error}"
+        ))
+    })?;
+    let value = entry.get_password().map_err(|error| match error {
+        keyring::Error::NoEntry => AppError::State(format!(
+            "No control credential is installed for instance {instance_id}"
+        )),
+        other => AppError::State(format!(
+            "Could not read the instance control credential from secure storage: {other}"
+        )),
+    })?;
+    hex::decode(value.trim())
+        .map_err(|_| AppError::State("Stored instance control credential is invalid".to_string()))?
+        .try_into()
+        .map_err(|_: Vec<u8>| {
+            AppError::State("Stored instance control credential is invalid".to_string())
+        })
+}
+
+async fn ensure_remote_control_secret(remote: &RemoteExec, local_path: &Path) -> AppResult<()> {
+    let deployment_id = Uuid::new_v4().simple().to_string();
+    let remote_path = format!("/tmp/noland-network-control-{deployment_id}");
+    upload_file(
+        remote,
+        local_path.to_path_buf(),
+        &remote_path,
+        Duration::from_secs(60),
+        "network control credential",
+    )
+    .await?;
+
+    let script = format!(
+        r#"set -euo pipefail
+cleanup() {{ rm -f {source}; }}
+trap cleanup EXIT
+install -d -o root -g root -m 0755 {directory}
+changed=0
+if ! cmp -s {source} {destination}; then
+    install -o root -g root -m 0600 {source} {destination}
+    changed=1
+fi
+if [[ "$changed" -eq 1 ]] && systemctl is-active --quiet {service}; then
+    systemctl restart {service}
+fi"#,
+        source = shell_single_quote(&remote_path),
+        directory = shell_single_quote(
+            Path::new(CONTROL_SECRET_PATH)
+                .parent()
+                .and_then(Path::to_str)
+                .unwrap_or("/etc/noland-network-agent")
+        ),
+        destination = shell_single_quote(CONTROL_SECRET_PATH),
+        service = AGENT_SERVICE,
+    );
+    let output = run_root_script(remote, script, Duration::from_secs(60)).await?;
+    if output.status_code != 0 {
+        return Err(AppError::Provisioning(format!(
+            "Failed installing the remote network control credential: {}",
+            concise_remote_failure(&output)
+        )));
+    }
+    Ok(())
+}
+
+fn write_private_file(path: &Path, body: &[u8]) -> AppResult<()> {
+    let mut file = File::options()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            AppError::State(format!(
+                "Could not create private network credential file {}: {error}",
+                path.display()
+            ))
+        })?;
+    file.write_all(body).map_err(|error| {
+        AppError::State(format!(
+            "Could not write private network credential file {}: {error}",
+            path.display()
+        ))
+    })?;
+    file.sync_all().map_err(|error| {
+        AppError::State(format!(
+            "Could not flush private network credential file {}: {error}",
+            path.display()
+        ))
+    })?;
+    set_owner_only_file_permissions(path)
 }
 
 async fn probe_existing(
@@ -545,6 +686,30 @@ fn pack_source_bundle(source_dir: &Path, archive_path: &Path) -> AppResult<()> {
         &mut archive,
         &source_dir.join("src"),
         &archive_root.join("src"),
+    )?;
+
+    let contracts_dir = source_dir
+        .parent()
+        .map(|parent| parent.join("network-contracts"))
+        .filter(|path| path.join("Cargo.toml").is_file())
+        .ok_or_else(|| {
+            AppError::Provisioning(
+                "Could not find network-contracts beside the network-agent source".to_string(),
+            )
+        })?;
+    let contracts_root = Path::new("network-contracts");
+    archive
+        .append_dir(contracts_root, &contracts_dir)
+        .map_err(|error| archive_error("network-contracts source directory", error))?;
+    append_archive_file(
+        &mut archive,
+        &contracts_dir.join("Cargo.toml"),
+        &contracts_root.join("Cargo.toml"),
+    )?;
+    append_archive_tree(
+        &mut archive,
+        &contracts_dir.join("src"),
+        &contracts_root.join("src"),
     )?;
 
     let encoder = archive.into_inner().map_err(|error| {

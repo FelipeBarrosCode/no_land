@@ -87,6 +87,10 @@ import {
   getLaunchInstanceSoftwareJob,
   getSoftwareArtwork,
   uploadPathsToInstance,
+  getCloudflareTurnSettings,
+  testCloudflareTurnSettings as testCloudflareTurnSettingsCommand,
+  saveCloudflareTurnSettings as saveCloudflareTurnSettingsCommand,
+  clearCloudflareTurnSettings as clearCloudflareTurnSettingsCommand,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
@@ -136,6 +140,9 @@ import type {
   SoftwareArtworkResult,
   SystemHealthReport,
   DiagnosticReportResponse,
+  CloudflareTurnSettingsResponse,
+  CloudflareTurnSettingsUpdate,
+  CloudflareTurnTestResult,
 } from "../lib/types";
 
 interface AppStore {
@@ -159,6 +166,8 @@ interface AppStore {
   systemHealth: SystemHealthReport | null;
   healthChecking: boolean;
   lastDiagnosticReport: DiagnosticReportResponse | null;
+  cloudflareTurnSettings: CloudflareTurnSettingsResponse | null;
+  cloudflareTurnTestResult: CloudflareTurnTestResult | null;
   initialize: () => Promise<void>;
   bindEvents: () => Promise<void>;
   dismissProvisioningModal: () => void;
@@ -205,6 +214,14 @@ interface AppStore {
   ) => Promise<void>;
   saveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   saveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  loadCloudflareTurnSettings: () => Promise<void>;
+  testCloudflareTurnSettings: (
+    payload: CloudflareTurnSettingsUpdate,
+  ) => Promise<CloudflareTurnTestResult | null>;
+  saveCloudflareTurnSettings: (
+    payload: CloudflareTurnSettingsUpdate,
+  ) => Promise<void>;
+  clearCloudflareTurnSettings: () => Promise<void>;
   regenerateEdid: (payload: {
     mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
@@ -1048,6 +1065,8 @@ export const useAppStore = create<AppStore>((set, get) => {
     systemHealth: null,
     healthChecking: false,
     lastDiagnosticReport: null,
+    cloudflareTurnSettings: null,
+    cloudflareTurnTestResult: null,
     sharedStorageSettings: null,
     storageProviders: [],
     sharedStorageProfiles: [],
@@ -1074,11 +1093,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     initialize: async () => {
       set({ loading: true, error: null });
       try {
-        const [appState, logs, postWireguardSetup, systemHealth] = await Promise.all([
+        const [appState, logs, postWireguardSetup, systemHealth, cloudflareTurnSettings] = await Promise.all([
           getAppState(),
           getProvisioningLogs(),
           getSetupStatus(),
           runSystemHealthCheck().catch(() => null),
+          getCloudflareTurnSettings().catch(() => null),
         ]);
         let rentedInstances: RentedInstanceSummary[] = [];
         let vastWalletSummary: VastWalletSummary | null = null;
@@ -1104,6 +1124,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           sharedStorageProfiles: appState.sharedStorageProfiles ?? [],
           vastWalletSummary,
           systemHealth,
+          cloudflareTurnSettings,
           provisioningModalDismissed: false,
           loading: false,
         });
@@ -1574,6 +1595,49 @@ export const useAppStore = create<AppStore>((set, get) => {
       try {
         const appState = await updateSshCredentials(payload);
         set({ appState, busy: false });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    loadCloudflareTurnSettings: async () => {
+      try {
+        const cloudflareTurnSettings = await getCloudflareTurnSettings();
+        set({ cloudflareTurnSettings });
+      } catch (error) {
+        set({ error: mapError(error) });
+      }
+    },
+
+    testCloudflareTurnSettings: async (payload) => {
+      set({ busy: true, error: null, cloudflareTurnTestResult: null });
+      try {
+        const result = await testCloudflareTurnSettingsCommand(payload);
+        set({ busy: false, cloudflareTurnTestResult: result });
+        return result;
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+        return null;
+      }
+    },
+
+    saveCloudflareTurnSettings: async (payload) => {
+      set({ busy: true, error: null });
+      try {
+        const cloudflareTurnSettings = await saveCloudflareTurnSettingsCommand(payload);
+        const appState = await getAppState();
+        set({ busy: false, appState, cloudflareTurnSettings, cloudflareTurnTestResult: null });
+      } catch (error) {
+        set({ busy: false, error: mapError(error) });
+      }
+    },
+
+    clearCloudflareTurnSettings: async () => {
+      set({ busy: true, error: null });
+      try {
+        const cloudflareTurnSettings = await clearCloudflareTurnSettingsCommand();
+        const appState = await getAppState();
+        set({ busy: false, appState, cloudflareTurnSettings, cloudflareTurnTestResult: null });
       } catch (error) {
         set({ busy: false, error: mapError(error) });
       }

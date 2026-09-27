@@ -1,0 +1,554 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InstanceNetworkState",
+  "type": "object",
+  "required": [
+    "clientRevision",
+    "cloudflareTurn",
+    "direct",
+    "preference",
+    "schemaVersion"
+  ],
+  "properties": {
+    "activeTransport": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TransportKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "clientRevision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "cloudflareTurn": {
+      "$ref": "#/definitions/CloudflareTurnPathState"
+    },
+    "direct": {
+      "$ref": "#/definitions/DirectPathState"
+    },
+    "fallbackReason": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EvaluationReason"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lastEvaluation": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectionEvaluation"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "lastTransition": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectionTransition"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "preference": {
+      "$ref": "#/definitions/ConnectionPreference"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "updatedAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "definitions": {
+    "CloudflareTurnPathState": {
+      "type": "object",
+      "required": [
+        "allocationGeneration",
+        "availability",
+        "enabled"
+      ],
+      "properties": {
+        "allocationExpiresAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allocationGeneration": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "availability": {
+          "$ref": "#/definitions/PathAvailability"
+        },
+        "credentialExpiresAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credentialRef": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effectiveMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "relayEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ConnectionEvaluation": {
+      "type": "object",
+      "required": [
+        "cloudflareTurn",
+        "comparison",
+        "direct",
+        "evaluatedAt",
+        "evaluationId",
+        "policyVersion",
+        "reason"
+      ],
+      "properties": {
+        "cloudflareTurn": {
+          "$ref": "#/definitions/PathEvaluation"
+        },
+        "comparison": {
+          "$ref": "#/definitions/EvaluationComparison"
+        },
+        "direct": {
+          "$ref": "#/definitions/PathEvaluation"
+        },
+        "evaluatedAt": {
+          "type": "string"
+        },
+        "evaluationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "policyVersion": {
+          "type": "string"
+        },
+        "reason": {
+          "$ref": "#/definitions/EvaluationReason"
+        },
+        "selected": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "ConnectionPreference": {
+      "type": "string",
+      "enum": [
+        "auto",
+        "direct",
+        "cloudflare_turn"
+      ]
+    },
+    "ConnectionTransition": {
+      "type": "object",
+      "required": [
+        "phase",
+        "requestedTransport",
+        "startedAt",
+        "transitionId"
+      ],
+      "properties": {
+        "completedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effectiveTransport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkError"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/definitions/TransitionPhase"
+        },
+        "previousTransport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requestedTransport": {
+          "$ref": "#/definitions/TransportKind"
+        },
+        "startedAt": {
+          "type": "string"
+        },
+        "transitionId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "DirectPathState": {
+      "type": "object",
+      "required": [
+        "availability"
+      ],
+      "properties": {
+        "availability": {
+          "$ref": "#/definitions/PathAvailability"
+        },
+        "effectiveMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "endpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "probeEndpoint": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkEndpoint"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "EvaluationComparison": {
+      "type": "object",
+      "required": [
+        "confidence",
+        "latencyAdvantage",
+        "latencyWeight",
+        "stabilityAdvantage",
+        "stabilityWeight",
+        "turnAdvantage"
+      ],
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "latencyAdvantage": {
+          "type": "number",
+          "format": "double"
+        },
+        "latencyWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "stabilityAdvantage": {
+          "type": "number",
+          "format": "double"
+        },
+        "stabilityWeight": {
+          "type": "number",
+          "format": "double"
+        },
+        "turnAdvantage": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "EvaluationReason": {
+      "type": "string",
+      "enum": [
+        "relay_lower_latency",
+        "relay_more_stable",
+        "relay_wins_both",
+        "direct_lower_latency",
+        "direct_more_stable",
+        "direct_wins_both",
+        "paths_equivalent",
+        "insufficient_samples",
+        "direct_unavailable",
+        "relay_unavailable",
+        "manual_preference",
+        "emergency_failover"
+      ]
+    },
+    "NetworkEndpoint": {
+      "type": "object",
+      "required": [
+        "host",
+        "port"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "NetworkError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "retryable"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/NetworkErrorCode"
+        },
+        "details": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "transitionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        },
+        "transport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "NetworkErrorCode": {
+      "type": "string",
+      "enum": [
+        "invalid_request",
+        "unsupported_method",
+        "control_operation_failed",
+        "unsupported_protocol_version",
+        "unauthorized",
+        "replayed_request",
+        "request_id_conflict",
+        "stale_revision",
+        "transition_in_progress",
+        "invalid_endpoint",
+        "helper_unavailable",
+        "helper_state_mismatch",
+        "direct_probe_unavailable",
+        "turn_credentials_missing",
+        "turn_credentials_invalid",
+        "turn_credentials_expired",
+        "turn_server_unreachable",
+        "turn_allocation_failed",
+        "turn_allocation_lost",
+        "turn_permission_failed",
+        "turn_bridge_unavailable",
+        "insufficient_samples",
+        "target_validation_failed",
+        "tunnel_validation_failed",
+        "sunshine_validation_failed",
+        "rollback_failed",
+        "state_persistence_failed",
+        "both_transports_unavailable"
+      ]
+    },
+    "PathAvailability": {
+      "type": "string",
+      "enum": [
+        "unknown",
+        "preparing",
+        "ready",
+        "degraded",
+        "unavailable"
+      ]
+    },
+    "PathEvaluation": {
+      "type": "object",
+      "required": [
+        "confidence",
+        "metrics",
+        "scoreable",
+        "stabilityPenalty"
+      ],
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "metrics": {
+          "$ref": "#/definitions/PathMetrics"
+        },
+        "scoreable": {
+          "type": "boolean"
+        },
+        "stabilityPenalty": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "PathMetrics": {
+      "type": "object",
+      "required": [
+        "jitterMs",
+        "lossPercent",
+        "sampleAgeMs",
+        "sampleCount",
+        "spikePercent"
+      ],
+      "properties": {
+        "jitterMs": {
+          "type": "number",
+          "format": "double"
+        },
+        "lossPercent": {
+          "type": "number",
+          "format": "double"
+        },
+        "medianRttMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "p95RttMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "p99RttMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "reorderingPercent": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "sampleAgeMs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "sampleCount": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "spikePercent": {
+          "type": "number",
+          "format": "double"
+        }
+      }
+    },
+    "TransitionPhase": {
+      "type": "string",
+      "enum": [
+        "idle",
+        "validating_target",
+        "applying_endpoint",
+        "validating_tunnel",
+        "committing",
+        "rolling_back",
+        "completed",
+        "failed"
+      ]
+    },
+    "TransportKind": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "cloudflare_turn"
+      ]
+    }
+  }
+}

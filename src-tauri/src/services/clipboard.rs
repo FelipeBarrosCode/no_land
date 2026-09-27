@@ -11,38 +11,41 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 const LINUX_SET_CLIPBOARD: &str = r#"
 export DISPLAY="${DISPLAY:-:0}"
-if [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ]; then
-  export XAUTHORITY="$HOME/.Xauthority"
-fi
+CLIPBOARD_USER="$(ps -eo user=,comm= | awk '$2 == "sunshine" { print $1; exit }')"
+CLIPBOARD_USER="${CLIPBOARD_USER:-${SUDO_USER:-$(id -un)}}"
+XAUTHORITY="${XAUTHORITY:-/etc/X11/.Xauthority-noland}"
+CLIPBOARD_FILE="$(mktemp /tmp/noland-clipboard.XXXXXX)"
+cat > "$CLIPBOARD_FILE"
+chown "$CLIPBOARD_USER" "$CLIPBOARD_FILE"
 if command -v xclip >/dev/null 2>&1; then
-  exec xclip -selection clipboard -in
+  runuser -u "$CLIPBOARD_USER" -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" sh -c "nohup sh -c 'xclip -selection clipboard -in < \"$CLIPBOARD_FILE\"; rm -f \"$CLIPBOARD_FILE\"' >/dev/null 2>&1 &"
 elif command -v xsel >/dev/null 2>&1; then
-  exec xsel --clipboard --input
+  runuser -u "$CLIPBOARD_USER" -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" sh -c "nohup sh -c 'xsel --clipboard --input < \"$CLIPBOARD_FILE\"; rm -f \"$CLIPBOARD_FILE\"' >/dev/null 2>&1 &"
 else
-  echo 'Remote clipboard needs xclip or xsel' >&2
+  rm -f "$CLIPBOARD_FILE"
+  echo 'Remote clipboard needs xclip or xsel (install xclip during provisioning)' >&2
   exit 127
 fi
 "#;
 
 const LINUX_GET_CLIPBOARD: &str = r#"
 export DISPLAY="${DISPLAY:-:0}"
-if [ -z "${XAUTHORITY:-}" ] && [ -f "$HOME/.Xauthority" ]; then
-  export XAUTHORITY="$HOME/.Xauthority"
-fi
+CLIPBOARD_USER="$(ps -eo user=,comm= | awk '$2 == "sunshine" { print $1; exit }')"
+CLIPBOARD_USER="${CLIPBOARD_USER:-${SUDO_USER:-$(id -un)}}"
+XAUTHORITY="${XAUTHORITY:-/etc/X11/.Xauthority-noland}"
+run_clipboard() { runuser -u "$CLIPBOARD_USER" -- env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" "$@"; }
 if command -v xclip >/dev/null 2>&1; then
-  exec xclip -selection clipboard -out
+  run_clipboard xclip -selection clipboard -out
 elif command -v xsel >/dev/null 2>&1; then
-  exec xsel --clipboard --output
+  run_clipboard xsel --clipboard --output
 else
-  echo 'Remote clipboard needs xclip or xsel' >&2
+  echo 'Remote clipboard needs xclip or xsel (install xclip during provisioning)' >&2
   exit 127
 fi
 "#;
 
-const WINDOWS_SET_CLIPBOARD: &str =
-    r#"powershell.exe -NoProfile -NonInteractive -Command "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text""#;
-const WINDOWS_GET_CLIPBOARD: &str =
-    r#"powershell.exe -NoProfile -NonInteractive -Command "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -Raw))""#;
+const WINDOWS_SET_CLIPBOARD: &str = r#"powershell.exe -NoProfile -NonInteractive -Command "$text = [Console]::In.ReadToEnd(); Set-Clipboard -Value $text""#;
+const WINDOWS_GET_CLIPBOARD: &str = r#"powershell.exe -NoProfile -NonInteractive -Command "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); [Console]::Out.Write((Get-Clipboard -Raw))""#;
 
 #[derive(Debug, Clone, Copy)]
 enum RemotePlatform {
@@ -54,7 +57,9 @@ pub fn read_local_text() -> AppResult<String> {
     let mut clipboard = Clipboard::new()
         .map_err(|error| AppError::Command(format!("Could not open local clipboard: {error}")))?;
     let content = clipboard.get_text().map_err(|error| {
-        AppError::Command(format!("Local clipboard does not contain readable text: {error}"))
+        AppError::Command(format!(
+            "Local clipboard does not contain readable text: {error}"
+        ))
     })?;
     validate_text(&content)?;
     Ok(content)

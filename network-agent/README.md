@@ -12,6 +12,9 @@ Defaults:
 
 - UDP: `127.0.0.1:6201`
 - WebSocket: `127.0.0.1:6202`
+- Local privileged control: `/run/noland-network-agent/control.sock`
+- TURN runtime state: `/var/lib/noland-network-agent/network-state.json`
+- Kernel WireGuard bridge: `127.0.0.1:51820`
 - Maximum sessions: 128 (oldest registration is evicted when full)
 - UDP response rate: 20 packets/second/session
 
@@ -20,9 +23,18 @@ Use `cargo run -- --help` for all CLI options. Core settings can also be supplie
 ```text
 NOLAND_UDP_ADDR
 NOLAND_WS_ADDR
+NOLAND_INSTANCE_ID
+NOLAND_CONTROL_SOCKET
+NOLAND_TURN_STATE_PATH
+NOLAND_KERNEL_WIREGUARD_ADDR
 NOLAND_MAX_SESSIONS
 NOLAND_UDP_RATE_LIMIT
 ```
+
+The desktop stores each privileged control secret in the OS keyring and
+installs a root-only copy at `/etc/noland-network-agent/control-secret`.
+Systemd exposes it to the dynamic service user through `LoadCredential`; the
+secret is never written to application state.
 
 Classifier thresholds have matching `NOLAND_*` environment variables shown by `--help`, including loss, jitter, p95-minus-median spread, spike percentage, and median latency boundaries.
 

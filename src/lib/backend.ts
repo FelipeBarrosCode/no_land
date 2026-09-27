@@ -56,6 +56,11 @@ import type {
   OfferCountryAvailability,
   SystemHealthReport,
   DiagnosticReportResponse,
+  CloudflareTurnSettingsResponse,
+  CloudflareTurnSettingsUpdate,
+  CloudflareTurnTestResult,
+  ConnectionPreference,
+  InstanceConnectionStatusResponse,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -343,6 +348,43 @@ export async function updatePlatformCredentials(
 ): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("update_platform_credentials", {
     payload,
+  });
+}
+
+export async function getCloudflareTurnSettings(): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("get_cloudflare_turn_settings");
+}
+
+export async function testCloudflareTurnSettings(
+  payload: CloudflareTurnSettingsUpdate,
+): Promise<CloudflareTurnTestResult> {
+  return invokeSafe<CloudflareTurnTestResult>("test_cloudflare_turn_settings", { payload });
+}
+
+export async function saveCloudflareTurnSettings(
+  payload: CloudflareTurnSettingsUpdate,
+): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("save_cloudflare_turn_settings", { payload });
+}
+
+export async function clearCloudflareTurnSettings(): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("clear_cloudflare_turn_settings");
+}
+
+export async function getInstanceConnectionStatus(
+  instanceId: number,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("get_instance_connection_status", {
+    instanceId,
+  });
+}
+
+export async function setInstanceConnectionPreference(
+  instanceId: number,
+  preference: ConnectionPreference,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("set_instance_connection_preference", {
+    payload: { instanceId, preference },
   });
 }
 

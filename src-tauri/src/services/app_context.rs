@@ -30,6 +30,7 @@ pub struct AppContext {
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
     pub wireguard_mutation_in_progress: Arc<AtomicBool>,
+    pub network_allocation_lock: Arc<Mutex<()>>,
     pub shared_storage_progress: tokio::sync::broadcast::Sender<SharedStorageProgressEvent>,
     pub shared_storage_restore_completed:
         tokio::sync::broadcast::Sender<SharedStorageRestoreCompletedEvent>,
@@ -77,6 +78,7 @@ impl AppContext {
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
             wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),
+            network_allocation_lock: Arc::new(Mutex::new(())),
             shared_storage_progress: tokio::sync::broadcast::channel(64).0,
             shared_storage_restore_completed: tokio::sync::broadcast::channel(16).0,
             active_agent_operation: Arc::new(RwLock::new(None)),
@@ -105,13 +107,11 @@ impl AppContext {
     where
         F: FnOnce(&mut PersistedAppState),
     {
-        let next_state = {
-            let mut state = self.state.write().await;
-            update(&mut state);
-            state.clone()
-        };
-
+        let mut state = self.state.write().await;
+        let mut next_state = state.clone();
+        update(&mut next_state);
         self.state_store.save_state(&next_state).await?;
+        *state = next_state.clone();
         Ok(next_state)
     }
 
