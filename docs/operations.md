@@ -134,6 +134,9 @@ validation and generates local SHA-256 checksums.
 Security reports appear in the workflow run artifacts and GitHub Security/Code scanning where
 SARIF is supported. Reports must never contain credentials.
 
+`.gitleaks.toml` allows only the exact deterministic 64-hex token shown in the public
+network-agent protocol example; it does not exclude the file or any credential pattern generally.
+
 An intentional vulnerability exception must be narrow and documented in this file (advisory or
 CVE, affected package, owner, justification, compensating control, and expiry/removal date) before
 adding it to a scanner-specific ignore file. Broad project, directory, or severity exclusions are
