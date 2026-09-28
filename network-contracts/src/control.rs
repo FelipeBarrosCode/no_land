@@ -6,7 +6,10 @@ use uuid::Uuid;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-use crate::{state::NetworkEndpoint, CONTROL_PROTOCOL_VERSION};
+use crate::{
+    state::{ConnectionProfile, HostLinkState, NetworkEndpoint},
+    CONTROL_PROTOCOL_VERSION,
+};
 
 pub const CONTROL_SUBPROTOCOL: &str = "noland-network-control/1";
 
@@ -179,6 +182,39 @@ pub struct PrepareTurnResponse {
     pub allocation_expires_at: Option<String>,
     pub credential_expires_at: String,
     pub permission_ips: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareConnectionProfileRequest {
+    pub operation_id: Uuid,
+    pub expected_profile_revision: u64,
+    pub lease_expires_at: String,
+    pub profile: ConnectionProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PrepareConnectionProfileResponse {
+    pub profile: ConnectionProfile,
+    pub link_state: HostLinkState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitConnectionProfileRequest {
+    pub operation_id: Uuid,
+    pub transition_id: Uuid,
+    pub profile_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AbortConnectionProfileRequest {
+    pub operation_id: Uuid,
+    pub transition_id: Uuid,
+    pub profile_revision: u64,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

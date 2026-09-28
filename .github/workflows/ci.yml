@@ -1,0 +1,74 @@
+name: Continuous Integration
+
+on:
+  push:
+  pull_request:
+  workflow_call:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  network-core:
+    name: Network contracts and agent
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --manifest-path network-contracts/Cargo.toml
+      - run: cargo test --locked --manifest-path network-agent/Cargo.toml
+      - run: cargo fmt --all --manifest-path network-contracts/Cargo.toml -- --check
+      - run: cargo clippy --locked --manifest-path network-agent/Cargo.toml --all-targets -- -D warnings
+
+  desktop-check:
+    name: Desktop check (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install Linux native dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libudev-dev libssl-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev libopus-dev libpulse-dev
+      - run: npm ci
+      - run: npm run build
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml --workspace
+
+  required:
+    name: CI required
+    if: always()
+    needs: [frontend, network-core, desktop-check]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every CI lane
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'all(.[]; .result == "success")'

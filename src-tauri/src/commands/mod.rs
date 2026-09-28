@@ -8,7 +8,7 @@ pub use self::auto_shutdown::{
 };
 pub use self::connection::{
     clear_cloudflare_turn_settings, get_cloudflare_turn_settings, get_instance_connection_status,
-    save_cloudflare_turn_settings, set_instance_connection_preference,
+    repair_instance_connection, save_cloudflare_turn_settings, set_instance_connection_preference,
     test_cloudflare_turn_settings,
 };
 pub use self::launch_library::{

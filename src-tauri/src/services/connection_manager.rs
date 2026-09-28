@@ -2,13 +2,17 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
 use chrono::{Duration as ChronoDuration, Utc};
 use noland_network_contracts::{
-    control::{InstallProbeSessionRequest, PrepareTurnRequest},
+    control::{
+        AbortConnectionProfileRequest, CommitConnectionProfileRequest, InstallProbeSessionRequest,
+        PrepareConnectionProfileRequest, PrepareTurnRequest,
+    },
     errors::{NetworkError, NetworkErrorCode},
     evaluation::{evaluate_paths, EvaluationMode, EvaluationPolicy},
-    probe::{PacketType, ProbePacket, ProbePath},
+    probe::{PacketType, ProbeDirection, ProbePacket, ProbePath},
     state::{
-        ConnectionEvaluation, ConnectionTransition, EvaluationReason, InstanceNetworkState,
-        NetworkEndpoint, PathAvailability, PathMetrics, TransitionPhase, TransportKind,
+        ConnectionEvaluation, ConnectionProfile, ConnectionTransition, EvaluationReason,
+        InstanceNetworkState, MeasurementMethod, NetworkEndpoint, PacketLimits, PathAvailability,
+        PathMetrics, TransitionPhase, TransportKind,
     },
 };
 use rand::{rngs::OsRng, RngCore};
@@ -41,6 +45,11 @@ const TUNNEL_VALIDATION_TIMEOUT: Duration = Duration::from_secs(15);
 const EVALUATION_SAMPLE_COUNT: u64 = 60;
 const EVALUATION_SAMPLE_INTERVAL: Duration = Duration::from_millis(100);
 const EVALUATION_DRAIN_TIME: Duration = Duration::from_secs(1);
+const WIREGUARD_DATA_OVERHEAD: u16 = 32;
+const MIN_STREAMING_INNER_MTU: u16 = 576;
+const PAYLOAD_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+const QUALITY_SWITCH_WIN_STREAK: u8 = 3;
+const QUALITY_SWITCH_MINIMUM_DWELL: Duration = Duration::from_secs(90);
 
 pub fn turn_switching_enabled() -> bool {
     std::env::var("NOLAND_ENABLE_VERIFIED_TURN_SWITCHING").as_deref() == Ok("1")
@@ -52,9 +61,6 @@ pub fn automatic_selection_enabled() -> bool {
 }
 
 pub async fn run_connection_maintenance(context: AppContext) {
-    if !turn_switching_enabled() {
-        return;
-    }
     let mut ticker = interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     // Let startup and tunnel restoration settle before the first evaluation.
@@ -75,6 +81,17 @@ pub async fn run_connection_maintenance(context: AppContext) {
         else {
             continue;
         };
+        if network
+            .last_transition
+            .as_ref()
+            .is_some_and(|transition| transition.phase == TransitionPhase::Committing)
+        {
+            if let Err(error) =
+                ConnectionManager::reconcile_committed_profile(&context, instance_id).await
+            {
+                tracing::warn!(instance_id, %error, "connection profile reconciliation failed");
+            }
+        }
         if network.active_transport == Some(TransportKind::CloudflareTurn)
             && maintenance_round % 10 == 1
         {
@@ -103,8 +120,10 @@ struct TargetPlan {
     probe_endpoint: NetworkEndpoint,
     effective_mtu: u16,
     relay_metadata: Option<RelayMetadata>,
+    packet_limits: PacketLimits,
 }
 
+#[derive(Clone)]
 struct RelayMetadata {
     allocation_generation: u64,
     allocation_expires_at: Option<String>,
@@ -117,6 +136,109 @@ enum HostControl {
 }
 
 impl ConnectionManager {
+    pub async fn reconcile_committed_profile(
+        context: &AppContext,
+        instance_id: u64,
+    ) -> AppResult<InstanceNetworkState> {
+        let state = context.load_state().await;
+        let server = state
+            .provisioned_servers
+            .iter()
+            .find(|server| server.instance_id == instance_id)
+            .cloned()
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Instance {instance_id} is not provisioned"))
+            })?;
+        let config_path = PathBuf::from(&server.wireguard_config_path);
+        let runtime = managed_runtime(config_path).await?;
+        let remote = remote_for_server(context, &state, &server);
+        let mut control =
+            HostControl::connect(instance_id, &server.wireguard_server_ip, remote.as_ref()).await?;
+        let status = control.get_status().await?;
+        validate_host_identity(instance_id, &status)?;
+        let profile = status
+            .state
+            .committed_profile
+            .ok_or_else(|| AppError::State("Host has no committed connection profile".into()))?;
+        let runtime_endpoint = parse_runtime_endpoint(&runtime.endpoint)?;
+        if runtime.mtu != profile.inner_mtu || runtime_endpoint != profile.endpoint {
+            return Err(AppError::State(format!(
+                "Committed host profile does not match the client runtime (host MTU {}, client MTU {}; host endpoint {:?}, client endpoint {:?})",
+                profile.inner_mtu, runtime.mtu, profile.endpoint, runtime_endpoint
+            )));
+        }
+        let completed_at = Utc::now().to_rfc3339();
+        let next = context
+            .update_state(|state| {
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+                {
+                    let previous_transport = server.network.active_transport;
+                    server.network.client_revision =
+                        server.network.client_revision.saturating_add(1);
+                    server.network.updated_at = Some(completed_at.clone());
+                    server.network.active_transport = Some(profile.desired_transport);
+                    server.network.connection_profile = Some(profile.clone());
+                    server.network.last_transition = Some(ConnectionTransition {
+                        transition_id: profile.transition_id,
+                        requested_transport: profile.desired_transport,
+                        previous_transport,
+                        effective_transport: Some(profile.desired_transport),
+                        phase: TransitionPhase::Completed,
+                        started_at: profile.created_at.clone(),
+                        completed_at: Some(completed_at.clone()),
+                        error: None,
+                    });
+                    match profile.desired_transport {
+                        TransportKind::Direct => {
+                            server.network.direct.effective_mtu = Some(profile.inner_mtu);
+                            server.network.direct.availability = PathAvailability::Ready;
+                        }
+                        TransportKind::CloudflareTurn => {
+                            server.network.cloudflare_turn.effective_mtu = Some(profile.inner_mtu);
+                            server.network.cloudflare_turn.relay_endpoint =
+                                Some(profile.endpoint.clone());
+                            server.network.cloudflare_turn.allocation_generation =
+                                profile.allocation_generation.unwrap_or_default();
+                            server.network.cloudflare_turn.availability = PathAvailability::Ready;
+                        }
+                    }
+                }
+            })
+            .await?;
+        Ok(next
+            .provisioned_servers
+            .iter()
+            .find(|server| server.instance_id == instance_id)
+            .expect("reconciled instance remains present")
+            .network
+            .clone())
+    }
+
+    pub async fn repair(context: &AppContext, instance_id: u64) -> AppResult<InstanceNetworkState> {
+        let state = context.load_state().await;
+        let network = state
+            .provisioned_servers
+            .iter()
+            .find(|server| server.instance_id == instance_id)
+            .map(|server| server.network.clone())
+            .ok_or_else(|| {
+                AppError::NotFound(format!("Instance {instance_id} is not provisioned"))
+            })?;
+        let requested_transport = match network.preference {
+            noland_network_contracts::state::ConnectionPreference::Direct => TransportKind::Direct,
+            noland_network_contracts::state::ConnectionPreference::CloudflareTurn => {
+                TransportKind::CloudflareTurn
+            }
+            noland_network_contracts::state::ConnectionPreference::Auto => {
+                network.active_transport.unwrap_or(TransportKind::Direct)
+            }
+        };
+        Self::switch_inner(context, instance_id, requested_transport, true).await
+    }
+
     pub async fn maintain_active_turn(
         context: &AppContext,
         instance_id: u64,
@@ -363,9 +485,45 @@ impl ConnectionManager {
             return Ok(network);
         };
         if network.active_transport == Some(selected) {
+            let mut decisions = context.connection_decisions.lock().await;
+            let decision = decisions.entry(instance_id).or_default();
+            decision.observed_active = network.active_transport;
+            decision.candidate = None;
+            decision.consecutive_wins = 0;
             return Ok(network);
         }
-        Self::switch(context, instance_id, selected).await
+        let should_switch = {
+            let now = std::time::Instant::now();
+            let mut decisions = context.connection_decisions.lock().await;
+            let decision = decisions.entry(instance_id).or_default();
+            if decision.observed_active != network.active_transport {
+                decision.observed_active = network.active_transport;
+                decision.candidate = None;
+                decision.consecutive_wins = 0;
+                decision.last_transport_change = Some(now);
+            }
+            if decision.candidate == Some(selected) {
+                decision.consecutive_wins = decision.consecutive_wins.saturating_add(1);
+            } else {
+                decision.candidate = Some(selected);
+                decision.consecutive_wins = 1;
+            }
+            let dwell_elapsed = decision
+                .last_transport_change
+                .is_none_or(|changed| now.duration_since(changed) >= QUALITY_SWITCH_MINIMUM_DWELL);
+            decision.consecutive_wins >= QUALITY_SWITCH_WIN_STREAK && dwell_elapsed
+        };
+        if !should_switch {
+            return Ok(network);
+        }
+        let switched = Self::switch(context, instance_id, selected).await?;
+        let mut decisions = context.connection_decisions.lock().await;
+        let decision = decisions.entry(instance_id).or_default();
+        decision.observed_active = Some(selected);
+        decision.candidate = None;
+        decision.consecutive_wins = 0;
+        decision.last_transport_change = Some(std::time::Instant::now());
+        Ok(switched)
     }
 
     pub async fn switch(
@@ -481,6 +639,114 @@ impl ConnectionManager {
             }
         };
 
+        let mut host_control =
+            match HostControl::connect(instance_id, &server.wireguard_server_ip, remote.as_ref())
+                .await
+            {
+                Ok(control) => control,
+                Err(error) => {
+                    let network_error = transition_error(
+                        NetworkErrorCode::ControlOperationFailed,
+                        format!("Host profile transaction is unavailable: {error}"),
+                    );
+                    persist_failed_transition(
+                        context,
+                        instance_id,
+                        transition_id,
+                        requested_transport,
+                        previous_transport,
+                        started_at,
+                        network_error,
+                    )
+                    .await?;
+                    return Err(error);
+                }
+            };
+        let host_status = host_control.get_status().await?;
+        validate_host_identity(instance_id, &host_status)?;
+        let profile_revision = host_status
+            .state
+            .committed_profile
+            .as_ref()
+            .map(|profile| profile.profile_revision)
+            .unwrap_or_default()
+            .saturating_add(1);
+        let operation_id = Uuid::new_v4();
+        let mut profile = ConnectionProfile::new(
+            instance_id.to_string(),
+            profile_revision,
+            transition_id,
+            requested_transport,
+            target.endpoint.clone(),
+            target.effective_mtu,
+            Utc::now().to_rfc3339(),
+        );
+        profile.allocation_generation = target
+            .relay_metadata
+            .as_ref()
+            .map(|metadata| metadata.allocation_generation);
+        profile.packet_limits = PacketLimits {
+            verified_inner_mtu: Some(target.effective_mtu),
+            observed_client_mtu: Some(previous_mtu),
+            observed_host_mtu: host_status.state.link_state.observed_mtu,
+            ..target.packet_limits.clone()
+        };
+        let prepared_profile = match host_control
+            .prepare_connection_profile(&PrepareConnectionProfileRequest {
+                operation_id,
+                expected_profile_revision: profile_revision.saturating_sub(1),
+                lease_expires_at: (Utc::now() + ChronoDuration::minutes(2)).to_rfc3339(),
+                profile: profile.clone(),
+            })
+            .await
+        {
+            Ok(prepared) if prepared.link_state.observed_mtu == Some(target.effective_mtu) => {
+                prepared
+            }
+            Ok(prepared) => {
+                let observed = prepared.link_state.observed_mtu;
+                let _ = host_control
+                    .abort_connection_profile(&AbortConnectionProfileRequest {
+                        operation_id,
+                        transition_id,
+                        profile_revision,
+                        reason: Some("host MTU readback mismatch".to_string()),
+                    })
+                    .await;
+                return Err(AppError::State(format!(
+                    "Host MTU readback mismatch: requested {}, observed {:?}",
+                    target.effective_mtu, observed
+                )));
+            }
+            Err(error) => {
+                // Prepare journals before mutating the host MTU. A transport
+                // error can therefore arrive after the mutation succeeded;
+                // issue an idempotent abort instead of waiting for lease expiry.
+                let _ = host_control
+                    .abort_connection_profile(&AbortConnectionProfileRequest {
+                        operation_id,
+                        transition_id,
+                        profile_revision,
+                        reason: Some(error.to_string()),
+                    })
+                    .await;
+                let network_error =
+                    transition_error(NetworkErrorCode::ControlOperationFailed, error.to_string());
+                persist_failed_transition(
+                    context,
+                    instance_id,
+                    transition_id,
+                    requested_transport,
+                    previous_transport,
+                    started_at,
+                    network_error,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        debug_assert_eq!(prepared_profile.profile, profile);
+
         persist_transition_phase(
             context,
             instance_id,
@@ -491,7 +757,6 @@ impl ConnectionManager {
         )
         .await?;
 
-        let mut mtu_changed = false;
         if target.effective_mtu != previous_mtu {
             let path = config_path.clone();
             let mtu = target.effective_mtu;
@@ -501,6 +766,14 @@ impl ConnectionManager {
             .await
             .map_err(|error| AppError::Command(format!("Tunnel MTU task failed: {error}")))?;
             if let Err(error) = mtu_result {
+                let _ = host_control
+                    .abort_connection_profile(&AbortConnectionProfileRequest {
+                        operation_id,
+                        transition_id,
+                        profile_revision,
+                        reason: Some(error.to_string()),
+                    })
+                    .await;
                 let network_error =
                     transition_error(NetworkErrorCode::HelperUnavailable, error.to_string());
                 persist_failed_transition(
@@ -515,7 +788,6 @@ impl ConnectionManager {
                 .await?;
                 return Err(error);
             }
-            mtu_changed = true;
         }
         let endpoint_result = {
             let path = config_path.clone();
@@ -529,13 +801,21 @@ impl ConnectionManager {
         let endpoint_update = match endpoint_result {
             Ok(update) => update,
             Err(error) => {
-                if mtu_changed {
-                    let path = config_path.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        set_managed_gotatun_mtu(&path, previous_mtu, transition_id)
+                let _ = rollback_tunnel(
+                    config_path.clone(),
+                    previous_endpoint.clone(),
+                    previous_mtu,
+                    transition_id,
+                )
+                .await;
+                let _ = host_control
+                    .abort_connection_profile(&AbortConnectionProfileRequest {
+                        operation_id,
+                        transition_id,
+                        profile_revision,
+                        reason: Some(error.to_string()),
                     })
                     .await;
-                }
                 let network_error =
                     transition_error(NetworkErrorCode::HelperUnavailable, error.to_string());
                 persist_failed_transition(
@@ -564,6 +844,14 @@ impl ConnectionManager {
         {
             let _ =
                 rollback_tunnel(config_path, previous_endpoint, previous_mtu, transition_id).await;
+            let _ = host_control
+                .abort_connection_profile(&AbortConnectionProfileRequest {
+                    operation_id,
+                    transition_id,
+                    profile_revision,
+                    reason: Some(error.to_string()),
+                })
+                .await;
             return Err(error);
         }
         let validation = validate_tunnel(
@@ -592,6 +880,14 @@ impl ConnectionManager {
                 transition_id,
             )
             .await;
+            let _ = host_control
+                .abort_connection_profile(&AbortConnectionProfileRequest {
+                    operation_id,
+                    transition_id,
+                    profile_revision,
+                    reason: Some(validation_error.to_string()),
+                })
+                .await;
             let network_error = match rollback {
                 Ok(()) => transition_error(
                     NetworkErrorCode::TunnelValidationFailed,
@@ -629,6 +925,39 @@ impl ConnectionManager {
         {
             let _ =
                 rollback_tunnel(config_path, previous_endpoint, previous_mtu, transition_id).await;
+            let _ = host_control
+                .abort_connection_profile(&AbortConnectionProfileRequest {
+                    operation_id,
+                    transition_id,
+                    profile_revision,
+                    reason: Some(error.to_string()),
+                })
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = host_control
+            .commit_connection_profile(&CommitConnectionProfileRequest {
+                operation_id,
+                transition_id,
+                profile_revision,
+            })
+            .await
+        {
+            let _ = rollback_tunnel(
+                config_path.clone(),
+                previous_endpoint.clone(),
+                previous_mtu,
+                transition_id,
+            )
+            .await;
+            let _ = host_control
+                .abort_connection_profile(&AbortConnectionProfileRequest {
+                    operation_id,
+                    transition_id,
+                    profile_revision,
+                    reason: Some(error.to_string()),
+                })
+                .await;
             return Err(error);
         }
         let completed_at = Utc::now().to_rfc3339();
@@ -644,6 +973,7 @@ impl ConnectionManager {
                         server.network.client_revision.saturating_add(1);
                     server.network.updated_at = Some(completed_at.clone());
                     server.network.active_transport = Some(requested_transport);
+                    server.network.connection_profile = Some(profile.clone());
                     server.network.last_transition = Some(ConnectionTransition {
                         transition_id,
                         requested_transport,
@@ -687,9 +1017,10 @@ impl ConnectionManager {
                 .network
                 .clone()),
             Err(error) => {
-                let _ =
-                    rollback_tunnel(config_path, previous_endpoint, previous_mtu, transition_id)
-                        .await;
+                // The host profile is already durably committed. Keep the
+                // verified endpoint/MTU active rather than creating a
+                // one-sided rollback. The persisted transition remains in
+                // Committing and Repair connection can reconcile it.
                 Err(error)
             }
         }
@@ -714,20 +1045,26 @@ async fn prepare_target(
             // no explicit UDP mapping, validate the agent through the
             // currently active WireGuard path and let post-switch handshake
             // validation verify the public Direct endpoint.
-            let probe_endpoint = network
-                .direct
-                .probe_endpoint
-                .clone()
-                .filter(|probe| probe.port != DIRECT_PROBE_PORT)
-                .unwrap_or_else(|| NetworkEndpoint {
-                    host: "10.77.0.1".to_string(),
-                    port: DIRECT_PROBE_PORT,
-                });
-            let target = TargetPlan {
+            let probe_endpoint =
+                network
+                    .direct
+                    .probe_endpoint
+                    .clone()
+                    .unwrap_or_else(|| NetworkEndpoint {
+                        host: "10.77.0.1".to_string(),
+                        port: DIRECT_PROBE_PORT,
+                    });
+            let mut target = TargetPlan {
                 endpoint,
                 probe_endpoint,
                 effective_mtu: network.direct.effective_mtu.unwrap_or(current_mtu),
                 relay_metadata: None,
+                packet_limits: PacketLimits {
+                    verified_inner_mtu: network.direct.effective_mtu,
+                    confidence: 0.25,
+                    measurement_method: MeasurementMethod::ConfiguredFallback,
+                    ..PacketLimits::default()
+                },
             };
             match HostControl::connect(instance_id, host, remote).await {
                 Ok(mut control) => {
@@ -742,6 +1079,16 @@ async fn prepare_target(
                         &token,
                     )
                     .await?;
+                    if network.direct.probe_endpoint.is_some() {
+                        apply_discovered_payload_limit(
+                            &mut target,
+                            ProbePath::Direct,
+                            probe_session_id,
+                            &token,
+                            0,
+                        )
+                        .await;
+                    }
                 }
                 Err(error) if network.direct.availability == PathAvailability::Ready => {
                     tracing::warn!(
@@ -814,6 +1161,22 @@ async fn prepare_target(
                         "Initial TURN probe failed ({first_error}); fresh TURN probe failed: {error}"
                     ))
                 })?;
+            }
+            if let Some(generation) = target
+                .relay_metadata
+                .as_ref()
+                .map(|metadata| metadata.allocation_generation)
+            {
+                let (payload_session_id, payload_token) =
+                    install_evaluation_probe(&mut control, TransportKind::CloudflareTurn).await?;
+                apply_discovered_payload_limit(
+                    &mut target,
+                    ProbePath::CloudflareTurn,
+                    payload_session_id,
+                    &payload_token,
+                    generation,
+                )
+                .await;
             }
             Ok(target)
         }
@@ -905,6 +1268,12 @@ async fn ensure_relay_target(
                     allocation_expires_at: host_status.state.allocation_expires_at.clone(),
                     credential_expires_at,
                 }),
+                packet_limits: PacketLimits {
+                    verified_inner_mtu: network.cloudflare_turn.effective_mtu,
+                    confidence: 0.25,
+                    measurement_method: MeasurementMethod::ConfiguredFallback,
+                    ..PacketLimits::default()
+                },
             });
         }
     }
@@ -936,7 +1305,163 @@ async fn ensure_relay_target(
             allocation_expires_at: prepared.allocation_expires_at,
             credential_expires_at: prepared.credential_expires_at,
         }),
+        packet_limits: PacketLimits {
+            verified_inner_mtu: Some(TURN_EFFECTIVE_MTU),
+            confidence: 0.25,
+            measurement_method: MeasurementMethod::ConfiguredFallback,
+            ..PacketLimits::default()
+        },
     })
+}
+
+async fn apply_discovered_payload_limit(
+    target: &mut TargetPlan,
+    path: ProbePath,
+    session_id: Uuid,
+    token: &[u8; 32],
+    profile_generation: u64,
+) {
+    let requested_ceiling = target
+        .effective_mtu
+        .saturating_add(WIREGUARD_DATA_OVERHEAD)
+        .clamp(MIN_STREAMING_INNER_MTU + WIREGUARD_DATA_OVERHEAD, 1500);
+    match discover_probe_payload_ceiling(
+        &target.probe_endpoint,
+        path,
+        session_id,
+        token,
+        profile_generation,
+        requested_ceiling,
+    )
+    .await
+    {
+        Ok(Some(payload_ceiling)) => {
+            let verified_inner_mtu = payload_ceiling
+                .saturating_sub(WIREGUARD_DATA_OVERHEAD)
+                .clamp(MIN_STREAMING_INNER_MTU, target.effective_mtu);
+            target.effective_mtu = verified_inner_mtu;
+            target.packet_limits.forward_payload_ceiling = Some(payload_ceiling);
+            target.packet_limits.verified_inner_mtu = Some(verified_inner_mtu);
+            target.packet_limits.confidence = 0.5;
+            target.packet_limits.measurement_method = MeasurementMethod::PacketizationLayerProbe;
+        }
+        Ok(None) => tracing::warn!(
+            ?path,
+            endpoint = ?target.probe_endpoint,
+            "padded path probe could not establish a streaming payload ceiling; retaining the conservative candidate"
+        ),
+        Err(error) => tracing::warn!(
+            ?path,
+            endpoint = ?target.probe_endpoint,
+            %error,
+            "padded path probe failed; retaining the conservative candidate"
+        ),
+    }
+}
+
+async fn discover_probe_payload_ceiling(
+    endpoint: &NetworkEndpoint,
+    path: ProbePath,
+    session_id: Uuid,
+    token: &[u8; 32],
+    profile_generation: u64,
+    upper_bound: u16,
+) -> AppResult<Option<u16>> {
+    let destination = resolve_endpoint(endpoint).await?;
+    let socket = UdpSocket::bind(if destination.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    })
+    .await?;
+    let minimum = MIN_STREAMING_INNER_MTU + WIREGUARD_DATA_OVERHEAD;
+    let upper_bound = upper_bound.max(minimum);
+    if !probe_payload_candidate(
+        &socket,
+        destination,
+        path,
+        session_id,
+        token,
+        profile_generation,
+        minimum,
+        1,
+    )
+    .await?
+    {
+        return Ok(None);
+    }
+    let candidates = (minimum..=upper_bound).step_by(4).collect::<Vec<_>>();
+    let mut low = 0usize;
+    let mut high = candidates.len().saturating_sub(1);
+    let mut sequence = 2_u64;
+    while low < high {
+        let midpoint = low + (high - low).div_ceil(2);
+        let delivered = probe_payload_candidate(
+            &socket,
+            destination,
+            path,
+            session_id,
+            token,
+            profile_generation,
+            candidates[midpoint],
+            sequence,
+        )
+        .await?;
+        sequence = sequence.saturating_add(1);
+        if delivered {
+            low = midpoint;
+        } else {
+            high = midpoint.saturating_sub(1);
+        }
+    }
+    Ok(Some(candidates[low]))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn probe_payload_candidate(
+    socket: &UdpSocket,
+    destination: SocketAddr,
+    path: ProbePath,
+    session_id: Uuid,
+    token: &[u8; 32],
+    profile_generation: u64,
+    payload_size: u16,
+    sequence: u64,
+) -> AppResult<bool> {
+    let packet = ProbePacket::v3(
+        PacketType::Probe,
+        path,
+        ProbeDirection::ClientToHost,
+        sequence,
+        session_id,
+        monotonic_us(),
+        profile_generation,
+        payload_size,
+    )
+    .encode(token);
+    if packet.is_empty() {
+        return Ok(false);
+    }
+    socket.send_to(&packet, destination).await?;
+    let mut response = [0_u8; 128];
+    let Ok(Ok((received, source))) =
+        timeout(PAYLOAD_PROBE_TIMEOUT, socket.recv_from(&mut response)).await
+    else {
+        return Ok(false);
+    };
+    let Some(ack) = ProbePacket::decode_and_verify(&response[..received], token) else {
+        return Ok(false);
+    };
+    Ok(source == destination
+        && ack.version == 3
+        && ack.packet_type == PacketType::Ack
+        && ack.path == path
+        && ack.direction == ProbeDirection::ClientToHost
+        && ack.sequence == sequence
+        && ack.session_id == session_id
+        && ack.profile_generation == profile_generation
+        && ack.payload_size == payload_size
+        && ack.observed_payload_size == payload_size)
 }
 
 async fn install_evaluation_probe(
@@ -1074,7 +1599,10 @@ fn path_metrics(
         .unwrap_or(usize::MAX)
         .saturating_sub(received_count);
     PathMetrics {
-        sample_count: sent.try_into().unwrap_or(u32::MAX),
+        sample_count: received_count.try_into().unwrap_or(u32::MAX),
+        sent_count: sent.try_into().unwrap_or(u32::MAX),
+        received_count: received_count.try_into().unwrap_or(u32::MAX),
+        lost_count: lost.try_into().unwrap_or(u32::MAX),
         sample_age_ms: sample_age.as_millis().try_into().unwrap_or(u64::MAX),
         median_rtt_ms,
         p95_rtt_ms,
@@ -1235,6 +1763,42 @@ impl HostControl {
         match self {
             Self::Tunnel(client) => client.prepare_turn(request).await,
             Self::Ssh(remote) => call_local_control_via_ssh(remote, "prepare_turn", request).await,
+        }
+    }
+
+    async fn prepare_connection_profile(
+        &mut self,
+        request: &PrepareConnectionProfileRequest,
+    ) -> AppResult<noland_network_contracts::control::PrepareConnectionProfileResponse> {
+        match self {
+            Self::Tunnel(client) => client.prepare_connection_profile(request).await,
+            Self::Ssh(remote) => {
+                call_local_control_via_ssh(remote, "prepare_connection_profile", request).await
+            }
+        }
+    }
+
+    async fn commit_connection_profile(
+        &mut self,
+        request: &CommitConnectionProfileRequest,
+    ) -> AppResult<noland_network_contracts::state::HostLinkState> {
+        match self {
+            Self::Tunnel(client) => client.commit_connection_profile(request).await,
+            Self::Ssh(remote) => {
+                call_local_control_via_ssh(remote, "commit_connection_profile", request).await
+            }
+        }
+    }
+
+    async fn abort_connection_profile(
+        &mut self,
+        request: &AbortConnectionProfileRequest,
+    ) -> AppResult<noland_network_contracts::state::HostLinkState> {
+        match self {
+            Self::Tunnel(client) => client.abort_connection_profile(request).await,
+            Self::Ssh(remote) => {
+                call_local_control_via_ssh(remote, "abort_connection_profile", request).await
+            }
         }
     }
 
@@ -1568,10 +2132,13 @@ mod tests {
             1,
             Duration::from_millis(25),
         );
-        assert_eq!(metrics.sample_count, 5);
+        assert_eq!(metrics.sample_count, 4);
+        assert_eq!(metrics.sent_count, 5);
+        assert_eq!(metrics.received_count, 4);
+        assert_eq!(metrics.lost_count, 1);
         assert_eq!(metrics.sample_age_ms, 25);
         assert_eq!(metrics.loss_percent, 20.0);
-        assert_eq!(metrics.median_rtt_ms, Some(13.0));
+        assert_eq!(metrics.median_rtt_ms, Some(12.0));
         assert_eq!(metrics.p95_rtt_ms, Some(50.0));
         assert_eq!(metrics.p99_rtt_ms, Some(50.0));
         assert_eq!(metrics.reordering_percent, Some(25.0));
@@ -1585,6 +2152,44 @@ mod tests {
         assert_eq!(metrics.loss_percent, 100.0);
         assert_eq!(metrics.median_rtt_ms, None);
         assert_eq!(availability(&metrics), PathAvailability::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn padded_probe_finds_size_dependent_delivery_ceiling() {
+        let token = [0x51; 32];
+        let session_id = Uuid::from_u128(31);
+        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let address = server.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buffer = [0_u8; 2_048];
+            loop {
+                let (received, peer) = server.recv_from(&mut buffer).await.unwrap();
+                if received <= 660 {
+                    let response = noland_network_contracts::probe::acknowledge_probe(
+                        &buffer[..received],
+                        &token,
+                    )
+                    .unwrap();
+                    server.send_to(&response, peer).await.unwrap();
+                }
+            }
+        });
+        let endpoint = NetworkEndpoint {
+            host: address.ip().to_string(),
+            port: address.port(),
+        };
+        let ceiling = discover_probe_payload_ceiling(
+            &endpoint,
+            ProbePath::Direct,
+            session_id,
+            &token,
+            9,
+            700,
+        )
+        .await
+        .unwrap();
+        task.abort();
+        assert_eq!(ceiling, Some(660));
     }
 
     #[test]
@@ -1610,6 +2215,10 @@ mod tests {
                 allocation_expires_at: None,
                 credential_expires_at: Some((Utc::now() + ChronoDuration::hours(1)).to_rfc3339()),
                 observed_transport: Some(TransportKind::CloudflareTurn),
+                link_state: Default::default(),
+                committed_profile: None,
+                committed_operation_id: None,
+                pending_profile: None,
             },
             bridge: Some(TurnBridgeStatus {
                 allocation_generation: 8,

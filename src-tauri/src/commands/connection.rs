@@ -94,6 +94,28 @@ pub async fn get_instance_connection_status(
 }
 
 #[tauri::command]
+pub async fn repair_instance_connection(
+    instance_id: u64,
+    context: State<'_, AppContext>,
+) -> Result<InstanceConnectionStatusResponse, FrontendError> {
+    let remote = super::build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    NetworkAgentProvisioner::ensure(&remote, instance_id).await?;
+    let network = ConnectionManager::repair(context.inner(), instance_id).await?;
+    let state = context.load_state().await;
+    let credentials_available = tokio::task::spawn_blocking(cloudflare_turn::load_secret)
+        .await
+        .map_err(|error| AppError::State(format!("Secure storage task failed: {error}")))??
+        .is_some();
+    Ok(InstanceConnectionStatusResponse {
+        instance_id,
+        network,
+        manual_turn_switching_enabled: state.cloudflare_turn.enabled && credentials_available,
+        automatic_selection_enabled:
+            crate::services::connection_manager::automatic_selection_enabled(),
+    })
+}
+
+#[tauri::command]
 pub async fn set_instance_connection_preference(
     payload: SetConnectionPreferenceRequest,
     context: State<'_, AppContext>,

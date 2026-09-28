@@ -4,10 +4,12 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use noland_network_contracts::{
     control::{
-        auth_hello_mac, verify_auth_ok_mac, AuthHello, AuthOk, InstallProbeSessionRequest,
-        PrepareTurnRequest, PrepareTurnResponse, RpcRequest, RpcResponse, CONTROL_SUBPROTOCOL,
+        auth_hello_mac, verify_auth_ok_mac, AbortConnectionProfileRequest, AuthHello, AuthOk,
+        CommitConnectionProfileRequest, InstallProbeSessionRequest,
+        PrepareConnectionProfileRequest, PrepareConnectionProfileResponse, PrepareTurnRequest,
+        PrepareTurnResponse, RpcRequest, RpcResponse, CONTROL_SUBPROTOCOL,
     },
-    state::HostNetworkState,
+    state::{HostLinkState, HostNetworkState},
     CONTROL_PROTOCOL_VERSION,
 };
 use rand::{rngs::OsRng, RngCore};
@@ -174,6 +176,47 @@ impl NetworkControlClient {
     ) -> AppResult<PrepareTurnResponse> {
         self.call("prepare_turn", request, Some(self.host_revision))
             .await
+    }
+
+    pub async fn get_link_state(&mut self) -> AppResult<HostLinkState> {
+        self.call("get_link_state", &serde_json::json!({}), None)
+            .await
+    }
+
+    pub async fn prepare_connection_profile(
+        &mut self,
+        request: &PrepareConnectionProfileRequest,
+    ) -> AppResult<PrepareConnectionProfileResponse> {
+        self.call(
+            "prepare_connection_profile",
+            request,
+            Some(self.host_revision),
+        )
+        .await
+    }
+
+    pub async fn commit_connection_profile(
+        &mut self,
+        request: &CommitConnectionProfileRequest,
+    ) -> AppResult<HostLinkState> {
+        self.call(
+            "commit_connection_profile",
+            request,
+            Some(self.host_revision),
+        )
+        .await
+    }
+
+    pub async fn abort_connection_profile(
+        &mut self,
+        request: &AbortConnectionProfileRequest,
+    ) -> AppResult<HostLinkState> {
+        self.call(
+            "abort_connection_profile",
+            request,
+            Some(self.host_revision),
+        )
+        .await
     }
 
     pub async fn install_probe_session(

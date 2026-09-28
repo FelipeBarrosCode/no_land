@@ -44,6 +44,9 @@ pub struct Config {
     )]
     pub kernel_wireguard_addr: SocketAddr,
 
+    #[arg(long, env = "NOLAND_WIREGUARD_INTERFACE", default_value = "wg0")]
+    pub wireguard_interface: String,
+
     #[arg(long, env = "NOLAND_MAX_SESSIONS", default_value_t = 128)]
     pub max_sessions: usize,
 

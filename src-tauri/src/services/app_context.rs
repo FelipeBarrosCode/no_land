@@ -1,5 +1,9 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Instant,
+};
 
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, RwLock};
@@ -31,10 +35,30 @@ pub struct AppContext {
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
     pub wireguard_mutation_in_progress: Arc<AtomicBool>,
     pub network_allocation_lock: Arc<Mutex<()>>,
+    pub connection_decisions: Arc<Mutex<HashMap<u64, ConnectionDecisionState>>>,
     pub shared_storage_progress: tokio::sync::broadcast::Sender<SharedStorageProgressEvent>,
     pub shared_storage_restore_completed:
         tokio::sync::broadcast::Sender<SharedStorageRestoreCompletedEvent>,
     pub active_agent_operation: Arc<RwLock<Option<ActiveAgentOperation>>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectionDecisionState {
+    pub observed_active: Option<noland_network_contracts::state::TransportKind>,
+    pub candidate: Option<noland_network_contracts::state::TransportKind>,
+    pub consecutive_wins: u8,
+    pub last_transport_change: Option<Instant>,
+}
+
+impl Default for ConnectionDecisionState {
+    fn default() -> Self {
+        Self {
+            observed_active: None,
+            candidate: None,
+            consecutive_wins: 0,
+            last_transport_change: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +103,7 @@ impl AppContext {
             pending_start: Arc::new(Mutex::new(None)),
             wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),
             network_allocation_lock: Arc::new(Mutex::new(())),
+            connection_decisions: Arc::new(Mutex::new(HashMap::new())),
             shared_storage_progress: tokio::sync::broadcast::channel(64).0,
             shared_storage_restore_completed: tokio::sync::broadcast::channel(16).0,
             active_agent_operation: Arc::new(RwLock::new(None)),
