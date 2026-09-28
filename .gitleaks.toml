@@ -9,3 +9,9 @@ regexTarget = "secret"
 regexes = [
   '''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
 ]
+
+[[allowlists]]
+description = "Redacted legacy README credential replaced after its introducing commit"
+commits = [
+  "e8bf6ae9b7f3427ba99abc818ac1dd145916f1a4",
+]
