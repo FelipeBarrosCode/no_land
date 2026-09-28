@@ -446,6 +446,18 @@ fn main() {
             moonlight_manager
                 .runtime
                 .start_event_bridge(app.handle().clone());
+            let mut stream_state = moonlight_manager.runtime.subscribe_state();
+            let stream_network_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                while stream_state.changed().await.is_ok() {
+                    let active = !matches!(
+                        *stream_state.borrow(),
+                        moonlight::domain::SessionState::Idle
+                    );
+                    stream_network_context.set_stream_network_active(active);
+                }
+                stream_network_context.set_stream_network_active(false);
+            });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
@@ -531,6 +543,7 @@ fn main() {
 
             tauri::async_runtime::spawn(async move {
                 network_monitor.stop().await;
+                mic_context.set_stream_network_active(false);
                 let _ = runtime.stop().await;
                 let _ = runtime.detach_surface().await;
                 input.end_capture();

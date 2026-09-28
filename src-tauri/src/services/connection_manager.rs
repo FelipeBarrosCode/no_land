@@ -92,7 +92,13 @@ pub async fn run_connection_maintenance(context: AppContext) {
                 tracing::warn!(instance_id, %error, "connection profile reconciliation failed");
             }
         }
-        if network.active_transport == Some(TransportKind::CloudflareTurn)
+        // Allocation replacement mutates the live peer endpoint. Defer it for
+        // manually pinned streams; Auto is the explicit opt-in for mid-stream
+        // transport management.
+        let may_mutate_active_stream = !context.is_stream_network_active()
+            || network.preference == noland_network_contracts::state::ConnectionPreference::Auto;
+        if may_mutate_active_stream
+            && network.active_transport == Some(TransportKind::CloudflareTurn)
             && maintenance_round % 10 == 1
         {
             if let Err(error) = ConnectionManager::maintain_active_turn(&context, instance_id).await
@@ -1079,7 +1085,14 @@ async fn prepare_target(
                         &token,
                     )
                     .await?;
-                    if network.direct.probe_endpoint.is_some() {
+                    // While repairing an already-active Direct path, the
+                    // private probe traverses that exact tunnel and can safely
+                    // re-measure the inner packet ceiling after a Wi-Fi/5G
+                    // path change. During a TURN -> Direct switch it would
+                    // still measure TURN, so require an explicit public probe.
+                    if network.direct.probe_endpoint.is_some()
+                        || network.active_transport == Some(TransportKind::Direct)
+                    {
                         apply_discovered_payload_limit(
                             &mut target,
                             ProbePath::Direct,
@@ -1891,9 +1904,15 @@ async fn validate_tunnel(
             Ok(mut control) => match control.get_status().await {
                 Ok(status) => {
                     let observed = status.state.observed_transport;
-                    status.state.instance_id == instance_id.to_string()
+                    let valid = status.state.instance_id == instance_id.to_string()
                         && (transport != TransportKind::CloudflareTurn
-                            || observed == Some(TransportKind::CloudflareTurn))
+                            || observed == Some(TransportKind::CloudflareTurn));
+                    if !valid {
+                        last_error = format!(
+                                "Host did not confirm the requested {transport:?} transport (observed {observed:?})"
+                            );
+                    }
+                    valid
                 }
                 Err(error) => {
                     last_error = error.to_string();
@@ -1912,22 +1931,39 @@ async fn validate_tunnel(
         .await
         .is_ok_and(|result| result.is_ok());
         let runtime = managed_runtime(config_path.clone()).await;
-        let runtime_ok = runtime.as_ref().is_ok_and(|runtime| {
-            runtime.active
-                && runtime.endpoint == expected_endpoint
-                && (runtime.tx_bytes > before.tx_bytes
-                    || runtime.rx_bytes > before.rx_bytes
-                    || runtime
-                        .latest_handshake_age_secs
-                        .is_some_and(|age| age <= 10))
+        let runtime_matches = runtime
+            .as_ref()
+            .is_ok_and(|runtime| runtime.active && runtime.endpoint == expected_endpoint);
+        let runtime_has_fresh_stats = runtime.as_ref().is_ok_and(|runtime| {
+            runtime.tx_bytes > before.tx_bytes
+                || runtime.rx_bytes > before.rx_bytes
+                || runtime
+                    .latest_handshake_age_secs
+                    .is_some_and(|age| age <= 10)
         });
-        if control_ok && sunshine_ok && runtime_ok {
+        if control_ok && sunshine_ok && runtime_matches {
+            if !runtime_has_fresh_stats {
+                tracing::debug!(
+                    ?transport,
+                    expected_endpoint,
+                    "committing tunnel after end-to-end host checks despite a stale local runtime counter"
+                );
+            }
             return Ok(());
         }
-        if !sunshine_ok {
+        if !runtime_matches {
+            last_error = match runtime {
+                Ok(runtime) if !runtime.active => {
+                    "Managed tunnel became inactive during validation".to_string()
+                }
+                Ok(runtime) => format!(
+                    "Managed tunnel endpoint mismatch: expected {expected_endpoint}, observed {}",
+                    runtime.endpoint
+                ),
+                Err(error) => error.to_string(),
+            };
+        } else if !sunshine_ok {
             last_error = "Sunshine control endpoint is unreachable through the tunnel".to_string();
-        } else if !runtime_ok {
-            last_error = "Managed tunnel did not report fresh traffic or a handshake".to_string();
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }

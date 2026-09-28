@@ -34,6 +34,10 @@ pub struct AppContext {
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
     pub wireguard_mutation_in_progress: Arc<AtomicBool>,
+    /// True while Moonlight is connecting, streaming, or reconnecting. This
+    /// prevents background transport maintenance from changing a manually
+    /// selected path underneath an active stream.
+    pub stream_network_active: Arc<AtomicBool>,
     pub network_allocation_lock: Arc<Mutex<()>>,
     pub connection_decisions: Arc<Mutex<HashMap<u64, ConnectionDecisionState>>>,
     pub shared_storage_progress: tokio::sync::broadcast::Sender<SharedStorageProgressEvent>,
@@ -102,12 +106,21 @@ impl AppContext {
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
             wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),
+            stream_network_active: Arc::new(AtomicBool::new(false)),
             network_allocation_lock: Arc::new(Mutex::new(())),
             connection_decisions: Arc::new(Mutex::new(HashMap::new())),
             shared_storage_progress: tokio::sync::broadcast::channel(64).0,
             shared_storage_restore_completed: tokio::sync::broadcast::channel(16).0,
             active_agent_operation: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub fn set_stream_network_active(&self, active: bool) {
+        self.stream_network_active.store(active, Ordering::SeqCst);
+    }
+
+    pub fn is_stream_network_active(&self) -> bool {
+        self.stream_network_active.load(Ordering::SeqCst)
     }
 
     pub fn try_begin_wireguard_mutation(&self) -> Option<WireGuardMutationGuard> {

@@ -24,7 +24,6 @@ pub enum SessionSignal {
     ConnectionEstablished,
     StopRequested,
     ConnectionLost,
-    ControlledReconnectRequested,
     ReconnectRequested,
     Stopped,
 }
@@ -44,7 +43,7 @@ pub fn transition(
         (Connecting, ConnectionStarted) => Connecting,
         (Connecting, ConnectionEstablished) => Streaming,
         (Streaming, StopRequested) => Stopping,
-        (Streaming, ConnectionLost) | (Streaming, ControlledReconnectRequested) => Reconnecting,
+        (Streaming, ConnectionLost) => Reconnecting,
         (Reconnecting, ReconnectRequested) => Connecting,
         (Preparing, StopRequested)
         | (Launching, StopRequested)
@@ -88,38 +87,8 @@ mod tests {
     }
 
     #[test]
-    fn controlled_reconnect_transitions_streaming_to_reconnecting() {
-        let state = transition(
-            &SessionState::Streaming,
-            SessionSignal::ControlledReconnectRequested,
-        )
-        .unwrap();
-        assert_eq!(state, SessionState::Reconnecting);
-    }
-
-    #[test]
     fn manual_stop_transitions_reconnecting_to_stopping() {
         let state = transition(&SessionState::Reconnecting, SessionSignal::StopRequested).unwrap();
         assert_eq!(state, SessionState::Stopping);
-    }
-
-    #[test]
-    fn controlled_reconnect_is_rejected_outside_streaming() {
-        for state in [
-            SessionState::Idle,
-            SessionState::Preparing,
-            SessionState::Launching,
-            SessionState::CreatingSurface,
-            SessionState::Connecting,
-            SessionState::Reconnecting,
-            SessionState::Stopping,
-        ] {
-            let error =
-                transition(&state, SessionSignal::ControlledReconnectRequested).unwrap_err();
-            assert!(matches!(
-                error,
-                MoonlightError::InvalidSessionTransition { .. }
-            ));
-        }
     }
 }
