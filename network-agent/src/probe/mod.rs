@@ -1,7 +1,8 @@
 pub mod udp;
 
 pub use noland_network_contracts::probe::{
-    acknowledge_probe, PacketType, ProbePacket, ProbePath, V1_PACKET_LEN, V2_PACKET_LEN,
+    acknowledge_probe, PacketType, ProbeDirection, ProbePacket, ProbePath, V1_PACKET_LEN,
+    V2_PACKET_LEN, V3_ACK_PACKET_LEN, V3_MAX_PACKET_LEN, V3_MIN_PACKET_LEN,
 };
 
 use std::time::Instant;
@@ -22,8 +23,8 @@ pub async fn acknowledge_registered_probe(
     }
     let declared_path = match (header.version, header.path) {
         (1, ProbePath::Unspecified) => TransportKind::Direct,
-        (2, ProbePath::Direct) => TransportKind::Direct,
-        (2, ProbePath::CloudflareTurn) => TransportKind::CloudflareTurn,
+        (2 | 3, ProbePath::Direct) => TransportKind::Direct,
+        (2 | 3, ProbePath::CloudflareTurn) => TransportKind::CloudflareTurn,
         _ => return None,
     };
     if declared_path != received_path {

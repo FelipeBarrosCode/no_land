@@ -12,6 +12,7 @@ import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettings
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import {
   getInstanceConnectionStatus,
+  repairInstanceConnection,
   setInstanceConnectionPreference,
 } from "../../lib/backend";
 import type {
@@ -400,6 +401,19 @@ export function SettingsScreen({
     setConnectionStatusError(null);
     try {
       const status = await setInstanceConnectionPreference(instanceId, preference);
+      setConnectionStatuses((current) => ({ ...current, [instanceId]: status }));
+    } catch (error) {
+      setConnectionStatusError(errorMessage(error));
+    } finally {
+      setSwitchingInstanceId(null);
+    }
+  }
+
+  async function repairConnection(instanceId: number) {
+    setSwitchingInstanceId(instanceId);
+    setConnectionStatusError(null);
+    try {
+      const status = await repairInstanceConnection(instanceId);
       setConnectionStatuses((current) => ({ ...current, [instanceId]: status }));
     } catch (error) {
       setConnectionStatusError(errorMessage(error));
@@ -1374,34 +1388,53 @@ export function SettingsScreen({
                       Instance {server.instanceId}
                     </p>
                     <p className="mt-1 text-[1rem] text-[#8fb4d4]">
-                      Active: {network.activeTransport ?? "not validated"}
+                      Requested: {network.preference} · Active: {network.activeTransport ?? "not validated"}
                       {network.lastEvaluation
                         ? ` · ${network.lastEvaluation.reason}`
                         : ""}
                     </p>
+                    <p className="mt-1 text-[0.95rem] text-[#789aba]">
+                      {network.connectionProfile
+                        ? `Verified profile r${network.connectionProfile.profileRevision} · MTU ${network.connectionProfile.innerMtu} · ${network.connectionProfile.packetLimits.measurementMethod}`
+                        : "No committed connection profile"}
+                      {network.lastTransition
+                        ? ` · Last transition: ${network.lastTransition.phase}`
+                        : ""}
+                    </p>
                   </div>
-                  <select
-                    className="min-w-52 rounded border border-[#48527a] bg-[#111936] px-3 py-2 text-[1rem] text-white"
-                    value={network.preference}
-                    disabled={busy || switchingInstanceId === server.instanceId || !status}
-                    onChange={(event) =>
-                      void changeConnectionPreference(
-                        server.instanceId,
-                        event.target.value as ConnectionPreference,
-                      )
-                    }
-                  >
-                    {status?.automaticSelectionEnabled ? (
-                      <option value="auto">Automatic (gaming-v1)</option>
-                    ) : network.preference === "auto" ? (
-                      <option value="auto" disabled>Automatic (locked)</option>
-                    ) : null}
-                    <option value="direct">Direct WireGuard</option>
-                    {status?.manualTurnSwitchingEnabled &&
-                    network.cloudflareTurn.enabled ? (
-                      <option value="cloudflare_turn">Cloudflare TURN</option>
-                    ) : null}
-                  </select>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      className="min-w-52 rounded border border-[#48527a] bg-[#111936] px-3 py-2 text-[1rem] text-white"
+                      value={network.preference}
+                      disabled={busy || switchingInstanceId === server.instanceId || !status}
+                      onChange={(event) =>
+                        void changeConnectionPreference(
+                          server.instanceId,
+                          event.target.value as ConnectionPreference,
+                        )
+                      }
+                    >
+                      {status?.automaticSelectionEnabled ? (
+                        <option value="auto">Automatic (gaming-v1)</option>
+                      ) : network.preference === "auto" ? (
+                        <option value="auto" disabled>Automatic (locked)</option>
+                      ) : null}
+                      <option value="direct">Direct WireGuard</option>
+                      {status?.manualTurnSwitchingEnabled &&
+                      network.cloudflareTurn.enabled ? (
+                        <option value="cloudflare_turn">Cloudflare TURN</option>
+                      ) : null}
+                    </select>
+                    <Button
+                      variant="ghost"
+                      disabled={busy || switchingInstanceId === server.instanceId || !status}
+                      onClick={() => void repairConnection(server.instanceId)}
+                    >
+                      {switchingInstanceId === server.instanceId
+                        ? "Repairing…"
+                        : "Repair connection"}
+                    </Button>
+                  </div>
                 </div>
               );
             })

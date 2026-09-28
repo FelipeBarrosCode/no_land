@@ -24,8 +24,9 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSec
 
 use crate::{
     errors::{AppError, AppResult},
+    moonlight::infrastructure::persistence::atomic_file::write_atomically,
     utils::managed_binaries::{
-        bundled_binary_candidate_paths, bundled_binary_names, locate_bundled_binary,
+        bundled_binary_candidate_paths, bundled_binary_names, locate_privileged_bundled_binary,
     },
 };
 
@@ -223,7 +224,7 @@ fn bundled_tool_candidate_paths(tool: &str) -> Vec<PathBuf> {
 
 fn locate_managed_tool_binary(tool: &str) -> Option<PathBuf> {
     let (lookup_name, env_var, uses_exe_suffix) = managed_tool_spec(tool)?;
-    locate_bundled_binary(
+    locate_privileged_bundled_binary(
         lookup_name,
         env_var,
         uses_exe_suffix,
@@ -404,6 +405,7 @@ pub fn set_managed_gotatun_peer_endpoint(
     endpoint
         .validate()
         .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let persisted_endpoint = format_endpoint(&endpoint);
     let status = require_active_gotatun_control(config_path)?;
     let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
         AppError::State(format!(
@@ -423,7 +425,9 @@ pub fn set_managed_gotatun_peer_endpoint(
         })?,
     };
     let response = call_gotatun_control(&status.control_endpoint, &request)?;
-    decode_helper_result(response)
+    let update = decode_helper_result(response)?;
+    persist_client_config_value(config_path, "Peer", "Endpoint", &persisted_endpoint)?;
+    Ok(update)
 }
 
 pub fn set_managed_gotatun_mtu(
@@ -452,7 +456,56 @@ pub fn set_managed_gotatun_mtu(
     };
     let response = call_gotatun_control(&status.control_endpoint, &request)?;
     let _: serde_json::Value = decode_helper_result(response)?;
+    persist_client_config_value(config_path, "Interface", "MTU", &mtu.to_string())?;
     Ok(())
+}
+
+fn format_endpoint(endpoint: &NetworkEndpoint) -> String {
+    if endpoint.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) {
+        format!("[{}]:{}", endpoint.host, endpoint.port)
+    } else {
+        format!("{}:{}", endpoint.host, endpoint.port)
+    }
+}
+
+fn persist_client_config_value(
+    config_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> AppResult<()> {
+    let config = std::fs::read_to_string(config_path)?;
+    let mut current_section = None::<String>;
+    let mut replaced = false;
+    let mut output = String::with_capacity(config.len() + value.len());
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = Some(trimmed[1..trimmed.len() - 1].to_string());
+        }
+        if current_section.as_deref() == Some(section)
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(key))
+        {
+            output.push_str(&format!("{key} = {value}\n"));
+            replaced = true;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        return Err(AppError::State(format!(
+            "Managed WireGuard configuration has no {section} {key} field"
+        )));
+    }
+    write_atomically(config_path, output.as_bytes()).map_err(|error| {
+        AppError::Command(format!(
+            "Could not persist managed WireGuard {key} in {}: {error}",
+            config_path.display()
+        ))
+    })
 }
 
 pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunnelRuntime> {
@@ -3059,10 +3112,11 @@ fn shell_single_quote_escape(content: &str) -> String {
 mod tests {
     use std::path::Path;
 
+    #[cfg(not(unix))]
+    use super::GOTATUN_RUNTIME_DIR_NAME;
     use super::{
         build_windows_tunnel_launch_script, gotatun_runtime_dir, has_recent_handshake,
         linux_process_start_ticks, linux_process_state, windows_command_line_quote,
-        GOTATUN_RUNTIME_DIR_NAME,
     };
 
     #[test]

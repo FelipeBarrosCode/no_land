@@ -388,6 +388,14 @@ export async function setInstanceConnectionPreference(
   });
 }
 
+export async function repairInstanceConnection(
+  instanceId: number,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("repair_instance_connection", {
+    instanceId,
+  });
+}
+
 export async function updateServerPreferences(
   payload: ServerPreferencesUpdate,
 ): Promise<PersistedAppState> {

@@ -597,6 +597,7 @@ fn main() {
             test_cloudflare_turn_settings,
             clear_cloudflare_turn_settings,
             get_instance_connection_status,
+            repair_instance_connection,
             set_instance_connection_preference,
             update_server_preferences,
             update_moonlight_preferences,

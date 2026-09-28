@@ -1,11 +1,12 @@
 //! Deploy and start the standalone network-quality agent on a remote instance.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
@@ -33,10 +34,41 @@ const AGENT_SERVICE: &str = "noland-network-agent.service";
 const AGENT_REVISION_PATH: &str = "/usr/local/share/noland-network-agent/install-revision";
 const CONTROL_SECRET_PATH: &str = "/etc/noland-network-agent/control-secret";
 const CONTROL_SECRET_KEYRING_SERVICE: &str = "com.noland.connect.network-control";
-const DEPLOYMENT_REVISION: &str = "4";
+const DEPLOYMENT_REVISION: &str = "5";
 const NETWORK_AGENT_MANIFEST: &str = include_str!("../../../network-agent/Cargo.toml");
 
 static DEPLOYMENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Process-lifetime cache for credentials already authorized through the OS
+/// secure store. Values are never serialized and disappear when the app exits.
+static CACHED_CONTROL_SECRETS: OnceLock<Mutex<HashMap<u64, [u8; 32]>>> = OnceLock::new();
+
+fn control_secret_cache() -> &'static Mutex<HashMap<u64, [u8; 32]>> {
+    CACHED_CONTROL_SECRETS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cached_control_secret(instance_id: u64) -> AppResult<Option<[u8; 32]>> {
+    control_secret_cache()
+        .lock()
+        .map(|cache| cache.get(&instance_id).copied())
+        .map_err(|_| AppError::State("Instance control credential cache is poisoned".to_string()))
+}
+
+fn cache_control_secret(instance_id: u64, secret: [u8; 32]) -> AppResult<()> {
+    control_secret_cache()
+        .lock()
+        .map_err(|_| AppError::State("Instance control credential cache is poisoned".to_string()))?
+        .insert(instance_id, secret);
+    Ok(())
+}
+
+fn decode_control_secret(value: &str) -> AppResult<[u8; 32]> {
+    hex::decode(value.trim())
+        .map_err(|_| AppError::State("Stored instance control credential is invalid".to_string()))?
+        .try_into()
+        .map_err(|_: Vec<u8>| {
+            AppError::State("Stored instance control credential is invalid".to_string())
+        })
+}
 
 pub struct NetworkAgentProvisioner;
 
@@ -147,6 +179,9 @@ chmod 0700 {root_installer}
 }
 
 fn load_or_create_control_secret(instance_id: u64) -> AppResult<String> {
+    if let Some(secret) = cached_control_secret(instance_id)? {
+        return Ok(hex::encode(secret));
+    }
     let account = format!("instance-{instance_id}");
     let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
         AppError::State(format!(
@@ -155,13 +190,9 @@ fn load_or_create_control_secret(instance_id: u64) -> AppResult<String> {
     })?;
     match entry.get_password() {
         Ok(value) => {
-            let value = value.trim().to_ascii_lowercase();
-            if value.len() == 64 && hex::decode(&value).is_ok_and(|bytes| bytes.len() == 32) {
-                return Ok(value);
-            }
-            return Err(AppError::State(
-                "Stored instance control credential is invalid".to_string(),
-            ));
+            let secret = decode_control_secret(&value)?;
+            cache_control_secret(instance_id, secret)?;
+            return Ok(hex::encode(secret));
         }
         Err(keyring::Error::NoEntry) => {}
         Err(error) => {
@@ -179,10 +210,14 @@ fn load_or_create_control_secret(instance_id: u64) -> AppResult<String> {
             "Could not save the instance control credential in secure storage: {error}"
         ))
     })?;
+    cache_control_secret(instance_id, secret)?;
     Ok(encoded)
 }
 
 pub fn load_instance_control_secret(instance_id: u64) -> AppResult<[u8; 32]> {
+    if let Some(secret) = cached_control_secret(instance_id)? {
+        return Ok(secret);
+    }
     let account = format!("instance-{instance_id}");
     let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
         AppError::State(format!(
@@ -197,12 +232,9 @@ pub fn load_instance_control_secret(instance_id: u64) -> AppResult<[u8; 32]> {
             "Could not read the instance control credential from secure storage: {other}"
         )),
     })?;
-    hex::decode(value.trim())
-        .map_err(|_| AppError::State("Stored instance control credential is invalid".to_string()))?
-        .try_into()
-        .map_err(|_: Vec<u8>| {
-            AppError::State("Stored instance control credential is invalid".to_string())
-        })
+    let secret = decode_control_secret(&value)?;
+    cache_control_secret(instance_id, secret)?;
+    Ok(secret)
 }
 
 async fn ensure_remote_control_secret(remote: &RemoteExec, local_path: &Path) -> AppResult<()> {

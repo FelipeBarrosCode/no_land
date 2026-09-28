@@ -131,6 +131,9 @@ export interface NetworkEndpoint {
 
 export interface PathMetrics {
   sampleCount: number;
+  sentCount: number;
+  receivedCount: number;
+  lostCount: number;
   sampleAgeMs: number;
   medianRttMs: number | null;
   p95RttMs: number | null;
@@ -211,6 +214,28 @@ export interface InstanceNetworkState {
   };
   lastEvaluation: ConnectionEvaluation | null;
   lastTransition: ConnectionTransition | null;
+  connectionProfile: {
+    schemaVersion: number;
+    instanceId: string;
+    profileRevision: number;
+    transitionId: string;
+    desiredTransport: TransportKind;
+    endpoint: NetworkEndpoint;
+    allocationGeneration: number | null;
+    innerMtu: number;
+    packetLimits: {
+      forwardPayloadCeiling: number | null;
+      reversePayloadCeiling: number | null;
+      verifiedInnerMtu: number | null;
+      observedClientMtu: number | null;
+      observedHostMtu: number | null;
+      confidence: number;
+      measurementMethod: string;
+    };
+    requestedMediaPacketSize: number | null;
+    mediaSessionGeneration: number | null;
+    createdAt: string;
+  } | null;
 }
 
 export interface InstanceConnectionStatusResponse {

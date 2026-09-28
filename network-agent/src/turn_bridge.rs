@@ -274,11 +274,10 @@ fn udp_turn_server_address(url: &str) -> Result<String> {
     if authority.trim().is_empty() {
         bail!("TURN URL has no server authority");
     }
-    let authority = if authority.starts_with('[') {
-        authority.to_string()
-    } else if authority
-        .rsplit_once(':')
-        .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+    let authority = if authority.starts_with('[')
+        || authority
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| port.parse::<u16>().is_ok())
     {
         authority.to_string()
     } else {

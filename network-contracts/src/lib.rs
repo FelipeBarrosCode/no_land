@@ -9,4 +9,5 @@ pub mod state;
 
 pub const CONTROL_PROTOCOL_VERSION: u16 = 1;
 pub const NETWORK_STATE_SCHEMA_VERSION: u16 = 1;
+pub const CONNECTION_PROFILE_SCHEMA_VERSION: u16 = 1;
 pub const EVENT_SCHEMA_VERSION: u16 = 1;

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:unit": "cargo test --locked --manifest-path network-contracts/Cargo.toml && cargo test --locked --manifest-path network-agent/Cargo.toml",
     "preview": "vite preview",
     "bootstrap:native-deps": "node scripts/bootstrap-native-deps.mjs",
     "prepare:mic-sidecar": "node scripts/prepare-mic-sidecar.mjs",

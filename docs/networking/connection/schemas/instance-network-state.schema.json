@@ -28,6 +28,17 @@
     "cloudflareTurn": {
       "$ref": "#/definitions/CloudflareTurnPathState"
     },
+    "connectionProfile": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectionProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "direct": {
       "$ref": "#/definitions/DirectPathState"
     },
@@ -188,6 +199,80 @@
         "cloudflare_turn"
       ]
     },
+    "ConnectionProfile": {
+      "type": "object",
+      "required": [
+        "createdAt",
+        "desiredTransport",
+        "endpoint",
+        "innerMtu",
+        "instanceId",
+        "packetLimits",
+        "profileRevision",
+        "schemaVersion",
+        "transitionId"
+      ],
+      "properties": {
+        "allocationGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "desiredTransport": {
+          "$ref": "#/definitions/TransportKind"
+        },
+        "endpoint": {
+          "$ref": "#/definitions/NetworkEndpoint"
+        },
+        "innerMtu": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "mediaSessionGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "packetLimits": {
+          "$ref": "#/definitions/PacketLimits"
+        },
+        "profileRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requestedMediaPacketSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "transitionId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
     "ConnectionTransition": {
       "type": "object",
       "required": [
@@ -341,6 +426,15 @@
         "emergency_failover"
       ]
     },
+    "MeasurementMethod": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "configured_fallback",
+        "authenticated_probe",
+        "packetization_layer_probe"
+      ]
+    },
     "NetworkEndpoint": {
       "type": "object",
       "required": [
@@ -433,6 +527,62 @@
         "both_transports_unavailable"
       ]
     },
+    "PacketLimits": {
+      "type": "object",
+      "required": [
+        "confidence",
+        "measurementMethod"
+      ],
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "forwardPayloadCeiling": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "measurementMethod": {
+          "$ref": "#/definitions/MeasurementMethod"
+        },
+        "observedClientMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "observedHostMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "reversePayloadCeiling": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "verifiedInnerMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
     "PathAvailability": {
       "type": "string",
       "enum": [
@@ -486,6 +636,12 @@
           "type": "number",
           "format": "double"
         },
+        "lostCount": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
         "medianRttMs": {
           "type": [
             "number",
@@ -507,6 +663,12 @@
           ],
           "format": "double"
         },
+        "receivedCount": {
+          "default": 0,
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
         "reorderingPercent": {
           "type": [
             "number",
@@ -520,6 +682,13 @@
           "minimum": 0.0
         },
         "sampleCount": {
+          "description": "Number of authenticated responses used for scoring. This field is kept for wire compatibility and intentionally mirrors `received_count`.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        },
+        "sentCount": {
+          "default": 0,
           "type": "integer",
           "format": "uint32",
           "minimum": 0.0

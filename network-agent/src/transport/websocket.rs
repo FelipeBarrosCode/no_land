@@ -125,6 +125,7 @@ pub async fn run(
     }
 }
 
+#[allow(clippy::result_large_err)]
 async fn handle_connection(
     stream: TcpStream,
     shared: SharedState,
