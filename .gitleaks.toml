@@ -1,0 +1,11 @@
+title = "No Land Gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public deterministic 32-byte protocol example in network-agent/README.md"
+regexTarget = "secret"
+regexes = [
+  '''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+]
