@@ -17,4 +17,4 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
 thiserror = "2.0"
 signal-hook = "0.3"
-gstreamer = "0.23"
+gstreamer = "0.25"
