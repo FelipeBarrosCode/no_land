@@ -28,7 +28,7 @@ Blocking lanes:
   Network contracts and network-agent are warning-free and use `-D warnings`. Other workspaces
   currently run Clippy with the existing-warning baseline; warnings remain visible and Clippy
   errors still fail.
-- `unit-tests`: the complete test workflow described below.
+- `unit-tests`: the existing fast `npm run test:unit` network-contract and network-agent suite.
 - `security`: Gitleaks, dependency review, npm audit, RustSec cargo audits, Trivy,
   CodeQL, and actionlint.
 - `PR CI required`: fails unless every preceding lane succeeds.
@@ -41,8 +41,8 @@ test suite.
 
 Reusable workflow: `.github/workflows/_tests.yml`
 
-Production and nightly run every lane after security succeeds; PR CI runs the same tests without
-performing release builds:
+Production and nightly run every lane after security succeeds. To keep PR feedback fast, PR CI
+runs the existing network test entry point while compiling and linting every workspace:
 
 - `npm run test:unit` (network-contracts and network-agent).
 - `cargo test --locked --workspace --all-targets` for `src-tauri`, including the desktop backend

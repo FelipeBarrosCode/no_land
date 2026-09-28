@@ -61,11 +61,13 @@ jobs:
             workspace: state-agent
             strict: false
             native: false
+            ebpf: true
           - name: desktop-net-helper
             manifest: src-tauri/Cargo.toml
             workspace: src-tauri
             strict: false
             native: true
+            skip_native_build: true
           - name: microphone-sender
             manifest: mic-sidecar/Cargo.toml
             workspace: mic-sidecar
@@ -84,22 +86,47 @@ jobs:
       - name: Install native dependencies
         if: matrix.native
         run: bash scripts/ci/install-linux-native-deps.sh
+      - name: Install state-agent eBPF build dependencies
+        if: matrix.ebpf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libelf-dev zlib1g-dev
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           key: pr-${{ matrix.name }}
           workspaces: ${{ matrix.workspace }}
       - name: Cargo check
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
         run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
       - name: Clippy strict baseline
         if: matrix.strict
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets -- -D warnings
       - name: Clippy existing-warning baseline
         if: matrix.strict == false
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
 
   unit-tests:
     name: unit-tests
-    uses: ./.github/workflows/_tests.yml
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            network-contracts
+            network-agent
+      - run: npm ci
+      - run: npm run test:unit
 
   security:
     name: security
