@@ -693,19 +693,16 @@ async fn start_runtime_with_connection_repair(
         Err(error) => error,
     };
 
-    let repaired = repair_stream_connection_after_failure(
-        context,
-        host_id,
-        &first_error.to_string(),
-    )
-    .await
-    .map_err(|repair_error| {
-        context.set_stream_network_active(false);
-        clear_active_stream_instance(moonlight, instance_id);
-        AppError::Command(format!(
+    let repaired =
+        repair_stream_connection_after_failure(context, host_id, &first_error.to_string())
+            .await
+            .map_err(|repair_error| {
+                context.set_stream_network_active(false);
+                clear_active_stream_instance(moonlight, instance_id);
+                AppError::Command(format!(
             "Stream startup failed ({first_error}); connection repair also failed: {repair_error}"
         ))
-    })?;
+            })?;
     if !repaired {
         context.set_stream_network_active(false);
         clear_active_stream_instance(moonlight, instance_id);

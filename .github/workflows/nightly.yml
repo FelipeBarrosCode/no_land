@@ -1,0 +1,112 @@
+name: Nightly Release Rehearsal
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+concurrency:
+  group: nightly-release-rehearsal
+  cancel-in-progress: true
+
+jobs:
+  validation:
+    name: validation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Validate scripts
+        run: |
+          for script in scripts/*.mjs scripts/ci/*.mjs; do node --check "$script"; done
+          for script in scripts/*.sh scripts/ci/*.sh; do bash -n "$script"; done
+
+  security:
+    name: security
+    needs: validation
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/_security.yml
+    with:
+      dependency-review: false
+
+  dast:
+    name: DAST staging baseline
+    needs: security
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Explain unavailable DAST target
+        if: vars.NOLAND_ZAP_STAGING_URL == ''
+        run: echo 'No deployable HTTP service exists in this repository and NOLAND_ZAP_STAGING_URL is unset; ZAP is not applicable to this run.'
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        if: vars.NOLAND_ZAP_STAGING_URL != ''
+      - name: OWASP ZAP baseline against protected staging
+        if: vars.NOLAND_ZAP_STAGING_URL != ''
+        uses: zaproxy/action-baseline@41aee98ebc7cf2802c3beae4e7d4336413a21e43 # v0.9.0
+        with:
+          target: ${{ vars.NOLAND_ZAP_STAGING_URL }}
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-security-report-${{ github.run_id }}-${{ github.run_attempt }}
+
+  tests:
+    name: full-test-suite
+    needs: [security, dast]
+    uses: ./.github/workflows/_tests.yml
+
+  version:
+    name: rehearsal-version
+    needs: tests
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+      - name: Compute production-equivalent version without creating a tag
+        id: version
+        shell: bash
+        run: |
+          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
+          configured_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          latest_version="${latest_tag#v}"
+          if [[ -z "$latest_version" ]] || [[ "$(printf '%s\n%s\n' "$latest_version" "$configured_version" | sort -V | tail -n 1)" == "$configured_version" ]]; then
+            version="$configured_version"
+          else
+            version="$latest_version"
+          fi
+          IFS='.' read -r major minor patch <<< "$version"
+          echo "version=${major}.${minor}.$((patch + 1))" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: signed-six-platform-release-rehearsal
+    needs: [tests, version]
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/_build.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+      retain-artifacts: false
+    secrets: inherit
+
+  discard:
+    name: discard-nightly-binaries
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Confirm validation-only completion
+        run: |
+          echo 'All six signed platform builds and local package validations succeeded.'
+          echo 'No nightly distributable was uploaded or published; runner filesystems are being destroyed.'
