@@ -1484,6 +1484,9 @@ mod tests {
         let db = StateDb::open_in_memory().unwrap();
         let home = std::env::temp_dir().join(format!("noland-shared-cgroup-{}", Uuid::new_v4()));
         std::fs::create_dir_all(home.join("state")).unwrap();
+        // macOS exposes /var through /private/var. Keep the configured root and the
+        // canonicalized observations in the same namespace on every platform.
+        let home = std::fs::canonicalize(home).unwrap();
         let iso = home.join("state/vice-city.iso");
         let desktop_file = home.join("state/desktop-state");
         let unknown_file = home.join("state/unknown-desktop-state");

@@ -137,7 +137,16 @@ SARIF is supported. Reports must never contain credentials.
 An intentional vulnerability exception must be narrow and documented in this file (advisory or
 CVE, affected package, owner, justification, compensating control, and expiry/removal date) before
 adding it to a scanner-specific ignore file. Broad project, directory, or severity exclusions are
-not acceptable. There are currently no vulnerability allowlist entries.
+not acceptable.
+
+Current exception:
+
+- `RUSTSEC-2023-0071` (`rsa` 0.9.x, MEDIUM), owner: desktop/Moonlight maintainers. The upstream
+  crate has no fixed stable release and is used only for local Sunshine pairing key generation and
+  protocol operations, not as a remotely exposed general-purpose signing service. Keys use OS CSPRNG
+  generation, remain local, and pairing attempts are network/access controlled. Cargo audit still
+  reports the advisory while the explicit ID is allowed. Review by **2026-12-31**, or remove sooner
+  when a compatible fixed `rsa` release is available.
 
 ### Workflow credentials
 
