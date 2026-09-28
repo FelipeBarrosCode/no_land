@@ -17,7 +17,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10.9"
 tokio = { version = "1.43", features = ["full"] }
-tun = { version = "=0.8.6", features = ["async"] }
+tun = { version = "=0.8.9", features = ["async"] }
 uuid = { version = "1.11", features = ["serde", "v4"] }
 
 [target.'cfg(unix)'.dependencies]
