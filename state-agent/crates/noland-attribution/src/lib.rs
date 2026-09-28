@@ -1064,10 +1064,17 @@ mod tests {
     use noland_state_core::metrics::Metrics;
     use std::sync::Arc;
 
+    fn test_home(prefix: &str) -> PathBuf {
+        std::env::current_dir()
+            .expect("test working directory should be available")
+            .join("target/noland-attribution-tests")
+            .join(format!("{prefix}-{}", Uuid::new_v4()))
+    }
+
     #[test]
     fn steam_staging_events_open_one_transaction_without_indexing_staging_paths() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-staging-{}", Uuid::new_v4()));
+        let home = test_home("staging");
         let final_root = home.join(".local/share/Steam/steamapps/common/Helldivers 2");
         let staging_root = home.join(".local/share/Steam/steamapps/downloading/553850");
         let staging_file = staging_root.join("data/incomplete.stream");
@@ -1116,7 +1123,7 @@ mod tests {
     #[test]
     fn rename_from_staging_to_final_content_indexes_the_destination() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-final-rename-{}", Uuid::new_v4()));
+        let home = test_home("final-rename");
         let final_root = home.join(".local/share/Steam/steamapps/common/Example Game");
         let final_file = final_root.join("content.pak");
         let staging_file = home.join(".local/share/Steam/steamapps/downloading/4242/content.pak");
@@ -1166,7 +1173,7 @@ mod tests {
     #[test]
     fn generic_temporary_mutations_are_not_indexed_or_queued() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-temporary-{}", Uuid::new_v4()));
+        let home = test_home("temporary");
         let temporary = home.join(".config/game/settings.json.tmp");
         let mut engine = AttributionEngine::new(
             &db,
@@ -1195,7 +1202,7 @@ mod tests {
     #[test]
     fn write_is_owned_read_is_not() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-attr-{}", Uuid::new_v4()));
+        let home = test_home("attribution");
         std::fs::create_dir_all(home.join(".local/share/example-game")).unwrap();
         let save = home.join(".local/share/example-game/save.db");
         std::fs::write(&save, b"hello").unwrap();
@@ -1303,7 +1310,7 @@ mod tests {
     #[test]
     fn registered_install_root_identifies_the_game_process() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-root-process-{}", Uuid::new_v4()));
+        let home = test_home("root-process");
         let install_root = home.join("steamapps/common/Root Game");
         let executable = install_root.join("root-game");
         std::fs::create_dir_all(&install_root).unwrap();
@@ -1346,7 +1353,7 @@ mod tests {
     #[test]
     fn steam_writer_mutations_use_the_registered_game_root_owner() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-steam-writer-{}", Uuid::new_v4()));
+        let home = test_home("steam-writer");
         let install_root = home.join("steamapps/common/Owned Game");
         let game_file = install_root.join("content.pak");
         std::fs::create_dir_all(&install_root).unwrap();
@@ -1416,7 +1423,7 @@ mod tests {
     #[test]
     fn ebpf_attribution_prefers_cgroup_then_falls_back_to_session_pid() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-cgroup-{}", Uuid::new_v4()));
+        let home = test_home("cgroup");
         std::fs::create_dir_all(home.join("state")).unwrap();
         let cgroup_path = home.join("state/cgroup.dat");
         let fallback_path = home.join("state/fallback.dat");
@@ -1482,7 +1489,7 @@ mod tests {
     #[test]
     fn known_app_exec_splits_from_shared_desktop_session() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-shared-cgroup-{}", Uuid::new_v4()));
+        let home = test_home("shared-cgroup");
         std::fs::create_dir_all(home.join("state")).unwrap();
         let iso = home.join("state/vice-city.iso");
         let desktop_file = home.join("state/desktop-state");
@@ -1607,7 +1614,7 @@ mod tests {
     #[test]
     fn unresolved_fs_fact_retries_after_its_process_fact() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-queued-{}", Uuid::new_v4()));
+        let home = test_home("queued");
         std::fs::create_dir_all(home.join("state")).unwrap();
         let save = home.join("state/queued-save.dat");
         std::fs::write(&save, b"queued").unwrap();
@@ -1656,7 +1663,7 @@ mod tests {
     #[test]
     fn rename_attributes_the_second_path() {
         let db = StateDb::open_in_memory().unwrap();
-        let home = std::env::temp_dir().join(format!("noland-rename-{}", Uuid::new_v4()));
+        let home = test_home("rename");
         std::fs::create_dir_all(home.join("state")).unwrap();
         let old_path = home.join("state/old-name");
         let second_path = home.join("state/new-name");
