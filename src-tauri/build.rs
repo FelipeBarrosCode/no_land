@@ -898,8 +898,10 @@ fn stage_macos_dev_runtime_dylibs(target: &str, manifest_dir: &Path) -> io::Resu
 }
 
 fn stage_runtime_entry(source: &Path, destination: PathBuf) -> io::Result<()> {
-    if destination.exists() {
-        let _ = fs::remove_file(&destination);
+    match fs::symlink_metadata(&destination) {
+        Ok(_) => fs::remove_file(&destination)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     let metadata = fs::symlink_metadata(source)?;
     if metadata.file_type().is_symlink() {
