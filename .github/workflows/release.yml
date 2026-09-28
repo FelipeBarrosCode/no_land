@@ -104,7 +104,7 @@ jobs:
           node-version: 22
           cache: npm
       - name: Download all six signed build outputs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: release-assets
           pattern: tauri-*
@@ -177,7 +177,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Download only the validated release set
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: validated-release-${{ github.sha }}
           path: release-publish
