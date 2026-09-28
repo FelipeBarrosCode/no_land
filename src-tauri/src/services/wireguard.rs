@@ -1,5 +1,5 @@
 use std::{
-    io::ErrorKind,
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     net::{IpAddr, SocketAddr, TcpStream},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -9,6 +9,12 @@ use std::{
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use fs2::FileExt;
+use noland_network_contracts::{
+    control::{
+        HelperMethod, HelperRequest, HelperResponse, SetInterfaceMtuParams, SetPeerEndpointParams,
+    },
+    state::NetworkEndpoint,
+};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -18,8 +24,9 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret as X25519StaticSec
 
 use crate::{
     errors::{AppError, AppResult},
+    moonlight::infrastructure::persistence::atomic_file::write_atomically,
     utils::managed_binaries::{
-        bundled_binary_candidate_paths, bundled_binary_names, locate_bundled_binary,
+        bundled_binary_candidate_paths, bundled_binary_names, locate_privileged_bundled_binary,
     },
 };
 
@@ -112,14 +119,41 @@ struct GotatunRuntimeStatus {
     allowed_ips: Vec<String>,
     endpoint: String,
     #[serde(default)]
+    control_endpoint: String,
+    #[serde(default)]
     config_fingerprint: String,
     #[serde(default)]
     listen_port: u16,
+    #[serde(default)]
+    mtu: u16,
     latest_handshake_age_secs: Option<u64>,
     rx_bytes: u64,
     tx_bytes: u64,
     updated_at_unix: u64,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedEndpointUpdate {
+    pub previous_endpoint: String,
+    pub active_endpoint: String,
+    pub transition_id: uuid::Uuid,
+    pub applied_at_unix: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManagedTunnelRuntime {
+    pub active: bool,
+    pub launch_id: String,
+    pub config_fingerprint: String,
+    pub peer_public_key: String,
+    pub endpoint: String,
+    pub mtu: u16,
+    pub latest_handshake_age_secs: Option<u64>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 const REQUIRED_REMOTE_WIREGUARD_PACKAGES: &[&str] = &["wireguard-tools", "iproute2", "ufw"];
@@ -190,7 +224,7 @@ fn bundled_tool_candidate_paths(tool: &str) -> Vec<PathBuf> {
 
 fn locate_managed_tool_binary(tool: &str) -> Option<PathBuf> {
     let (lookup_name, env_var, uses_exe_suffix) = managed_tool_spec(tool)?;
-    locate_bundled_binary(
+    locate_privileged_bundled_binary(
         lookup_name,
         env_var,
         uses_exe_suffix,
@@ -251,6 +285,18 @@ fn gotatun_runtime_dir(config_path: &Path) -> PathBuf {
     } else {
         parent
     };
+    #[cfg(unix)]
+    {
+        // Unix domain sockets have a small platform-defined path limit
+        // (SUN_LEN). macOS development paths under ~/Library/Containers can
+        // exceed it before the helper even starts. Keep the runtime metadata
+        // and control socket in a short deterministic directory while still
+        // sharing one runtime per WireGuard root.
+        let digest = Sha256::digest(root.as_os_str().to_string_lossy().as_bytes());
+        return PathBuf::from("/tmp").join(format!("noland-g-{}", hex::encode(&digest[..8])));
+    }
+
+    #[cfg(not(unix))]
     root.join(GOTATUN_RUNTIME_DIR_NAME)
 }
 
@@ -349,6 +395,249 @@ fn load_gotatun_runtime_status(path: &Path) -> Option<GotatunRuntimeStatus> {
 fn load_active_gotatun_runtime_status() -> Option<GotatunRuntimeStatus> {
     let path = active_gotatun_status_path().lock().ok()?.clone()?;
     load_gotatun_runtime_status(&path)
+}
+
+pub fn set_managed_gotatun_peer_endpoint(
+    config_path: &Path,
+    endpoint: NetworkEndpoint,
+    transition_id: uuid::Uuid,
+) -> AppResult<ManagedEndpointUpdate> {
+    endpoint
+        .validate()
+        .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    let persisted_endpoint = format_endpoint(&endpoint);
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint.clone(),
+        method: HelperMethod::SetPeerEndpoint,
+        params: serde_json::to_value(SetPeerEndpointParams {
+            peer_public_key: status.peer_public_key.clone(),
+            endpoint,
+            transition_id,
+        })?,
+    };
+    let response = call_gotatun_control(&status.control_endpoint, &request)?;
+    let update = decode_helper_result(response)?;
+    persist_client_config_value(config_path, "Peer", "Endpoint", &persisted_endpoint)?;
+    Ok(update)
+}
+
+pub fn set_managed_gotatun_mtu(
+    config_path: &Path,
+    mtu: u16,
+    transition_id: uuid::Uuid,
+) -> AppResult<()> {
+    if !(576..=9000).contains(&mtu) {
+        return Err(AppError::InvalidInput(
+            "Managed tunnel MTU must be between 576 and 9000".to_string(),
+        ));
+    }
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint.clone(),
+        method: HelperMethod::SetInterfaceMtu,
+        params: serde_json::to_value(SetInterfaceMtuParams { mtu, transition_id })?,
+    };
+    let response = call_gotatun_control(&status.control_endpoint, &request)?;
+    let _: serde_json::Value = decode_helper_result(response)?;
+    persist_client_config_value(config_path, "Interface", "MTU", &mtu.to_string())?;
+    Ok(())
+}
+
+fn format_endpoint(endpoint: &NetworkEndpoint) -> String {
+    if endpoint.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) {
+        format!("[{}]:{}", endpoint.host, endpoint.port)
+    } else {
+        format!("{}:{}", endpoint.host, endpoint.port)
+    }
+}
+
+fn persist_client_config_value(
+    config_path: &Path,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> AppResult<()> {
+    let config = std::fs::read_to_string(config_path)?;
+    let mut current_section = None::<String>;
+    let mut replaced = false;
+    let mut output = String::with_capacity(config.len() + value.len());
+    for line in config.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            current_section = Some(trimmed[1..trimmed.len() - 1].to_string());
+        }
+        if current_section.as_deref() == Some(section)
+            && trimmed
+                .split_once('=')
+                .is_some_and(|(candidate, _)| candidate.trim().eq_ignore_ascii_case(key))
+        {
+            output.push_str(&format!("{key} = {value}\n"));
+            replaced = true;
+        } else {
+            output.push_str(line);
+            output.push('\n');
+        }
+    }
+    if !replaced {
+        return Err(AppError::State(format!(
+            "Managed WireGuard configuration has no {section} {key} field"
+        )));
+    }
+    write_atomically(config_path, output.as_bytes()).map_err(|error| {
+        AppError::Command(format!(
+            "Could not persist managed WireGuard {key} in {}: {error}",
+            config_path.display()
+        ))
+    })
+}
+
+pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunnelRuntime> {
+    let status = require_active_gotatun_control(config_path)?;
+    let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
+        AppError::State(format!(
+            "Managed tunnel reported an invalid launch ID `{}`: {error}",
+            status.launch_id
+        ))
+    })?;
+    let request = HelperRequest {
+        request_id: uuid::Uuid::new_v4(),
+        expected_launch_id: launch_id,
+        expected_config_fingerprint: status.config_fingerprint,
+        method: HelperMethod::GetRuntime,
+        params: serde_json::json!({}),
+    };
+    decode_helper_result(call_gotatun_control(&status.control_endpoint, &request)?)
+}
+
+fn require_active_gotatun_control(config_path: &Path) -> AppResult<GotatunRuntimeStatus> {
+    let status_path = gotatun_status_path(config_path);
+    let status = load_gotatun_runtime_status(&status_path).ok_or_else(|| {
+        AppError::State(format!(
+            "Managed tunnel runtime status is unavailable at {}",
+            status_path.display()
+        ))
+    })?;
+    let age = gotatun_runtime_unix_timestamp().saturating_sub(status.updated_at_unix);
+    if !status.active || age > 5 || !process_matches_gotatun_status(&status) {
+        return Err(AppError::State(
+            "Managed tunnel helper is not active or its status is stale".to_string(),
+        ));
+    }
+    if status.control_endpoint.trim().is_empty()
+        || status.launch_id.trim().is_empty()
+        || status.config_fingerprint.trim().is_empty()
+    {
+        return Err(AppError::State(
+            "Managed tunnel helper does not expose the endpoint-control contract".to_string(),
+        ));
+    }
+    Ok(status)
+}
+
+fn call_gotatun_control(
+    control_endpoint: &str,
+    request: &HelperRequest,
+) -> AppResult<HelperResponse> {
+    #[cfg(unix)]
+    {
+        let mut stream =
+            std::os::unix::net::UnixStream::connect(control_endpoint).map_err(|error| {
+                AppError::Command(format!(
+                    "Could not connect to managed tunnel control socket {control_endpoint}: {error}"
+                ))
+            })?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(AppError::from)?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(AppError::from)?;
+        return exchange_helper_request(&mut stream, request);
+    }
+
+    #[cfg(windows)]
+    {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(control_endpoint)
+            {
+                Ok(mut pipe) => return exchange_helper_request(&mut pipe, request),
+                Err(error) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                    let _ = error;
+                }
+                Err(error) => {
+                    return Err(AppError::Command(format!(
+                        "Could not connect to managed tunnel named pipe {control_endpoint}: {error}"
+                    )))
+                }
+            }
+        }
+    }
+}
+
+fn exchange_helper_request<S: Read + Write>(
+    stream: &mut S,
+    request: &HelperRequest,
+) -> AppResult<HelperResponse> {
+    let mut body = serde_json::to_vec(request)?;
+    body.push(b'\n');
+    stream.write_all(&body)?;
+    stream.flush()?;
+
+    let mut response = String::new();
+    let mut reader = BufReader::new(stream);
+    reader.read_line(&mut response)?;
+    if response.len() > 64 * 1024 {
+        return Err(AppError::State(
+            "Managed tunnel control response exceeded 64 KiB".to_string(),
+        ));
+    }
+    let response: HelperResponse = serde_json::from_str(&response).map_err(|error| {
+        AppError::Serialization(format!(
+            "Managed tunnel returned an invalid control response: {error}"
+        ))
+    })?;
+    if response.request_id != request.request_id {
+        return Err(AppError::State(format!(
+            "Managed tunnel response ID mismatch: expected {}, got {}",
+            request.request_id, response.request_id
+        )));
+    }
+    Ok(response)
+}
+
+fn decode_helper_result<T: for<'de> Deserialize<'de>>(response: HelperResponse) -> AppResult<T> {
+    if let Some(error) = response.error {
+        return Err(AppError::Command(format!(
+            "Managed tunnel control failed ({}): {}",
+            error.code, error.message
+        )));
+    }
+    let result = response.result.ok_or_else(|| {
+        AppError::State("Managed tunnel control response omitted its result".to_string())
+    })?;
+    serde_json::from_value(result).map_err(AppError::from)
 }
 
 fn gotatun_runtime_unix_timestamp() -> u64 {
@@ -1538,6 +1827,26 @@ WantedBy=multi-user.target
         allowed_client_ip: &str,
         server_listen_port: u16,
     ) -> AppResult<()> {
+        let wg_interface = &self.defaults.server_interface_name;
+        validate_firewall_interface(primary_interface)?;
+        validate_firewall_interface(wg_interface)?;
+        let allowed_client_ip =
+            allowed_client_ip
+                .parse::<std::net::Ipv4Addr>()
+                .map_err(|error| {
+                    AppError::InvalidInput(format!(
+                    "WireGuard firewall client address `{allowed_client_ip}` is invalid: {error}"
+                ))
+                })?;
+        let server_tunnel_ip = strip_cidr(&self.defaults.server_tunnel_ip)
+            .parse::<std::net::Ipv4Addr>()
+            .map_err(|error| {
+                AppError::InvalidInput(format!(
+                    "WireGuard firewall server address `{}` is invalid: {error}",
+                    self.defaults.server_tunnel_ip
+                ))
+            })?;
+        let client_cidr = format!("{allowed_client_ip}/32");
         let firewall_setup = format!(
             r#"#!/bin/bash
 set -euo pipefail
@@ -1549,14 +1858,24 @@ ufw --force enable >/dev/null 2>&1 || true
 ufw status | grep -q "22/tcp" || ufw allow 22/tcp comment 'SSH'
 
 # Allow WireGuard
-ufw status | grep -q "{}/udp" || ufw allow {}/udp comment 'WireGuard'
+ufw status | grep -q "{wg_port}/udp" || ufw allow {wg_port}/udp comment 'WireGuard'
 
 # Ensure WireGuard response traffic can always exit
-ufw status | grep -q "{}/udp (out)" || ufw allow out {}/udp comment 'WireGuard outbound'
+ufw status | grep -q "{wg_port}/udp (out)" || ufw allow out {wg_port}/udp comment 'WireGuard outbound'
+
+# Public direct-path probes are HMAC-authenticated and rate limited by the
+# network agent. Vast maps this fixed internal UDP port independently of WG.
+ufw status | grep -q "6201/udp" || ufw allow 6201/udp comment 'Noland authenticated network probe'
+
+# The network agent host-control WebSocket is reachable only through the
+# private WireGuard interface. Restrict it to the single configured client
+# address; without this rule UFW's default deny blocks TURN preparation and
+# reports a misleading host-control timeout.
+ufw status | grep -q "6202/tcp on {wg_interface}" || ufw allow in on {wg_interface} from {client_cidr} to {server_tunnel_ip} port 6202 proto tcp comment 'Noland network control'
 
 # Allow forwarding between public NIC and WireGuard interface
-ufw route allow in on {} out on {} comment 'WG ingress forward' >/dev/null 2>&1 || true
-ufw route allow in on {} out on {} comment 'WG egress forward' >/dev/null 2>&1 || true
+ufw route allow in on {primary_interface} out on {wg_interface} comment 'WG ingress forward' >/dev/null 2>&1 || true
+ufw route allow in on {wg_interface} out on {primary_interface} comment 'WG egress forward' >/dev/null 2>&1 || true
 
 # Allow ICMP (ping) via iptables directly — UFW ICMP syntax is inconsistent across versions
 iptables -C INPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
@@ -1565,8 +1884,8 @@ iptables -C OUTPUT -p icmp --icmp-type echo-request -j ACCEPT 2>/dev/null || ipt
 iptables -C OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT 2>/dev/null || iptables -A OUTPUT -p icmp --icmp-type echo-reply -j ACCEPT
 
 # Remove legacy broad Sunshine allow rules (best effort)
-ufw --force delete allow in on {} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
-ufw --force delete allow in on {} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
+ufw --force delete allow in on {wg_interface} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
+ufw --force delete allow in on {wg_interface} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
 for port in 47984 47989 47990 47991 48010; do
   ufw --force delete allow "$port/tcp" >/dev/null 2>&1 || true
 done
@@ -1575,33 +1894,14 @@ for port in 47998 47999 48000 48002; do
 done
 
 # Sunshine ports restricted to the configured WireGuard client only
-ufw status | grep -q "from {}/32 to any port 47984,47989,47990,47991,48010 proto tcp" || ufw allow in on {} from {}/32 to any port 47984,47989,47990,47991,48010 proto tcp comment 'Sunshine TCP over WireGuard (single client)'
-ufw status | grep -q "from {}/32 to any port 47998,47999,48000,48002 proto udp" || ufw allow in on {} from {}/32 to any port 47998,47999,48000,48002 proto udp comment 'Sunshine UDP over WireGuard (single client)'
+ufw status | grep -q "from {client_cidr} to any port 47984,47989,47990,47991,48010 proto tcp" || ufw allow in on {wg_interface} from {client_cidr} to any port 47984,47989,47990,47991,48010 proto tcp comment 'Sunshine TCP over WireGuard (single client)'
+ufw status | grep -q "from {client_cidr} to any port 47998,47999,48000,48002 proto udp" || ufw allow in on {wg_interface} from {client_cidr} to any port 47998,47999,48000,48002 proto udp comment 'Sunshine UDP over WireGuard (single client)'
 
 # Deny all other Sunshine access paths (best effort; source rule above stays higher priority)
-ufw status | grep -q "deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp" || ufw deny in on {} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
-ufw status | grep -q "deny in on {} to any port 47998,47999,48000,48002 proto udp" || ufw deny in on {} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
+ufw status | grep -q "deny in on {wg_interface} to any port 47984,47989,47990,47991,48010 proto tcp" || ufw deny in on {wg_interface} to any port 47984,47989,47990,47991,48010 proto tcp >/dev/null 2>&1 || true
+ufw status | grep -q "deny in on {wg_interface} to any port 47998,47999,48000,48002 proto udp" || ufw deny in on {wg_interface} to any port 47998,47999,48000,48002 proto udp >/dev/null 2>&1 || true
 "#,
-            server_listen_port,
-            server_listen_port,
-            server_listen_port,
-            server_listen_port,
-            self.defaults.server_interface_name,
-            primary_interface,
-            primary_interface,
-            self.defaults.server_interface_name,
-            self.defaults.server_interface_name,
-            self.defaults.server_interface_name,
-            allowed_client_ip,
-            self.defaults.server_interface_name,
-            allowed_client_ip,
-            allowed_client_ip,
-            self.defaults.server_interface_name,
-            allowed_client_ip,
-            self.defaults.server_interface_name,
-            self.defaults.server_interface_name,
-            self.defaults.server_interface_name,
-            self.defaults.server_interface_name
+            wg_port = server_listen_port,
         );
 
         let escaped = shell_single_quote_escape(&firewall_setup);
@@ -2805,14 +3105,30 @@ fn shell_single_quote_escape(content: &str) -> String {
     content.replace('\'', "'\"'\"'")
 }
 
+fn validate_firewall_interface(interface: &str) -> AppResult<()> {
+    if interface.is_empty()
+        || interface.len() > 15
+        || !interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'@'))
+    {
+        return Err(AppError::InvalidInput(format!(
+            "Firewall interface name `{interface}` is invalid"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
+    #[cfg(not(unix))]
+    use super::GOTATUN_RUNTIME_DIR_NAME;
     use super::{
         build_windows_tunnel_launch_script, gotatun_runtime_dir, has_recent_handshake,
-        linux_process_start_ticks, linux_process_state, windows_command_line_quote,
-        GOTATUN_RUNTIME_DIR_NAME,
+        linux_process_start_ticks, linux_process_state, validate_firewall_interface,
+        windows_command_line_quote,
     };
 
     #[test]
@@ -2837,6 +3153,14 @@ mod tests {
     #[test]
     fn instance_configs_share_one_global_gotatun_runtime() {
         let config = Path::new("wireguard/47458589/nolandwg0.conf");
+        #[cfg(unix)]
+        assert!(gotatun_runtime_dir(config)
+            .to_string_lossy()
+            .starts_with("/tmp/noland-g-"));
+        #[cfg(unix)]
+        return;
+
+        #[cfg(not(unix))]
         assert_eq!(
             gotatun_runtime_dir(config),
             Path::new("wireguard").join(GOTATUN_RUNTIME_DIR_NAME)
@@ -2849,6 +3173,14 @@ mod tests {
         assert!(has_recent_handshake("180 seconds ago"));
         assert!(!has_recent_handshake("181 seconds ago"));
         assert!(!has_recent_handshake("never"));
+    }
+
+    #[test]
+    fn firewall_interface_validation_rejects_shell_syntax() {
+        assert!(validate_firewall_interface("eth0").is_ok());
+        assert!(validate_firewall_interface("enp1s0@if4").is_ok());
+        assert!(validate_firewall_interface("eth0;reboot").is_err());
+        assert!(validate_firewall_interface("../../eth0").is_err());
     }
 
     #[test]

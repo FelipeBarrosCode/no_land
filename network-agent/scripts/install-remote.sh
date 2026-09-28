@@ -5,10 +5,12 @@ SOURCE_ARCHIVE="${1:-/tmp/noland-network-agent-src.tgz}"
 BUILD_ROOT="${2:-/tmp/noland-network-agent-build}"
 SOURCE_DIR="${BUILD_ROOT}/network-agent"
 INSTALL_REVISION="${3:?network-agent install revision is required}"
+INSTANCE_ID="${4:?Vast instance ID is required}"
 BINARY_PATH="/usr/local/bin/noland-network-agent"
 WRAPPER_PATH="/usr/local/libexec/noland-network-agent-bind-wg0"
 UNIT_PATH="/etc/systemd/system/noland-network-agent.service"
 REVISION_PATH="/usr/local/share/noland-network-agent/install-revision"
+INSTANCE_ID_PATH="/etc/noland-network-agent/instance-id"
 BUILD_LOG="${BUILD_ROOT}/build.log"
 
 cleanup() {
@@ -85,6 +87,10 @@ install -d -o root -g root -m 0755 "$(dirname "$REVISION_PATH")"
 printf '%s\n' "$INSTALL_REVISION" >"$REVISION_PATH"
 chown root:root "$REVISION_PATH"
 chmod 0644 "$REVISION_PATH"
+install -d -o root -g root -m 0755 "$(dirname "$INSTANCE_ID_PATH")"
+printf '%s\n' "$INSTANCE_ID" >"$INSTANCE_ID_PATH"
+chown root:root "$INSTANCE_ID_PATH"
+chmod 0644 "$INSTANCE_ID_PATH"
 
 systemctl daemon-reload
 systemctl enable --now noland-network-agent.service

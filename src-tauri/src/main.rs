@@ -392,6 +392,11 @@ fn main() {
                 app_data_dir.join("software-artwork-cache.json"),
             );
             let context = AppContext::new(config, state_store, initial_state);
+            let automatic_network_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                services::connection_manager::run_connection_maintenance(automatic_network_context)
+                    .await;
+            });
             let mut shared_storage_progress = context.shared_storage_progress.subscribe();
             let mut shared_storage_restore_completed =
                 context.shared_storage_restore_completed.subscribe();
@@ -441,7 +446,21 @@ fn main() {
             moonlight_manager
                 .runtime
                 .start_event_bridge(app.handle().clone());
+            let mut stream_state = moonlight_manager.runtime.subscribe_state();
+            let stream_network_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                while stream_state.changed().await.is_ok() {
+                    let active = !matches!(
+                        *stream_state.borrow(),
+                        moonlight::domain::SessionState::Idle
+                    );
+                    stream_network_context.set_stream_network_active(active);
+                }
+                stream_network_context.set_stream_network_active(false);
+            });
+            let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
+            moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
             let app_handle = app.handle().clone();
             let resume_context = context.clone();
@@ -524,6 +543,7 @@ fn main() {
 
             tauri::async_runtime::spawn(async move {
                 network_monitor.stop().await;
+                mic_context.set_stream_network_active(false);
                 let _ = runtime.stop().await;
                 let _ = runtime.detach_surface().await;
                 input.end_capture();
@@ -585,6 +605,13 @@ fn main() {
             get_vast_wallet_summary,
             update_vast_api_key,
             update_platform_credentials,
+            get_cloudflare_turn_settings,
+            save_cloudflare_turn_settings,
+            test_cloudflare_turn_settings,
+            clear_cloudflare_turn_settings,
+            get_instance_connection_status,
+            repair_instance_connection,
+            set_instance_connection_preference,
             update_server_preferences,
             update_moonlight_preferences,
             set_instance_moonlight_pipeline_enabled,
@@ -645,6 +672,7 @@ fn main() {
             get_instance_mic_status,
             list_microphones,
             moonlight_get_configuration,
+            set_instance_performance_overlay,
             moonlight_register_host,
             moonlight_refresh_host,
             moonlight_begin_pairing,
@@ -652,6 +680,8 @@ fn main() {
             moonlight_list_apps,
             moonlight_start_stream,
             moonlight_disconnect_stream,
+            moonlight_send_clipboard_to_remote,
+            moonlight_get_clipboard_from_remote,
             moonlight_start_input_capture,
             moonlight_stop_input_capture,
             moonlight_update_video_geometry,

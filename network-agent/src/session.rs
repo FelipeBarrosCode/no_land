@@ -3,6 +3,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
+use noland_network_contracts::state::TransportKind;
 use uuid::Uuid;
 
 use crate::telemetry::{state::StateMachine, window::TelemetryWindow};
@@ -43,6 +45,8 @@ pub struct Session {
     pub window: TelemetryWindow,
     pub state: StateMachine,
     pub udp_rate: RateLimiter,
+    pub allowed_probe_paths: Vec<TransportKind>,
+    pub expires_at: Option<DateTime<Utc>>,
     registered_at: Instant,
 }
 
@@ -89,6 +93,42 @@ impl SessionRegistry {
                 window: TelemetryWindow::default(),
                 state: StateMachine::default(),
                 udp_rate: RateLimiter::new(self.udp_rate_limit),
+                allowed_probe_paths: vec![TransportKind::Direct],
+                expires_at: None,
+                registered_at: now,
+            },
+        );
+    }
+
+    pub fn install_probe_session(
+        &mut self,
+        session_id: Uuid,
+        token: [u8; 32],
+        expires_at: DateTime<Utc>,
+        max_packets_per_second: usize,
+        allowed_paths: Vec<TransportKind>,
+        now: Instant,
+    ) {
+        if !self.sessions.contains_key(&session_id) && self.sessions.len() >= self.max_sessions {
+            if let Some(oldest) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, session)| session.registered_at)
+                .map(|(id, _)| *id)
+            {
+                self.sessions.remove(&oldest);
+            }
+        }
+
+        self.sessions.insert(
+            session_id,
+            Session {
+                token,
+                window: TelemetryWindow::default(),
+                state: StateMachine::default(),
+                udp_rate: RateLimiter::new(max_packets_per_second),
+                allowed_probe_paths: allowed_paths,
+                expires_at: Some(expires_at),
                 registered_at: now,
             },
         );
@@ -102,6 +142,11 @@ impl SessionRegistry {
 impl Session {
     pub fn runtime(&self, now: Instant) -> Duration {
         now.saturating_duration_since(self.registered_at)
+    }
+
+    pub fn allows_probe(&self, path: TransportKind, now: DateTime<Utc>) -> bool {
+        self.expires_at.is_none_or(|expires_at| expires_at > now)
+            && self.allowed_probe_paths.contains(&path)
     }
 }
 

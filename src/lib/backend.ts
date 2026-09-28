@@ -56,6 +56,11 @@ import type {
   OfferCountryAvailability,
   SystemHealthReport,
   DiagnosticReportResponse,
+  CloudflareTurnSettingsResponse,
+  CloudflareTurnSettingsUpdate,
+  CloudflareTurnTestResult,
+  ConnectionPreference,
+  InstanceConnectionStatusResponse,
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
@@ -322,6 +327,10 @@ export async function getRentedInstances(): Promise<RentedInstanceSummary[]> {
   return invokeSafe<RentedInstanceSummary[]>("get_rented_instances");
 }
 
+export async function setInstancePerformanceOverlay(instanceId: number, enabled: boolean): Promise<boolean> {
+  return invokeSafe<boolean>("set_instance_performance_overlay", { instanceId, enabled });
+}
+
 export async function updateVastApiKey(
   apiKey: string,
 ): Promise<PersistedAppState> {
@@ -339,6 +348,51 @@ export async function updatePlatformCredentials(
 ): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("update_platform_credentials", {
     payload,
+  });
+}
+
+export async function getCloudflareTurnSettings(): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("get_cloudflare_turn_settings");
+}
+
+export async function testCloudflareTurnSettings(
+  payload: CloudflareTurnSettingsUpdate,
+): Promise<CloudflareTurnTestResult> {
+  return invokeSafe<CloudflareTurnTestResult>("test_cloudflare_turn_settings", { payload });
+}
+
+export async function saveCloudflareTurnSettings(
+  payload: CloudflareTurnSettingsUpdate,
+): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("save_cloudflare_turn_settings", { payload });
+}
+
+export async function clearCloudflareTurnSettings(): Promise<CloudflareTurnSettingsResponse> {
+  return invokeSafe<CloudflareTurnSettingsResponse>("clear_cloudflare_turn_settings");
+}
+
+export async function getInstanceConnectionStatus(
+  instanceId: number,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("get_instance_connection_status", {
+    instanceId,
+  });
+}
+
+export async function setInstanceConnectionPreference(
+  instanceId: number,
+  preference: ConnectionPreference,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("set_instance_connection_preference", {
+    payload: { instanceId, preference },
+  });
+}
+
+export async function repairInstanceConnection(
+  instanceId: number,
+): Promise<InstanceConnectionStatusResponse> {
+  return invokeSafe<InstanceConnectionStatusResponse>("repair_instance_connection", {
+    instanceId,
   });
 }
 
@@ -445,6 +499,19 @@ export async function moonlightDisconnectStream(): Promise<{
   state: string;
 }> {
   return invokeSafe<{ state: string }>("moonlight_disconnect_stream");
+}
+
+export interface ClipboardTransferResponse {
+  id: string;
+  byteCount: number;
+}
+
+export async function moonlightSendClipboardToRemote(): Promise<ClipboardTransferResponse> {
+  return invokeSafe<ClipboardTransferResponse>("moonlight_send_clipboard_to_remote");
+}
+
+export async function moonlightGetClipboardFromRemote(): Promise<ClipboardTransferResponse> {
+  return invokeSafe<ClipboardTransferResponse>("moonlight_get_clipboard_from_remote");
 }
 
 export async function moonlightSendRelativeMouse(input: {

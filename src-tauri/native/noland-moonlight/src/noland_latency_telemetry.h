@@ -88,6 +88,24 @@ typedef struct nl_latency_snapshot {
 } nl_latency_snapshot_t;
 
 typedef struct nl_latency_telemetry {
+  nl_performance_stats_t performance;
+  uint64_t performance_started_us;
+  uint64_t received_frames;
+  uint64_t decoded_frames;
+  uint64_t submitted_frames;
+  uint64_t received_bytes;
+  uint64_t missing_frames;
+  uint64_t host_total;
+  uint64_t host_samples;
+  uint64_t reassembly_total;
+  uint64_t reassembly_samples;
+  uint64_t decode_total;
+  uint64_t decode_samples;
+  uint64_t dwell_total;
+  uint64_t dwell_samples;
+  uint32_t previous_frame_number;
+  uint8_t has_previous_frame;
+  uint8_t has_decoder_output;
   nl_frame_timing_t records[NL_FRAME_TIMING_CAPACITY];
   size_t next_record;
   size_t record_count;
@@ -149,6 +167,7 @@ void nl_latency_telemetry_set_smoothing(nl_latency_telemetry_t* telemetry, uint8
 void nl_latency_telemetry_set_pacing(nl_latency_telemetry_t* telemetry, nl_pacing_mode_t configured, nl_pacing_mode_t effective);
 void nl_latency_telemetry_sample_network(nl_latency_telemetry_t* telemetry, uint64_t now_us, int32_t pending_core_video_frames, const void* rtp_video_stats);
 void nl_latency_telemetry_snapshot(nl_latency_telemetry_t* telemetry, nl_latency_snapshot_t* output);
+void nl_latency_telemetry_performance(nl_latency_telemetry_t* telemetry, uint64_t now_us, nl_performance_stats_t* output);
 size_t nl_latency_telemetry_record_count(nl_latency_telemetry_t* telemetry);
 
 #ifdef __cplusplus

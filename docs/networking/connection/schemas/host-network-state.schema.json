@@ -1,0 +1,372 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "HostNetworkState",
+  "type": "object",
+  "required": [
+    "agentVersion",
+    "allocationGeneration",
+    "hostRevision",
+    "instanceId",
+    "schemaVersion",
+    "sessionId",
+    "turnStatus",
+    "updatedAt"
+  ],
+  "properties": {
+    "agentVersion": {
+      "type": "string"
+    },
+    "allocationExpiresAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allocationGeneration": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "committedOperationId": {
+      "default": null,
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "committedProfile": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ConnectionProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "credentialExpiresAt": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "hostRevision": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "instanceId": {
+      "type": "string"
+    },
+    "linkState": {
+      "default": {
+        "appliedProfileRevision": 0,
+        "interfaceName": "",
+        "observedMtu": null,
+        "observedTransport": null,
+        "pendingTransitionId": null
+      },
+      "allOf": [
+        {
+          "$ref": "#/definitions/HostLinkState"
+        }
+      ]
+    },
+    "observedTransport": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/TransportKind"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pendingProfile": {
+      "default": null,
+      "anyOf": [
+        {
+          "$ref": "#/definitions/PendingConnectionProfile"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "relayEndpoint": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/NetworkEndpoint"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "turnStatus": {
+      "$ref": "#/definitions/TurnRuntimeStatus"
+    },
+    "updatedAt": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ConnectionProfile": {
+      "type": "object",
+      "required": [
+        "createdAt",
+        "desiredTransport",
+        "endpoint",
+        "innerMtu",
+        "instanceId",
+        "packetLimits",
+        "profileRevision",
+        "schemaVersion",
+        "transitionId"
+      ],
+      "properties": {
+        "allocationGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "desiredTransport": {
+          "$ref": "#/definitions/TransportKind"
+        },
+        "endpoint": {
+          "$ref": "#/definitions/NetworkEndpoint"
+        },
+        "innerMtu": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "instanceId": {
+          "type": "string"
+        },
+        "mediaSessionGeneration": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "packetLimits": {
+          "$ref": "#/definitions/PacketLimits"
+        },
+        "profileRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "requestedMediaPacketSize": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "schemaVersion": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "transitionId": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "HostLinkState": {
+      "type": "object",
+      "required": [
+        "appliedProfileRevision",
+        "interfaceName"
+      ],
+      "properties": {
+        "appliedProfileRevision": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "interfaceName": {
+          "type": "string"
+        },
+        "observedMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "observedTransport": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/TransportKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pendingTransitionId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uuid"
+        }
+      }
+    },
+    "MeasurementMethod": {
+      "type": "string",
+      "enum": [
+        "unverified",
+        "configured_fallback",
+        "authenticated_probe",
+        "packetization_layer_probe"
+      ]
+    },
+    "NetworkEndpoint": {
+      "type": "object",
+      "required": [
+        "host",
+        "port"
+      ],
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PacketLimits": {
+      "type": "object",
+      "required": [
+        "confidence",
+        "measurementMethod"
+      ],
+      "properties": {
+        "confidence": {
+          "type": "number",
+          "format": "double"
+        },
+        "forwardPayloadCeiling": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "measurementMethod": {
+          "$ref": "#/definitions/MeasurementMethod"
+        },
+        "observedClientMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "observedHostMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "reversePayloadCeiling": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "verifiedInnerMtu": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    },
+    "PendingConnectionProfile": {
+      "type": "object",
+      "required": [
+        "leaseExpiresAt",
+        "operationId",
+        "preparedAt",
+        "previousMtu",
+        "profile"
+      ],
+      "properties": {
+        "leaseExpiresAt": {
+          "type": "string"
+        },
+        "operationId": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "preparedAt": {
+          "type": "string"
+        },
+        "previousMtu": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        },
+        "profile": {
+          "$ref": "#/definitions/ConnectionProfile"
+        }
+      }
+    },
+    "TransportKind": {
+      "type": "string",
+      "enum": [
+        "direct",
+        "cloudflare_turn"
+      ]
+    },
+    "TurnRuntimeStatus": {
+      "type": "string",
+      "enum": [
+        "disabled",
+        "awaiting_credentials",
+        "preparing",
+        "ready",
+        "degraded",
+        "failed"
+      ]
+    }
+  }
+}

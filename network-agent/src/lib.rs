@@ -4,10 +4,15 @@ use tokio::sync::Mutex;
 
 pub mod classifier;
 pub mod config;
+pub mod control;
+pub mod link_profile;
 pub mod probe;
+pub mod remote_control;
 pub mod session;
 pub mod telemetry;
 pub mod transport;
+pub mod turn_bridge;
+pub mod turn_manager;
 
 pub use session::SessionRegistry;
 

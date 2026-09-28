@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { errorMessage } from "../../lib/errorMessage";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -9,6 +10,11 @@ import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
+import {
+  getInstanceConnectionStatus,
+  repairInstanceConnection,
+  setInstanceConnectionPreference,
+} from "../../lib/backend";
 import type {
   AutoShutdownSettings as AutoShutdownSettingsValue,
   MoonlightPreferences,
@@ -20,6 +26,11 @@ import type {
   ServerPreferencesUpdate,
   SharedStorageTestResult,
   SshCredentialsUpdate,
+  CloudflareTurnSettingsResponse,
+  CloudflareTurnSettingsUpdate,
+  CloudflareTurnTestResult,
+  ConnectionPreference,
+  InstanceConnectionStatusResponse,
 } from "../../lib/types";
 import {
   VAST_API_KEY_URL,
@@ -97,6 +108,16 @@ interface Props {
   ) => Promise<void>;
   onSaveMoonlightPreferences: (payload: MoonlightPreferences) => Promise<void>;
   onSaveSshCredentials: (payload: SshCredentialsUpdate) => Promise<void>;
+  cloudflareTurnSettings: CloudflareTurnSettingsResponse | null;
+  cloudflareTurnTestResult: CloudflareTurnTestResult | null;
+  onLoadCloudflareTurnSettings: () => Promise<void>;
+  onTestCloudflareTurnSettings: (
+    payload: CloudflareTurnSettingsUpdate,
+  ) => Promise<CloudflareTurnTestResult | null>;
+  onSaveCloudflareTurnSettings: (
+    payload: CloudflareTurnSettingsUpdate,
+  ) => Promise<void>;
+  onClearCloudflareTurnSettings: () => Promise<void>;
   onRegenerateEdid: (payload: {
     mode: "auto_detect" | "mac_hardware" | "manual";
     refreshRateHz: number;
@@ -220,6 +241,12 @@ export function SettingsScreen({
   onSaveServerPreferences,
   onSaveMoonlightPreferences,
   onSaveSshCredentials,
+  cloudflareTurnSettings,
+  cloudflareTurnTestResult,
+  onLoadCloudflareTurnSettings,
+  onTestCloudflareTurnSettings,
+  onSaveCloudflareTurnSettings,
+  onClearCloudflareTurnSettings,
   onRegenerateEdid,
 }: Props) {
   const [section, setSection] = useState<SettingsSection>("profile");
@@ -248,6 +275,16 @@ export function SettingsScreen({
   const [edidRefreshRateHz, setEdidRefreshRateHz] = useState(
     appState.sunshine.edidRefreshRateHz.toString(),
   );
+  const [turnEnabled, setTurnEnabled] = useState(
+    cloudflareTurnSettings?.enabled ?? appState.cloudflareTurn.enabled,
+  );
+  const [turnKeyId, setTurnKeyId] = useState("");
+  const [turnApiToken, setTurnApiToken] = useState("");
+  const [connectionStatuses, setConnectionStatuses] = useState<
+    Record<number, InstanceConnectionStatusResponse>
+  >({});
+  const [switchingInstanceId, setSwitchingInstanceId] = useState<number | null>(null);
+  const [connectionStatusError, setConnectionStatusError] = useState<string | null>(null);
 
   const [serverForm, setServerForm] = useState({
     minReliability: appState.serverPreferences.minReliability.toString(),
@@ -324,6 +361,66 @@ export function SettingsScreen({
         appState.moonlightPreferences.showInputDebugHud.toString(),
     });
   }, [appState]);
+
+  useEffect(() => {
+    void onLoadCloudflareTurnSettings();
+  }, [onLoadCloudflareTurnSettings]);
+
+  useEffect(() => {
+    setTurnEnabled(cloudflareTurnSettings?.enabled ?? appState.cloudflareTurn.enabled);
+  }, [appState.cloudflareTurn.enabled, cloudflareTurnSettings]);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadStatuses() {
+      const results = await Promise.allSettled(
+        appState.provisionedServers.map((server) =>
+          getInstanceConnectionStatus(server.instanceId),
+        ),
+      );
+      if (cancelled) return;
+      const next: Record<number, InstanceConnectionStatusResponse> = {};
+      for (const result of results) {
+        if (result.status === "fulfilled") {
+          next[result.value.instanceId] = result.value;
+        }
+      }
+      setConnectionStatuses(next);
+    }
+    void loadStatuses();
+    return () => {
+      cancelled = true;
+    };
+  }, [appState.provisionedServers]);
+
+  async function changeConnectionPreference(
+    instanceId: number,
+    preference: ConnectionPreference,
+  ) {
+    setSwitchingInstanceId(instanceId);
+    setConnectionStatusError(null);
+    try {
+      const status = await setInstanceConnectionPreference(instanceId, preference);
+      setConnectionStatuses((current) => ({ ...current, [instanceId]: status }));
+    } catch (error) {
+      setConnectionStatusError(errorMessage(error));
+    } finally {
+      setSwitchingInstanceId(null);
+    }
+  }
+
+  async function repairConnection(instanceId: number) {
+    setSwitchingInstanceId(instanceId);
+    setConnectionStatusError(null);
+    try {
+      const status = await repairInstanceConnection(instanceId);
+      setConnectionStatuses((current) => ({ ...current, [instanceId]: status }));
+    } catch (error) {
+      setConnectionStatusError(errorMessage(error));
+    } finally {
+      setSwitchingInstanceId(null);
+    }
+  }
 
 
   async function openExternalUrl(url: string) {
@@ -874,7 +971,7 @@ export function SettingsScreen({
             </div>
             <div>
               <SelectField
-                label="Performance Overlay"
+                label="Default Performance Overlay"
                 value={clientForm.showperfoverlay}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -882,8 +979,8 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Shows a live HUD with stream stats like FPS, latency, and
-                bitrate.
+                Default for instances without a saved choice. Each instance card
+                controls its live FPS, latency, jitter and bitrate overlay.
               </SettingHelp>
             </div>
             <div>
@@ -1177,6 +1274,182 @@ export function SettingsScreen({
         <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
           Keep this set to the managed tunnel option so Noland can configure the local desktop connection automatically.
         </p>
+      </div>
+
+      <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+              Cloudflare TURN Relay
+            </h3>
+            <p className="mt-2 max-w-3xl text-[1.05rem] leading-snug text-[#a8bed6]">
+              Adds an encrypted WireGuard relay path for networks where the direct UDP path is unavailable or unstable. The long-lived API token is stored only in your operating system secure credential store.
+            </p>
+          </div>
+          <span className="rounded border border-[#48527a] px-2 py-1 font-display text-[9px] uppercase tracking-[0.12em] text-[#b7d7f2]">
+            {cloudflareTurnSettings?.status ?? "loading"}
+          </span>
+        </div>
+
+        <label className="mt-4 flex items-center gap-3 text-[1.05rem] text-white">
+          <input
+            type="checkbox"
+            checked={turnEnabled}
+            onChange={(event) => setTurnEnabled(event.target.checked)}
+          />
+          Enable relay preparation for new connections
+        </label>
+
+        {cloudflareTurnSettings?.tokenSet ? (
+          <p className="mt-3 text-[1rem] text-[#8fb4d4]">
+            Stored key: {cloudflareTurnSettings.keyIdHint ?? "configured"}. Enter both values again to replace it.
+          </p>
+        ) : null}
+
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
+          <InputField
+            label="TURN Key ID"
+            value={turnKeyId}
+            onChange={(event) => setTurnKeyId(event.target.value)}
+            placeholder="Cloudflare TURN Key ID"
+          />
+          <InputField
+            label="TURN API Token"
+            type="password"
+            value={turnApiToken}
+            onChange={(event) => setTurnApiToken(event.target.value)}
+            placeholder="Cloudflare TURN API token"
+          />
+        </div>
+
+        <div className="mt-4 flex flex-wrap gap-3">
+          <Button
+            variant="secondary"
+            disabled={busy || !turnKeyId.trim() || !turnApiToken.trim()}
+            onClick={() =>
+              void onTestCloudflareTurnSettings({
+                enabled: turnEnabled,
+                keyId: turnKeyId.trim(),
+                apiToken: turnApiToken.trim(),
+              })
+            }
+          >
+            Test Credentials
+          </Button>
+          <Button
+            disabled={busy || !turnKeyId.trim() || !turnApiToken.trim()}
+            onClick={() =>
+              void onSaveCloudflareTurnSettings({
+                enabled: turnEnabled,
+                keyId: turnKeyId.trim(),
+                apiToken: turnApiToken.trim(),
+              })
+            }
+          >
+            Validate &amp; Save
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={busy || !cloudflareTurnSettings?.tokenSet}
+            onClick={() => void onClearCloudflareTurnSettings()}
+          >
+            Remove Credentials
+          </Button>
+        </div>
+
+        {cloudflareTurnTestResult?.valid ? (
+          <p className="mt-3 text-[1rem] text-neon-lime">
+            Credentials are valid; Cloudflare returned {cloudflareTurnTestResult.udpUrls.length} UDP relay endpoint{cloudflareTurnTestResult.udpUrls.length === 1 ? "" : "s"}.
+          </p>
+        ) : null}
+      </div>
+
+      <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
+        <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
+          Per-instance transport
+        </h3>
+        <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
+          Endpoint changes commit only after the managed tunnel and Sunshine are reachable. Failed changes roll back to the previous transport.
+        </p>
+        <div className="mt-4 grid gap-3">
+          {appState.provisionedServers.length === 0 ? (
+            <p className="text-[1rem] text-[#8fb4d4]">No provisioned instances.</p>
+          ) : (
+            appState.provisionedServers.map((server) => {
+              const status = connectionStatuses[server.instanceId];
+              const network = status?.network ?? server.network;
+              return (
+                <div
+                  key={server.instanceId}
+                  className="flex flex-wrap items-center justify-between gap-3 rounded border border-[#343b61] bg-[#0b1027] p-3"
+                >
+                  <div>
+                    <p className="font-display text-[9px] uppercase tracking-[0.12em] text-white">
+                      Instance {server.instanceId}
+                    </p>
+                    <p className="mt-1 text-[1rem] text-[#8fb4d4]">
+                      Requested: {network.preference} · Active: {network.activeTransport ?? "not validated"}
+                      {network.lastEvaluation
+                        ? ` · ${network.lastEvaluation.reason}`
+                        : ""}
+                    </p>
+                    <p className="mt-1 text-[0.95rem] text-[#789aba]">
+                      {network.connectionProfile
+                        ? `Verified profile r${network.connectionProfile.profileRevision} · MTU ${network.connectionProfile.innerMtu} · ${network.connectionProfile.packetLimits.measurementMethod}`
+                        : "No committed connection profile"}
+                      {network.lastTransition
+                        ? ` · Last transition: ${network.lastTransition.phase}`
+                        : ""}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      className="min-w-52 rounded border border-[#48527a] bg-[#111936] px-3 py-2 text-[1rem] text-white"
+                      value={network.preference}
+                      disabled={busy || switchingInstanceId === server.instanceId || !status}
+                      onChange={(event) =>
+                        void changeConnectionPreference(
+                          server.instanceId,
+                          event.target.value as ConnectionPreference,
+                        )
+                      }
+                    >
+                      {status?.automaticSelectionEnabled ? (
+                        <option value="auto">Automatic (gaming-v1)</option>
+                      ) : network.preference === "auto" ? (
+                        <option value="auto" disabled>Automatic (locked)</option>
+                      ) : null}
+                      <option value="direct">Direct WireGuard</option>
+                      {status?.manualTurnSwitchingEnabled &&
+                      network.cloudflareTurn.enabled ? (
+                        <option value="cloudflare_turn">Cloudflare TURN</option>
+                      ) : null}
+                    </select>
+                    <Button
+                      variant="ghost"
+                      disabled={busy || switchingInstanceId === server.instanceId || !status}
+                      onClick={() => void repairConnection(server.instanceId)}
+                    >
+                      {switchingInstanceId === server.instanceId
+                        ? "Repairing…"
+                        : "Repair connection"}
+                    </Button>
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+        {connectionStatusError ? (
+          <p className="mt-3 text-[1rem] text-[#ff9aae]">{connectionStatusError}</p>
+        ) : null}
+        {appState.provisionedServers.some(
+          (server) => !connectionStatuses[server.instanceId]?.manualTurnSwitchingEnabled,
+        ) ? (
+          <p className="mt-3 text-[0.95rem] text-[#8fb4d4]">
+            TURN selection is available when Cloudflare TURN is enabled and the validated credentials are present in secure storage.
+          </p>
+        ) : null}
       </div>
 
     </Card>

@@ -844,6 +844,10 @@ size_t nl_sizeof_event(void) {
   return sizeof(nl_event_t);
 }
 
+size_t nl_sizeof_performance_stats(void) {
+  return sizeof(nl_performance_stats_t);
+}
+
 size_t nl_sizeof_stats(void) {
   return sizeof(nl_stats_t);
 }
@@ -981,6 +985,25 @@ nl_result_t nl_runtime_poll_event(nl_runtime_t* runtime, nl_event_t* output) {
   runtime->event_len -= 1U;
   nl_runtime_unlock(runtime);
   return NL_RESULT_OK;
+}
+
+void nl_runtime_read_performance(nl_runtime_t* runtime, nl_performance_stats_t* output) {
+  if (runtime == NULL || output == NULL) return;
+  nl_latency_telemetry_performance(&runtime->renderer.telemetry, LiGetMicroseconds(), output);
+  nl_runtime_lock(runtime);
+  output->width = (uint32_t)runtime->renderer.width;
+  output->height = (uint32_t)runtime->renderer.height;
+  output->video_format = (uint32_t)runtime->renderer.video_format;
+  nl_runtime_unlock(runtime);
+}
+
+void nl_runtime_set_overlay_text(nl_runtime_t* runtime, const char* text) {
+  if (runtime == NULL) {
+    return;
+  }
+  nl_runtime_lock(runtime);
+  nl_video_renderer_set_overlay_text(&runtime->renderer, text);
+  nl_runtime_unlock(runtime);
 }
 
 nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {

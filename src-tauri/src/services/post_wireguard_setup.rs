@@ -295,6 +295,25 @@ pub async fn setup_wireguard_app_handoff(
         source = mtu_selection.source,
         "selected and applied WireGuard MTU over the connected tunnel"
     );
+    let selected_mtu = mtu_selection.mtu;
+    context
+        .update_state(|state| {
+            let instance_id = state
+                .post_wireguard_setup
+                .current_instance_id
+                .or(state.instance.instance_id);
+            if let Some(server) = instance_id.and_then(|instance_id| {
+                state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+            }) {
+                server.network.direct.effective_mtu = Some(selected_mtu);
+                server.network.client_revision = server.network.client_revision.saturating_add(1);
+                server.network.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await?;
     emit_post_wireguard_event(
         app,
         context,
@@ -377,6 +396,7 @@ pub async fn verify_wireguard_connection(
         },
     };
     if result.reachable {
+        let verified_at = chrono::Utc::now().to_rfc3339();
         context
             .update_state(|state| {
                 state.post_wireguard_setup.stage = SetupStage::WireguardConnected;
@@ -385,6 +405,23 @@ pub async fn verify_wireguard_connection(
                     result.reachable_ports.clone();
                 state.orchestration_state = OrchestrationState::MoonlightSunshineReadyToSetup;
                 state.last_error = None;
+                if let Some(instance_id) = state.post_wireguard_setup.current_instance_id {
+                    if let Some(server) = state
+                        .provisioned_servers
+                        .iter_mut()
+                        .find(|server| server.instance_id == instance_id)
+                    {
+                        server.network.client_revision =
+                            server.network.client_revision.saturating_add(1);
+                        server.network.updated_at = Some(verified_at.clone());
+                        server.network.direct.availability =
+                            noland_network_contracts::state::PathAvailability::Ready;
+                        if server.network.active_transport.is_none() {
+                            server.network.active_transport =
+                                Some(noland_network_contracts::state::TransportKind::Direct);
+                        }
+                    }
+                }
             })
             .await?;
 

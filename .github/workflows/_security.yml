@@ -1,0 +1,164 @@
+name: Reusable security gates
+
+on:
+  workflow_call:
+    inputs:
+      dependency-review:
+        description: Run the PR dependency diff review
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  secret-scan:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+      - name: Scan relevant Git history without printing secret values
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+          GITLEAKS_ENABLE_SUMMARY: "true"
+          GITLEAKS_NOTIFY_USER_LIST: "false"
+
+  dependency-security:
+    name: Dependency security (${{ matrix.ecosystem }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ecosystem: npm
+            directory: .
+          - ecosystem: rust-network-contracts
+            directory: network-contracts
+          - ecosystem: rust-network-agent
+            directory: network-agent
+          - ecosystem: rust-state-agent
+            directory: state-agent
+          - ecosystem: rust-desktop
+            directory: src-tauri
+          - ecosystem: rust-mic-sidecar
+            directory: mic-sidecar
+          - ecosystem: rust-mic-receiver
+            directory: vm-cloud-mic-agent
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: matrix.ecosystem == 'npm'
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install exact JavaScript dependency graph
+        if: matrix.ecosystem == 'npm'
+        run: npm ci
+      - name: Block high and critical JavaScript advisories
+        if: matrix.ecosystem == 'npm'
+        run: npm audit --audit-level=high
+      - name: Audit Rust lockfile against RustSec
+        if: matrix.ecosystem != 'npm'
+        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
+        with:
+          token: ${{ github.token }}
+          working-directory: ${{ matrix.directory }}
+          # Medium-severity no-fix exception documented in docs/operations.md.
+          ignore: RUSTSEC-2023-0071
+
+  dependency-review:
+    name: Dependency change review
+    if: inputs.dependency-review && github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/dependency-review-action@56339e523c0409420f6c2c9a2f4292bbb3c07dd3 # v4.8.0
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+
+  trivy:
+    name: Trivy dependencies and configuration
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Report all dependency and configuration findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: sarif
+          output: trivy-results.sarif
+          exit-code: "0"
+          ignore-unfixed: false
+      - name: Block high and critical Trivy findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,misconfig
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "1"
+          ignore-unfixed: false
+      - name: Upload Trivy findings to code scanning
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-repository
+      - name: Retain security report only
+        if: always() && hashFiles('trivy-results.sarif') != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-security-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: trivy-results.sarif
+          retention-days: 14
+
+  static-analysis:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: javascript-typescript
+            build-mode: none
+          - language: c-cpp
+            build-mode: manual
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+      - name: Install native analysis dependencies
+        if: matrix.language == 'c-cpp'
+        run: bash scripts/ci/install-linux-native-deps.sh
+      - name: Build native Moonlight code for CodeQL
+        if: matrix.language == 'c-cpp'
+        run: |
+          cmake -S src-tauri/native -B build/codeql-native -DBUILD_NOLAND_MOONLIGHT_HARNESS=OFF -DBUILD_NOLAND_MOONLIGHT_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/codeql-native --config Release --parallel 2
+      - name: Analyze
+        uses: github/codeql-action/analyze@1190a975f95ce23525efb6a3fc21ea29567c1b52 # v3.38.2
+        with:
+          category: /language:${{ matrix.language }}
+
+  workflow-security:
+    name: GitHub Actions security
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Validate workflow syntax and expressions
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" -color

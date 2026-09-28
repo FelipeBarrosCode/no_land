@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "NetworkEvent",
+  "type": "object",
+  "required": [
+    "eventId",
+    "eventType",
+    "instanceId",
+    "payload",
+    "schemaVersion",
+    "timestamp"
+  ],
+  "properties": {
+    "eventId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "eventType": {
+      "$ref": "#/definitions/NetworkEventType"
+    },
+    "instanceId": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "payload": true,
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "timestamp": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "NetworkEventType": {
+      "type": "string",
+      "enum": [
+        "status_updated",
+        "metrics_updated",
+        "evaluation_completed",
+        "transition_updated",
+        "allocation_updated",
+        "error"
+      ]
+    }
+  }
+}

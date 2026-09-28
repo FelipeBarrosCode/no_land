@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RpcRequest",
+  "type": "object",
+  "required": [
+    "controlSessionId",
+    "method",
+    "params",
+    "protocolVersion",
+    "requestId",
+    "sequence"
+  ],
+  "properties": {
+    "controlSessionId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "expectedHostRevision": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "method": {
+      "type": "string"
+    },
+    "params": true,
+    "protocolVersion": {
+      "type": "integer",
+      "format": "uint16",
+      "minimum": 0.0
+    },
+    "requestId": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sequence": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

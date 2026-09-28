@@ -2,6 +2,7 @@ node_modules/
 dist/
 
 # Tauri / Rust build outputs
+**/target/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/bundled/
@@ -22,6 +23,12 @@ network-agent/target/
 # Local tools and temporary/generated workspace files
 .tmp/
 src-tauri/.local-tools/
+coverage/
+.coverage/
+.cache/
+.turbo/
+*.swp
+*.swo
 *.tmp
 *.temp
 *.bak
@@ -58,3 +65,5 @@ src-tauri/platform/*
 *.pdb
 *.ilk
 *.dmp
+
+/tools/debug/artifacts/

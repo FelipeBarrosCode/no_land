@@ -45,6 +45,9 @@ pub enum RuntimeCommand {
     Stop {
         response: oneshot::Sender<Result<(), MoonlightError>>,
     },
+    /// Composites or clears the in-pipeline performance text (Linux).
+    #[cfg(target_os = "linux")]
+    SetOverlayText { text: String },
     AttachSurface {
         surface: NativeSurfaceDescriptor,
         response: oneshot::Sender<Result<(), MoonlightError>>,
@@ -105,12 +108,6 @@ pub enum RuntimeCommand {
         right_stick_y: i16,
         response: oneshot::Sender<Result<(), MoonlightError>>,
     },
-    RestartWithPacketSize {
-        source_generation: u64,
-        target: u16,
-        score: u8,
-        reason: String,
-    },
     GetState {
         response: oneshot::Sender<SessionState>,
     },
@@ -119,6 +116,9 @@ pub enum RuntimeCommand {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatistics {
+    #[serde(skip)]
+    pub sampled_at: std::time::Instant,
+    pub performance: crate::moonlight::performance::PerformanceStatistics,
     pub state: String,
     pub start_count: u64,
     pub stop_count: u64,
@@ -484,6 +484,15 @@ impl MoonlightRuntimeHandle {
         self.statistics.borrow().clone()
     }
 
+    /// Replaces the platform-composited performance text. A no-op while idle.
+    #[cfg(target_os = "linux")]
+    pub async fn set_overlay_text(&self, text: String) -> Result<(), MoonlightError> {
+        self.commands
+            .send(RuntimeCommand::SetOverlayText { text })
+            .await
+            .map_err(|_| MoonlightError::Persistence("runtime actor is unavailable".to_string()))
+    }
+
     pub fn subscribe_events(&self) -> broadcast::Receiver<RuntimeEventMessage> {
         self.events.subscribe()
     }
@@ -637,7 +646,8 @@ impl NativeRuntime {
             remote_input_aes_iv: request.remote_input_iv.map(|value| value as i8),
             session_generation: request.session_generation,
             latency_config: native::nl_latency_config_t {
-                telemetry_enabled: u8::from(request.preferences.latency.telemetry_enabled),
+                // Aggregate performance measurements must be ready for a live toggle.
+                telemetry_enabled: 1,
                 adaptive_late_frame_drop_enabled: u8::from(
                     request.preferences.latency.adaptive_late_frame_drop_enabled,
                 ),
@@ -873,6 +883,7 @@ impl NativeRuntime {
         let result = unsafe { native::nl_runtime_read_stats(self.raw, &mut output) };
         map_native_result(result, "nl_runtime_read_stats")?;
         Ok(NativeStats {
+            performance: unsafe { crate::moonlight::performance::read(self.raw) },
             state: output.state,
             start_count: output.start_count,
             stop_count: output.stop_count,
@@ -991,6 +1002,20 @@ impl NativeRuntime {
     }
 }
 
+impl NativeRuntime {
+    /// Replaces the Linux in-pipeline overlay text; a no-op on other platforms.
+    #[cfg(target_os = "linux")]
+    fn set_overlay_text(&self, text: &str) {
+        if self.raw.is_null() {
+            return;
+        }
+        let Ok(text) = std::ffi::CString::new(text) else {
+            return;
+        };
+        unsafe { native::nl_runtime_set_overlay_text(self.raw, text.as_ptr()) };
+    }
+}
+
 impl Drop for NativeRuntime {
     fn drop(&mut self) {
         if !self.raw.is_null() {
@@ -1002,6 +1027,7 @@ impl Drop for NativeRuntime {
 
 #[derive(Debug, Clone)]
 struct NativeStats {
+    performance: crate::moonlight::performance::PerformanceStatistics,
     state: native::nl_stream_state_t,
     start_count: u64,
     stop_count: u64,
@@ -1091,15 +1117,6 @@ struct NativeEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReconnectCause {
     UnexpectedFailure,
-    PacketSize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingPacketReconnect {
-    source_generation: u64,
-    target: u16,
-    score: u8,
-    reason: String,
 }
 
 fn audio_configuration_native(configuration: AudioConfiguration) -> i32 {
@@ -1210,7 +1227,7 @@ fn should_evaluate_packet_size_policy(
     renderer_ready: bool,
     failure_reconnect_requested: bool,
     reconnect_in_flight: Option<ReconnectCause>,
-    packet_reconnect_pending: bool,
+    packet_size_deferred: bool,
 ) -> bool {
     *state == SessionState::Streaming
         && desired_running
@@ -1220,8 +1237,7 @@ fn should_evaluate_packet_size_policy(
         && renderer_ready
         && !failure_reconnect_requested
         && reconnect_in_flight != Some(ReconnectCause::UnexpectedFailure)
-        && reconnect_in_flight != Some(ReconnectCause::PacketSize)
-        && !packet_reconnect_pending
+        && !packet_size_deferred
 }
 
 fn next_external_generation(
@@ -1351,6 +1367,8 @@ fn runtime_statistics_from_native(
     let _ = stats.state;
     let controller_snapshot = packet_size_controller.map(AdaptivePacketSizeController::snapshot);
     RuntimeStatistics {
+        sampled_at: std::time::Instant::now(),
+        performance: stats.performance.clone(),
         state: session_state_label(state),
         start_count: stats.start_count,
         stop_count: stats.stop_count,
@@ -1619,6 +1637,8 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<RuntimeCommand>(32);
     let (state_tx, state_rx) = watch::channel(SessionState::Idle);
     let (stats_tx, stats_rx) = watch::channel(RuntimeStatistics {
+        sampled_at: std::time::Instant::now(),
+        performance: Default::default(),
         state: session_state_label(&SessionState::Idle),
         start_count: 0,
         stop_count: 0,
@@ -1739,9 +1759,9 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
         let mut unexpected_reconnect_attempted = false;
 
         let mut reconnect_in_flight: Option<ReconnectCause> = None;
-        let mut packet_reconnect_pending: Option<PendingPacketReconnect> = None;
+        let mut packet_size_deferred = false;
         let mut packet_size_controller: Option<AdaptivePacketSizeController> = None;
-        let mut adaptive_packet_reconnect_count = 0_u64;
+        let adaptive_packet_reconnect_count = 0_u64;
 
         loop {
             tokio::select! {
@@ -1767,7 +1787,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 || event.kind == native::nl_event_kind_NL_EVENT_TERMINATED;
                             let reconnect_teardown = terminal
                                 && state == SessionState::Reconnecting
-                                && (packet_reconnect_pending.is_some()
+                                && (packet_size_deferred
                                     || failure_reconnect_requested);
                             if reconnect_teardown {
                                 tracing::debug!(
@@ -1804,8 +1824,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     native_runtime.record_reconnect_result(false, true);
                                 }
                                 match completed_reconnect {
-                                    Some(ReconnectCause::UnexpectedFailure)
-                                    | Some(ReconnectCause::PacketSize) => {}
+                                    Some(ReconnectCause::UnexpectedFailure) => {}
                                     None => {
                                         unexpected_reconnect_attempted = false;
                                     }
@@ -1842,7 +1861,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     reconnect_in_flight = None;
                                     desired_running = false;
                                     active_request = None;
-                                    packet_reconnect_pending = None;
+                                    packet_size_deferred = false;
                                     packet_size_controller = None;
                                     unexpected_reconnect_attempted = false;
                                     let _ = native_runtime.stop();
@@ -1859,7 +1878,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                     if terminal_cleanup_requested && !failure_reconnect_requested {
                         desired_running = false;
                         active_request = None;
-                        packet_reconnect_pending = None;
+                        packet_size_deferred = false;
                         packet_size_controller = None;
                         reconnect_in_flight = None;
                         unexpected_reconnect_attempted = false;
@@ -1897,7 +1916,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             let _ = event_tx.send(payload);
                             desired_running = false;
                             active_request = None;
-                            packet_reconnect_pending = None;
+                            packet_size_deferred = false;
                             packet_size_controller = None;
                             reconnect_in_flight = None;
                             unexpected_reconnect_attempted = false;
@@ -1924,7 +1943,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             stats.renderer_ready,
                             failure_reconnect_requested,
                             reconnect_in_flight,
-                            packet_reconnect_pending.is_some(),
+                            packet_size_deferred,
                         );
                         let decision = if should_evaluate {
                             packet_size_controller.as_mut().and_then(|controller| {
@@ -1938,60 +1957,26 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             if let Some(controller) = packet_size_controller.as_mut() {
                                 controller.commit_downshift(decision.to);
                             }
-                            let pending = PendingPacketReconnect {
-                                source_generation: active_generation,
-                                target: decision.to,
-                                score: decision.score,
-                                reason: decision.reason.clone(),
+                            // Do not deliberately close a healthy stream just
+                            // to apply a newly learned packet size. Persist the
+                            // safer value and use it on the next connection.
+                            // A genuine connection failure still follows the
+                            // separate one-shot reconnect path below.
+                            packet_size_deferred = true;
+                            let payload = RuntimeEventMessage {
+                                kind: "packetSizeDeferred".to_string(),
+                                code: 0,
+                                session_generation: active_generation,
+                                message: format!(
+                                    "learned safer packet size from={} to={} score={} reason={}; applying on next connection",
+                                    decision.from,
+                                    decision.to,
+                                    decision.score,
+                                    decision.reason,
+                                ),
                             };
-                            if let Ok(next) = transition(
-                                &state,
-                                SessionSignal::ControlledReconnectRequested,
-                            ) {
-                                state = next;
-                                packet_reconnect_pending = Some(pending.clone());
-                                let _ = state_tx.send(state.clone());
-                                let payload = RuntimeEventMessage {
-                                    kind: "packetSizeReconnecting".to_string(),
-                                    code: 0,
-                                    session_generation: active_generation,
-                                    message: format!(
-                                        "packet size reconnect from={} to={} score={} reason={}",
-                                        decision.from,
-                                        decision.to,
-                                        decision.score,
-                                        decision.reason,
-                                    ),
-                                };
-                                let _ = latest_event_tx.send(Some(payload.clone()));
-                                let _ = event_tx.send(payload);
-                                let _ = stats_tx.send(runtime_statistics_from_native(
-                                    &state,
-                                    &stats,
-                                    packet_size_controller.as_ref(),
-                                    adaptive_packet_reconnect_count,
-                                ));
-                                let _ = native_runtime.stop();
-                                let _ = native_runtime.drain_events();
-                                let command = RuntimeCommand::RestartWithPacketSize {
-                                    source_generation: pending.source_generation,
-                                    target: pending.target,
-                                    score: pending.score,
-                                    reason: pending.reason,
-                                };
-                                if let Err(error) = command_tx.try_send(command) {
-                                    tracing::error!(%error, "failed to queue packet-size reconnect");
-                                    desired_running = false;
-                                    active_request = None;
-                                    packet_reconnect_pending = None;
-                                    packet_size_controller = None;
-                                    reconnect_in_flight = None;
-                                    unexpected_reconnect_attempted = false;
-                                    state = SessionState::Idle;
-                                    let _ = state_tx.send(state.clone());
-                                }
-                                continue;
-                            }
+                            let _ = latest_event_tx.send(Some(payload.clone()));
+                            let _ = event_tx.send(payload);
                         }
 
                         let _ = stats_tx.send(runtime_statistics_from_native(
@@ -2018,7 +2003,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 desired_running = true;
                                 unexpected_reconnect_attempted = false;
                                 reconnect_in_flight = None;
-                                packet_reconnect_pending = None;
+                                packet_size_deferred = false;
                                 packet_size_controller = Some(controller);
                                 active_request = Some(request.clone());
                                 let _ = state_tx.send(state.clone());
@@ -2058,7 +2043,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                     );
                                     desired_running = false;
                                     active_request = None;
-                                    packet_reconnect_pending = None;
+                                    packet_size_deferred = false;
                                     packet_size_controller = None;
                                     reconnect_in_flight = None;
                                     let _ = native_runtime.stop();
@@ -2094,7 +2079,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 active_request = None;
                                 unexpected_reconnect_attempted = false;
                                 reconnect_in_flight = None;
-                                packet_reconnect_pending = None;
+                                packet_size_deferred = false;
                                 packet_size_controller = None;
                                 state = match state {
                                     SessionState::Idle => SessionState::Idle,
@@ -2125,90 +2110,6 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 Ok(())
                             })();
                             let _ = response.send(result);
-                        }
-                        RuntimeCommand::RestartWithPacketSize {
-                            source_generation,
-                            target,
-                            score,
-                            reason,
-                        } => {
-                            let matches_pending = packet_reconnect_pending.as_ref().is_some_and(
-                                |pending| {
-                                    pending.source_generation == source_generation
-                                        && pending.target == target
-                                        && pending.score == score
-                                        && pending.reason == reason
-                                },
-                            );
-                            if !matches_pending
-                                || source_generation != active_generation
-                                || state != SessionState::Reconnecting
-                                || !desired_running
-                                || active_request.is_none()
-                                || packet_size_controller.is_none()
-                                || reconnect_in_flight.is_some()
-                            {
-                                tracing::debug!(
-                                    source_generation,
-                                    active_generation,
-                                    target,
-                                    score,
-                                    %reason,
-                                    "ignoring stale packet-size reconnect command"
-                                );
-                                continue;
-                            }
-
-                            let mut request = active_request.clone().expect("checked above");
-                            let controller = packet_size_controller.as_ref().expect("checked above");
-                            active_generation = active_generation.wrapping_add(1).max(1);
-                            request.session_generation = active_generation;
-                            apply_packet_size(
-                                &mut request,
-                                controller.resolved_remote_mode(),
-                                target,
-                            );
-                            active_request = Some(request.clone());
-                            packet_reconnect_pending = None;
-                            state = match transition(&state, SessionSignal::ReconnectRequested) {
-                                Ok(next) => next,
-                                Err(error) => {
-                                    tracing::error!(%error, "packet-size reconnect transition failed");
-                                    desired_running = false;
-                                    active_request = None;
-                                    packet_size_controller = None;
-                                    reconnect_in_flight = None;
-                                    unexpected_reconnect_attempted = false;
-                                    let _ = native_runtime.stop();
-                                    let _ = native_runtime.drain_events();
-                                    let _ = state_tx.send(SessionState::Idle);
-                                    state = SessionState::Idle;
-                                    continue;
-                                }
-                            };
-                            let _ = state_tx.send(state.clone());
-                            adaptive_packet_reconnect_count =
-                                adaptive_packet_reconnect_count.saturating_add(1);
-                            native_runtime.record_reconnect_result(true, false);
-                            match native_runtime.start(&request) {
-                                Ok(()) => {
-                                    reconnect_in_flight = Some(ReconnectCause::PacketSize);
-                                    last_video_frame_count = 0;
-                                    last_video_progress_at = Instant::now();
-                                }
-                                Err(error) => {
-                                    tracing::error!(%error, "packet-size reconnect failed");
-                                    desired_running = false;
-                                    active_request = None;
-                                    packet_size_controller = None;
-                                    reconnect_in_flight = None;
-                                    unexpected_reconnect_attempted = false;
-                                    let _ = native_runtime.stop();
-                                    let _ = native_runtime.drain_events();
-                                    state = SessionState::Idle;
-                                    let _ = state_tx.send(state.clone());
-                                }
-                            }
                         }
                         RuntimeCommand::AttachSurface { surface, response } => {
                             let result = native_runtime.attach_surface(&surface);
@@ -2287,6 +2188,10 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                         RuntimeCommand::GetState { response } => {
                             let _ = response.send(state.clone());
                         }
+                        #[cfg(target_os = "linux")]
+                        RuntimeCommand::SetOverlayText { text } => {
+                            native_runtime.set_overlay_text(&text);
+                        }
 
                     }
                 }
@@ -2324,6 +2229,9 @@ mod tests {
 
     #[test]
     fn handwritten_native_bindings_match_c_abi_sizes() {
+        assert_eq!(size_of::<native::nl_performance_stats_t>(), unsafe {
+            native::nl_sizeof_performance_stats()
+        });
         assert_eq!(size_of::<native::nl_start_request_t>(), unsafe {
             native::nl_sizeof_start_request()
         },);

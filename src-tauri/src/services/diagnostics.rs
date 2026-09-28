@@ -141,6 +141,22 @@ pub async fn write_diagnostic_report(
         state.provisioned_servers.len()
     ));
 
+    body.push_str("## Connection Transport State\n\n");
+    if state.provisioned_servers.is_empty() {
+        body.push_str("No provisioned connection state is available.\n\n");
+    } else {
+        for server in &state.provisioned_servers {
+            body.push_str(&format!(
+                "### Instance `{}`\n\n```json\n",
+                server.instance_id
+            ));
+            let network = serde_json::to_string_pretty(&server.network)
+                .unwrap_or_else(|error| format!("{{\"serializationError\":\"{error}\"}}"));
+            body.push_str(&network);
+            body.push_str("\n```\n\n");
+        }
+    }
+
     body.push_str("## Recent Provisioning Events\n\n");
     if logs.is_empty() {
         body.push_str("No provisioning events recorded.\n\n");

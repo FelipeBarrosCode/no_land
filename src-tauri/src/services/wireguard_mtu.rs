@@ -18,7 +18,9 @@ use super::{remote_exec::RemoteExec, wireguard::reconnect_local_wireguard_client
 
 pub(super) const BOOTSTRAP_TUNNEL_MTU: u16 = 1440;
 
-const MIN_TUNNEL_MTU: u16 = 1280;
+// The current tunnel carries IPv4 (10.77.0.0/24), so it may safely use an
+// inner MTU below IPv6's 1280-byte minimum when measurement requires it.
+const MIN_TUNNEL_MTU: u16 = 576;
 const MAX_TUNNEL_MTU: u16 = 1420;
 const SAFETY_MARGIN: u16 = 16;
 const PROBE_COUNT: u8 = 4;
@@ -82,10 +84,31 @@ pub(super) async fn tune_connected_tunnel(
     .map_err(|error| AppError::Command(format!("WireGuard MTU probe task failed: {error}")))?;
 
     let current_mtu = read_config_mtu(&config_path).unwrap_or(BOOTSTRAP_TUNNEL_MTU);
-    if current_mtu != pending.selection.mtu {
+    let remote_mtu = read_remote_mtu(&remote, &remote_interface).await?;
+    if remote_mtu != pending.selection.mtu {
         apply_remote_mtu(&remote, &remote_interface, pending.selection.mtu).await?;
-        write_local_config_mtu(&config_path, pending.selection.mtu)?;
-        reconnect_local_wireguard_client(&config_path)?;
+    }
+    if current_mtu != pending.selection.mtu {
+        if let Err(error) = write_local_config_mtu(&config_path, pending.selection.mtu) {
+            if remote_mtu != pending.selection.mtu {
+                let _ = apply_remote_mtu(&remote, &remote_interface, remote_mtu).await;
+            }
+            return Err(error);
+        }
+        if let Err(error) = reconnect_local_wireguard_client(&config_path) {
+            let local_rollback = write_local_config_mtu(&config_path, current_mtu)
+                .and_then(|()| reconnect_local_wireguard_client(&config_path));
+            let remote_rollback = if remote_mtu != pending.selection.mtu {
+                apply_remote_mtu(&remote, &remote_interface, remote_mtu).await
+            } else {
+                Ok(())
+            };
+            return Err(AppError::Command(format!(
+                "Could not restart the selected tunnel MTU: {error}; local rollback: {}; remote rollback: {}",
+                result_label(&local_rollback),
+                result_label(&remote_rollback)
+            )));
+        }
     }
 
     if let (Some(path_mtu), Some(fingerprint)) = (pending.selection.path_mtu, pending.fingerprint) {
@@ -167,22 +190,56 @@ fn fallback_selection(fallback_mtu: u16) -> PendingSelection {
     }
 }
 
-fn operational_mtu(path_mtu: u16, fallback_mtu: u16) -> u16 {
+fn operational_mtu(path_mtu: u16, _fallback_mtu: u16) -> u16 {
     let bounded = path_mtu
         .saturating_sub(SAFETY_MARGIN)
-        .clamp(fallback_mtu, MAX_TUNNEL_MTU);
+        .clamp(MIN_TUNNEL_MTU, MAX_TUNNEL_MTU);
     bounded - (bounded % 4)
 }
 
-async fn apply_remote_mtu(remote: &RemoteExec, remote_interface: &str, mtu: u16) -> AppResult<()> {
-    if !remote_interface
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+fn result_label<T>(result: &AppResult<T>) -> String {
+    match result {
+        Ok(_) => "ok".to_string(),
+        Err(error) => error.to_string(),
+    }
+}
+
+async fn read_remote_mtu(remote: &RemoteExec, remote_interface: &str) -> AppResult<u16> {
+    validate_interface_name(remote_interface)?;
+    let command = format!("cat /sys/class/net/{remote_interface}/mtu");
+    let remote = remote.clone();
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(15)))
+        .await
+        .map_err(|error| AppError::Command(format!("Remote MTU read task failed: {error}")))??;
+    if output.status_code != 0 {
+        return Err(AppError::Command(format!(
+            "Could not read remote WireGuard MTU: {}",
+            output.stderr.trim()
+        )));
+    }
+    output
+        .stdout
+        .trim()
+        .parse::<u16>()
+        .map_err(|error| AppError::Command(format!("Remote WireGuard MTU was invalid: {error}")))
+}
+
+fn validate_interface_name(remote_interface: &str) -> AppResult<()> {
+    if remote_interface.is_empty()
+        || remote_interface.len() > 15
+        || !remote_interface.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
     {
         return Err(AppError::Command(
             "WireGuard interface name is invalid during MTU update".to_string(),
         ));
     }
+    Ok(())
+}
+
+async fn apply_remote_mtu(remote: &RemoteExec, remote_interface: &str, mtu: u16) -> AppResult<()> {
+    validate_interface_name(remote_interface)?;
     let script = format!(
         "sudo sed -i -E 's/^[[:space:]]*MTU[[:space:]]*=.*/MTU = {mtu}/' /etc/wireguard/{remote_interface}.conf && sudo ip link set dev {remote_interface} mtu {mtu}"
     );
@@ -514,14 +571,15 @@ mod tests {
             candidate <= 1436
         });
         assert_eq!(selected, Some(1436));
-        assert!(probes.len() <= 8);
+        assert!(probes.len() <= 11);
     }
 
     #[test]
     fn connected_path_mtu_gets_safety_margin() {
         assert_eq!(operational_mtu(1440, 1280), 1420);
         assert_eq!(operational_mtu(1400, 1280), 1384);
-        assert_eq!(operational_mtu(1280, 1280), 1280);
+        assert_eq!(operational_mtu(1280, 1280), 1264);
+        assert_eq!(operational_mtu(900, 1280), 884);
     }
 
     #[test]

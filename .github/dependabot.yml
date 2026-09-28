@@ -1,0 +1,42 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: cargo
+    directory: /network-contracts
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /network-agent
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /state-agent
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /src-tauri
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /mic-sidecar
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /vm-cloud-mic-agent
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
