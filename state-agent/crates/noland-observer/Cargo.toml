@@ -13,5 +13,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-libbpf-rs = "0.24"
+libbpf-rs = "0.27"
 libc = "0.2"
