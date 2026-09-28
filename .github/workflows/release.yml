@@ -189,7 +189,7 @@ jobs:
           git tag "${{ needs.version.outputs.release_tag }}" "$GITHUB_SHA"
           git push origin "refs/tags/${{ needs.version.outputs.release_tag }}"
       - name: Publish GitHub release assets
-        uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7 # v2.3.4
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
