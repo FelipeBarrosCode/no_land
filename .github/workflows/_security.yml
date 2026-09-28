@@ -68,6 +68,8 @@ jobs:
         with:
           token: ${{ github.token }}
           working-directory: ${{ matrix.directory }}
+          # Medium-severity no-fix exception documented in docs/operations.md.
+          ignore: RUSTSEC-2023-0071
 
   dependency-review:
     name: Dependency change review
