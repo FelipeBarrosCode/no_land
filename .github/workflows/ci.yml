@@ -95,26 +95,22 @@ jobs:
         with:
           key: pr-${{ matrix.name }}
           workspaces: ${{ matrix.workspace }}
-      - name: Prepare required net-helper sidecar
-        if: matrix.skip_native_build
-        run: |
-          cargo build --locked --manifest-path src-tauri/crates/noland-net-helper/Cargo.toml
-          mkdir -p src-tauri/binaries
-          cp src-tauri/target/debug/noland-net-helper \
-            src-tauri/binaries/noland-net-helper-x86_64-unknown-linux-gnu
       - name: Cargo check
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
       - name: Clippy strict baseline
         if: matrix.strict
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets -- -D warnings
       - name: Clippy existing-warning baseline
         if: matrix.strict == false
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
 
   unit-tests:
