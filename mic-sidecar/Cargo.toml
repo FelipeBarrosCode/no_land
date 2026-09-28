@@ -21,7 +21,7 @@ serde_json = "1.0.149"
 
 [target.'cfg(not(all(target_os = "windows", target_arch = "aarch64")))'.dependencies]
 gstreamer = "0.23.7"
-gstreamer-app = "0.23.5"
+gstreamer-app = "0.25.2"
 
 [build-dependencies]
 cc = "1"
