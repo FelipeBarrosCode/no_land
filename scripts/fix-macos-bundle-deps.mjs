@@ -396,13 +396,12 @@ function pruneIrrelevantMacResourceSidecars(destinationDir, targetTriple) {
 
 function ensureMicrophoneUsageDescription(infoPlist, message) {
   if (!existsSync(infoPlist)) return;
-  const printResult = run('/usr/libexec/PlistBuddy', ['-c', 'Print :NSMicrophoneUsageDescription', infoPlist], { allowFailure: true });
-  const escapedMessage = message.replace(/"/g, '\\"');
+  const printResult = run('plutil', ['-extract', 'NSMicrophoneUsageDescription', 'raw', infoPlist], { allowFailure: true });
   if (printResult.status === 0) {
-    run('/usr/libexec/PlistBuddy', ['-c', `Set :NSMicrophoneUsageDescription "${escapedMessage}"`, infoPlist], { allowFailure: false });
+    run('plutil', ['-replace', 'NSMicrophoneUsageDescription', '-string', message, infoPlist], { allowFailure: false });
     return;
   }
-  run('/usr/libexec/PlistBuddy', ['-c', `Add :NSMicrophoneUsageDescription string "${escapedMessage}"`, infoPlist], { allowFailure: false });
+  run('plutil', ['-insert', 'NSMicrophoneUsageDescription', '-string', message, infoPlist], { allowFailure: false });
 }
 
 // Sign the versioned bundle (Versions/1.0 or Versions/Current) rather than the
