@@ -722,7 +722,7 @@ dependencies = [
  "futures-util",
  "hex",
  "noland-network-contracts",
- "rand 0.8.8",
+ "rand 0.9.5",
  "serde",
  "serde_json",
  "tokio",
