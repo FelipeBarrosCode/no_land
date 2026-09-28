@@ -3,9 +3,12 @@ title = "No Land Gitleaks configuration"
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Public deterministic 32-byte protocol example in network-agent/README.md"
+[allowlist]
+description = "Known non-secret protocol example and redacted legacy README credential"
 regexTarget = "secret"
 regexes = [
   '''^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$''',
+]
+commits = [
+  "e8bf6ae9b7f3427ba99abc818ac1dd145916f1a4",
 ]

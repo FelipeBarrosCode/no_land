@@ -14,7 +14,10 @@ pub struct Harness {
 
 impl Harness {
     pub fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("noland-harness-{}", Uuid::new_v4()));
+        let root = std::env::current_dir()
+            .expect("test working directory should be available")
+            .join("target/noland-testkit")
+            .join(Uuid::new_v4().to_string());
         let home = root.join("home");
         fs::create_dir_all(home.join(".local/share/applications")).unwrap();
         fs::create_dir_all(home.join(".config")).unwrap();

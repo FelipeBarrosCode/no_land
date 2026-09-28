@@ -82,15 +82,12 @@ The signing job uses these Artifact Signing resources:
 Configure these secrets on the GitHub `Secrets` environment:
 
 - `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 
 The Entra service principal must have the **Artifact Signing Certificate
-Profile Signer** role on the `Noland` certificate profile. Its GitHub OIDC
-federated credential must allow this environment subject:
-
-`repo:FelipeBarrosCode/no_land:environment:Secrets`
-
-No Azure client secret or exported signing certificate is used. Unsigned
-Windows build artifacts are staged under an `unsigned-` artifact name, which
-the release job deliberately excludes.
+Profile Signer** role on the `Noland` certificate profile. Its credentials are
+available only through the protected `Secrets` environment. No exported signing
+certificate is used. Unsigned Windows build artifacts are staged under an
+`unsigned-` artifact name, which the release job deliberately excludes.

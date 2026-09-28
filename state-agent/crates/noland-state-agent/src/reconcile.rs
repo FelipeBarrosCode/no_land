@@ -482,16 +482,13 @@ fn reconciliation_root(record: &PathRecord, association: &PathAssociation) -> Op
 mod tests {
     use super::*;
     use crate::AgentConfig;
+    use uuid::Uuid;
 
     fn test_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "noland-reconcile-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        std::env::current_dir()
+            .expect("test working directory should be available")
+            .join("target/noland-state-agent-tests")
+            .join(format!("reconcile-{label}-{}", Uuid::new_v4()))
     }
 
     fn association(class: PersistenceClass) -> PathAssociation {

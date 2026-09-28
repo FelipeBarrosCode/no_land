@@ -81,8 +81,8 @@ The publish job is unreachable unless every preceding job succeeds. It also requ
 - event exactly `push` or `workflow_dispatch`;
 - protected `Secrets` environment approval where configured.
 
-Only the final `release` job has `contents: write`. Azure OIDC (`id-token: write`) is limited to
-the protected build call and used only by Windows signing jobs.
+Only the final `release` job has `contents: write`. Windows signing authenticates with the
+service-principal credentials scoped to the protected `Secrets` environment.
 
 ### Nightly release rehearsal
 
@@ -112,8 +112,9 @@ Reusable workflow: `.github/workflows/_build.yml`
 - Windows ARM64 (`aarch64-pc-windows-msvc`)
 
 macOS requires Developer ID signing, Apple notarization, stapling, Gatekeeper validation, and
-Tauri updater signatures. Windows installers are signed through Azure Artifact Signing using
-OIDC, validated with Authenticode, and then have their Tauri updater signatures regenerated.
+Tauri updater signatures. Windows installers are signed through Azure Artifact Signing using a
+protected service principal, validated with Authenticode, and then have their Tauri updater
+signatures regenerated.
 Linux `.deb` files pass structural checks and lintian. Every target runs bundled-sidecar/runtime
 validation and generates local SHA-256 checksums.
 
@@ -157,8 +158,8 @@ Current exception:
 - Production/nightly macOS: `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
   `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID`, optional Apple API key
   values already supported by the build scripts, and Tauri signing key/password.
-- Production/nightly Windows: Azure client, tenant, and subscription IDs for OIDC Artifact
-  Signing, plus Tauri signing key/password.
+- Production/nightly Windows: Azure client ID and secret, tenant ID, and subscription ID for
+  Artifact Signing, plus Tauri signing key/password.
 - Production package metadata: `CLOUDFLARE_R2_PUBLIC_BASE_URL` is read only to construct existing
   store metadata. Nightly never invokes metadata preparation or any R2 operation.
 - Production release: the job-scoped write `GITHUB_TOKEN` pushes the calculated tag and creates

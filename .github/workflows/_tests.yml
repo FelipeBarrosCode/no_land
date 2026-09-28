@@ -31,18 +31,21 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - name: Install native test dependencies
         run: bash scripts/ci/install-linux-native-deps.sh
       - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
         with:
           workspaces: src-tauri
-      - name: Prepare required net-helper sidecar
-        run: |
-          cargo build --locked --manifest-path src-tauri/crates/noland-net-helper/Cargo.toml
-          mkdir -p src-tauri/binaries
-          cp src-tauri/target/debug/noland-net-helper \
-            src-tauri/binaries/noland-net-helper-x86_64-unknown-linux-gnu
+      - run: npm ci
+      - name: Build desktop frontend assets
+        run: npm run build
+      - name: Prepare required desktop sidecars
+        run: node scripts/prepare-mic-sidecar.mjs dev
       - name: Run desktop workspace tests
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets
 
