@@ -1757,14 +1757,10 @@ mod tests {
     use noland_storage::{read_pack_index, LocalStorage};
 
     fn test_root(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "noland-backup-{label}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ))
+        std::env::current_dir()
+            .expect("test working directory should be available")
+            .join("target/noland-state-agent-tests")
+            .join(format!("backup-{label}-{}", Uuid::new_v4()))
     }
 
     #[test]
@@ -2047,14 +2043,7 @@ mod tests {
 
     #[test]
     fn finds_manifest_in_registered_steam_library() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-steam-manifest-tracking-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = test_root("steam-manifest-tracking");
         let steamapps = root.join("steamapps");
         std::fs::create_dir_all(&steamapps).unwrap();
         let manifest = steamapps.join("appmanifest_3241660.acf");
