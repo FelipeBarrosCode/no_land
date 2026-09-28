@@ -424,7 +424,7 @@ export function DashboardScreen({
 
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
-      <div className="mx-auto flex w-full max-w-7xl flex-col gap-6">
+      <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
@@ -487,7 +487,7 @@ export function DashboardScreen({
               <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
                 Managed Streaming
               </h2>
-              <p className="mt-2 max-w-md text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+                <p className="mt-2 max-w-md text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
                 Noland now handles the streaming and connection flow inside the app. Just complete Vast.ai billing and API key setup, then continue from the dashboard.
               </p>
             </Card>
@@ -515,7 +515,7 @@ export function DashboardScreen({
                   <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
                     Managed Secure Connection
                   </h2>
-                  <p className="mt-1 text-[1.2rem] leading-[1.1] text-[#bfd3ee]">
+                  <p className="mt-1 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
                     Noland activates and verifies the secure connection flow for you inside the app before moving on to streaming setup.
                   </p>
                 </div>
@@ -543,7 +543,7 @@ export function DashboardScreen({
               <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
                 Set Server
               </h2>
-              <p className="mt-2 text-[1.32rem] leading-[1.25] text-[#bfd3ee]">
+              <p className="mt-2 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
                 Discover nearby high-performance GPU server offers filtered by
                 price, reliability, and network distance. Adjust template hash
                 and storage allocation prior to launching your machine.
@@ -728,7 +728,7 @@ export function DashboardScreen({
                       </Button>
                     </div>
                   </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2 text-[1.15rem] text-[#bfd3ee]">
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-[1rem] leading-[1.25] text-[#bfd3ee]">
                     <p>ID: {instance.instanceId}</p>
                     <p>Status: {instance.status}</p>
                     <p>GPU: {instance.gpuName}</p>
@@ -878,7 +878,7 @@ export function DashboardScreen({
             </div>
 
             {appState.selectedOffer ? (
-              <div className="mt-4 grid grid-cols-2 gap-3 text-[1.25rem] leading-[1.05] text-[#d9efff] md:grid-cols-4">
+              <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-[1.05rem] leading-[1.25] text-[#d9efff] md:grid-cols-4">
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
                     Host
@@ -960,7 +960,7 @@ export function DashboardScreen({
                 />
               </div>
             ) : (
-              <p className="mt-4 text-[1.35rem] leading-[1.05] text-[#bfd3ee]">
+                <p className="mt-4 max-w-prose text-[1.1rem] leading-[1.35] text-[#bfd3ee]">
                 No offer selected yet. Use Select Server to pick a machine.
               </p>
             )}
@@ -982,7 +982,7 @@ export function DashboardScreen({
                 <SpriteIcon icon="play" />
               </div>
               <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
-              <p className="mt-2 text-[1.32rem] leading-[1.1] text-[#bfd3ee]">
+              <p className="mt-2 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
                 {hasProvisioningToResume
                   ? "Returns to your current provisioning session exactly where it stopped."
                   : "Creates the instance, waits for readiness, runs provisioning, and opens pairing guidance."}
