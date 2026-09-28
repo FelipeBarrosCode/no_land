@@ -95,22 +95,25 @@ jobs:
         with:
           key: pr-${{ matrix.name }}
           workspaces: ${{ matrix.workspace }}
+      - name: Prepare Tauri check inputs
+        if: matrix.skip_native_build
+        run: mkdir -p src-tauri/ci-dist
       - name: Cargo check
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
         run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
       - name: Clippy strict baseline
         if: matrix.strict
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets -- -D warnings
       - name: Clippy existing-warning baseline
         if: matrix.strict == false
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
 
   unit-tests:

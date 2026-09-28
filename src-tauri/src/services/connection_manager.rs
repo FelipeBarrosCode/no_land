@@ -1529,7 +1529,7 @@ async fn sample_probe_path(
     let mut sent = 0_u64;
     let mut pending = HashMap::new();
     let mut received = Vec::new();
-    let mut maximum_received_sequence = None;
+    let mut maximum_received_sequence: Option<u64> = None;
     let mut reordered = 0_usize;
     let mut last_received_at = None;
     let mut buffer = [0_u8; 128];
