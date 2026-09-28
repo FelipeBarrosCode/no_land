@@ -28,7 +28,7 @@ Blocking lanes:
   Network contracts and network-agent are warning-free and use `-D warnings`. Other workspaces
   currently run Clippy with the existing-warning baseline; warnings remain visible and Clippy
   errors still fail.
-- `unit-tests`: the complete test workflow described below.
+- `unit-tests`: the existing fast `npm run test:unit` network-contract and network-agent suite.
 - `security`: Gitleaks, dependency review, npm audit, RustSec cargo audits, Trivy,
   CodeQL, and actionlint.
 - `PR CI required`: fails unless every preceding lane succeeds.
@@ -41,8 +41,8 @@ test suite.
 
 Reusable workflow: `.github/workflows/_tests.yml`
 
-Production and nightly run every lane after security succeeds; PR CI runs the same tests without
-performing release builds:
+Production and nightly run every lane after security succeeds. To keep PR feedback fast, PR CI
+runs the existing network test entry point while compiling and linting every workspace:
 
 - `npm run test:unit` (network-contracts and network-agent).
 - `cargo test --locked --workspace --all-targets` for `src-tauri`, including the desktop backend
@@ -134,10 +134,22 @@ validation and generates local SHA-256 checksums.
 Security reports appear in the workflow run artifacts and GitHub Security/Code scanning where
 SARIF is supported. Reports must never contain credentials.
 
+`.gitleaks.toml` allows only the exact deterministic 64-hex token shown in the public
+network-agent protocol example; it does not exclude the file or any credential pattern generally.
+
 An intentional vulnerability exception must be narrow and documented in this file (advisory or
 CVE, affected package, owner, justification, compensating control, and expiry/removal date) before
 adding it to a scanner-specific ignore file. Broad project, directory, or severity exclusions are
-not acceptable. There are currently no vulnerability allowlist entries.
+not acceptable.
+
+Current exception:
+
+- `RUSTSEC-2023-0071` (`rsa` 0.9.x, MEDIUM), owner: desktop/Moonlight maintainers. The upstream
+  crate has no fixed stable release and is used only for local Sunshine pairing key generation and
+  protocol operations, not as a remotely exposed general-purpose signing service. Keys use OS CSPRNG
+  generation, remain local, and pairing attempts are network/access controlled. Cargo audit still
+  reports the advisory while the explicit ID is allowed. Review by **2026-12-31**, or remove sooner
+  when a compatible fixed `rsa` release is available.
 
 ### Workflow credentials
 
