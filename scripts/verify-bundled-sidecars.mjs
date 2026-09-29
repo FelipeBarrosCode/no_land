@@ -70,6 +70,10 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
     withExtractedTemp('linux-appimage-', (extractRoot) => {
       run(appImage, ['--appimage-extract'], { cwd: extractRoot });
       const extractedAppDir = join(extractRoot, 'squashfs-root');
+      const dirIcon = join(extractedAppDir, '.DirIcon');
+      if (!existsSync(dirIcon) || !statSync(dirIcon).isFile() || statSync(dirIcon).size === 0) {
+        fail(`AppImage ${basename(appImage)} is missing a usable root .DirIcon`);
+      }
       verifyBundleTree(extractedAppDir, targetTriple, `AppImage ${basename(appImage)}`);
       verifyLinuxExecutableSmokeTests(extractedAppDir, targetTriple, `AppImage ${basename(appImage)}`);
     });

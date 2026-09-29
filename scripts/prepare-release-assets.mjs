@@ -58,6 +58,8 @@ for (const source of approvedFiles) {
 
 const updaterPlatforms = {};
 for (const descriptor of [
+  { artifact: 'tauri-linux-arm64', platform: 'linux-aarch64', pattern: /\.AppImage$/u },
+  { artifact: 'tauri-linux-x64', platform: 'linux-x86_64', pattern: /\.AppImage$/u },
   { artifact: 'tauri-macos-arm64', platform: 'darwin-aarch64', pattern: /\.app\.tar\.gz$/u },
   { artifact: 'tauri-macos-x64', platform: 'darwin-x86_64', pattern: /\.app\.tar\.gz$/u },
   { artifact: 'tauri-windows-arm64', platform: 'windows-aarch64', pattern: /-setup\.exe$/iu },
@@ -156,10 +158,7 @@ function shouldPublish(relativePath, baseName) {
   if (baseName.endsWith('.app.tar.gz') || baseName.endsWith('.app.tar.gz.sig')) return true;
   if (baseName.endsWith('.exe.sig') || baseName.endsWith('.msi.sig')) return true;
   if (baseName.endsWith('.dmg')) return true;
-  // AppImage is intentionally not published for the Linux client right now.
-  // WebKitGTK/GIO can load host modules while AppImage injects bundled usr/lib,
-  // causing GLib/GIO/libcurl symbol mismatches on Ubuntu/Zorin LTS.
-  if (baseName.endsWith('.AppImage')) return false;
+  if (baseName.endsWith('.AppImage') || baseName.endsWith('.AppImage.sig')) return true;
   if (baseName.endsWith('.deb')) return true;
   if (baseName.endsWith('.rpm')) return true;
   if (baseName.endsWith('.msi')) return true;
