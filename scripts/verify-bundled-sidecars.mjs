@@ -148,12 +148,14 @@ function verifyMacBundleTree(root, targetTriple, label) {
   }
 
   verifyBundledMicReceiverSource(root, label);
+  verifyBundledNetworkAgentSource(root, label);
 }
 
 function verifyBundleTree(root, targetTriple, label) {
   verifyRequiredSidecars(root, targetTriple, label);
   verifyRequiredRuntimeFiles(root, targetTriple, label);
   verifyBundledMicReceiverSource(root, label);
+  verifyBundledNetworkAgentSource(root, label);
 }
 
 function verifyMacExecutableSmokeTests(appBundle, targetTriple, label) {
@@ -252,6 +254,7 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
 function verifyLinuxLinkage(root, targetTriple, label) {
   const cleanEnv = cleanLinuxRuntimeEnv();
   const appExecutable = findLinuxAppExecutable(root);
+  const isPortableAppImageTree = existsSync(join(root, 'AppRun'));
   const seeds = [
     appExecutable,
     ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
@@ -273,8 +276,13 @@ function verifyLinuxLinkage(root, targetTriple, label) {
     }
   }
 
-  verifyLinuxSystemGstreamer(root, label, appExecutable, cleanEnv);
-  verifyNoBundledLinuxDesktopPlatformLibraries(root, label);
+  // AppImage deliberately carries its desktop runtime and launches through
+  // AppRun. Native deb/rpm packages must continue using one coherent distro
+  // GTK/WebKit/GStreamer stack to avoid host/bundled ABI collisions.
+  if (!isPortableAppImageTree) {
+    verifyLinuxSystemGstreamer(root, label, appExecutable, cleanEnv);
+    verifyNoBundledLinuxDesktopPlatformLibraries(root, label);
+  }
 }
 
 function verifyLinuxSystemGstreamer(root, label, appExecutable, cleanEnv) {
@@ -550,6 +558,29 @@ function verifyMicReceiverSourceDirectory(receiverDir, label) {
     const candidate = join(receiverDir, relativePath);
     if (!existsSync(candidate)) {
       fail(`Missing bundled vm-cloud-mic-agent file '${relativePath}' in ${label}`);
+    }
+  }
+}
+
+function verifyBundledNetworkAgentSource(root, label) {
+  const agentDir = findFirstPath(
+    root,
+    (path) => basename(path) === 'network-agent' && existsSync(join(path, 'Cargo.toml')),
+  );
+  if (!agentDir) {
+    fail(`Missing bundled network-agent source directory in ${label}`);
+  }
+
+  for (const relativePath of ['Cargo.toml', 'Cargo.lock', 'src/main.rs']) {
+    if (!existsSync(join(agentDir, relativePath))) {
+      fail(`Missing bundled network-agent file '${relativePath}' in ${label}`);
+    }
+  }
+
+  const contractsDir = join(dirname(agentDir), 'network-contracts');
+  for (const relativePath of ['Cargo.toml', 'Cargo.lock', 'src/lib.rs']) {
+    if (!existsSync(join(contractsDir, relativePath))) {
+      fail(`Missing bundled network-contracts sibling file '${relativePath}' in ${label}`);
     }
   }
 }
