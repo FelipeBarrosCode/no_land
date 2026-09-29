@@ -135,6 +135,21 @@ jobs:
           NOLAND_REQUIRE_SIGNED_RELEASE: "1"
         run: npm run tauri:build -- --target "${{ matrix.target }}"
 
+      - name: Repair and re-sign portable AppImage metadata
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) bash scripts/fix-appimage-metadata.sh "$bundle" "${{ matrix.arch }}"
+          mapfile -d '' appimages < <(find "$bundle" -type f -name '*.AppImage' -print0)
+          test "${#appimages[@]}" -eq 1
+          rm -f "${appimages[0]}.sig"
+          node node_modules/@tauri-apps/cli/tauri.js signer sign "${appimages[0]}"
+          test -s "${appimages[0]}.sig"
+
       - name: Create and validate macOS downloadable archives
         if: matrix.platform == 'macos'
         shell: bash

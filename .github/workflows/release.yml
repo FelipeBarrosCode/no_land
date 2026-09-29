@@ -131,6 +131,11 @@ jobs:
           while IFS= read -r archive; do
             index=$((index + 1)); mkdir -p "artifact-scan-root/mac-$index"; tar -xzf "$archive" -C "artifact-scan-root/mac-$index"
           done < <(find release-assets -type f -name '*.app.tar.gz' -print)
+          while IFS= read -r appimage; do
+            index=$((index + 1)); extract_dir="$PWD/artifact-scan-root/appimage-$index"; mkdir -p "$extract_dir"
+            appimage=$(realpath "$appimage"); chmod +x "$appimage"
+            (cd "$extract_dir" && "$appimage" --appimage-extract >/dev/null)
+          done < <(find release-assets -type f -name '*.AppImage' -print)
       - name: Block high and critical packaged dependency findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

@@ -298,16 +298,7 @@ function resolveLinuxBundleConfig(targetTriple, args) {
     return [];
   }
 
-  // Do not produce AppImage by default for the Linux desktop client.
-  // WebKitGTK/GIO loads host modules at runtime; AppImage also injects bundled
-  // usr/lib into the loader path, which can mix incompatible GLib/GIO/libcurl
-  // stacks on Ubuntu/Zorin LTS and crash with undefined symbols such as:
-  //   g_task_set_static_name
-  //   g_assertion_message_cmpint
-  //   nghttp2_option_set_no_rfc9113_leading_and_trailing_ws_validation
-  // Native packages keep GTK/WebKit/GIO on the distro side as one compatible set.
-  console.log('[tauri-with-mic-sidecar] Linux build defaults to deb,rpm bundles; AppImage is disabled to avoid host/bundled GLib-GIO collisions.');
-  return ['--bundles', 'deb,rpm'];
+  return ['--bundles', 'deb,rpm,appimage'];
 }
 
 function resolveWindowsTargetConfig(targetTriple, args) {
