@@ -490,6 +490,8 @@ function launchAndRequireAlive(command, args, env, label, durationMs) {
   }
   if (alive) {
     child.kill('SIGTERM');
+    spawnSync('pkill', ['-TERM', '-P', String(child.pid)], { stdio: 'ignore' });
+    spawnSync('kill', ['-KILL', String(child.pid)], { stdio: 'ignore' });
   }
   if (!alive) {
     fail(`${label} exited before the ${durationMs / 1000}-second package smoke test completed`);
@@ -690,7 +692,7 @@ function withMountedDmg(dmg, volumeName, fn) {
     run('hdiutil', ['attach', dmg, '-mountpoint', mountPoint, '-nobrowse', '-readonly']);
     fn(join(mountPoint, `${volumeName}.app`));
   } finally {
-    runAllowFailure('hdiutil', ['detach', mountPoint]);
+    runAllowFailure('hdiutil', ['detach', mountPoint, '-force']);
     rmSync(mountPoint, { recursive: true, force: true });
   }
 }

@@ -226,9 +226,6 @@ jobs:
         run: |
           npm ci
           cargo install artifact-signing-cli --locked
-          $profile = if ([string]::IsNullOrWhiteSpace($env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME)) { 'Noland' } else { $env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }
-          $signCommand = "artifact-signing-cli -e `"$env:TRUSTED_SIGNING_ENDPOINT`" -a `"$env:TRUSTED_SIGNING_ACCOUNT_NAME`" -c `"$profile`" -d `"Noland Connect`" %1"
-          @{ bundle = @{ windows = @{ signCommand = $signCommand } } } | ConvertTo-Json -Depth 10 | Set-Content -Path src-tauri/tauri.windows.signing.conf.json
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           node scripts/set-release-version.mjs "${{ inputs.version }}"
         env:
@@ -252,8 +249,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $extraArgs = @('--config', 'src-tauri/tauri.windows.signing.conf.json')
-          npm run tauri:build -- --target "${{ matrix.target }}" @extraArgs
+          npm run tauri:build -- --target "${{ matrix.target }}"
 
       - name: Sign Windows installers with Trusted Signing CLI
         shell: pwsh
