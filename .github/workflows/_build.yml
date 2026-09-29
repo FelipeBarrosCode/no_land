@@ -238,8 +238,11 @@ jobs:
         env:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: |
-          foreach ($name in @('TRUSTED_SIGNING_ENDPOINT', 'TRUSTED_SIGNING_ACCOUNT_NAME')) {
+          foreach ($name in @('TRUSTED_SIGNING_ENDPOINT', 'TRUSTED_SIGNING_ACCOUNT_NAME', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID')) {
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "Missing Trusted Signing secret: $name" }
           }
 
@@ -257,10 +260,21 @@ jobs:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || 'Noland' }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
           foreach ($file in @(Get-ChildItem -Path $bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })) {
-            & artifact-signing-cli -e $env:TRUSTED_SIGNING_ENDPOINT -a $env:TRUSTED_SIGNING_ACCOUNT_NAME -c $env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME -d 'Noland Connect' $file.FullName
+            & artifact-signing-cli `
+              --azure-client-secret $env:AZURE_CLIENT_SECRET `
+              --azure-client-id $env:AZURE_CLIENT_ID `
+              --azure-tenant-id $env:AZURE_TENANT_ID `
+              --endpoint $env:TRUSTED_SIGNING_ENDPOINT `
+              --account $env:TRUSTED_SIGNING_ACCOUNT_NAME `
+              --certificate $env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME `
+              --description 'Noland Connect' `
+              $file.FullName
             if ($LASTEXITCODE -ne 0) { throw "Trusted Signing failed for $($file.FullName)" }
           }
 
