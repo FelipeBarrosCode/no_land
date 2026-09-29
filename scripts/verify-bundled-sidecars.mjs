@@ -254,7 +254,9 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
 function verifyLinuxLinkage(root, targetTriple, label) {
   const cleanEnv = cleanLinuxRuntimeEnv();
   const appExecutable = findLinuxAppExecutable(root);
-  const isPortableAppImageTree = existsSync(join(root, 'AppRun'));
+  const isPortableAppImageTree = basename(root).endsWith('.AppDir')
+    || existsSync(join(root, 'AppRun'))
+    || existsSync(join(root, '.DirIcon'));
   const seeds = [
     appExecutable,
     ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
