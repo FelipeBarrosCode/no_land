@@ -35,6 +35,7 @@ jobs:
     needs: validation
     permissions:
       contents: read
+      id-token: write
       security-events: write
     uses: ./.github/workflows/_security.yml
     with:
