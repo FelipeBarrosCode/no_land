@@ -235,10 +235,6 @@ jobs:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Require Trusted Signing credentials
         shell: pwsh
@@ -256,23 +252,15 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          $extraArgs = @()
-          if ('${{ inputs.retain-artifacts }}' -eq 'false') {
-            $extraArgs = @('--config', 'src-tauri/tauri.windows.signing.conf.json')
-          }
+          $extraArgs = @('--config', 'src-tauri/tauri.windows.signing.conf.json')
           npm run tauri:build -- --target "${{ matrix.target }}" @extraArgs
 
       - name: Sign Windows installers with Trusted Signing CLI
-        if: ${{ !inputs.retain-artifacts }}
         shell: pwsh
         env:
           TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
           TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
           TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || 'Noland' }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
         run: |
           $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
           foreach ($file in @(Get-ChildItem -Path $bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })) {
@@ -281,7 +269,6 @@ jobs:
           }
 
       - name: Verify Windows Authenticode signatures
-        if: ${{ !inputs.retain-artifacts }}
         shell: pwsh
         run: |
           $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
@@ -293,7 +280,6 @@ jobs:
           }
 
       - name: Regenerate Tauri updater signatures after Authenticode signing
-        if: ${{ !inputs.retain-artifacts }}
         shell: pwsh
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -320,11 +306,11 @@ jobs:
       - name: Generate local artifact checksums
         run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-windows-${{ matrix.arch }}"
 
-      - name: Upload unsigned production artifacts for established x64 signing job
+      - name: Upload signed production artifacts
         if: inputs.retain-artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: unsigned-tauri-windows-${{ matrix.arch }}
+          name: tauri-windows-${{ matrix.arch }}
           path: src-tauri/target/${{ matrix.target }}/release/bundle
           if-no-files-found: error
           retention-days: 2
@@ -333,86 +319,3 @@ jobs:
         if: always() && !inputs.retain-artifacts
         shell: pwsh
         run: Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "src-tauri/target/${{ matrix.target }}/release/bundle"
-
-  sign-windows:
-    name: sign-windows-${{ matrix.arch }}
-    if: inputs.retain-artifacts
-    needs: build-windows
-    runs-on: windows-latest
-    environment: Secrets
-    permissions:
-      contents: read
-    strategy:
-      fail-fast: false
-      matrix:
-        arch: [x64, arm64]
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Install Trusted Signing CLI
-        shell: pwsh
-        run: cargo install artifact-signing-cli --locked
-      - name: Download unsigned Windows bundle
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: unsigned-tauri-windows-${{ matrix.arch }}
-          path: windows-bundle
-      - name: Require Trusted Signing credentials
-        shell: pwsh
-        env:
-          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
-        run: |
-          foreach ($name in @('TRUSTED_SIGNING_ENDPOINT', 'TRUSTED_SIGNING_ACCOUNT_NAME')) {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "Missing Trusted Signing secret: $name" }
-          }
-      - name: Sign Windows installers with Trusted Signing CLI
-        shell: pwsh
-        env:
-          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
-          TRUSTED_SIGNING_ACCOUNT_NAME: ${{ secrets.TRUSTED_SIGNING_ACCOUNT_NAME }}
-          TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME || 'Noland' }}
-        run: |
-          foreach ($file in @(Get-ChildItem -Path windows-bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })) {
-            & artifact-signing-cli -e $env:TRUSTED_SIGNING_ENDPOINT -a $env:TRUSTED_SIGNING_ACCOUNT_NAME -c $env:TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME -d 'Noland Connect' $file.FullName
-            if ($LASTEXITCODE -ne 0) { throw "Trusted Signing failed for $($file.FullName)" }
-          }
-      - name: Verify Windows Authenticode signatures
-        shell: pwsh
-        run: |
-          $files = @(Get-ChildItem -Path windows-bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })
-          if ($files.Count -eq 0) { throw 'No Windows installers were found to verify.' }
-          foreach ($file in $files) {
-            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
-            if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature on $($file.FullName): $($signature.Status)" }
-          }
-      - name: Regenerate Tauri updater signatures
-        shell: pwsh
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'TAURI_SIGNING_PRIVATE_KEY is required.' }
-          $count = 0
-          foreach ($installer in @(Get-ChildItem -Path windows-bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })) {
-            $signaturePath = "$($installer.FullName).sig"
-            if (-not (Test-Path -LiteralPath $signaturePath)) { continue }
-            Remove-Item -LiteralPath $signaturePath -Force
-            & node node_modules/@tauri-apps/cli/tauri.js signer sign $installer.FullName
-            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $signaturePath) -or (Get-Item $signaturePath).Length -eq 0) {
-              throw "Failed regenerating updater signature for $($installer.FullName)"
-            }
-            $count += 1
-          }
-          if ($count -eq 0) { throw 'No Windows updater signature was regenerated.' }
-      - name: Upload signed production artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: tauri-windows-${{ matrix.arch }}
-          path: windows-bundle
-          if-no-files-found: error
-          retention-days: 2
