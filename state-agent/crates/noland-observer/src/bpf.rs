@@ -63,7 +63,8 @@ pub struct BpfObserverConfig {
     pub cgroup_modes: HashMap<u64, CgroupObservationMode>,
     pub default_mode: CgroupObservationMode,
     pub poll_interval: Duration,
-    /// `0` or `1` retains all reads; `N` asks BPF to retain roughly 1/N.
+    /// `0` or `1` retains all read-only dependency events; `N` asks BPF to
+    /// retain roughly 1/N reads, opens, and mmaps. Mutations are never sampled.
     pub read_sample_rate: u32,
     pub target_cgroup_id: u64,
     pub discovery_read_window: Duration,
@@ -543,6 +544,17 @@ mod platform {
     }
 
     impl ProcPathResolver {
+        const MAX_CACHE_ENTRIES: usize = 16_384;
+
+        fn cache_path(&mut self, key: (i32, u64, u64), path: PathBuf) {
+            if self.cache.len() >= Self::MAX_CACHE_ENTRIES && !self.cache.contains_key(&key) {
+                if let Some(expired) = self.cache.keys().next().copied() {
+                    self.cache.remove(&expired);
+                }
+            }
+            self.cache.insert(key, path);
+        }
+
         fn enrich(&mut self, raw: &mut RawEvent) {
             let tgid = i32::try_from(raw.tgid).unwrap_or(i32::MAX);
             if !raw.path.is_empty()
@@ -554,7 +566,7 @@ mod platform {
                     .or_else(|| resolve_open_input(tgid, raw.offset as i64 as i32, &supplied))
                 {
                     if metadata_matches_for_process(tgid, &path, raw.dev, raw.ino) {
-                        self.cache.insert((tgid, raw.dev, raw.ino), path.clone());
+                        self.cache_path((tgid, raw.dev, raw.ino), path.clone());
                     }
                     raw.path = path_bytes(path);
                 }
@@ -599,7 +611,7 @@ mod platform {
                 let link = proc_root.join(special);
                 if metadata_matches(&link, device, inode) {
                     let path = clean_proc_link(fs::read_link(&link).ok()?);
-                    self.cache.insert(key, path.clone());
+                    self.cache_path(key, path.clone());
                     return Some(path);
                 }
             }
@@ -611,7 +623,7 @@ mod platform {
                     continue;
                 }
                 let path = clean_proc_link(fs::read_link(&link).ok()?);
-                self.cache.insert(key, path.clone());
+                self.cache_path(key, path.clone());
                 return Some(path);
             }
             None

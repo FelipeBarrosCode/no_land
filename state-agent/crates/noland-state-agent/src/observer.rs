@@ -1,12 +1,13 @@
 use std::sync::Arc;
 
-use noland_observer::{BpfObserver, BpfObserverConfig, ObserverHub};
+use noland_observer::{BpfObserver, BpfObserverConfig, CgroupObservationMode, ObserverHub};
 use parking_lot::Mutex;
 use serde::Serialize;
 
 const MIN_CAPABILITY_KERNEL: (u32, u32) = (5, 8);
 const CAP_PERFMON: u32 = 38;
 const CAP_BPF: u32 = 39;
+const PRODUCTION_READ_SAMPLE_RATE: u32 = 64;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -105,7 +106,7 @@ impl ObserverSupervisor {
             }
         }
 
-        let mut config = BpfObserverConfig::default();
+        let mut config = production_bpf_config();
         if let Some(cgroup_id) = current_cgroup_id() {
             config.ignored_cgroup_ids.insert(cgroup_id);
         }
@@ -196,6 +197,17 @@ impl ObserverSupervisor {
     }
 }
 
+fn production_bpf_config() -> BpfObserverConfig {
+    let mut config = BpfObserverConfig::default();
+    // Startup recovery reconstructs live processes and their open files.
+    // Production tracing can therefore use long steady-state coalescing and
+    // sample dependency reads while retaining every mutation and
+    // process-lifecycle event.
+    config.default_mode = CgroupObservationMode::Steady;
+    config.read_sample_rate = PRODUCTION_READ_SAMPLE_RATE;
+    config
+}
+
 fn runtime_object_path() -> Option<std::path::PathBuf> {
     std::env::var_os("NOLAND_BPF_OBJECT")
         .map(std::path::PathBuf::from)
@@ -252,6 +264,14 @@ fn has_capability(mask: u64, capability: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_observer_samples_reads_and_coalesces_in_steady_mode() {
+        let config = production_bpf_config();
+        assert_eq!(config.default_mode, CgroupObservationMode::Steady);
+        assert_eq!(config.read_sample_rate, PRODUCTION_READ_SAMPLE_RATE);
+        assert!(config.read_sample_rate > 1);
+    }
 
     #[test]
     fn parses_distribution_kernel_release() {
