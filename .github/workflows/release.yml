@@ -25,6 +25,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install package extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y squashfs-tools
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
@@ -129,12 +133,11 @@ jobs:
             index=$((index + 1)); mkdir -p "artifact-scan-root/deb-$index"; dpkg-deb -x "$package" "artifact-scan-root/deb-$index"
           done < <(find release-assets -type f -name '*.deb' -print)
           while IFS= read -r archive; do
-            index=$((index + 1)); mkdir -p "artifact-scan-root/mac-$index"; tar -xzf "$archive" -C "artifact-scan-root/mac-$index"
+            index=$((index + 1)); mkdir -p "artifact-scan-root/mac-$index"; tar --warning=no-unknown-keyword -xzf "$archive" -C "artifact-scan-root/mac-$index"
           done < <(find release-assets -type f -name '*.app.tar.gz' -print)
           while IFS= read -r appimage; do
             index=$((index + 1)); extract_dir="$PWD/artifact-scan-root/appimage-$index"; mkdir -p "$extract_dir"
-            appimage=$(realpath "$appimage"); chmod +x "$appimage"
-            (cd "$extract_dir" && "$appimage" --appimage-extract >/dev/null)
+            bash scripts/extract-appimage.sh "$appimage" "$extract_dir"
           done < <(find release-assets -type f -name '*.AppImage' -print)
       - name: Block high and critical packaged dependency findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
