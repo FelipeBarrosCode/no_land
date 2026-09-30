@@ -1,4 +1,10 @@
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::io::{Error as IoError, ErrorKind, Read};
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -7,6 +13,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use tokio::io::unix::AsyncFd;
 use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
@@ -312,14 +320,39 @@ async fn read_linux_input_device(
     recorder: Arc<dyn ActivityRecorder>,
 ) -> Result<()> {
     const INPUT_EVENT_BYTES_64_BIT: usize = 24;
+    // Linux uapi O_NONBLOCK. evdev reads are record-atomic, and AsyncFd needs
+    // nonblocking descriptors so cancelling a reader does not strand a Tokio
+    // blocking-pool thread in read(2).
+    const O_NONBLOCK: i32 = 0o4000;
     const EV_KEY: u16 = 1;
     const EV_REL: u16 = 2;
     const EV_ABS: u16 = 3;
 
-    let mut file = tokio::fs::File::open(&device.path).await?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NONBLOCK)
+        .open(&device.path)?;
+    let file = AsyncFd::new(file)?;
     let mut bytes = [0_u8; INPUT_EVENT_BYTES_64_BIT];
     loop {
-        file.read_exact(&mut bytes).await?;
+        let mut ready = file.readable().await?;
+        let read = match ready.try_io(|inner| {
+            let mut file = inner.get_ref();
+            file.read(&mut bytes)
+        }) {
+            Ok(read) => read?,
+            Err(_would_block) => continue,
+        };
+        if read == 0 {
+            return Err(IoError::new(ErrorKind::UnexpectedEof, "input device closed").into());
+        }
+        if read != INPUT_EVENT_BYTES_64_BIT {
+            return Err(IoError::new(
+                ErrorKind::InvalidData,
+                format!("input device returned a partial {read}-byte event"),
+            )
+            .into());
+        }
         let event_type = u16::from_ne_bytes([bytes[16], bytes[17]]);
         let value = i32::from_ne_bytes([bytes[20], bytes[21], bytes[22], bytes[23]]);
         let accepted = match device.source {

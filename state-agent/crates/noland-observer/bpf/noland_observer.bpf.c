@@ -472,12 +472,12 @@ static __always_inline void fill_parent_and_name(struct noland_event_v1 *event,
     event->flags |= NOLAND_F_PARENT_AND_NAME;
 }
 
-static __always_inline int should_sample_read(const struct noland_config_v1 *cfg)
+static __always_inline int should_sample_dependency(const struct noland_config_v1 *cfg)
 {
     __u32 rate = cfg ? cfg->read_sample_rate : 0;
     if (rate <= 1)
         return 0;
-    if ((bpf_ktime_get_ns() % rate) != 0) {
+    if ((bpf_get_prandom_u32() % rate) != 0) {
         count_stat(NOLAND_STAT_SAMPLED_OUT);
         return 1;
     }
@@ -545,7 +545,7 @@ static __always_inline int emit_io(struct file *file, __u16 type, __s64 result,
 
     if (result <= 0 || current_is_ignored(class, &cfg) || file_is_ignored(file))
         return 0;
-    if (type == NOLAND_EVENT_FILE_READ && should_sample_read(cfg))
+    if (type == NOLAND_EVENT_FILE_READ && should_sample_dependency(cfg))
         return 0;
     inode = file ? BPF_CORE_READ(file, f_inode) : NULL;
     if (inode) {
@@ -751,6 +751,8 @@ int noland_security_file_open(__u64 *ctx)
     if (result < 0 || current_is_ignored(NOLAND_CLASS_OPEN, &cfg) || file_is_ignored(file))
         return 0;
     type = consume_pending_create(file) ? NOLAND_EVENT_FILE_CREATE : NOLAND_EVENT_FILE_OPEN;
+    if (type == NOLAND_EVENT_FILE_OPEN && should_sample_dependency(cfg))
+        return 0;
     event = new_event(type, 0);
     if (!event)
         return 0;
@@ -778,6 +780,8 @@ int noland_security_mmap_file(__u64 *ctx)
     __u32 accumulated = 1;
 
     if (!file || result < 0 || current_is_ignored(NOLAND_CLASS_MMAP, &cfg) || file_is_ignored(file))
+        return 0;
+    if (should_sample_dependency(cfg))
         return 0;
     event = new_event(NOLAND_EVENT_FILE_MMAP, 0);
     if (!event)

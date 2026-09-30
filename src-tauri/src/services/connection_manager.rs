@@ -866,7 +866,7 @@ impl ConnectionManager {
             &config_path,
             &endpoint_update.active_endpoint,
             &runtime_before,
-            requested_transport,
+            &profile,
         )
         .await;
         if let Err(validation_error) = validation {
@@ -1203,6 +1203,19 @@ fn validate_host_identity(instance_id: u64, status: &HostNetworkStatus) -> AppRe
         ));
     }
     Ok(())
+}
+
+fn host_confirms_pending_profile(
+    instance_id: u64,
+    status: &HostNetworkStatus,
+    profile: &ConnectionProfile,
+) -> bool {
+    status.state.instance_id == instance_id.to_string()
+        && status
+            .state
+            .pending_profile
+            .as_ref()
+            .is_some_and(|pending| pending.profile == *profile)
 }
 
 fn turn_status_is_healthy(
@@ -1895,7 +1908,7 @@ async fn validate_tunnel(
     config_path: &PathBuf,
     expected_endpoint: &str,
     before: &ManagedTunnelRuntime,
-    transport: TransportKind,
+    profile: &ConnectionProfile,
 ) -> AppResult<()> {
     let deadline = tokio::time::Instant::now() + TUNNEL_VALIDATION_TIMEOUT;
     let mut last_error = "tunnel validation did not run".to_string();
@@ -1904,13 +1917,21 @@ async fn validate_tunnel(
             Ok(mut control) => match control.get_status().await {
                 Ok(status) => {
                     let observed = status.state.observed_transport;
-                    let valid = status.state.instance_id == instance_id.to_string()
-                        && (transport != TransportKind::CloudflareTurn
-                            || observed == Some(TransportKind::CloudflareTurn));
+                    let pending = status
+                        .state
+                        .pending_profile
+                        .as_ref()
+                        .map(|pending| &pending.profile);
+                    let valid = host_confirms_pending_profile(instance_id, &status, profile);
                     if !valid {
                         last_error = format!(
-                                "Host did not confirm the requested {transport:?} transport (observed {observed:?})"
-                            );
+                            "Host did not confirm the pending {:?} profile (transition {}, revision {}; observed transport {observed:?}, pending transition {:?}, pending revision {:?})",
+                            profile.desired_transport,
+                            profile.transition_id,
+                            profile.profile_revision,
+                            pending.map(|pending| pending.transition_id),
+                            pending.map(|pending| pending.profile_revision),
+                        );
                     }
                     valid
                 }
@@ -1944,7 +1965,7 @@ async fn validate_tunnel(
         if control_ok && sunshine_ok && runtime_matches {
             if !runtime_has_fresh_stats {
                 tracing::debug!(
-                    ?transport,
+                    transport = ?profile.desired_transport,
                     expected_endpoint,
                     "committing tunnel after end-to-end host checks despite a stale local runtime counter"
                 );
@@ -2138,7 +2159,7 @@ mod tests {
     use super::*;
     use crate::services::network_control::TurnBridgeStatus;
     use noland_network_contracts::{
-        state::{HostNetworkState, TurnRuntimeStatus},
+        state::{HostNetworkState, PendingConnectionProfile, TurnRuntimeStatus},
         NETWORK_STATE_SCHEMA_VERSION,
     };
 
@@ -2277,6 +2298,61 @@ mod tests {
             &network,
             &status,
             "198.51.100.10".parse().unwrap()
+        ));
+    }
+
+    #[test]
+    fn tunnel_validation_accepts_the_exact_pending_profile_before_commit() {
+        let transition_id = Uuid::new_v4();
+        let mut profile = ConnectionProfile::new(
+            "42".into(),
+            1,
+            transition_id,
+            TransportKind::CloudflareTurn,
+            NetworkEndpoint {
+                host: "192.0.2.44".into(),
+                port: 3478,
+            },
+            1280,
+            Utc::now().to_rfc3339(),
+        );
+        profile.allocation_generation = Some(8);
+        let status = HostNetworkStatus {
+            state: HostNetworkState {
+                schema_version: NETWORK_STATE_SCHEMA_VERSION,
+                host_revision: 2,
+                updated_at: Utc::now().to_rfc3339(),
+                instance_id: "42".into(),
+                session_id: Uuid::new_v4(),
+                agent_version: "test".into(),
+                turn_status: TurnRuntimeStatus::Ready,
+                allocation_generation: 8,
+                relay_endpoint: Some(profile.endpoint.clone()),
+                allocation_expires_at: None,
+                credential_expires_at: Some((Utc::now() + ChronoDuration::hours(1)).to_rfc3339()),
+                observed_transport: None,
+                link_state: Default::default(),
+                committed_profile: None,
+                committed_operation_id: None,
+                pending_profile: Some(PendingConnectionProfile {
+                    operation_id: Uuid::new_v4(),
+                    profile: profile.clone(),
+                    previous_mtu: 1420,
+                    prepared_at: Utc::now().to_rfc3339(),
+                    lease_expires_at: (Utc::now() + ChronoDuration::minutes(2)).to_rfc3339(),
+                }),
+            },
+            bridge: None,
+        };
+
+        assert!(host_confirms_pending_profile(42, &status, &profile));
+
+        let mut different_profile = profile;
+        different_profile.transition_id = Uuid::new_v4();
+        assert!(!host_confirms_pending_profile(
+            42,
+            &status,
+            &different_profile
         ));
     }
 }

@@ -22,6 +22,8 @@ use noland_state_db::StateDb;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
+const PROCESS_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct AgentConfig {
     pub instance_id: Uuid,
     pub image_id: String,
@@ -344,6 +346,7 @@ impl StateAgent {
     pub fn process_events(&self) -> Result<usize> {
         let mut engine = self.attribution_engine();
         let n = noland_attribution::process_hub_events(&mut engine, &self.hub)?;
+        drop(engine);
         if self.hub.queue.take_loss_flag() {
             let dropped = self.hub.queue.dropped();
             let app_ids = self.db.open_session_app_ids()?;
@@ -378,6 +381,14 @@ impl StateAgent {
                     app_ids.len()
                 ),
             );
+            let recovery = self.reconcile_live_processes()?;
+            tracing::info!(
+                processes_seen = recovery.processes_seen,
+                sessions_pruned = recovery.sessions_pruned,
+                sessions_recovered = recovery.sessions_recovered,
+                open_files_recovered = recovery.open_files_recovered,
+                "reconciled live processes immediately after observer loss"
+            );
         }
         Ok(n)
     }
@@ -389,7 +400,7 @@ impl StateAgent {
     pub fn spawn_background(self: &Arc<Self>) {
         let agent = Arc::clone(self);
         tokio::spawn(async move {
-            let mut process_recovery = tokio::time::interval(Duration::from_secs(2));
+            let mut process_recovery = tokio::time::interval(PROCESS_RECOVERY_INTERVAL);
             let mut rediscovery = tokio::time::interval(Duration::from_secs(30));
             let mut checkpoint =
                 tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
