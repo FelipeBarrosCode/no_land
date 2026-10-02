@@ -25,8 +25,6 @@ use crate::{
 use super::{
     app_context::{AppContext, OrchestrationStartRequest},
     audio_latency::AudioLatencyService,
-    cloudflare_turn,
-    connection_manager::{automatic_selection_enabled, ConnectionManager},
     health_check::run_system_health_report,
     instance_manager::InstanceManager,
     lifecycle_agent::LifecycleAgentProvisioner,
@@ -79,19 +77,6 @@ async fn provision_lifecycle_agent(
         &settings,
     )
     .await
-}
-
-async fn turn_credentials_configured(context: &AppContext) -> bool {
-    let enabled = context.load_state().await.cloudflare_turn.enabled;
-    if !enabled {
-        return false;
-    }
-    tokio::task::spawn_blocking(cloudflare_turn::load_secret)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .flatten()
-        .is_some()
 }
 
 async fn persist_direct_network_metadata(
@@ -1496,6 +1481,12 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             state.sunshine.configured = true;
         })
         .await?;
+    // The mutation guard protects remote WireGuard configuration only. Do not
+    // hold it through microphone setup, post-WireGuard initialization, or
+    // connection-manager evaluation: those flows may legitimately perform a
+    // separate managed-tunnel operation, and the UI can expose tunnel setup
+    // as soon as the config-ready state is emitted.
+    drop(_wireguard_mutation_guard);
     ensure_not_cancelled(&context)?;
 
     let microphone_provisioning_enabled = microphone_receiver_provisioning_enabled();
@@ -1586,26 +1577,6 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         &wireguard_result.client_config_path,
     )
     .await?;
-    if turn_credentials_configured(&context).await {
-        if let Err(error) = ConnectionManager::evaluate_runtime(&context, instance.id).await {
-            warn!(
-                instance_id = instance.id,
-                %error,
-                "Optional TURN allocation/probing failed; Direct WireGuard remains usable"
-            );
-        }
-    }
-    if automatic_selection_enabled() {
-        if let Err(error) =
-            ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await
-        {
-            warn!(
-                instance_id = instance.id,
-                %error,
-                "Direct WireGuard is ready; optional TURN provisioning evaluation failed"
-            );
-        }
-    }
 
     Ok(())
 }
@@ -2468,6 +2439,9 @@ async fn run_existing_instance_orchestration(
 
         result
     };
+    // Release the provisioning mutation lock before the remaining existing-
+    // instance setup and connection-manager evaluation stages.
+    drop(_wireguard_mutation_guard);
     persist_direct_network_metadata(
         &context,
         instance.id,
@@ -2590,26 +2564,6 @@ async fn run_existing_instance_orchestration(
         &wireguard_result.client_config_path,
     )
     .await?;
-    if turn_credentials_configured(&context).await {
-        if let Err(error) = ConnectionManager::evaluate_runtime(&context, instance.id).await {
-            warn!(
-                instance_id = instance.id,
-                %error,
-                "Optional TURN allocation/probing failed; Direct WireGuard remains usable"
-            );
-        }
-    }
-    if automatic_selection_enabled() {
-        if let Err(error) =
-            ConnectionManager::evaluate_and_apply_automatic(&context, instance.id).await
-        {
-            warn!(
-                instance_id = instance.id,
-                %error,
-                "Direct WireGuard is ready; optional TURN provisioning evaluation failed"
-            );
-        }
-    }
 
     Ok(())
 }

@@ -15,7 +15,7 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
-import { refreshStateAgentIndex } from "../lib/backend";
+import { moonlightGetSessionState, refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
 import { isRunningInTauri } from "../lib/tauri";
 import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
@@ -609,12 +609,38 @@ export function App() {
       return;
     }
 
-    const hasActiveStream =
+    const hasEmbeddedActiveStream =
       embeddedMoonlightStatus?.videoSessionActive === true ||
       rentedInstances.some((instance) => instance.embeddedMoonlightVideoSessionActive === true);
-    const checkForInstancesNeedingAttention = () => {
-      if (rentedInstances.length === 0 || hasActiveStream) {
+    const activeSessionStates = new Set([
+      "preparing",
+      "launching",
+      "creating_surface",
+      "connecting",
+      "streaming",
+      "reconnecting",
+      "stopping",
+    ]);
+    let checking = false;
+
+    const checkForInstancesNeedingAttention = async () => {
+      if (checking) {
+        return;
+      }
+      checking = true;
+      let hasNativeActiveStream = false;
+      try {
+        const session = await moonlightGetSessionState();
+        hasNativeActiveStream = activeSessionStates.has(session.state);
+      } catch {
+        // Avoid a false billing warning when native stream state cannot be read.
+        checking = false;
+        return;
+      }
+
+      if (rentedInstances.length === 0 || hasEmbeddedActiveStream || hasNativeActiveStream) {
         attentionNotificationAtRef.current = null;
+        checking = false;
         return;
       }
 
@@ -626,10 +652,11 @@ export function App() {
         attentionNotificationAtRef.current = now;
         void notifyInstancesNeedAttention(rentedInstances.length);
       }
+      checking = false;
     };
 
-    checkForInstancesNeedingAttention();
-    const interval = window.setInterval(checkForInstancesNeedingAttention, 60 * 1000);
+    void checkForInstancesNeedingAttention();
+    const interval = window.setInterval(() => void checkForInstancesNeedingAttention(), 60 * 1000);
     return () => window.clearInterval(interval);
   }, [
     embeddedMoonlightStatus?.videoSessionActive,

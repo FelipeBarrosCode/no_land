@@ -3,6 +3,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
+import { isNotificationEnabled } from "./notificationPreferences";
 
 export type NetworkStatusEvent = {
   current: "WARMING_UP" | "GREAT" | "GOOD" | "POOR" | "BAD";
@@ -34,6 +35,9 @@ export function networkWarningBody(event: NetworkStatusEvent): string {
 }
 
 export async function notifyBadConnection(event: NetworkStatusEvent): Promise<void> {
+  if (!isNotificationEnabled("network")) {
+    return;
+  }
   const connectionLost = event.reasons.includes("CONNECTION_LOST");
   const body = connectionLost
     ? networkWarningBody(event)

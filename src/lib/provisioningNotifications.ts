@@ -5,10 +5,15 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { isNotificationEnabled } from "./notificationPreferences";
 
-export async function notifyInstancesNeedAttention(instanceCount: number): Promise<void> {
-  if (!isNotificationEnabled("instances")) {
+export async function notifyProvisioningUpdate(
+  kind: "attention" | "complete",
+  message: string,
+  details?: string,
+): Promise<void> {
+  if (!isNotificationEnabled("provisioning")) {
     return;
   }
+
   try {
     let granted = await isPermissionGranted();
     if (!granted) {
@@ -19,12 +24,14 @@ export async function notifyInstancesNeedAttention(instanceCount: number): Promi
     }
 
     await sendNotification({
-      title: "No Land — Instances need attention",
-      body: `You have ${instanceCount} rented instance${instanceCount === 1 ? "" : "s"} with no active stream. They may continue charging. Open No Land to continue, set up shared storage, or delete them.`,
+      title: kind === "complete"
+        ? "No Land — Provisioning complete"
+        : "No Land — Provisioning needs attention",
+      body: details ? `${message} ${details}` : message,
       icon: "icons/icon.png",
       silent: false,
     });
   } catch (error) {
-    console.warn("[instance-monitor] native notification failed", error);
+    console.warn("[provisioning] native notification failed", error);
   }
 }

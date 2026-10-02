@@ -10,6 +10,7 @@ import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
+import { NotificationSettings } from "./NotificationSettings";
 import {
   getInstanceConnectionStatus,
   repairInstanceConnection,
@@ -43,7 +44,8 @@ type SettingsSection =
   | "server"
   | "client"
   | "storage"
-  | "connection";
+  | "connection"
+  | "notifications";
 type ClientForm = {
   bitrate: string;
   fps: string;
@@ -1458,6 +1460,8 @@ export function SettingsScreen({
     </Card>
   );
 
+  const notificationsPanel = <NotificationSettings />;
+
   const panel =
     section === "profile"
       ? profilePanel
@@ -1467,7 +1471,9 @@ export function SettingsScreen({
           ? storagePanel
           : section === "connection"
             ? connectionPanel
-            : clientPanel;
+            : section === "notifications"
+              ? notificationsPanel
+              : clientPanel;
 
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-6 pt-6 md:px-8">
@@ -1532,6 +1538,12 @@ export function SettingsScreen({
                 onClick={() => setSection("connection")}
               >
                 Connection
+              </Button>
+              <Button
+                variant={section === "notifications" ? "secondary" : "ghost"}
+                onClick={() => setSection("notifications")}
+              >
+                Notifications
               </Button>
             </div>
           </Card>
