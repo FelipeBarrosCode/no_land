@@ -17,6 +17,8 @@ import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
+import { isRunningInTauri } from "../lib/tauri";
+import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
 
 import {
   checkForAppUpdate,
@@ -401,10 +403,60 @@ function BootScreen() {
 
 const AUTO_GITHUB_ISSUES_STORAGE_KEY = "noland.autoGithubIssues";
 
+function CloseWithInstancesModal({
+  instances,
+  deleting,
+  error,
+  onContinue,
+  onQuit,
+  onDeleteAll,
+  onSetupStorage,
+}: {
+  instances: number;
+  deleting: boolean;
+  error: string | null;
+  onContinue: () => void;
+  onQuit: () => void;
+  onDeleteAll: () => void;
+  onSetupStorage: () => void;
+}) {
+  return (
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[140]">
+      <div className="border-b-2 border-[#9a6536] px-5 py-4">
+        <h2 className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text="Instances still running">
+          Instances still running
+        </h2>
+        <p className="mt-2 text-[1.15rem] leading-snug text-[#d7e6f7]">
+          You have {instances} rented instance{instances === 1 ? "" : "s"}. Quitting Noland does not stop them — they will continue charging until they are destroyed.
+        </p>
+      </div>
+      <ModalBody className="space-y-4 px-5 py-5">
+        <Card className="border border-[#9a6536] bg-[#3a2518]/60 text-[1.1rem] text-[#ffd3a3]">
+          Choose what to do before closing the app. Inactive instances are included because they may still be billable.
+        </Card>
+        {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{error}</p>}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button variant="ghost" onClick={onContinue} disabled={deleting}>Continue using app</Button>
+          <Button variant="secondary" onClick={onQuit} disabled={deleting}>Quit — keep instances on</Button>
+          <Button className="border-red-500/60 text-red-300 hover:bg-red-900/30" onClick={onDeleteAll} loading={deleting} loadingText="Deleting instances...">
+            Delete all, then quit
+          </Button>
+          <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>Setup shared storage</Button>
+        </div>
+      </ModalBody>
+    </ModalFrame>
+  );
+}
+
 export function App() {
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [windowLabelResolved, setWindowLabelResolved] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const [deletingBeforeClose, setDeletingBeforeClose] = useState(false);
+  const [closeGuardError, setCloseGuardError] = useState<string | null>(null);
+  const allowWindowCloseRef = useRef(false);
+  const attentionNotificationAtRef = useRef<number | null>(null);
   const [autoGithubIssuesEnabled, setAutoGithubIssuesEnabled] = useState(() => {
     try {
       return window.localStorage.getItem(AUTO_GITHUB_ISSUES_STORAGE_KEY) === "true";
@@ -429,6 +481,9 @@ export function App() {
   const appState = useAppStore((state) => state.appState);
   const busy = useAppStore((state) => state.busy);
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
+  const rentedInstances = useAppStore((state) => state.rentedInstances);
+  const embeddedMoonlightStatus = useAppStore((state) => state.embeddedMoonlightStatus);
+  const destroyInstance = useAppStore((state) => state.destroyInstance);
 
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
@@ -525,6 +580,89 @@ export function App() {
     void initialize();
     void bindEvents();
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel !== "main" || loading) {
+      return;
+    }
+
+    const currentWindow = getCurrentWindow();
+    const unlistenPromise = currentWindow.onCloseRequested((event) => {
+      if (allowWindowCloseRef.current) {
+        return;
+      }
+      if (rentedInstances.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      setCloseGuardError(null);
+      setCloseGuardOpen(true);
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [loading, rentedInstances.length, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel !== "main" || loading || !isRunningInTauri()) {
+      return;
+    }
+
+    const hasActiveStream =
+      embeddedMoonlightStatus?.videoSessionActive === true ||
+      rentedInstances.some((instance) => instance.embeddedMoonlightVideoSessionActive === true);
+    const checkForInstancesNeedingAttention = () => {
+      if (rentedInstances.length === 0 || hasActiveStream) {
+        attentionNotificationAtRef.current = null;
+        return;
+      }
+
+      const now = Date.now();
+      if (
+        attentionNotificationAtRef.current === null ||
+        now - attentionNotificationAtRef.current >= 3 * 60 * 60 * 1000
+      ) {
+        attentionNotificationAtRef.current = now;
+        void notifyInstancesNeedAttention(rentedInstances.length);
+      }
+    };
+
+    checkForInstancesNeedingAttention();
+    const interval = window.setInterval(checkForInstancesNeedingAttention, 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [
+    embeddedMoonlightStatus?.videoSessionActive,
+    loading,
+    rentedInstances,
+    windowLabel,
+    windowLabelResolved,
+  ]);
+
+  async function quitWindow() {
+    allowWindowCloseRef.current = true;
+    setCloseGuardOpen(false);
+    await getCurrentWindow().close();
+  }
+
+  async function deleteAllAndQuit() {
+    setDeletingBeforeClose(true);
+    setCloseGuardError(null);
+    try {
+      for (const instance of rentedInstances) {
+        await destroyInstance(instance.instanceId);
+      }
+      await quitWindow();
+    } catch (error) {
+      setCloseGuardError(error instanceof Error ? error.message : String(error));
+      setDeletingBeforeClose(false);
+    }
+  }
+
+  function openSharedStorageFromCloseGuard() {
+    setCloseGuardOpen(false);
+    window.location.hash = "#/settings?section=storage";
+  }
 
 
   useEffect(() => {
@@ -679,6 +817,18 @@ export function App() {
         <UpdateAvailableModal
           update={availableUpdate}
           onDismiss={() => setAvailableUpdate(null)}
+        />
+      )}
+
+      {closeGuardOpen && (
+        <CloseWithInstancesModal
+          instances={rentedInstances.length}
+          deleting={deletingBeforeClose}
+          error={closeGuardError}
+          onContinue={() => setCloseGuardOpen(false)}
+          onQuit={() => void quitWindow()}
+          onDeleteAll={() => void deleteAllAndQuit()}
+          onSetupStorage={openSharedStorageFromCloseGuard}
         />
       )}
 

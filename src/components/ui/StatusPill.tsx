@@ -1,8 +1,6 @@
 import clsx from "clsx";
-import type { OrchestrationState } from "../../lib/types";
-
 interface Props {
-  state: OrchestrationState;
+  state: string;
 }
 
 export function StatusPill({ state }: Props) {
@@ -11,6 +9,8 @@ export function StatusPill({ state }: Props) {
       ? "border-[#ff687d] bg-[#481b2a] text-[#ffb2bf]"
       : state === "Ready"
         ? "border-[#8af75d] bg-[#243d21] text-[#c8ffad]"
+        : state === "Inactive"
+          ? "border-[#ffb86b] bg-[#4a2d1b] text-[#ffd3a3]"
         : "border-[#44d6ff] bg-[#182a43] text-[#8deeff]";
 
   return (

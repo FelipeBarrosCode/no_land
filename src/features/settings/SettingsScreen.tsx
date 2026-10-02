@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { errorMessage } from "../../lib/errorMessage";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
@@ -249,7 +249,10 @@ export function SettingsScreen({
   onClearCloudflareTurnSettings,
   onRegenerateEdid,
 }: Props) {
-  const [section, setSection] = useState<SettingsSection>("profile");
+  const [searchParams] = useSearchParams();
+  const [section, setSection] = useState<SettingsSection>(() =>
+    searchParams.get("section") === "storage" ? "storage" : "profile",
+  );
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
   const [platformUsername, setPlatformUsername] = useState(
     appState.credentials.appUsername,

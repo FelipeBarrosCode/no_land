@@ -678,9 +678,14 @@ export function DashboardScreen({
 
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {rentedInstances.map((instance) => (
+                (() => {
+                  const rawStatus = instance.status.toLowerCase();
+                  const isActive = rawStatus.includes("run") && !rawStatus.includes("inactive");
+                  const isInactive = rawStatus.includes("inactive") || rawStatus.includes("stopped") || rawStatus.includes("exited");
+                  return (
                 <Card
                   key={instance.instanceId}
-                  className="border-2 border-[#3a4068]"
+                  className={`border-2 ${isInactive ? "border-[#9a6536] bg-[#211a1a]" : "border-[#3a4068]"}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <h4 className="font-display text-[11px] text-white">
@@ -689,9 +694,9 @@ export function DashboardScreen({
                     <div className="flex items-center gap-2">
                       <StatusPill
                         state={
-                          instance.status.toLowerCase().includes("run")
+                          isActive
                             ? "Ready"
-                            : "WaitingForInstance"
+                            : isInactive ? "Inactive" : "WaitingForInstance"
                         }
                       />
                       <Button
@@ -699,7 +704,7 @@ export function DashboardScreen({
                         aria-label={`Upload files to ${instance.label}`}
                         title="Upload files and folders directly to this instance"
                         className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
-                        disabled={busy || backgroundTransferRunning || !instance.status.toLowerCase().includes("run")}
+                         disabled={busy || backgroundTransferRunning || !isActive}
                         onClick={() => setUploadInstanceId(instance.instanceId)}
                       >
                         <span aria-hidden="true">↑</span>
@@ -709,7 +714,7 @@ export function DashboardScreen({
                         aria-label={`Open terminal for ${instance.label}`}
                         title="Open an SSH terminal for this instance"
                         className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
-                        disabled={busy || !instance.status.toLowerCase().includes("run")}
+                         disabled={busy || !isActive}
                         onClick={() => setTerminalInstanceId(instance.instanceId)}
                       >
                         <span aria-hidden="true">&gt;</span>
@@ -734,6 +739,12 @@ export function DashboardScreen({
                     <p>GPU: {instance.gpuName}</p>
                     <p>SSH: {instance.sshHost || "pending"}</p>
                   </div>
+                  {isInactive && (
+                    <div className="mt-3 border border-[#9a6536]/70 bg-[#3a2518]/70 px-3 py-2 text-sm text-[#ffd3a3]">
+                      <strong className="uppercase tracking-wide">Inactive instance</strong>
+                      <p className="mt-1">This instance is not running, but it may still incur charges until it is destroyed.</p>
+                    </div>
+                  )}
                   {instance.embeddedMoonlightPipelineEnabled && (
                     <div className="mt-2 space-y-2">
                       <div className="rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
@@ -839,13 +850,15 @@ export function DashboardScreen({
                       onSyncStorage={handleSyncStorage}
                     />
                   </div>
-                  {instance.status.toLowerCase().includes("run") && (
+                  {isActive && (
                     <div className="mt-3">
                       <MicControls instanceId={instance.instanceId} />
                     </div>
                   )}
 
                 </Card>
+                  );
+                })()
               ))}
 
               <Card
