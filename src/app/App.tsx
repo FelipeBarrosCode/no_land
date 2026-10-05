@@ -17,10 +17,11 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
-import { moonlightGetSessionState, refreshStateAgentIndex } from "../lib/backend";
+import { moonlightGetSessionState, refreshStateAgentIndex, subscribeSpendAlerts } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
 import { isRunningInTauri } from "../lib/tauri";
 import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
+import { notifySpendAlert } from "../lib/spendNotifications";
 
 import {
   checkForAppUpdate,
@@ -645,6 +646,30 @@ export function App() {
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, [loading, rentedInstances.length, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel !== "main" || !isRunningInTauri()) {
+      return;
+    }
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void subscribeSpendAlerts((alert) => {
+      void notifySpendAlert(alert);
+      if (alert.kind === "auto_stopped") {
+        void useAppStore.getState().loadRentedInstances();
+      }
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+      } else {
+        unlisten = stop;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [windowLabel, windowLabelResolved]);
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel !== "main" || loading || !isRunningInTauri()) {

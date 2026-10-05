@@ -1195,3 +1195,49 @@ export interface MicrophoneDevice {
   sampleRates: number[];
   channels: number;
 }
+
+export interface BudgetSettings {
+  monthlyBudgetUsd: number;
+  warnAtPercent: number;
+  autoStopAtBudget: boolean;
+}
+
+export interface InstanceSpend {
+  provider: string;
+  instanceId: number;
+  label: string;
+  gpuName: string;
+  running: boolean;
+  currentHourlyUsd: number;
+  sessionUsd: number;
+  sessionStartedAt: string | null;
+  monthToDateUsd: number;
+}
+
+export interface MonthlySpend {
+  month: string;
+  totalUsd: number;
+  runningHours: number;
+}
+
+export type BudgetStatus = "disabled" | "ok" | "warning" | "exceeded";
+
+export interface SpendSummary {
+  month: string;
+  monthToDateUsd: number;
+  currentBurnUsdPerHour: number;
+  projectedMonthUsd: number;
+  budget: BudgetSettings;
+  budgetStatus: BudgetStatus;
+  budgetUsedPercent: number | null;
+  instances: InstanceSpend[];
+  months: MonthlySpend[];
+}
+
+export interface SpendAlert {
+  kind: "warning" | "exceeded" | "auto_stopped" | "auto_stop_failed";
+  monthToDateUsd: number;
+  budgetUsd: number;
+  instanceId: number | null;
+  message: string;
+}

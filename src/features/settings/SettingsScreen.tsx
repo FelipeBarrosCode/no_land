@@ -12,6 +12,7 @@ import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettings
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import { NotificationSettings } from "./NotificationSettings";
 import { LOCALE_OPTIONS, translateSource, useLocalization, type LocalePreference, translate } from "../../lib/i18n";
+import { BudgetSettings } from "../spend/BudgetSettings";
 import {
   getInstanceConnectionStatus,
   repairInstanceConnection,
@@ -46,6 +47,7 @@ type SettingsSection =
   | "client"
   | "storage"
   | "connection"
+  | "budget"
   | "notifications"
   | "language";
 type ClientForm = {
@@ -256,7 +258,11 @@ export function SettingsScreen({
   const { preference, setLocale, t } = useLocalization();
   const [searchParams] = useSearchParams();
   const [section, setSection] = useState<SettingsSection>(() =>
-    searchParams.get("section") === "storage" ? "storage" : "profile",
+    searchParams.get("section") === "storage"
+      ? "storage"
+      : searchParams.get("section") === "budget"
+        ? "budget"
+        : "profile",
   );
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
   const [platformUsername, setPlatformUsername] = useState(
@@ -1482,7 +1488,9 @@ export function SettingsScreen({
               ? notificationsPanel
               : section === "language"
                 ? languagePanel
-                : clientPanel;
+                : section === "budget"
+                  ? <BudgetSettings />
+                  : clientPanel;
 
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-6 pt-6 md:px-8">
@@ -1547,6 +1555,12 @@ export function SettingsScreen({
                 onClick={() => setSection("connection")}
               >
                 {t("settings.connection")}
+              </Button>
+              <Button
+                variant={section === "budget" ? "secondary" : "ghost"}
+                onClick={() => setSection("budget")}
+              >
+                Budget
               </Button>
               <Button
                 variant={section === "notifications" ? "secondary" : "ghost"}

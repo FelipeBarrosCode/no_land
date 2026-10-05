@@ -28,6 +28,11 @@ const SETTINGS: Array<{ kind: NotificationKind; title: string; description: stri
     title: "notifications.provisioning.title",
     description: "notifications.provisioning.description",
   },
+  {
+    kind: "budget",
+    title: "Budget alerts",
+    description: "Warn me as monthly spend approaches my budget and when instances are stopped because of it.",
+  },
 ];
 
 export function NotificationSettings() {

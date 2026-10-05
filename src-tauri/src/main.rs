@@ -480,6 +480,12 @@ fn main() {
             app.manage(moonlight_manager);
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
+            let spend_app = app.handle().clone();
+            let spend_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                services::spend_tracker::run_spend_tracking(spend_app, spend_context).await;
+            });
+
             let app_handle = app.handle().clone();
             let resume_context = context.clone();
             tauri::async_runtime::spawn(async move {
@@ -587,6 +593,8 @@ fn main() {
             get_auto_shutdown_settings,
             get_instance_auto_shutdown_status,
             save_auto_shutdown_settings,
+            get_spend_summary,
+            update_budget_settings,
             complete_onboarding,
             refresh_state_agent_index,
             refresh_ip_location,
