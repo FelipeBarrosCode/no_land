@@ -163,8 +163,8 @@ pub fn locate_privileged_bundled_binary(
         PathBuf::from("/usr/lib/noland-connect"),
         // Tauri installs `externalBin` sidecars below the package's
         // resources directory on Debian/AppImage-style Linux layouts.
-        // Keep this in the trusted lookup set because this resolver is used
-        // for the elevated network helper, not ordinary user-owned tools.
+        // Keep lookup constrained to package layouts; the candidate must also
+        // match the helper digest embedded in this app build.
         PathBuf::from("/usr/lib/noland-connect/resources"),
         PathBuf::from("/usr/lib/Noland Connect"),
         PathBuf::from("/usr/lib/Noland Connect/resources"),
@@ -188,23 +188,11 @@ fn is_trusted_privileged_binary(path: &Path) -> bool {
     let _ = &canonical;
     #[cfg(target_os = "linux")]
     {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let Ok(metadata) = fs::metadata(&canonical) else {
+        // AppImages are mounted by the current user, so ownership checks reject
+        // their immutable payload. Bind the elevated helper to this exact app
+        // build instead, just as on Windows.
+        if !packaged_helper_matches_build(&canonical) {
             return false;
-        };
-        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
-            return false;
-        }
-        let mut parent = canonical.parent();
-        while let Some(directory) = parent {
-            let Ok(metadata) = fs::metadata(directory) else {
-                return false;
-            };
-            if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
-                return false;
-            }
-            parent = directory.parent();
         }
     }
     #[cfg(all(target_os = "macos", not(debug_assertions)))]
@@ -233,8 +221,7 @@ fn is_trusted_privileged_binary(path: &Path) -> bool {
         let Ok(current_exe) = env::current_exe().and_then(|path| path.canonicalize()) else {
             return false;
         };
-        if canonical.parent() != current_exe.parent()
-            || !windows_signers_match(&current_exe, &canonical)
+        if canonical.parent() != current_exe.parent() || !packaged_helper_matches_build(&canonical)
         {
             return false;
         }
@@ -271,37 +258,21 @@ fn macos_team_identifier(path: &Path) -> Option<String> {
         .map(str::to_string)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 #[cfg_attr(debug_assertions, allow(dead_code))]
-fn windows_signers_match(current_exe: &Path, helper: &Path) -> bool {
-    let Some(system_root) = env::var_os("SystemRoot") else {
-        return false;
-    };
-    let powershell = PathBuf::from(system_root)
-        .join("System32")
-        .join("WindowsPowerShell")
-        .join("v1.0")
-        .join("powershell.exe");
-    let script = concat!(
-        "$app = Get-AuthenticodeSignature -LiteralPath $env:NOLAND_VERIFY_APP; ",
-        "$helper = Get-AuthenticodeSignature -LiteralPath $env:NOLAND_VERIFY_HELPER; ",
-        "if ($app.Status -eq 'Valid' -and $helper.Status -eq 'Valid' -and ",
-        "$null -ne $app.SignerCertificate -and $null -ne $helper.SignerCertificate -and ",
-        "$app.SignerCertificate.Thumbprint -eq $helper.SignerCertificate.Thumbprint) ",
-        "{ exit 0 } else { exit 1 }"
-    );
-    Command::new(powershell)
-        .args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            script,
-        ])
-        .env("NOLAND_VERIFY_APP", current_exe)
-        .env("NOLAND_VERIFY_HELPER", helper)
-        .status()
-        .is_ok_and(|status| status.success())
+fn packaged_helper_matches_build(helper: &Path) -> bool {
+    let expected = option_env!("NOLAND_NET_HELPER_SHA256").unwrap_or_default();
+    helper_matches_expected_sha256(helper, expected)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn helper_matches_expected_sha256(helper: &Path, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+
+    !expected.is_empty()
+        && fs::read(helper)
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(expected))
+            .unwrap_or(false)
 }
 
 pub fn bundled_binary_candidate_paths(
@@ -475,10 +446,9 @@ fn find_binary_recursively(root: &Path, names: &[String], max_depth: usize) -> O
 
 #[cfg(test)]
 mod tests {
-    #[cfg(target_os = "linux")]
-    use super::is_trusted_privileged_binary;
     use super::{
-        bundled_binary_candidate_paths, bundled_binary_names, locate_bundled_binary_in_layout,
+        bundled_binary_candidate_paths, bundled_binary_names, helper_matches_expected_sha256,
+        locate_bundled_binary_in_layout,
     };
     use std::{fs, path::PathBuf};
 
@@ -493,6 +463,22 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn validates_embedded_helper_digest() {
+        let root = temp_root("helper-digest");
+        let helper = root.join("noland-net-helper.exe");
+        fs::write(&helper, b"packaged helper").unwrap();
+
+        assert!(helper_matches_expected_sha256(
+            &helper,
+            "e414bbdfcb2b696f2079f62ac0519a1825ad3325d5e4701dff64596d0f93e9b9",
+        ));
+        assert!(!helper_matches_expected_sha256(&helper, "incorrect"));
+        assert!(!helper_matches_expected_sha256(&helper, ""));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     fn write_executable(path: &PathBuf) {
@@ -547,14 +533,5 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|path| { path.ends_with("bundle/Resources/binaries/ssh-aarch64-apple-darwin") }));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn rejects_user_owned_privileged_helper() {
-        let root = temp_root("untrusted-privileged-helper");
-        let helper = root.join("noland-net-helper");
-        write_executable(&helper);
-        assert!(!is_trusted_privileged_binary(&helper));
     }
 }

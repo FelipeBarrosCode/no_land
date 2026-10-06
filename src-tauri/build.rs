@@ -1,3 +1,4 @@
+use sha2::{Digest, Sha256};
 use std::{
     env, fs, io,
     path::{Path, PathBuf},
@@ -684,6 +685,16 @@ fn ensure_managed_sidecar_bundle_artifacts() -> io::Result<()> {
         false,
         "run the Tauri build through the npm wrapper so the embedded GotaTun helper is staged first",
     )?;
+    let helper_name = if target_is_windows {
+        format!("noland-net-helper-{target_triple}.exe")
+    } else {
+        format!("noland-net-helper-{target_triple}")
+    };
+    let helper_path = binaries_dir.join(helper_name);
+    println!("cargo:rerun-if-changed={}", helper_path.display());
+    let helper_bytes = fs::read(helper_path)?;
+    let helper_sha256 = format!("{:x}", Sha256::digest(helper_bytes));
+    println!("cargo:rustc-env=NOLAND_NET_HELPER_SHA256={helper_sha256}");
     if target_is_windows && is_release {
         let wintun = binaries_dir.join(format!("wintun-{target_triple}.dll"));
         if !wintun.is_file() {

@@ -400,9 +400,9 @@ pub async fn run_system_health_report(app: &AppHandle, context: &AppContext) -> 
             "binary.net_helper",
             "Managed tunnel helper",
             "wireguard",
-            "noland-net-helper is missing.",
+            "noland-net-helper is missing or failed integrity validation.",
             None,
-            Some("Reinstall or rebuild Noland Connect; the embedded tunnel cannot run without this sidecar.".to_string()),
+            Some("Reinstall or rebuild Noland Connect; the embedded tunnel requires the helper packaged with this exact app build.".to_string()),
         ),
     });
 
