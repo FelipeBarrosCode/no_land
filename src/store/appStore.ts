@@ -651,7 +651,9 @@ async function applyProvisioningEventState(
         updates.busy = false;
         updates.provisioningStopRequested = false;
       } else {
-        updates.busy = true;
+        // The user has already stopped the UI flow. Keep surrounding controls
+        // usable while the backend finishes the current safe stage.
+        updates.busy = false;
       }
       return updates;
     }
@@ -1193,6 +1195,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       // for the loading modal to close.
       set({
         provisioningStopRequested: true,
+        provisioningModalDismissed: true,
+        busy: false,
         blockingAction: null,
         isBlocking: false,
         error: null,
