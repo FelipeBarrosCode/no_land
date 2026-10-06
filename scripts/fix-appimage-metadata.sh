@@ -8,12 +8,12 @@ case "$architecture" in
   x64)
     tool_arch=x86_64
     output_arch=x86_64
-    expected_sha256=a6d71e2b6cd66f8e8d16c37ad164658985e0cf5fcaa950c90a482890cb9d13e0
+    expected_sha256=95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6
     ;;
   arm64)
     tool_arch=aarch64
     output_arch=aarch64
-    expected_sha256=1b00524ba8c6b678dc15ef88a5c25ec24def36cdfc7e3abb32ddcd068e8007fe
+    expected_sha256=a595ea34cd6136c7f595e9dcbb16f3e9725d7610efb9e43b38c3c6e86cafc270
     ;;
   *)
     echo "Unsupported AppImage architecture: $architecture" >&2
