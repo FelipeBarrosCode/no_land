@@ -1094,20 +1094,16 @@ function resolveMacLocalOpenSslPrefix() {
 
   const envPrefix = process.env.OPENSSL_ROOT_DIR?.trim();
   const brewPrefix = run('brew', ['--prefix', 'openssl@3'], { allowFailure: true, captureOutput: true }).stdout.trim();
-  const candidate = locateExistingPath([
+  const candidate = [
     envPrefix,
     brewPrefix || null,
     '/opt/homebrew/opt/openssl@3',
     '/usr/local/opt/openssl@3',
-  ]);
+  ].find((path) => path
+    && existsSync(join(path, 'lib', 'libcrypto.3.dylib'))
+    && existsSync(join(path, 'lib', 'libssl.3.dylib')));
 
-  if (!candidate) {
-    return null;
-  }
-
-  return existsSync(join(candidate, 'lib', 'libcrypto.3.dylib')) && existsSync(join(candidate, 'lib', 'libssl.3.dylib'))
-    ? candidate
-    : null;
+  return candidate ?? null;
 }
 
 function stageMacOpenSslPrefix(sourcePrefix, destinationPrefix) {
