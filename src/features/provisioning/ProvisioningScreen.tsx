@@ -19,6 +19,7 @@ interface Props {
   busy: boolean;
   provisioningModalDismissed: boolean;
   onDismissProvisioningModal: () => void;
+  onStopProvisioning: () => Promise<void>;
   onReopenProvisioningModal: () => void;
   blockingAction: BlockingActionState | null;
   onSetupWireguardAppHandoff: () => Promise<unknown>;
@@ -47,6 +48,7 @@ export function ProvisioningScreen({
   busy,
   provisioningModalDismissed,
   onDismissProvisioningModal,
+  onStopProvisioning,
   onReopenProvisioningModal,
   blockingAction,
   onSetupWireguardAppHandoff,
@@ -253,7 +255,10 @@ export function ProvisioningScreen({
 
       <PostWireguardModal
         open={provisioningModalOpen}
-        onClose={onDismissProvisioningModal}
+        onClose={() => {
+          onDismissProvisioningModal();
+          void onStopProvisioning();
+        }}
         appState={appState}
         busy={busy}
         onSetupWireguardAppHandoff={onSetupWireguardAppHandoff}

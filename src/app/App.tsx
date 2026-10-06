@@ -242,6 +242,9 @@ function ProvisioningRoute() {
     (state) => state.startSleepPrevention,
   );
   const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
+  const stopProvisioningAfterCurrentStage = useAppStore(
+    (state) => state.stopProvisioningAfterCurrentStage,
+  );
 
   if (!appState) {
     return null;
@@ -261,6 +264,7 @@ function ProvisioningRoute() {
       busy={busy}
       provisioningModalDismissed={provisioningModalDismissed}
       onDismissProvisioningModal={dismissProvisioningModal}
+      onStopProvisioning={stopProvisioningAfterCurrentStage}
       onReopenProvisioningModal={reopenProvisioningModal}
       blockingAction={blockingAction}
       onSetupWireguardAppHandoff={setupWireguardAppHandoff}
