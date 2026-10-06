@@ -1,0 +1,345 @@
+name: Reusable signed six-platform build
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Semver to embed in the rehearsal or production bundles
+        type: string
+        required: true
+      retain-artifacts:
+        description: Upload distributable artifacts for the production release job
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  GSTREAMER_VERSION: 1.24.13
+  NOLAND_GSTREAMER_VERSION: 1.24.13
+  MACOSX_DEPLOYMENT_TARGET: "12.0"
+
+jobs:
+  build-unix:
+    name: build-${{ matrix.platform }}-${{ matrix.arch }}
+    environment: Secrets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+          - os: macos-15-intel
+            platform: macos
+            arch: x64
+            target: x86_64-apple-darwin
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x64
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - name: Setup Rust target
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            src-tauri
+            mic-sidecar
+
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos'
+        run: brew install pkg-config
+
+      - name: Install Linux build and package dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl openssh-client xdg-utils xvfb dbus-x11 cpio file binutils libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev wayland-protocols libdecor-0-dev pkg-config libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav gstreamer1.0-gl gstreamer1.0-vaapi gstreamer1.0-x gstreamer1.0-pipewire rpm2cpio libssl-dev libopus-dev libpulse-dev patchelf lintian
+
+      - name: Require Apple production credentials
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          missing=0
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD KEYCHAIN_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID TAURI_SIGNING_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then echo "$name: missing" >&2; missing=1; else echo "$name: present"; fi
+          done
+          test "$missing" -eq 0
+
+      - name: Import Apple Developer ID certificate
+        if: matrix.platform == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE" | base64 --decode > certificate.p12
+          security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+          security set-keychain-settings -t 3600 -u build.keychain
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+
+      - name: Resolve Apple signing identity
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          identities=$(security find-identity -v -p codesigning build.keychain)
+          cert_id=$(printf '%s\n' "$identities" | grep -E 'Developer ID Application' | head -n 1 | awk -F'"' '{print $2}')
+          test -n "$cert_id" || { echo 'Developer ID Application identity not found.' >&2; exit 1; }
+          echo "APPLE_SIGNING_IDENTITY=$cert_id" >> "$GITHUB_ENV"
+
+      - name: Install dependencies and stage managed tools
+        run: |
+          npm ci
+          node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
+          node scripts/set-release-version.mjs "${{ inputs.version }}"
+
+      - name: Build signed/notarized Tauri application
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_SIGNING_IDENTITY }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          NOLAND_REQUIRE_SIGNED_RELEASE: "1"
+        run: npm run tauri:build -- --target "${{ matrix.target }}"
+
+      - name: Repair and re-sign portable AppImage metadata
+        if: matrix.platform == 'linux'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          bundle="src-tauri/target/${{ matrix.target }}/release/bundle"
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD) bash scripts/fix-appimage-metadata.sh "$bundle" "${{ matrix.arch }}"
+          mapfile -d '' appimages < <(find "$bundle" -type f -name '*.AppImage' -print0)
+          test "${#appimages[@]}" -eq 1
+          rm -f "${appimages[0]}.sig"
+          node node_modules/@tauri-apps/cli/tauri.js signer sign "${appimages[0]}"
+          test -s "${appimages[0]}.sig"
+
+      - name: Create and validate macOS downloadable archives
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          product_name=$(node -p "require('./src-tauri/tauri.conf.json').productName")
+          version=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          app_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${product_name}.app"
+          zip_path="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${product_name}_${version}_${{ matrix.arch }}.app.zip"
+          ditto -c -k --keepParent "$app_path" "$zip_path"
+          extract_dir=$(mktemp -d)
+          ditto -x -k "$zip_path" "$extract_dir"
+          codesign --verify --deep --strict --verbose=2 "$extract_dir/${product_name}.app"
+          xcrun stapler validate -v "$extract_dir/${product_name}.app"
+          spctl -a -vvv -t exec "$extract_dir/${product_name}.app"
+          updater="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${product_name}.app.tar.gz"
+          test -s "$updater" && test -s "$updater.sig"
+          updater_dir=$(mktemp -d)
+          tar -xzf "$updater" -C "$updater_dir"
+          codesign --verify --deep --strict --verbose=2 "$updater_dir/${product_name}.app"
+          xcrun stapler validate -v "$updater_dir/${product_name}.app"
+          spctl -a -vvv -t exec "$updater_dir/${product_name}.app"
+          rm -rf "$extract_dir" "$updater_dir"
+
+      - name: Verify bundled sidecars and runtime
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+
+      - name: Validate Debian package
+        if: matrix.platform == 'linux'
+        run: bash scripts/validate-deb.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle"
+
+      - name: Generate local artifact checksums
+        run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}"
+
+      - name: Upload production build artifacts
+        if: inputs.retain-artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tauri-${{ matrix.platform }}-${{ matrix.arch }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Remove temporary Apple signing keychain
+        if: always() && matrix.platform == 'macos'
+        shell: bash
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
+          rm -f certificate.p12
+
+      - name: Destroy nightly distributables and signing material
+        if: always() && !inputs.retain-artifacts
+        shell: bash
+        run: |
+          rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle"
+
+  build-windows:
+    name: build-windows-${{ matrix.arch }}
+    environment: Secrets
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            arch: x64
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            arch: arm64
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            src-tauri
+            mic-sidecar
+
+      - name: Install dependencies and stage managed tools
+        shell: pwsh
+        run: |
+          npm ci
+          node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
+          node scripts/set-release-version.mjs "${{ inputs.version }}"
+
+      - name: Require Artifact Signing credentials
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          foreach ($name in @('AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET', 'AZURE_TENANT_ID')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing Artifact Signing secret: $name"
+            }
+          }
+
+      - name: Build Windows Tauri application
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          npm run tauri:build -- --target "${{ matrix.target }}"
+
+      - name: Sign Windows installers with Azure Artifact Signing
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: Noland
+          certificate-profile-name: Noland
+          files-folder: ${{ github.workspace }}\src-tauri\target\${{ matrix.target }}\release\bundle
+          files-folder-filter: exe,msi
+          files-folder-recurse: true
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: Noland Connect
+          description-url: https://no-land.net
+          exclude-environment-credential: false
+          exclude-workload-identity-credential: true
+          exclude-managed-identity-credential: true
+          exclude-shared-token-cache-credential: true
+          exclude-visual-studio-credential: true
+          exclude-visual-studio-code-credential: true
+          exclude-azure-cli-credential: true
+          exclude-azure-powershell-credential: true
+          exclude-azure-developer-cli-credential: true
+          exclude-interactive-browser-credential: true
+
+      - name: Verify Windows Authenticode signatures
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          $files = @(Get-ChildItem -Path $bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })
+          if ($files.Count -eq 0) { throw 'No Windows installers were found to verify.' }
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $file.FullName
+            if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature on $($file.FullName): $($signature.Status)" }
+          }
+
+      - name: Regenerate Tauri updater signatures after Authenticode signing
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) { throw 'TAURI_SIGNING_PRIVATE_KEY is required.' }
+          $bundle = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          $count = 0
+          foreach ($installer in @(Get-ChildItem -Path $bundle -Recurse -File | Where-Object { $_.Extension -in @('.exe', '.msi') })) {
+            $signaturePath = "$($installer.FullName).sig"
+            if (-not (Test-Path -LiteralPath $signaturePath)) { continue }
+            Remove-Item -LiteralPath $signaturePath -Force
+            & node node_modules/@tauri-apps/cli/tauri.js signer sign $installer.FullName
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $signaturePath) -or (Get-Item $signaturePath).Length -eq 0) {
+              throw "Failed regenerating updater signature for $($installer.FullName)"
+            }
+            $count += 1
+          }
+          if ($count -eq 0) { throw 'No Windows updater signature was regenerated.' }
+
+      - name: Verify bundled sidecars and runtime
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+
+      - name: Generate local artifact checksums
+        run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-windows-${{ matrix.arch }}"
+
+      - name: Upload signed production artifacts
+        if: inputs.retain-artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tauri-windows-${{ matrix.arch }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Destroy nightly Windows distributables
+        if: always() && !inputs.retain-artifacts
+        shell: pwsh
+        run: Remove-Item -Recurse -Force -ErrorAction SilentlyContinue "src-tauri/target/${{ matrix.target }}/release/bundle"

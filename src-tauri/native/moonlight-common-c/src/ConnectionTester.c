@@ -80,6 +80,10 @@ unsigned short LiGetPortFromPortFlagIndex(int portFlagIndex)
 
 void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* outputBuffer, int outputBufferLength)
 {
+    if (outputBuffer == NULL || outputBufferLength <= 0) {
+        return;
+    }
+
     // Initialize the output buffer to an empty string
     outputBuffer[0] = 0;
 
@@ -92,15 +96,17 @@ void LiStringifyPortFlags(unsigned int portFlags, const char* separator, char* o
     for (int i = 0; i < PORT_FLAGS_MAX_COUNT; i++) {
         if (portFlags & (1U << i)) {
             const char* protoStr = LiGetProtocolFromPortFlagIndex(i) == IPPROTO_UDP ? "UDP" : "TCP";
-            offset += snprintf(&outputBuffer[offset], outputBufferLength - offset, "%s%s %u",
-                               offset != 0 ? separator : "",
-                               protoStr,
-                               LiGetPortFromPortFlagIndex(i));
-            if (outputBufferLength - offset <= 0) {
-                // snprintf() will return the desired length if the buffer is too small,
-                // so it is possible for this calculation to be negative.
+            int remaining = outputBufferLength - offset;
+            int written = snprintf(&outputBuffer[offset], remaining, "%s%s %u",
+                                   offset != 0 ? separator : "",
+                                   protoStr,
+                                   LiGetPortFromPortFlagIndex(i));
+            if (written < 0 || written >= remaining) {
+                // snprintf() always terminates when remaining is positive. Stop before
+                // its required-length return value can move offset beyond the buffer.
                 break;
             }
+            offset += written;
         }
     }
 }

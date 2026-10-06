@@ -92,6 +92,11 @@ fn main() {
     init_logging();
 
     tauri::Builder::default()
+        .plugin(
+            tauri::plugin::Builder::<_, ()>::new("navigation-policy")
+                .on_navigation(|_, url| is_trusted_webview_navigation(url))
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
@@ -446,6 +451,18 @@ fn main() {
             moonlight_manager
                 .runtime
                 .start_event_bridge(app.handle().clone());
+            let mut stream_state = moonlight_manager.runtime.subscribe_state();
+            let stream_network_context = context.clone();
+            tauri::async_runtime::spawn(async move {
+                while stream_state.changed().await.is_ok() {
+                    let active = !matches!(
+                        *stream_state.borrow(),
+                        moonlight::domain::SessionState::Idle
+                    );
+                    stream_network_context.set_stream_network_active(active);
+                }
+                stream_network_context.set_stream_network_active(false);
+            });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
@@ -531,6 +548,7 @@ fn main() {
 
             tauri::async_runtime::spawn(async move {
                 network_monitor.stop().await;
+                mic_context.set_stream_network_active(false);
                 let _ = runtime.stop().await;
                 let _ = runtime.detach_surface().await;
                 input.end_capture();
@@ -597,6 +615,7 @@ fn main() {
             test_cloudflare_turn_settings,
             clear_cloudflare_turn_settings,
             get_instance_connection_status,
+            repair_instance_connection,
             set_instance_connection_preference,
             update_server_preferences,
             update_moonlight_preferences,
@@ -696,4 +715,48 @@ fn main() {
             error!("{message}");
             std::process::exit(1);
         });
+}
+
+fn is_trusted_webview_navigation(url: &tauri::Url) -> bool {
+    match (url.scheme(), url.host_str()) {
+        ("tauri" | "asset", Some("localhost")) => true,
+        ("http" | "https", Some("tauri.localhost" | "asset.localhost")) => true,
+        #[cfg(debug_assertions)]
+        ("http" | "https", Some("localhost" | "127.0.0.1")) => url.port() == Some(1420),
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod navigation_policy_tests {
+    use super::is_trusted_webview_navigation;
+
+    #[test]
+    fn accepts_only_exact_local_app_origins() {
+        for url in [
+            "tauri://localhost/",
+            "asset://localhost/index.html",
+            "http://tauri.localhost/",
+            "https://asset.localhost/index.html",
+        ] {
+            assert!(
+                is_trusted_webview_navigation(&url.parse().unwrap()),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_remote_domains_that_mimic_app_protocols() {
+        for url in [
+            "http://tauri.attacker.example/",
+            "https://asset.attacker.example/",
+            "https://example.com/",
+        ] {
+            assert!(
+                !is_trusted_webview_navigation(&url.parse().unwrap()),
+                "{url}"
+            );
+        }
+    }
 }

@@ -128,6 +128,182 @@ pub fn locate_bundled_binary(
     )
 }
 
+/// Resolve a helper that will be launched with elevated privileges. Unlike
+/// normal sidecars this never searches the current working directory,
+/// recursive ancestors, or user-writable `.local` layouts.
+pub fn locate_privileged_bundled_binary(
+    stem: &str,
+    env_var: &str,
+    uses_exe_suffix: bool,
+    target_triple: &str,
+) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = env::var(env_var)
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| is_executable_file(path))
+    {
+        return Some(path);
+    }
+
+    #[cfg(not(debug_assertions))]
+    let _ = env_var;
+
+    let names = bundled_binary_names(stem, uses_exe_suffix, target_triple);
+    let mut directories = Vec::new();
+    if let Some(executable_dir) = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        directories.push(executable_dir);
+    }
+    #[cfg(target_os = "linux")]
+    directories.extend([
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/usr/lib/noland-connect"),
+        // Tauri installs `externalBin` sidecars below the package's
+        // resources directory on Debian/AppImage-style Linux layouts.
+        // Keep this in the trusted lookup set because this resolver is used
+        // for the elevated network helper, not ordinary user-owned tools.
+        PathBuf::from("/usr/lib/noland-connect/resources"),
+        PathBuf::from("/usr/lib/Noland Connect"),
+        PathBuf::from("/usr/lib/Noland Connect/resources"),
+    ]);
+
+    directories.into_iter().find_map(|directory| {
+        names.iter().find_map(|name| {
+            let candidate = directory.join(name);
+            is_trusted_privileged_binary(&candidate).then_some(candidate)
+        })
+    })
+}
+
+fn is_trusted_privileged_binary(path: &Path) -> bool {
+    if !is_executable_file(path) {
+        return false;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let _ = &canonical;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let Ok(metadata) = fs::metadata(&canonical) else {
+            return false;
+        };
+        if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+            return false;
+        }
+        let mut parent = canonical.parent();
+        while let Some(directory) = parent {
+            let Ok(metadata) = fs::metadata(directory) else {
+                return false;
+            };
+            if metadata.uid() != 0 || metadata.permissions().mode() & 0o022 != 0 {
+                return false;
+            }
+            parent = directory.parent();
+        }
+    }
+    #[cfg(all(target_os = "macos", not(debug_assertions)))]
+    {
+        let Ok(current_exe) = env::current_exe().and_then(|path| path.canonicalize()) else {
+            return false;
+        };
+        let Some(app_root) = current_exe
+            .ancestors()
+            .find(|ancestor| ancestor.extension().is_some_and(|value| value == "app"))
+        else {
+            return false;
+        };
+        if !canonical.starts_with(app_root)
+            || !valid_macos_signature(&current_exe)
+            || !valid_macos_signature(&canonical)
+            || macos_team_identifier(&current_exe)
+                .zip(macos_team_identifier(&canonical))
+                .is_none_or(|(app, helper)| app != helper)
+        {
+            return false;
+        }
+    }
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    {
+        let Ok(current_exe) = env::current_exe().and_then(|path| path.canonicalize()) else {
+            return false;
+        };
+        if canonical.parent() != current_exe.parent()
+            || !windows_signers_match(&current_exe, &canonical)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn valid_macos_signature(path: &Path) -> bool {
+    Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn macos_team_identifier(path: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "not set")
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "windows")]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn windows_signers_match(current_exe: &Path, helper: &Path) -> bool {
+    let Some(system_root) = env::var_os("SystemRoot") else {
+        return false;
+    };
+    let powershell = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let script = concat!(
+        "$app = Get-AuthenticodeSignature -LiteralPath $env:NOLAND_VERIFY_APP; ",
+        "$helper = Get-AuthenticodeSignature -LiteralPath $env:NOLAND_VERIFY_HELPER; ",
+        "if ($app.Status -eq 'Valid' -and $helper.Status -eq 'Valid' -and ",
+        "$null -ne $app.SignerCertificate -and $null -ne $helper.SignerCertificate -and ",
+        "$app.SignerCertificate.Thumbprint -eq $helper.SignerCertificate.Thumbprint) ",
+        "{ exit 0 } else { exit 1 }"
+    );
+    Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .env("NOLAND_VERIFY_APP", current_exe)
+        .env("NOLAND_VERIFY_HELPER", helper)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 pub fn bundled_binary_candidate_paths(
     names: &[String],
     current_exe: Option<&Path>,
@@ -299,6 +475,8 @@ fn find_binary_recursively(root: &Path, names: &[String], max_depth: usize) -> O
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::is_trusted_privileged_binary;
     use super::{
         bundled_binary_candidate_paths, bundled_binary_names, locate_bundled_binary_in_layout,
     };
@@ -369,5 +547,14 @@ mod tests {
         assert!(candidates
             .iter()
             .any(|path| { path.ends_with("bundle/Resources/binaries/ssh-aarch64-apple-darwin") }));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejects_user_owned_privileged_helper() {
+        let root = temp_root("untrusted-privileged-helper");
+        let helper = root.join("noland-net-helper");
+        write_executable(&helper);
+        assert!(!is_trusted_privileged_binary(&helper));
     }
 }

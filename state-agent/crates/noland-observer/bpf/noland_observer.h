@@ -65,7 +65,7 @@ struct noland_config_v1 {
     __u64 discovery_read_ns;      /* default 5 seconds */
     __u64 steady_read_ns;         /* default 60 seconds */
     __u64 write_ns;               /* default 250 milliseconds */
-    __u32 read_sample_rate;       /* 0/1 keeps all, N keeps roughly 1/N */
+    __u32 read_sample_rate;       /* 0/1 keeps all dependency reads; N keeps roughly 1/N */
     __u32 ignored_tgid;           /* convenient single-agent exclusion */
     __u32 default_mode;           /* discovery when zero for compatibility */
     __u32 reserved;

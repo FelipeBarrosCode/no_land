@@ -2,7 +2,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result};
 use noland_network_contracts::control::{
-    InstallProbeSessionRequest, PrepareTurnRequest, PrepareTurnResponse,
+    AbortConnectionProfileRequest, CommitConnectionProfileRequest, InstallProbeSessionRequest,
+    PrepareConnectionProfileRequest, PrepareTurnRequest, PrepareTurnResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -141,10 +142,40 @@ pub async fn dispatch_method(
             "protocolVersions": [1],
             "turnProviders": ["cloudflare"],
             "turnTransports": ["udp"],
-            "probeProtocolVersions": [1, 2],
+            "probeProtocolVersions": [1, 2, 3],
             "bridgeSupported": true,
+            "connectionProfileSchemaVersions": [1],
+            "connectionProfileTransactions": true,
             "policyProfiles": ["gaming-v1"],
         })),
+        "get_link_state" => manager
+            .get_link_state()
+            .await
+            .and_then(|state| serde_json::to_value(state).map_err(Into::into)),
+        "prepare_connection_profile" => {
+            let params = serde_json::from_value::<PrepareConnectionProfileRequest>(params)
+                .context("invalid prepare_connection_profile parameters")?;
+            manager
+                .prepare_connection_profile(params)
+                .await
+                .and_then(|result| serde_json::to_value(result).map_err(Into::into))
+        }
+        "commit_connection_profile" => {
+            let params = serde_json::from_value::<CommitConnectionProfileRequest>(params)
+                .context("invalid commit_connection_profile parameters")?;
+            manager
+                .commit_connection_profile(params)
+                .await
+                .and_then(|result| serde_json::to_value(result).map_err(Into::into))
+        }
+        "abort_connection_profile" => {
+            let params = serde_json::from_value::<AbortConnectionProfileRequest>(params)
+                .context("invalid abort_connection_profile parameters")?;
+            manager
+                .abort_connection_profile(params)
+                .await
+                .and_then(|result| serde_json::to_value(result).map_err(Into::into))
+        }
         "prepare_turn" => match serde_json::from_value::<PrepareTurnRequest>(params) {
             Ok(params) => {
                 manager

@@ -1,0 +1,100 @@
+name: Reusable full test suite
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  network-tests:
+    name: Network contracts and agent tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            network-contracts
+            network-agent
+      - run: npm ci
+      - name: Existing unit-test entry point
+        run: npm run test:unit
+
+  desktop-tests:
+    name: Desktop and net-helper tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install native test dependencies
+        run: bash scripts/ci/install-linux-native-deps.sh
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Build desktop frontend assets
+        run: npm run build
+      - name: Prepare required desktop sidecars
+        run: node scripts/prepare-mic-sidecar.mjs dev
+      - name: Run desktop workspace tests
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets
+
+  state-agent-tests:
+    name: State-agent unit and integration tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install eBPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libelf-dev zlib1g-dev
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: state-agent
+      - name: Run all state-agent workspace tests
+        run: cargo test --locked --manifest-path state-agent/Cargo.toml --workspace --all-targets
+
+  microphone-tests:
+    name: Microphone sender and receiver tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - name: Install GStreamer/audio dependencies
+        run: bash scripts/ci/install-linux-native-deps.sh
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            mic-sidecar
+            vm-cloud-mic-agent
+      - run: cargo test --locked --manifest-path mic-sidecar/Cargo.toml --all-targets
+      - run: cargo test --locked --manifest-path vm-cloud-mic-agent/Cargo.toml --all-targets
+
+  native-moonlight-tests:
+    name: Native Moonlight C tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Install native test dependencies
+        run: bash scripts/ci/install-linux-native-deps.sh
+      - name: Configure native tests
+        run: >-
+          cmake -S src-tauri/native -B build/native-tests
+          -DBUILD_NOLAND_MOONLIGHT_HARNESS=OFF
+          -DBUILD_NOLAND_MOONLIGHT_TESTS=ON
+          -DCMAKE_BUILD_TYPE=Release
+      - name: Build native tests
+        run: cmake --build build/native-tests --config Release --parallel 2
+      - name: Run native tests
+        run: ctest --test-dir build/native-tests -C Release --output-on-failure

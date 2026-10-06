@@ -17,6 +17,12 @@ export function Card({ className, children, interactive = false, onClick }: Prop
         className
       )}
       onClick={onClick}
+      onKeyDown={(event) => {
+        if (interactive && (event.key === "Enter" || event.key === " ")) {
+          event.preventDefault();
+          onClick?.();
+        }
+      }}
       role={interactive ? "button" : undefined}
       tabIndex={interactive ? 0 : undefined}
     >

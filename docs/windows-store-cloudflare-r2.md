@@ -65,7 +65,7 @@ The release job also publishes helper files in the GitHub release:
 
 Use the generated package URL in Microsoft Partner Center.
 
-## Azure Artifact Signing
+## Trusted Signing
 
 Windows installers are Authenticode-signed after the architecture-specific
 builds complete. Both x64 and ARM64 installers are signed from a supported x64
@@ -81,16 +81,14 @@ The signing job uses these Artifact Signing resources:
 
 Configure these secrets on the GitHub `Secrets` environment:
 
+- `TRUSTED_SIGNING_ENDPOINT`
+- `TRUSTED_SIGNING_ACCOUNT_NAME`
 - `AZURE_CLIENT_ID`
+- `AZURE_CLIENT_SECRET`
 - `AZURE_TENANT_ID`
 - `AZURE_SUBSCRIPTION_ID`
 
-The Entra service principal must have the **Artifact Signing Certificate
-Profile Signer** role on the `Noland` certificate profile. Its GitHub OIDC
-federated credential must allow this environment subject:
-
-`repo:FelipeBarrosCode/no_land:environment:Secrets`
-
-No Azure client secret or exported signing certificate is used. Unsigned
-Windows build artifacts are staged under an `unsigned-` artifact name, which
-the release job deliberately excludes.
+The pinned Trusted Signing CLI uses the endpoint/account values and the protected
+Azure service-principal credentials to sign the `Noland` certificate profile. No
+exported signing certificate is used. Unsigned Windows build artifacts are staged
+under an `unsigned-` artifact name, which the release job deliberately excludes.

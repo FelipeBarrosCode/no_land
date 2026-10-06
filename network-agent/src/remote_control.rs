@@ -67,7 +67,7 @@ impl RemoteControl {
             ),
         };
         websocket
-            .send(Message::Text(serde_json::to_string(&auth_ok)?.into()))
+            .send(Message::Text(serde_json::to_string(&auth_ok)?))
             .await?;
 
         let mut expected_sequence = next_sequence;
@@ -198,7 +198,7 @@ impl RemoteControl {
                 },
             };
             websocket
-                .send(Message::Text(serde_json::to_string(&response)?.into()))
+                .send(Message::Text(serde_json::to_string(&response)?))
                 .await?;
             expected_sequence = expected_sequence.saturating_add(1);
         }
@@ -295,7 +295,7 @@ impl RemoteControl {
             }),
         };
         websocket
-            .send(Message::Text(serde_json::to_string(&response)?.into()))
+            .send(Message::Text(serde_json::to_string(&response)?))
             .await?;
         Ok(())
     }
@@ -323,7 +323,12 @@ fn random_nonce() -> String {
 fn is_mutating_method(method: &str) -> bool {
     matches!(
         method,
-        "prepare_turn" | "install_probe_session" | "stop_turn"
+        "prepare_turn"
+            | "install_probe_session"
+            | "stop_turn"
+            | "prepare_connection_profile"
+            | "commit_connection_profile"
+            | "abort_connection_profile"
     )
 }
 
@@ -338,6 +343,10 @@ mod tests {
     fn only_state_changing_methods_require_revision_checks() {
         assert!(is_mutating_method("prepare_turn"));
         assert!(is_mutating_method("install_probe_session"));
+        assert!(is_mutating_method("prepare_connection_profile"));
+        assert!(is_mutating_method("commit_connection_profile"));
+        assert!(is_mutating_method("abort_connection_profile"));
+        assert!(!is_mutating_method("get_link_state"));
         assert!(!is_mutating_method("get_network_status"));
         assert!(!is_mutating_method("get_capabilities"));
     }

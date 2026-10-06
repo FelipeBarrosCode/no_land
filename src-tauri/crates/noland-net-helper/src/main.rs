@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::{mpsc, oneshot},
-    time::sleep,
+    time::{interval, sleep, MissedTickBehavior},
 };
 use tun::AbstractDevice;
 
@@ -931,6 +931,12 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
     write_status(status_path, &status)?;
 
     let stop_request_path = args.state_dir.join(STOP_REQUEST_FILE_NAME);
+    // Keep one interval across control requests. Recreating `sleep()` inside
+    // the select loop lets frequent GetRuntime polling postpone the status
+    // refresh forever.
+    let mut status_heartbeat = interval(STATUS_INTERVAL);
+    status_heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    status_heartbeat.tick().await;
     #[cfg(unix)]
     {
         let mut terminate =
@@ -971,7 +977,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                         status_path,
                     ).await;
                 }
-                _ = sleep(STATUS_INTERVAL) => {
+                _ = status_heartbeat.tick() => {
                     if stop_request_path.exists() {
                         break;
                     }
@@ -1019,7 +1025,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                     status_path,
                 ).await;
             }
-            _ = sleep(STATUS_INTERVAL) => {
+            _ = status_heartbeat.tick() => {
                 if stop_request_path.exists() {
                     break;
                 }
@@ -1083,12 +1089,18 @@ async fn handle_control_call(
         )
     } else {
         match call.request.method {
-            HelperMethod::GetRuntime => HelperResponse {
-                request_id,
-                launch_id,
-                result: serde_json::to_value(&*status).ok(),
-                error: None,
-            },
+            HelperMethod::GetRuntime => {
+                // Runtime validation needs a read-through snapshot. Returning
+                // the last heartbeat can falsely report no traffic immediately
+                // after an endpoint switch.
+                refresh_status_from_device(device, status).await;
+                HelperResponse {
+                    request_id,
+                    launch_id,
+                    result: serde_json::to_value(&*status).ok(),
+                    error: None,
+                }
+            }
             HelperMethod::SetPeerEndpoint => {
                 match serde_json::from_value::<SetPeerEndpointParams>(call.request.params) {
                     Ok(params) => {

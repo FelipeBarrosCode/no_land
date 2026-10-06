@@ -1,0 +1,155 @@
+name: Pull Request CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck-build:
+    name: typecheck-build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: TypeScript and Vite production build
+        run: npm run build
+
+  rust-format:
+    name: rust-format
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+      - name: Check every first-party Rust workspace
+        run: |
+          for manifest in network-contracts/Cargo.toml network-agent/Cargo.toml state-agent/Cargo.toml src-tauri/Cargo.toml mic-sidecar/Cargo.toml vm-cloud-mic-agent/Cargo.toml; do
+            cargo fmt --all --manifest-path "$manifest" -- --check
+          done
+
+  rust-check:
+    name: rust-check (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: network-contracts
+            manifest: network-contracts/Cargo.toml
+            workspace: network-contracts
+            strict: true
+            native: false
+          - name: network-agent
+            manifest: network-agent/Cargo.toml
+            workspace: network-agent
+            strict: true
+            native: false
+          - name: state-agent
+            manifest: state-agent/Cargo.toml
+            workspace: state-agent
+            strict: false
+            native: false
+            ebpf: true
+          - name: desktop-net-helper
+            manifest: src-tauri/Cargo.toml
+            workspace: src-tauri
+            strict: false
+            native: true
+            skip_native_build: true
+          - name: microphone-sender
+            manifest: mic-sidecar/Cargo.toml
+            workspace: mic-sidecar
+            strict: false
+            native: true
+          - name: microphone-receiver
+            manifest: vm-cloud-mic-agent/Cargo.toml
+            workspace: vm-cloud-mic-agent
+            strict: false
+            native: true
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: clippy
+      - name: Install native dependencies
+        if: matrix.native
+        run: bash scripts/ci/install-linux-native-deps.sh
+      - name: Install state-agent eBPF build dependencies
+        if: matrix.ebpf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libelf-dev zlib1g-dev
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          key: pr-${{ matrix.name }}
+          workspaces: ${{ matrix.workspace }}
+      - name: Prepare Tauri check inputs
+        if: matrix.skip_native_build
+        run: mkdir -p src-tauri/ci-dist
+      - name: Cargo check
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+        run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
+      - name: Clippy strict baseline
+        if: matrix.strict
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+        run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets -- -D warnings
+      - name: Clippy existing-warning baseline
+        if: matrix.strict == false
+        env:
+          NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+        run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
+
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+        with:
+          workspaces: |
+            network-contracts
+            network-agent
+      - run: npm ci
+      - run: npm run test:unit
+
+  security:
+    name: security
+    permissions:
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/_security.yml
+    with:
+      dependency-review: true
+
+  required:
+    name: PR CI required
+    if: always()
+    needs: [typecheck-build, rust-format, rust-check, unit-tests, security]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every PR lane
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: echo "$NEEDS" | jq -e 'all(.[]; .result == "success")'

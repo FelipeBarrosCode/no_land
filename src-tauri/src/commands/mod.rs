@@ -8,7 +8,7 @@ pub use self::auto_shutdown::{
 };
 pub use self::connection::{
     clear_cloudflare_turn_settings, get_cloudflare_turn_settings, get_instance_connection_status,
-    save_cloudflare_turn_settings, set_instance_connection_preference,
+    repair_instance_connection, save_cloudflare_turn_settings, set_instance_connection_preference,
     test_cloudflare_turn_settings,
 };
 pub use self::launch_library::{
@@ -33,7 +33,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
-    errors::{AppError, FrontendError},
+    errors::{AppError, AppResult, FrontendError},
     input::{
         event::{ButtonState, MouseButton},
         state::MouseMode as CaptureMouseMode,
@@ -80,6 +80,7 @@ use crate::{
     services::{
         app_context::AppContext,
         clipboard,
+        connection_manager::ConnectionManager,
         diagnostics::{write_diagnostic_report, DiagnosticReportResponse},
         display_profile::{
             build_display_profile, DisplayModeSpec, DisplayProfile, DisplayProfileSource,
@@ -621,6 +622,200 @@ fn resolve_instance_id_for_embedded_host(state: &PersistedAppState, host_id: &st
         })
         .map(|server| server.instance_id)
         .or_else(|| parse_instance_id_from_embedded_host_id(host_id))
+}
+
+fn stream_start_error_is_repairable(error: &crate::moonlight::domain::MoonlightError) -> bool {
+    matches!(
+        error,
+        crate::moonlight::domain::MoonlightError::Persistence(_)
+            | crate::moonlight::domain::MoonlightError::Io(_)
+            | crate::moonlight::domain::MoonlightError::Native(_)
+    )
+}
+
+async fn repair_stream_connection_after_failure(
+    context: &AppContext,
+    host_id: &str,
+    failure: &str,
+) -> AppResult<bool> {
+    let state = context.load_state().await;
+    let Some(instance_id) = resolve_instance_id_for_embedded_host(&state, host_id) else {
+        return Ok(false);
+    };
+    warn!(
+        instance_id,
+        host_id,
+        failure,
+        "stream startup failed; repairing the selected tunnel and MTU before one retry"
+    );
+
+    // TURN control prefers the private agent, but Direct repair can still use
+    // SSH if optional agent deployment is unavailable.
+    match build_remote_exec_for_instance(context, instance_id).await {
+        Ok(remote) => {
+            if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance_id).await {
+                warn!(instance_id, %error, "network agent preparation failed during stream repair; continuing with available control path");
+            }
+        }
+        Err(error) => {
+            warn!(instance_id, %error, "SSH preparation unavailable during stream repair; trying tunnel control");
+        }
+    }
+    ConnectionManager::repair(context, instance_id).await?;
+    Ok(true)
+}
+
+async fn start_runtime_with_connection_repair(
+    context: &AppContext,
+    moonlight: &MoonlightManager,
+    host_id: &str,
+    request: NativeStartRequest,
+) -> Result<(), FrontendError> {
+    let instance_id = resolve_instance_id_for_embedded_host(&context.load_state().await, host_id);
+    if let Some(instance_id) = instance_id {
+        if let Ok(mut active_instance) = moonlight.active_stream_instance_id.lock() {
+            *active_instance = Some(instance_id);
+        }
+    }
+    context.set_stream_network_active(true);
+    let first_error = match moonlight.runtime.start(request.clone()).await {
+        Ok(()) => {
+            schedule_failed_start_repair(
+                context.clone(),
+                moonlight.runtime.clone(),
+                moonlight.active_stream_instance_id.clone(),
+                host_id.to_string(),
+                instance_id,
+                request,
+            );
+            return Ok(());
+        }
+        Err(error) => error,
+    };
+
+    let repaired =
+        repair_stream_connection_after_failure(context, host_id, &first_error.to_string())
+            .await
+            .map_err(|repair_error| {
+                context.set_stream_network_active(false);
+                clear_active_stream_instance(moonlight, instance_id);
+                AppError::Command(format!(
+            "Stream startup failed ({first_error}); connection repair also failed: {repair_error}"
+        ))
+            })?;
+    if !repaired {
+        context.set_stream_network_active(false);
+        clear_active_stream_instance(moonlight, instance_id);
+        return Err(moonlight_frontend_error(first_error));
+    }
+
+    context.set_stream_network_active(true);
+    if let Err(retry_error) = moonlight.runtime.start(request.clone()).await {
+        context.set_stream_network_active(false);
+        clear_active_stream_instance(moonlight, instance_id);
+        return Err(moonlight_frontend_error(
+            crate::moonlight::domain::MoonlightError::Native(format!(
+                "stream startup failed before repair ({first_error}) and after repair ({retry_error})"
+            )),
+        ));
+    }
+    schedule_failed_start_repair(
+        context.clone(),
+        moonlight.runtime.clone(),
+        moonlight.active_stream_instance_id.clone(),
+        host_id.to_string(),
+        instance_id,
+        request,
+    );
+    Ok(())
+}
+
+fn clear_active_stream_instance(moonlight: &MoonlightManager, expected: Option<u64>) {
+    let Some(expected) = expected else {
+        return;
+    };
+    if let Ok(mut active) = moonlight.active_stream_instance_id.lock() {
+        if *active == Some(expected) {
+            *active = None;
+        }
+    }
+}
+
+fn schedule_failed_start_repair(
+    context: AppContext,
+    runtime: crate::moonlight::runtime::MoonlightRuntimeHandle,
+    active_stream_instance_id: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+    host_id: String,
+    instance_id: Option<u64>,
+    request: NativeStartRequest,
+) {
+    let Some(instance_id) = instance_id else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        let mut states = runtime.subscribe_state();
+        let failed_before_streaming = tokio::time::timeout(Duration::from_secs(25), async {
+            loop {
+                match states.borrow().clone() {
+                    SessionState::Streaming => return false,
+                    SessionState::Idle => return true,
+                    _ => {}
+                }
+                if states.changed().await.is_err() {
+                    return false;
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        if !failed_before_streaming {
+            return;
+        }
+
+        // A manual close clears the active instance before stopping. Never
+        // resurrect a stream the user intentionally closed.
+        let still_requested = active_stream_instance_id
+            .lock()
+            .ok()
+            .is_some_and(|active| *active == Some(instance_id));
+        if !still_requested {
+            return;
+        }
+
+        if let Err(error) = repair_stream_connection_after_failure(
+            &context,
+            &host_id,
+            "stream did not reach the streaming state",
+        )
+        .await
+        {
+            warn!(instance_id, %error, "one-shot failed-start connection repair did not complete");
+            context.set_stream_network_active(false);
+            if let Ok(mut active) = active_stream_instance_id.lock() {
+                if *active == Some(instance_id) {
+                    *active = None;
+                }
+            }
+            return;
+        }
+        let still_requested = active_stream_instance_id
+            .lock()
+            .ok()
+            .is_some_and(|active| *active == Some(instance_id));
+        if !still_requested {
+            return;
+        }
+        context.set_stream_network_active(true);
+        if let Err(error) = runtime.start(request).await {
+            warn!(instance_id, %error, "stream retry after MTU/connection repair failed");
+            context.set_stream_network_active(false);
+            if let Ok(mut active) = active_stream_instance_id.lock() {
+                if *active == Some(instance_id) {
+                    *active = None;
+                }
+            }
+        }
+    });
 }
 
 fn resolve_embedded_moonlight_host_address(
@@ -1409,6 +1604,25 @@ async fn start_embedded_stream_for_host(
             .await
             .map_err(moonlight_frontend_error)?
         }
+        Err(error) if stream_start_error_is_repairable(&error) => {
+            let repaired =
+                repair_stream_connection_after_failure(context, &host_id, &error.to_string())
+                    .await?;
+            if !repaired {
+                return Err(moonlight_frontend_error(error));
+            }
+            moonlight_launch::start_stream_request(
+                moonlight.repository.as_ref(),
+                moonlight.secret_store.as_ref(),
+                &client,
+                &host_id,
+                app_id,
+                None,
+                false,
+            )
+            .await
+            .map_err(moonlight_frontend_error)?
+        }
         Err(error) => return Err(moonlight_frontend_error(error)),
     };
 
@@ -1458,9 +1672,11 @@ async fn start_embedded_stream_for_host(
         *active_preferences = Some(prepared.preferences.clone());
     }
 
-    if let Err(error) = moonlight
-        .runtime
-        .start(NativeStartRequest {
+    if let Err(error) = start_runtime_with_connection_repair(
+        context,
+        moonlight,
+        &host_id,
+        NativeStartRequest {
             host_id: host_id.clone(),
             app_id,
             host_address: prepared.host_address.clone(),
@@ -1473,15 +1689,17 @@ async fn start_embedded_stream_for_host(
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
             session_generation: 0,
-        })
-        .await
+        },
+    )
+    .await
     {
+        context.set_stream_network_active(false);
         let _ = moonlight.runtime.detach_surface().await;
         if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
             *active_preferences = None;
         }
         let _ = close_stream_window(app);
-        return Err(moonlight_frontend_error(error));
+        return Err(error);
     }
 
     schedule_microphone_for_game_stream(context, moonlight, &host_id).await;
@@ -4979,7 +5197,7 @@ pub async fn moonlight_start_stream(
         .map_err(moonlight_frontend_error)?;
     let client = ReqwestGameStreamHttpClient::new(moonlight.secret_store.clone())
         .map_err(moonlight_frontend_error)?;
-    let mut prepared = moonlight_launch::start_stream_request(
+    let prepared_result = moonlight_launch::start_stream_request(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
         &client,
@@ -4988,8 +5206,33 @@ pub async fn moonlight_start_stream(
         input.session_preferences.as_ref(),
         input.replace_existing,
     )
-    .await
-    .map_err(moonlight_frontend_error)?;
+    .await;
+    let mut prepared = match prepared_result {
+        Ok(prepared) => prepared,
+        Err(error) if stream_start_error_is_repairable(&error) => {
+            let repaired = repair_stream_connection_after_failure(
+                context.inner(),
+                &input.host_id,
+                &error.to_string(),
+            )
+            .await?;
+            if !repaired {
+                return Err(moonlight_frontend_error(error));
+            }
+            moonlight_launch::start_stream_request(
+                moonlight.repository.as_ref(),
+                moonlight.secret_store.as_ref(),
+                &client,
+                &input.host_id,
+                input.app_id,
+                input.session_preferences.as_ref(),
+                input.replace_existing,
+            )
+            .await
+            .map_err(moonlight_frontend_error)?
+        }
+        Err(error) => return Err(moonlight_frontend_error(error)),
+    };
 
     prepare_performance_overlay(
         context.inner(),
@@ -5043,9 +5286,11 @@ pub async fn moonlight_start_stream(
         *active_preferences = Some(prepared.preferences.clone());
     }
 
-    if let Err(error) = moonlight
-        .runtime
-        .start(NativeStartRequest {
+    if let Err(error) = start_runtime_with_connection_repair(
+        context.inner(),
+        moonlight.inner(),
+        &input.host_id,
+        NativeStartRequest {
             host_id: input.host_id.clone(),
             app_id: input.app_id,
             host_address: prepared.host_address.clone(),
@@ -5058,15 +5303,17 @@ pub async fn moonlight_start_stream(
             remote_input_key: prepared.remote_input_key,
             remote_input_iv: prepared.remote_input_iv,
             session_generation: 0,
-        })
-        .await
+        },
+    )
+    .await
     {
+        context.set_stream_network_active(false);
         let _ = moonlight.runtime.detach_surface().await;
         if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
             *active_preferences = None;
         }
         let _ = close_stream_window(&app);
-        return Err(moonlight_frontend_error(error));
+        return Err(error);
     }
 
     let state = context.load_state().await;
@@ -5128,6 +5375,7 @@ pub async fn moonlight_disconnect_stream(
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<MoonlightSessionStateResponse, FrontendError> {
     stop_network_monitor(&app).await;
+    context.set_stream_network_active(false);
     moonlight
         .runtime
         .stop()

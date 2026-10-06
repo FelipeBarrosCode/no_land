@@ -25,7 +25,8 @@ desktop client and `noland-network-agent`.
 | Control envelopes | `network-contracts/src/control.rs` |
 | Stable errors | `network-contracts/src/errors.rs` |
 | Events | `network-contracts/src/events.rs` |
-| Probe v1/v2 | `network-contracts/src/probe.rs` |
+| Probe v1/v2 and padded MTU probe v3 | `network-contracts/src/probe.rs` |
+| Versioned connection profile transaction | `network-contracts/src/state.rs`, `network-contracts/src/control.rs` |
 | `gaming-v1` evaluator | `network-contracts/src/evaluation.rs` |
 | Generated JSON Schema | `schemas/*.schema.json` |
 
@@ -52,10 +53,18 @@ relay preference does not declare that the relay is active.
 - Manual TURN selection is available when TURN is enabled and validated
   credentials are present in secure storage. The switch remains transactional
   and commits only after bridge interoperability checks pass.
-- `NOLAND_ENABLE_AUTOMATIC_TRANSPORT_SELECTION=1` additionally starts the
+- `NOLAND_ENABLE_VERIFIED_TURN_SWITCHING=1` and
+  `NOLAND_ENABLE_AUTOMATIC_TRANSPORT_SELECTION=1` additionally start the
   selected-instance `gaming-v1` evaluator every 30 seconds. It remains
   separately gated from manual switching.
 
 Each evaluation installs short-lived in-memory probe sessions, samples direct
 and relay paths concurrently, persists non-secret metrics and the decision, and
-uses runtime hysteresis before requesting a transactional endpoint change.
+requires three consecutive wins and a 90-second dwell before requesting a
+transactional endpoint change. Active TURN allocation maintenance remains on
+even when quality-driven automatic selection is disabled.
+
+The host profile transaction journals the previous MTU before mutation,
+requires revision and operation identifiers, reads back the applied `wg0` MTU,
+and supports idempotent commit and abort. An expired lease or interrupted agent
+restart restores the journaled MTU before the agent reports readiness.

@@ -5,6 +5,7 @@ use tokio::sync::Mutex;
 pub mod classifier;
 pub mod config;
 pub mod control;
+pub mod link_profile;
 pub mod probe;
 pub mod remote_control;
 pub mod session;

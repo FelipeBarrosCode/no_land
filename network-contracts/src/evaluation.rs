@@ -98,11 +98,17 @@ pub fn evaluate_paths(
 }
 
 pub fn evaluate_path(metrics: PathMetrics, policy: EvaluationPolicy) -> PathEvaluation {
-    let scoreable = metrics.sample_count >= policy.minimum_samples
+    let received_count = if metrics.received_count == 0 && metrics.sample_count > 0 {
+        // Backward compatibility for persisted v1 metrics.
+        metrics.sample_count
+    } else {
+        metrics.received_count
+    };
+    let scoreable = received_count >= policy.minimum_samples
         && metrics.sample_age_ms <= policy.maximum_sample_age_ms
         && metrics.median_rtt_ms.is_some();
     let sample_confidence =
-        (metrics.sample_count as f64 / policy.target_samples.max(1) as f64).clamp(0.0, 1.0);
+        (received_count as f64 / policy.target_samples.max(1) as f64).clamp(0.0, 1.0);
     let freshness_confidence = if metrics.sample_age_ms >= policy.maximum_sample_age_ms {
         0.0
     } else {
@@ -248,6 +254,9 @@ mod tests {
     fn metrics(latency: f64, jitter: f64, loss: f64, spikes: f64) -> PathMetrics {
         PathMetrics {
             sample_count: 60,
+            sent_count: 60,
+            received_count: 60,
+            lost_count: 0,
             sample_age_ms: 0,
             median_rtt_ms: Some(latency),
             p95_rtt_ms: Some(latency + jitter),
@@ -309,6 +318,8 @@ mod tests {
     fn missing_relay_samples_keep_direct_during_provisioning() {
         let mut relay = metrics(20.0, 1.0, 0.0, 0.0);
         relay.sample_count = 5;
+        relay.received_count = 5;
+        relay.lost_count = 55;
         let result = evaluate_paths(
             metrics(30.0, 2.0, 0.0, 0.0),
             relay,

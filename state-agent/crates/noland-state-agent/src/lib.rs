@@ -22,6 +22,8 @@ use noland_state_db::StateDb;
 use parking_lot::Mutex;
 use uuid::Uuid;
 
+const PROCESS_RECOVERY_INTERVAL: Duration = Duration::from_secs(30);
+
 pub struct AgentConfig {
     pub instance_id: Uuid,
     pub image_id: String,
@@ -344,6 +346,7 @@ impl StateAgent {
     pub fn process_events(&self) -> Result<usize> {
         let mut engine = self.attribution_engine();
         let n = noland_attribution::process_hub_events(&mut engine, &self.hub)?;
+        drop(engine);
         if self.hub.queue.take_loss_flag() {
             let dropped = self.hub.queue.dropped();
             let app_ids = self.db.open_session_app_ids()?;
@@ -378,6 +381,14 @@ impl StateAgent {
                     app_ids.len()
                 ),
             );
+            let recovery = self.reconcile_live_processes()?;
+            tracing::info!(
+                processes_seen = recovery.processes_seen,
+                sessions_pruned = recovery.sessions_pruned,
+                sessions_recovered = recovery.sessions_recovered,
+                open_files_recovered = recovery.open_files_recovered,
+                "reconciled live processes immediately after observer loss"
+            );
         }
         Ok(n)
     }
@@ -389,7 +400,7 @@ impl StateAgent {
     pub fn spawn_background(self: &Arc<Self>) {
         let agent = Arc::clone(self);
         tokio::spawn(async move {
-            let mut process_recovery = tokio::time::interval(Duration::from_secs(2));
+            let mut process_recovery = tokio::time::interval(PROCESS_RECOVERY_INTERVAL);
             let mut rediscovery = tokio::time::interval(Duration::from_secs(30));
             let mut checkpoint =
                 tokio::time::interval(Duration::from_secs(constants::CHECKPOINT_INTERVAL_SECS));
@@ -472,16 +483,16 @@ mod tests {
     use noland_restore::{RestorePlan, RestoreTarget, RestoreTransaction};
     use noland_state_core::{ContentObjectKind, SyncDirection, SyncJournalEntry, SyncJournalState};
 
+    fn test_root(label: &str) -> PathBuf {
+        std::env::current_dir()
+            .expect("test working directory should be available")
+            .join("target/noland-state-agent-tests")
+            .join(format!("{label}-{}", Uuid::new_v4()))
+    }
+
     #[test]
     fn recover_preserves_unfinished_operations_as_interrupted() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-recover-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = test_root("recover");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let operation_id = Uuid::new_v4();
         agent
@@ -541,11 +552,7 @@ mod tests {
 
     #[test]
     fn recover_rolls_back_crashed_restore_before_marking_operation_interrupted() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-crashed-restore-recover-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
+        let root = test_root("crashed-restore-recover");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let operation_id = Uuid::new_v4();
         agent
@@ -642,11 +649,7 @@ mod tests {
 
     #[test]
     fn discovery_is_available_to_attribution_engines() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-agent-steam-discovery-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
+        let root = test_root("steam-discovery");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let steamapps = agent.config.home.join(".local/share/Steam/steamapps");
         let install_root = steamapps.join("common/Discovered Game");
@@ -697,11 +700,7 @@ mod tests {
 
     #[test]
     fn discovery_persists_owned_roots_for_non_steam_apps() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-agent-owned-roots-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
+        let root = test_root("owned-roots");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let home = &agent.config.home;
 
@@ -791,11 +790,7 @@ mod tests {
 
     #[test]
     fn discovery_finishes_steam_transaction_after_scanning_only_final_content() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-agent-install-complete-{}-{}",
-            std::process::id(),
-            Uuid::new_v4()
-        ));
+        let root = test_root("install-complete");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let steamapps = agent.config.home.join(".local/share/Steam/steamapps");
         let final_root = steamapps.join("common/Completed Game");
@@ -867,14 +862,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn live_reconciliation_prunes_only_sessions_without_live_pids() {
-        let root = std::env::temp_dir().join(format!(
-            "noland-session-prune-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = test_root("session-prune");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let live_app = AppIdentity::new(AppId::desktop("live-app"), "Live App");
         let stale_app = AppIdentity::new(AppId::desktop("stale-app"), "Stale App");

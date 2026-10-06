@@ -1,0 +1,8 @@
+self-hosted-runner:
+  # GitHub-hosted preview labels not yet known to actionlint 1.7.7.
+  labels:
+    - macos-15-intel
+    - windows-11-arm
+
+config-variables:
+  - NOLAND_ZAP_STAGING_URL

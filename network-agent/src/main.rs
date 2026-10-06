@@ -16,12 +16,13 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     let thresholds = Arc::new(config.classifier_thresholds());
     let shared = shared_state(config.max_sessions, config.udp_rate_limit);
-    let turn_manager = TurnManager::new(
+    let turn_manager = TurnManager::new_with_interface(
         config.instance_id.clone(),
         env!("CARGO_PKG_VERSION").to_string(),
         config.turn_state_path.clone(),
         config.kernel_wireguard_addr,
         shared.clone(),
+        config.wireguard_interface.clone(),
     )?;
     let remote_control = load_control_secret(&config.control_secret_path)?
         .map(|secret| RemoteControl::new(config.instance_id.clone(), secret, turn_manager.clone()));

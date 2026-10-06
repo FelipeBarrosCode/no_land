@@ -67,3 +67,15 @@ src-tauri/platform/*
 *.dmp
 
 /tools/debug/artifacts/
+
+# Local agent skill installations (managed outside Git)
+/.*/
+!/.github/
+!/.cargo/
+!/.agent-deploy/
+!/.tmp-agent-deploy/
+!/.tmp/
+/agent/
+/data/
+/skills/
+/skills-lock.json

@@ -45,7 +45,7 @@ export function ModalFrame({
   return (
     <div
       className={clsx(
-        "fixed inset-0 overflow-y-auto overscroll-contain bg-[#02040bdd] p-4",
+        "fixed inset-0 overflow-y-auto overscroll-contain bg-[#02040bdd] p-3 sm:p-4",
         zIndexClassName,
         overlayClassName,
       )}
@@ -56,7 +56,7 @@ export function ModalFrame({
           aria-modal="true"
           aria-labelledby={labelledBy}
           className={clsx(
-            "flex max-h-[calc(100dvh-2rem)] min-h-0 w-full flex-col overflow-hidden",
+            "flex max-h-[calc(100dvh-1.5rem)] min-h-0 w-full flex-col overflow-hidden sm:max-h-[calc(100dvh-2rem)]",
             panelClassName,
           )}
         >

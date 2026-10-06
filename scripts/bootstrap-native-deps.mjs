@@ -1616,17 +1616,7 @@ function run(command, args, options = {}) {
 
   let input;
   if (inputPath) {
-    const cat = spawnSync(process.platform === 'win32' ? 'cmd' : 'cat', process.platform === 'win32' ? ['/c', 'type', inputPath] : [inputPath], {
-      cwd,
-      env,
-      stdio: ['ignore', 'pipe', 'inherit'],
-      encoding: null,
-      shell: process.platform === 'win32',
-    });
-    if (cat.status !== 0) {
-      throw new Error(`Failed reading ${inputPath}`);
-    }
-    input = cat.stdout;
+    input = readFileSync(inputPath);
   }
 
   const result = spawnSync(command, args, {

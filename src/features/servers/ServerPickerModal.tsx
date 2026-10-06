@@ -192,9 +192,10 @@ export function ServerPickerModal({
   const [minReliabilityInput, setMinReliabilityInput] = useState("");
   const [maxReliabilityInput, setMaxReliabilityInput] = useState("");
   const [storageInput, setStorageInput] = useState(
-    String(serverPreferences.storageGb || ""),
+    String(serverPreferences.storageGb || storageGb || ""),
   );
   const storageInputRef = useRef(storageInput);
+  const [pendingOfferId, setPendingOfferId] = useState<number | null>(null);
 
   const countryOptions = useMemo<CountryOption[]>(() => {
     if (availableCountries.length === 0) {
@@ -304,14 +305,31 @@ export function ServerPickerModal({
     sortMode,
   ]);
 
-  const commitStorageInput = () => {
+  const commitStorageInput = async () => {
     const parsed = Number(storageInputRef.current);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       return;
     }
     const clamped = Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)));
-    onUpdateServerPreferences({ storageGb: clamped });
+    await onUpdateServerPreferences({ storageGb: clamped });
   };
+
+  async function confirmProvisioning() {
+    if (pendingOfferId === null) {
+      return;
+    }
+
+    const parsed = Number(storageInputRef.current);
+    const effectiveStorage =
+      Number.isFinite(parsed) && parsed > 0
+        ? Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)))
+        : storageGb;
+
+    await commitStorageInput();
+    const offerId = pendingOfferId;
+    setPendingOfferId(null);
+    await onSelectOffer(offerId, effectiveStorage);
+  }
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -360,8 +378,8 @@ export function ServerPickerModal({
             >
               Select Server
             </h2>
-            <p className="text-[1.25rem] leading-none text-[#b4c8de]">
-              Search the market by country.
+            <p className="text-[1.05rem] leading-none text-[#b4c8de]">
+              Choose a country and server.
             </p>
           </div>
           <AIPromptHelper
@@ -388,7 +406,7 @@ export function ServerPickerModal({
           </p>
         )}
 
-        <div className="mb-2 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,1fr)_minmax(10rem,0.7fr)_auto] md:items-end">
+        <div className="mb-3 grid gap-3 rounded border border-[#3e4270] p-3 md:grid-cols-[minmax(14rem,1fr)_auto] md:items-end">
           <label className="flex min-w-0 flex-col justify-end">
             <span className="block pb-1 text-[1.2rem] leading-none text-[#b4c8de]">
               Country
@@ -409,30 +427,6 @@ export function ServerPickerModal({
             </select>
           </label>
 
-          <label className="flex min-w-0 flex-col justify-end">
-            <span className="block pb-1 text-[1.2rem] leading-none text-[#b4c8de]">
-              Storage (GB)
-            </span>
-            <span className="block pb-1 text-[1rem] leading-none text-[#7fa8cc]">
-              Pick Amount of Storage you want
-            </span>
-            <input
-              type="number"
-              min={MIN_STORAGE_GB}
-              max={10000}
-              step={1}
-              title="Minimum 30 GB · Maximum 10,000 GB"
-              className="h-11 w-full border border-[#3f476c] bg-[#0b0f23] px-2 py-1 text-[1.35rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
-              value={storageInput}
-              onChange={(event) => {
-                const raw = event.target.value;
-                setStorageInput(raw);
-                storageInputRef.current = raw;
-              }}
-              onBlur={commitStorageInput}
-            />
-          </label>
-
           <Button
             variant="secondary"
             className="h-11"
@@ -445,26 +439,19 @@ export function ServerPickerModal({
           </Button>
         </div>
 
-        <p className="mb-3 text-[1.05rem] text-[#7fa8cc]">
-          Storage must be between 30 GB and 10,000 GB.
-        </p>
-
-        <details className="mb-3 rounded border border-[#3e4270] bg-[#0b0f23]/50 p-3" open>
+        <details className="mb-3 rounded border border-[#3e4270] bg-[#0b0f23]/50 p-3">
           <summary className="cursor-pointer list-none">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                  ▾ Advanced Search
-                </p>
-                <p className="text-[1.05rem] leading-none text-[#7fa8cc]">
-                  Combine sort and filters freely: price and reliability filters stack, then the selected sort is applied.
+                  ▾ Advanced filters
                 </p>
                 <p className="mt-1 text-[1rem] leading-none text-[#9ec4df]">
-                  Active: {activeFilterCount} filter{activeFilterCount === 1 ? "" : "s"} · Sorted by {sortModeLabel(sortMode)}
+                  {activeFilterCount} filter{activeFilterCount === 1 ? "" : "s"} · {sortModeLabel(sortMode)}
                 </p>
               </div>
               <span className="border border-[#3f476c] px-3 py-2 font-display text-[10px] uppercase tracking-[0.12em] text-[#9ec4df]">
-                Open / Close
+                Show
               </span>
             </div>
           </summary>
@@ -480,17 +467,14 @@ export function ServerPickerModal({
                 setMaxReliabilityInput("");
               }}
             >
-              Reset Advanced Search
+              Reset filters
             </Button>
           </div>
 
           <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
-            <details className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3" open>
-              <summary className="cursor-pointer font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+            <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
+              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
                 1. Sort by price
-              </summary>
-              <p className="mt-2 text-[1rem] leading-none text-[#7fa8cc]">
-                Sorts whatever remains after active filters.
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
@@ -506,14 +490,11 @@ export function ServerPickerModal({
                   Highest price first
                 </Button>
               </div>
-            </details>
+            </div>
 
-            <details className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3" open>
-              <summary className="cursor-pointer font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+            <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
+              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
                 2. Sort by reliability
-              </summary>
-              <p className="mt-2 text-[1rem] leading-none text-[#7fa8cc]">
-                Sorts whatever remains after active filters.
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
@@ -529,14 +510,11 @@ export function ServerPickerModal({
                   Least reliable first
                 </Button>
               </div>
-            </details>
+            </div>
 
-            <details className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3" open>
-              <summary className="cursor-pointer font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+            <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
+              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
                 3. Filter by price
-              </summary>
-              <p className="mt-2 text-[1rem] leading-none text-[#7fa8cc]">
-                Keep offers inside a total $/hr range. If min is greater than max, they are auto-swapped.
               </p>
               {priceRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -598,14 +576,11 @@ export function ServerPickerModal({
                   Clear
                 </Button>
               </div>
-            </details>
+            </div>
 
-            <details className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3" open>
-              <summary className="cursor-pointer font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
+            <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
+              <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
                 4. Filter by reliability
-              </summary>
-              <p className="mt-2 text-[1rem] leading-none text-[#7fa8cc]">
-                Keep hosts inside a reliability range from 0–100%. Presets set minimum reliability only.
               </p>
               {reliabilityRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -669,12 +644,12 @@ export function ServerPickerModal({
                   Clear
                 </Button>
               </div>
-            </details>
+            </div>
           </div>
         </details>
 
-        <p className="mb-3 text-[1.05rem] text-[#9ec4df]" aria-live="polite">
-          Showing {displayedOffers.length} of {offers.length} returned offers on market page {offersPage} after combined filters, sorted by {sortModeLabel(sortMode)}.
+        <p className="mb-3 text-[1rem] text-[#9ec4df]" aria-live="polite">
+          Showing {displayedOffers.length} of {offers.length} · Page {offersPage}
         </p>
 
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -765,17 +740,14 @@ export function ServerPickerModal({
                     disabled={busy}
                     loading={busy && isSelected}
                     loadingText="Provisioning..."
-                    onClick={() => {
-                      const parsed = Number(storageInputRef.current);
-                      const effectiveStorage =
-                        Number.isFinite(parsed) && parsed > 0
-                          ? Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)))
-                          : storageGb;
-                      commitStorageInput();
-                      onSelectOffer(offer.id, effectiveStorage);
-                    }}
+                     onClick={() => {
+                       const nextStorage = String(serverPreferences.storageGb || storageGb || "");
+                       setStorageInput(nextStorage);
+                       storageInputRef.current = nextStorage;
+                       setPendingOfferId(offer.id);
+                     }}
                   >
-                    {isSelected ? "Provisioning" : "Select & Provision"}
+                    {isSelected ? "Provision" : "Select & provision"}
                   </Button>
                 </Card>
               );
@@ -808,6 +780,67 @@ export function ServerPickerModal({
             </Button>
           </div>
         </div>
+
+        {pendingOfferId !== null && (
+          <ModalFrame
+            panelClassName="glass-panel pixel-frame max-w-md"
+            zIndexClassName="z-[60]"
+            labelledBy="storage-picker-title"
+          >
+            <ModalBody className="p-5">
+              <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
+                Provisioning
+              </p>
+              <h3 id="storage-picker-title" className="mt-1 font-display text-base text-white">
+                Choose storage
+              </h3>
+              <p className="mt-2 text-[1rem] leading-[1.3] text-[#b4c8de]">
+                Set disk space for this instance.
+              </p>
+              <label className="mt-4 flex flex-col gap-1.5">
+                <span className="font-display text-[11px] uppercase tracking-[0.1em] text-[#9ad9ff]">
+                  Storage (GB)
+                </span>
+                <input
+                  autoFocus
+                  type="number"
+                  min={MIN_STORAGE_GB}
+                  max={10000}
+                  step={1}
+                  title="Minimum 30 GB · Maximum 10,000 GB"
+                  className="min-h-11 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
+                  value={storageInput}
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    setStorageInput(raw);
+                    storageInputRef.current = raw;
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      void confirmProvisioning();
+                    }
+                  }}
+                />
+                <span className="text-[0.95rem] text-[#7fa8cc]">
+                  30–10,000 GB
+                </span>
+              </label>
+              <div className="mt-5 flex justify-end gap-2">
+                <Button variant="ghost" onClick={() => setPendingOfferId(null)}>
+                  Cancel
+                </Button>
+                <Button
+                  variant="secondary"
+                  loading={busy}
+                  loadingText="Provisioning..."
+                  onClick={() => void confirmProvisioning()}
+                >
+                  Provision
+                </Button>
+              </div>
+            </ModalBody>
+          </ModalFrame>
+        )}
       </ModalBody>
     </ModalFrame>
   );

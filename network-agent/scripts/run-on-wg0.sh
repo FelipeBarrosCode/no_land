@@ -12,6 +12,7 @@ for _ in $(seq 1 60); do
             --udp-addr "0.0.0.0:6201" \
             --ws-addr "${wg_address}:6202" \
             --instance-id "$instance_id" \
+            --wireguard-interface "wg0" \
             --kernel-wireguard-addr "127.0.0.1:${wg_port}"
     fi
     sleep 2
