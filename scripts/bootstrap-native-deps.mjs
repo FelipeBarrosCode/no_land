@@ -743,8 +743,13 @@ function ensureBash(prefix, targetTriple) {
   console.log(`[bootstrap-native-deps] Building Bash from source for ${targetTriple}`);
 
   const tarball = join(nativeDepsRoot, 'src', 'bash-5.2.tar.gz');
-  const tarballUrl = 'https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz';
-  downloadFile(tarballUrl, tarball, { expectedKind: 'tar.gz' });
+  const tarballUrls = [
+    process.env.NOLAND_BASH_SOURCE_URL,
+    'https://ftpmirror.gnu.org/bash/bash-5.2.tar.gz',
+    'https://mirrors.kernel.org/gnu/bash/bash-5.2.tar.gz',
+    'https://ftp.gnu.org/gnu/bash/bash-5.2.tar.gz',
+  ].filter(Boolean);
+  downloadFile(tarballUrls, tarball, { expectedKind: 'tar.gz' });
 
   const extractRoot = join(nativeDepsRoot, `build-bash-src-${targetTriple}`);
   const buildDir = extractTarballSource(tarball, extractRoot, 'bash-5.2');
@@ -1381,6 +1386,7 @@ function extractWindowsMsi(msiPath, extractionRoot) {
 
 function downloadFile(url, destination, options = {}) {
   const { expectedKind } = options;
+  const urls = Array.isArray(url) ? url : [url];
 
   if (existsSync(destination) && validateDownloadedFile(destination, expectedKind)) {
     return;
@@ -1392,20 +1398,41 @@ function downloadFile(url, destination, options = {}) {
 
   mkdirSync(dirname(destination), { recursive: true });
   const tempDestination = `${destination}.partial`;
-  rmSync(tempDestination, { force: true });
-  run('curl', ['-fL', '--retry', '3', '--retry-all-errors', '-o', tempDestination, url]);
-
-  if (!validateDownloadedFile(tempDestination, expectedKind)) {
-    const preview = readFileSync(tempDestination)
-      .subarray(0, 256)
-      .toString('utf8')
-      .replace(/\s+/g, ' ')
-      .trim();
+  const failures = [];
+  for (const url of urls) {
     rmSync(tempDestination, { force: true });
-    throw new Error(`Downloaded file from ${url} to ${destination} but it was not a valid ${expectedKind || 'artifact'}. First bytes: ${preview || '<binary/empty>'}`);
+    try {
+      console.log(`[bootstrap-native-deps] Downloading ${url}`);
+      run('curl', [
+        '-fL',
+        '--connect-timeout', '30',
+        '--max-time', '300',
+        '--retry', '3',
+        '--retry-all-errors',
+        '-o', tempDestination,
+        url,
+      ]);
+    } catch (error) {
+      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
+
+    if (!validateDownloadedFile(tempDestination, expectedKind)) {
+      const preview = readFileSync(tempDestination)
+        .subarray(0, 256)
+        .toString('utf8')
+        .replace(/\s+/g, ' ')
+        .trim();
+      failures.push(`${url}: invalid ${expectedKind || 'artifact'} (${preview || '<binary/empty>'})`);
+      continue;
+    }
+
+    renameSync(tempDestination, destination);
+    return;
   }
 
-  renameSync(tempDestination, destination);
+  rmSync(tempDestination, { force: true });
+  throw new Error(`Could not download ${destination}. Attempts:\n${failures.join('\n')}`);
 }
 
 function validateDownloadedFile(path, expectedKind) {
