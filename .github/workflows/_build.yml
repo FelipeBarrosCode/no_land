@@ -64,7 +64,9 @@ jobs:
 
       - name: Install macOS build dependencies
         if: matrix.platform == 'macos'
-        run: brew install pkg-config
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: brew install pkg-config openssl@3
 
       - name: Install Linux build and package dependencies
         if: matrix.platform == 'linux'
@@ -123,6 +125,7 @@ jobs:
 
       - name: Build signed/notarized Tauri application
         shell: bash
+        timeout-minutes: 60
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
