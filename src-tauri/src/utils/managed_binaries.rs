@@ -161,7 +161,13 @@ pub fn locate_privileged_bundled_binary(
     directories.extend([
         PathBuf::from("/usr/bin"),
         PathBuf::from("/usr/lib/noland-connect"),
+        // Tauri installs `externalBin` sidecars below the package's
+        // resources directory on Debian/AppImage-style Linux layouts.
+        // Keep this in the trusted lookup set because this resolver is used
+        // for the elevated network helper, not ordinary user-owned tools.
+        PathBuf::from("/usr/lib/noland-connect/resources"),
         PathBuf::from("/usr/lib/Noland Connect"),
+        PathBuf::from("/usr/lib/Noland Connect/resources"),
     ]);
 
     directories.into_iter().find_map(|directory| {
