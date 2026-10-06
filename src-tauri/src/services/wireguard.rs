@@ -254,7 +254,7 @@ fn resolve_managed_tool_binary(tool: &str) -> AppResult<String> {
         )
     } else {
         format!(
-            "This Noland Connect installation is incomplete: the bundled `{lookup_name}` component is missing or not executable. Reinstall the app or report the package; do not install WireGuard manually."
+            "This Noland Connect installation is incomplete: the bundled `{lookup_name}` component is missing, not executable, or failed integrity validation. Reinstall the app or report the package; do not install WireGuard manually."
         )
     };
     Err(AppError::Command(message))
