@@ -226,6 +226,23 @@ if (process.platform === 'darwin' && mode === 'build') {
     const bundleDir = resolve(repoRoot, 'src-tauri', 'target', targetTriple, 'release', 'bundle', 'macos');
     const appName = `${productName}.app`;
     const updaterArchive = join(bundleDir, `${appName}.tar.gz`);
+    const appPath = join(bundleDir, appName);
+
+    // Tauri creates this archive before the post-build dependency repair and
+    // notarization steps above. Never ship that stale archive: the updater
+    // must contain the exact final, notarized bundle that is in the DMG.
+    const verify = spawnSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], {
+      cwd: repoRoot,
+      stdio: 'inherit',
+      env: nativeEnv,
+    });
+    if (verify.status !== 0) process.exit(verify.status ?? 1);
+    const clearQuarantine = spawnSync('xattr', ['-d', 'com.apple.quarantine', appPath], {
+      cwd: repoRoot,
+      stdio: 'ignore',
+      env: nativeEnv,
+    });
+
     rmSync(updaterArchive, { force: true });
     rmSync(`${updaterArchive}.sig`, { force: true });
     console.log(`[tauri-with-mic-sidecar] Rebuilding updater archive from final notarized app: ${updaterArchive}`);
