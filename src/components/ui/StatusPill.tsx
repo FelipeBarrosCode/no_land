@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import { translate, translateSource } from "../../lib/i18n";
 interface Props {
   state: string;
 }
@@ -20,7 +21,7 @@ export function StatusPill({ state }: Props) {
         intent
       )}
     >
-      {state}
+      {state === "WaitingForInstance" ? translate("status.waiting.instance") : translateSource(state)}
     </span>
   );
 }

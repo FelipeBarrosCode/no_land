@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { useLocalization, translate } from "../../lib/i18n";
 import type {
   LaunchLibraryResponse,
   LaunchSoftwareJob,
@@ -49,6 +50,7 @@ export function LaunchLibraryModal({
   onLoadArtwork,
   onClose,
 }: Props) {
+  const { t } = useLocalization();
   const [loadRequested, setLoadRequested] = useState(false);
   const [search, setSearch] = useState("");
   const navigate = useNavigate();
@@ -111,17 +113,17 @@ export function LaunchLibraryModal({
       <div className="flex items-start justify-between gap-4 border-b border-[#283252] p-5">
         <div>
           <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">
-            Launch Library · Instance {instanceId}
+            {translate("generated.5d43e1bb65ed54c8")} {instanceId}
           </p>
           <h2 id="launch-library-title" className="mt-1 font-display text-xl text-white">
-            What do you want to play?
+            {translate("generated.558aab1ea62591ac")}
           </h2>
           <p className="mt-2 text-sm text-[#91a9c4]">
-            {instanceLabel} · Installed software and titles tracked in Shared Storage
+            {instanceLabel} {translate("generated.44dbfc9d6214e1f8")}
           </p>
         </div>
         <Button variant="ghost" onClick={onClose}>
-          Close
+          {translate("generated.7d9eb7acb13e2462")}
         </Button>
       </div>
 
@@ -139,14 +141,14 @@ export function LaunchLibraryModal({
             type="search"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
-            placeholder="Search software..."
-            aria-label="Search software"
+            placeholder={t("library.search")}
+            aria-label={t("library.search")}
             className="min-w-0 flex-1 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-sm text-[#dff8ff] outline-none placeholder:text-[#5e7396] focus:border-neon-cyan"
           />
           <div className="flex items-center gap-2">
-            <p className="text-xs text-[#7890ae]">Artwork provided by IGDB</p>
+            <p className="text-xs text-[#7890ae]">{t("library.artwork")}</p>
             <Button variant="ghost" className="px-3 py-1 text-[11px]" onClick={openIgdbSettings}>
-              Add Twitch Auth
+              {translate("generated.306a2cd87b6e0cdf")}
             </Button>
           </div>
         </div>
@@ -155,7 +157,7 @@ export function LaunchLibraryModal({
           <div className="flex min-h-40 flex-col items-center justify-center gap-4 text-[#a8bed6]">
             <span className="h-8 w-8 animate-spin rounded-full border-2 border-neon-cyan border-t-transparent" />
             <p className="font-display text-xs uppercase tracking-[0.12em]">
-              Reading software library…
+              {translate("generated.265bcb09adbb4128")}
             </p>
           </div>
         ) : library ? (
@@ -182,19 +184,19 @@ export function LaunchLibraryModal({
 
             {library.items.length === 0 ? (
               <div className="border border-[#283252] bg-[#0d132b] p-4 text-sm text-[#a8bed6]">
-                No installed or cloud-tracked software was found. You can still launch the full PC above.
+                {translate("generated.9592be79a0699345")}
               </div>
             ) : filteredItems.length === 0 ? (
               <div className="border border-[#283252] bg-[#0d132b] p-4 text-sm text-[#a8bed6]">
-                No software matches “{search.trim()}”.
+                {translate("generated.318dc6997872935f")}{search.trim()}”.
               </div>
             ) : null}
           </>
         ) : (
           <div className="flex min-h-40 flex-col items-center justify-center gap-4 text-center">
-            <p className="text-[#a8bed6]">The software library could not be loaded. Launch PC is still available.</p>
+            <p className="text-[#a8bed6]">{t("library.load.failed")}</p>
             <Button variant="secondary" onClick={() => void onLoadLibrary(instanceId)}>
-              Try Again
+              {translate("generated.df0fe9e00d354b01")}
             </Button>
           </div>
         )}

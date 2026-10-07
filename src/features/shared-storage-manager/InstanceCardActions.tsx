@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
+import { useLocalization, translate } from "../../lib/i18n";
 import { Button } from "../../components/ui/Button";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import type { RentedInstanceSummary } from "../../lib/types";
@@ -31,6 +32,7 @@ export function InstanceCardActions({
   onSaveStorage,
   onSyncStorage,
 }: Props) {
+  const { t } = useLocalization();
   const [showDestroyConfirm, setShowDestroyConfirm] = useState(false);
   const isRunning = instance.status.toLowerCase().includes("run");
   const actionDisabled = busy || instanceActionRunning;
@@ -57,11 +59,11 @@ export function InstanceCardActions({
           className="w-full"
           disabled={actionDisabled}
           loading={loadingKey === "provisioning.flow"}
-          loadingText="Launching..."
+          loadingText={t("instance.launching")}
           onClick={() => onProvisioning(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
-          <span className="ml-1">Provisioning</span>
+          <span className="ml-1">{t("instance.provisioning")}</span>
         </Button>
 
         <Button
@@ -71,7 +73,7 @@ export function InstanceCardActions({
           onClick={() => onOpenLaunchLibrary(instance.instanceId)}
         >
           <SpriteIcon icon="play" />
-          <span className="ml-1">Play</span>
+          <span className="ml-1">{t("common.play")}</span>
         </Button>
       </div>
 
@@ -81,10 +83,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.export"}
-          loadingText="Saving files..."
+          loadingText={translate("generated.0a6e1f59cb714422")}
           onClick={() => onSaveStorage(instance.instanceId)}
         >
-          Save
+          {translate("generated.1509f561f2416598")}
         </Button>
 
         <Button
@@ -92,10 +94,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
-          loadingText="Syncing files..."
+          loadingText={translate("generated.61263112babd588c")}
           onClick={() => onSyncStorage(instance.instanceId)}
         >
-          Sync Files
+          {translate("generated.8156b7d5123fb069")}
         </Button>
       </div>
 
@@ -106,7 +108,7 @@ export function InstanceCardActions({
           disabled={actionDisabled || !isRunning}
           onClick={() => onDisplay(instance.instanceId)}
         >
-          Display
+          {translate("generated.34e108c0896d0158")}
         </Button>
 
         <Button
@@ -114,10 +116,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled}
           loading={loadingKey === "instance.services.reboot"}
-          loadingText="Rebooting..."
+          loadingText={translate("generated.6a5b9e2c84b8ffe6")}
           onClick={() => onReboot(instance.instanceId)}
         >
-          Reboot
+          {translate("generated.fba023ca78ebb022")}
         </Button>
 
         <Button
@@ -125,7 +127,7 @@ export function InstanceCardActions({
           className={`w-full text-[14px] ${showDestroyConfirm ? "text-red-400 border-red-500/50" : ""}`}
           disabled={actionDisabled}
           loading={loadingKey === "instance.destroy"}
-          loadingText="Destroying..."
+          loadingText={translate("generated.81718696be2eed63")}
           onClick={handleDestroy}
         >
           {showDestroyConfirm ? (
@@ -133,7 +135,7 @@ export function InstanceCardActions({
           ) : (
             <>
               <SpriteIcon icon="destroy" />
-              <span className="ml-1">Destroy</span>
+              <span className="ml-1">{t("instance.destroy")}</span>
             </>
           )}
         </Button>
@@ -141,17 +143,16 @@ export function InstanceCardActions({
 
       {showDestroyConfirm && (
         <div className="text-xs text-red-300 bg-red-900/20 p-2 rounded border border-red-500/30">
-          This will permanently destroy instance {instance.instanceId}. A backup
-          will run first if configured.
+          {translate("generated.933882d245653198")} {instance.instanceId}{translate("generated.4567726876726721")}
           <div className="mt-1 flex gap-2">
             <button className="text-red-400 underline" onClick={handleDestroy}>
-              Yes, destroy
+              {translate("generated.3c98f82698fe06a8")}
             </button>
             <button
               className="text-gray-400 underline"
               onClick={() => setShowDestroyConfirm(false)}
             >
-              Cancel
+              {translate("generated.19766ed6ccb2f4a3")}
             </button>
           </div>
         </div>

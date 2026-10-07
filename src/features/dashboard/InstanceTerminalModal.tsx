@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { Button } from "../../components/ui/Button";
+import { useLocalization, translate } from "../../lib/i18n";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import {
   closeRemoteTerminal,
@@ -29,6 +30,7 @@ interface Props {
 }
 
 export function InstanceTerminalModal({ instance, onClose }: Props) {
+  const { t } = useLocalization();
   const hostRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const [status, setStatus] = useState<"connecting" | "connected" | "closed" | "error">(
@@ -76,8 +78,8 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
     terminal.loadAddon(fitAddon);
     terminal.open(hostRef.current);
     fitAddon.fit();
-    terminal.writeln("\x1b[36mNOLAND REMOTE TERMINAL\x1b[0m");
-    terminal.writeln(`Connecting to ${instance.sshHost}:${instance.sshPort}...\r\n`);
+    terminal.writeln(`\x1b[36m${translate("terminal.banner")}\x1b[0m`);
+    terminal.writeln(`${translate("terminal.connecting", { host: instance.sshHost, port: instance.sshPort })}\r\n`);
 
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
@@ -107,10 +109,10 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
 
         if (typeof payload.exitCode === "number" && payload.exitCode !== 0) {
           setStatus("error");
-          terminal.writeln(`\r\n\x1b[31mSSH exited with code ${payload.exitCode}. Check the host, port, and SSH key, then refresh the instance connection details.\x1b[0m`);
+          terminal.writeln(`\r\n\x1b[31m${translate("terminal.ssh.exit", { code: payload.exitCode })}\x1b[0m`);
         } else {
           setStatus("closed");
-          terminal.writeln("\r\n\x1b[33mSSH connection closed.\x1b[0m");
+          terminal.writeln(`\r\n\x1b[33m${translate("terminal.ssh.closed")}\x1b[0m`);
         }
       }),
     ]).then(([removeOutput, removeClosed]) => {
@@ -164,20 +166,20 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
       <ModalBody className="p-0">
         <div className="flex items-center justify-between gap-3 border-b border-[#3e4270] px-4 py-3">
           <div>
-            <h2 className="font-display text-sm uppercase tracking-[0.16em] text-white">Remote Terminal</h2>
+            <h2 className="font-display text-sm uppercase tracking-[0.16em] text-white">{t("terminal.title")}</h2>
             <p className="mt-1 text-xs text-[#bfd3ee]">
-              {instance ? `${instance.label} · ${instance.sshHost}:${instance.sshPort}` : "No running instance selected"}
+              {instance ? `${instance.label} · ${instance.sshHost}:${instance.sshPort}` : translate("generated.34705857a088051e")}
             </p>
           </div>
           <div className="flex items-center gap-3">
             <span className={`text-[10px] uppercase tracking-wider ${status === "connected" ? "text-neon-lime" : status === "error" ? "text-[#ff8ca2]" : "text-[#ffd166]"}`}>
-              {status}
+              {translate(`terminal.status.${status}`)}
             </span>
-            <Button variant="ghost" onClick={onClose}>Close</Button>
+            <Button variant="ghost" onClick={onClose}>{t("common.close")}</Button>
           </div>
         </div>
         <div className="bg-[#080b18] p-2">
-          <div ref={hostRef} className="h-[min(65dvh,38rem)] w-full overflow-hidden" aria-label="Interactive remote terminal" />
+          <div ref={hostRef} className="h-[min(65dvh,38rem)] w-full overflow-hidden" aria-label={t("terminal.accessibility")} />
         </div>
       </ModalBody>
     </ModalFrame>

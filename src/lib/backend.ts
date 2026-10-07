@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invokeSafe } from "./tauri";
+import { getActiveLocale, translate } from "./i18n";
 import type {
   AutoShutdownSettings,
   AutoShutdownState,
@@ -733,6 +734,7 @@ export async function beginOauthAuthorization(
     clientId,
     clientSecret,
     providerFieldsJson: providerFieldsJson ?? null,
+    locale: getActiveLocale(),
   });
 }
 
@@ -1044,7 +1046,7 @@ export async function listMicrophones(
   const request = withTimeout(
     invokeSafe<MicrophoneDevice[]>("list_microphones"),
     microphoneListTimeoutMs,
-    "Loading microphones timed out. Please try Refresh.",
+    translate("error.microphones.timeout"),
   )
     .then((devices) => {
       microphoneListCache = { fetchedAt: Date.now(), devices };

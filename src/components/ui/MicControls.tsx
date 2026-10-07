@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useState, useEffect, useCallback, useRef } from "react";
 import {
   getInstanceMicConfig,
@@ -37,7 +38,7 @@ function micErrorMessage(error: unknown): string {
       return message;
     }
   }
-  return "Microphone operation failed. Check the pipeline status and try again.";
+  return translate("generated.78fdb0a14598c194");
 }
 
 export function MicControls({ instanceId, compact = false }: MicControlsProps) {
@@ -281,24 +282,24 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
   const isActive = status?.enabled ?? config?.enabled ?? false;
 
   const stateLabel: Record<string, string> = {
-    disabled: "Mic Off",
-    ready: "Ready",
-    starting: "Starting...",
-    connecting: "Connecting...",
-    streaming: "Active",
-    no_audio_detected: "No Audio",
-    wireguard_disconnected: "WireGuard Down",
-    vm_agent_unreachable: "VM Unreachable",
-    cloud_mic_missing: "Device Missing",
-    packet_loss_high: "High Loss",
-    pipewire_unavailable: "PipeWire Down",
-    no_microphone: "No Microphone",
-    capture_failure: "Capture Failed",
-    pipeline_failure: "Media Sidecar Failed",
-    network_failure: "Network Failed",
-    reconnecting: "Reconnecting...",
-    degraded: "Degraded",
-    error: "Error",
+    disabled: translate("generated.02090677aa9e6109"),
+    ready: translate("generated.5fa7aac5375c5815"),
+    starting: translate("generated.82b93630a921dddf"),
+    connecting: translate("generated.5f04ae9ed6a865bb"),
+    streaming: translate("generated.92340695899bd2d8"),
+    no_audio_detected: translate("generated.067606abf652e6a9"),
+    wireguard_disconnected: translate("generated.5cc990792b650912"),
+    vm_agent_unreachable: translate("generated.94de2f1e928d8c37"),
+    cloud_mic_missing: translate("generated.e98b45fe20bf2eed"),
+    packet_loss_high: translate("generated.17a04810ea0dda88"),
+    pipewire_unavailable: translate("generated.6c255bc02cc9b1ee"),
+    no_microphone: translate("generated.85565c9728cc4f76"),
+    capture_failure: translate("generated.c115adae4e24c8f0"),
+    pipeline_failure: translate("generated.8fe6533cba77c001"),
+    network_failure: translate("generated.7f0fa908c1b69762"),
+    reconnecting: translate("generated.66bce4bdb48e51a0"),
+    degraded: translate("generated.a8494c12f2243903"),
+    error: translate("generated.54a0e8c17ebb21a1"),
   };
 
   const stateColor: Record<string, string> = {
@@ -334,10 +335,10 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
               : "bg-blue-600 hover:bg-blue-700 text-white"
           } disabled:opacity-50`}
           title={
-            isForwardingEnabled ? "Disable microphone forwarding" : "Enable microphone forwarding"
+            isForwardingEnabled ? translate("generated.50f0b881b2dc5ea7") : translate("generated.38cfc5ba526b9e43")
           }
         >
-          {loading ? "..." : isForwardingEnabled ? "🎙 Disable" : "🎙 Enable"}
+          {loading ? "..." : isForwardingEnabled ? translate("generated.eec08d90f7b34b62") : translate("generated.218f9aee1be74bc0")}
         </button>
         <span
           className={`w-2.5 h-2.5 rounded-full ${stateColor[micState] ?? "bg-gray-500"}`}
@@ -356,7 +357,7 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
     <div className="p-4 bg-gray-900 rounded-lg border border-gray-700 space-y-4">
       <div className="flex items-center justify-between">
         <h3 className="text-sm font-semibold text-gray-200">
-          Microphone Forwarding
+          {translate("generated.8967bd0544368ea6")}
         </h3>
         <div className="flex items-center gap-2">
           <span
@@ -379,23 +380,23 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         } disabled:opacity-50`}
       >
         {loading
-          ? "Working..."
+          ? translate("generated.b93900bded315d04")
           : isForwardingEnabled
-            ? "Disable Microphone Forwarding"
-            : "Enable Microphone Forwarding"}
+            ? translate("generated.ed4ec948a890f213")
+            : translate("generated.bfca33b78f323ad8")}
       </button>
 
       {/* Device selection */}
       <div>
         <div className="mb-1 flex items-center justify-between gap-2">
-          <label className="text-xs text-gray-400 block">Input Device</label>
+          <label className="text-xs text-gray-400 block">{translate("generated.967438abb32e13c2")}</label>
           <button
             type="button"
             onClick={handleRefreshDevices}
             disabled={loading}
             className="rounded border border-gray-600 bg-gray-800 px-2 py-1 text-[10px] text-gray-300 transition-colors hover:bg-gray-700 disabled:opacity-50"
           >
-            Refresh
+            {translate("generated.0e91610117029a62")}
           </button>
         </div>
         <select
@@ -406,28 +407,28 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         >
           {devicesLoading ? (
             <option value={config?.deviceId ?? "default"}>
-              Loading microphones...
+              {translate("generated.a0926aa44b31b666")}
             </option>
           ) : devices.length === 0 ? (
             <option value={config?.deviceId ?? "default"}>
-              No microphones detected
+              {translate("generated.a83ecb13b294fb6f")}
             </option>
           ) : (
             devices.map((d) => (
               <option key={d.id} value={d.id}>
-                {d.name} {d.isDefault ? "(Default)" : ""}
+                {d.name} {d.isDefault ? translate("generated.1fc1ffe61be98b40") : ""}
               </option>
             ))
           )}
         </select>
         <p className="mt-1 text-[11px] text-gray-500">
-          Current: {config?.deviceName ?? "System Default"}
+          {translate("generated.c09f632874c2511b")} {config?.deviceName ?? "System Default"}
         </p>
       </div>
 
       {/* Quality profile */}
       <div>
-        <label className="text-xs text-gray-400 block mb-1">Quality</label>
+        <label className="text-xs text-gray-400 block mb-1">{translate("generated.1b2c08a8733d7ff1")}</label>
         <select
           className="w-full bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-sm text-gray-200"
           value={config?.qualityProfile ?? "standard"}
@@ -435,17 +436,17 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
             handleProfileChange(e.target.value as MicQualityProfile)
           }
         >
-          <option value="standard">Balanced (10ms, 32 kbps)</option>
-          <option value="lowLatency">Low Latency (10ms, 48 kbps)</option>
-          <option value="highQuality">High Quality (10ms, 64 kbps)</option>
+          <option value="standard">{translate("generated.919cc4ac2074deb4")}</option>
+          <option value="lowLatency">{translate("generated.3078d46679cbfa8e")}</option>
+          <option value="highQuality">{translate("generated.860ea320f86090e3")}</option>
         </select>
       </div>
 
       <label className="flex items-center justify-between gap-3 rounded border border-gray-700 bg-gray-800/60 px-3 py-2 text-xs text-gray-300">
         <span>
-          Auto-connect with game stream
+          {translate("generated.55d4e8663b94f916")}
           <span className="mt-0.5 block text-[10px] text-gray-500">
-            Mic failures never block Moonlight or Sunshine.
+            {translate("generated.49094771c472cd49")}
           </span>
         </span>
         <input
@@ -463,21 +464,21 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
           disabled={loading || !isActive}
           className="px-3 py-1.5 rounded border border-gray-600 bg-gray-800 text-xs text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
         >
-          {status?.muted ? "Unmute" : "Mute"}
+          {status?.muted ? translate("generated.ce4ee4efc5e324fc") : translate("generated.8dd6857baf026850")}
         </button>
         <button
           onClick={handleReconnect}
           disabled={loading || !isActive}
           className="px-3 py-1.5 rounded border border-gray-600 bg-gray-800 text-xs text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
         >
-          Reconnect Mic
+          {translate("generated.5c2af7646c1fe2ed")}
         </button>
         <button
           onClick={handleRecreateRemoteDevice}
           disabled={loading}
           className="px-3 py-1.5 rounded border border-gray-600 bg-gray-800 text-xs text-gray-200 transition-colors hover:bg-gray-700 disabled:opacity-50"
         >
-          Recreate Remote Device
+          {translate("generated.30ca1fb4239148e2")}
         </button>
       </div>
 
@@ -486,39 +487,39 @@ export function MicControls({ instanceId, compact = false }: MicControlsProps) {
         <div className="space-y-1 text-xs text-gray-400">
           {status.packetLossPercent !== undefined && (
             <div className="flex justify-between">
-              <span>Packet Loss</span>
+              <span>{translate("generated.efe580226c57a395")}</span>
               <span>{status.packetLossPercent.toFixed(1)}%</span>
             </div>
           )}
           {status.jitterMs !== undefined && (
             <div className="flex justify-between">
-              <span>Jitter</span>
-              <span>{status.jitterMs.toFixed(1)} ms</span>
+              <span>{translate("generated.91fbe4c855fbe075")}</span>
+              <span>{status.jitterMs.toFixed(1)} {translate("generated.f785c3ce1d580c8f")}</span>
             </div>
           )}
           {status.bufferDepthMs !== undefined && (
             <div className="flex justify-between">
-              <span>Buffer</span>
-              <span>{status.bufferDepthMs.toFixed(0)} ms</span>
+              <span>{translate("generated.e44193fd2d21722a")}</span>
+              <span>{status.bufferDepthMs.toFixed(0)} {translate("generated.f785c3ce1d580c8f")}</span>
             </div>
           )}
           <div className="flex justify-between">
-            <span>Capture Buffer</span>
-            <span>{status.ringFillMs.toFixed(1)} ms</span>
+            <span>{translate("generated.9cf2f743c69f622f")}</span>
+            <span>{status.ringFillMs.toFixed(1)} {translate("generated.f785c3ce1d580c8f")}</span>
           </div>
           <div className="flex justify-between">
-            <span>Sidecar Queue</span>
-            <span>{status.appsrcQueueMs.toFixed(1)} ms</span>
+            <span>{translate("generated.68c8c1ca29e319ec")}</span>
+            <span>{status.appsrcQueueMs.toFixed(1)} {translate("generated.f785c3ce1d580c8f")}</span>
           </div>
           {status.bitrateKbps && (
             <div className="flex justify-between">
-              <span>Bitrate</span>
-              <span>{status.bitrateKbps} kbps</span>
+              <span>{translate("generated.0b2b7f69b8eff531")}</span>
+              <span>{status.bitrateKbps} {translate("generated.1f01791cf8751512")}</span>
             </div>
           )}
           {status.reconnectCount > 0 && (
             <div className="flex justify-between">
-              <span>Sidecar Recoveries</span>
+              <span>{translate("generated.cabc4d6f1b94b4a2")}</span>
               <span>{status.reconnectCount}</span>
             </div>
           )}

@@ -1,5 +1,6 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import { translate } from "./i18n";
 
 export interface AppUpdateInfo {
   currentVersion: string;
@@ -28,7 +29,7 @@ export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
     currentVersion: pendingUpdate.currentVersion,
     latestVersion: pendingUpdate.version,
     releaseName: `Noland Connect ${pendingUpdate.version}`,
-    releaseNotes: pendingUpdate.body?.trim() || "Performance improvements and bug fixes.",
+    releaseNotes: pendingUpdate.body?.trim() || translate("update.default.notes"),
     publishedAt: pendingUpdate.date ?? null,
   };
 }
@@ -37,7 +38,7 @@ export async function installPendingAppUpdate(
   onProgress: (progress: AppUpdateProgress) => void,
 ): Promise<void> {
   const update = pendingUpdate;
-  if (!update) throw new Error("The update is no longer available. Check again.");
+  if (!update) throw new Error(translate("error.update.unavailable"));
 
   let downloadedBytes = 0;
   let totalBytes: number | null = null;

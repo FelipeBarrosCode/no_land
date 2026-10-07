@@ -4,6 +4,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { isNotificationEnabled } from "./notificationPreferences";
+import { translate } from "./i18n";
 
 export type NetworkStatusEvent = {
   current: "WARMING_UP" | "GREAT" | "GOOD" | "POOR" | "BAD";
@@ -20,18 +21,18 @@ export type NetworkStatusEvent = {
 export function networkWarningBody(event: NetworkStatusEvent): string {
   const metrics = event.keyMetrics;
   if (event.reasons.includes("CONNECTION_LOST")) {
-    return "The connection to your gaming PC appears to be lost.";
+    return translate("notification.network.lost.body");
   }
   if (event.reasons.includes("PACKET_LOSS") && metrics) {
-    return `Packet loss has reached ${(metrics.lossPercent ?? 0).toFixed(1)}%. Streaming may stutter.`;
+    return translate("notification.network.packet_loss", { percent: (metrics.lossPercent ?? 0).toFixed(1) });
   }
   if (event.reasons.includes("HIGH_JITTER") && metrics) {
-    return `Network jitter has reached ${(metrics.jitterMs ?? 0).toFixed(1)} ms. Streaming may feel inconsistent.`;
+    return translate("notification.network.jitter", { jitter: (metrics.jitterMs ?? 0).toFixed(1) });
   }
   if (event.reasons.includes("HIGH_LATENCY") && metrics?.medianRttMs != null) {
-    return `Network latency is ${metrics.medianRttMs.toFixed(1)} ms. Input may feel delayed.`;
+    return translate("notification.network.latency", { latency: metrics.medianRttMs.toFixed(1) });
   }
-  return "High latency variation or packet loss may affect streaming.";
+  return translate("notification.network.generic");
 }
 
 export async function notifyBadConnection(event: NetworkStatusEvent): Promise<void> {
@@ -41,7 +42,7 @@ export async function notifyBadConnection(event: NetworkStatusEvent): Promise<vo
   const connectionLost = event.reasons.includes("CONNECTION_LOST");
   const body = connectionLost
     ? networkWarningBody(event)
-    : "Connection unstable. Please get closer to your router or use Ethernet.";
+    : translate("notification.network.unstable.body");
   try {
     let granted = await isPermissionGranted();
     if (!granted) {
@@ -50,8 +51,8 @@ export async function notifyBadConnection(event: NetworkStatusEvent): Promise<vo
     if (granted) {
       await sendNotification({
         title: connectionLost
-          ? "No Land — Connection lost"
-          : "No Land — Connection unstable",
+          ? translate("notification.network.lost.title")
+          : translate("notification.network.unstable.title"),
         body,
         icon: "icons/icon.png",
         silent: false,

@@ -11,6 +11,7 @@ import {
 import type { OnboardingPayload } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
+import { useLocalization, translate } from "../../lib/i18n";
 
 interface Props {
   busy: boolean;
@@ -24,6 +25,7 @@ interface FormState {
 }
 
 export function OnboardingScreen({ busy, onSubmit }: Props) {
+  const { t } = useLocalization();
   const [tutorialOpen, setTutorialOpen] = useState(true);
   const [tutorialCompleted, setTutorialCompleted] = useState(false);
   const [tutorialStep, setTutorialStep] = useState(0);
@@ -115,62 +117,61 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
           <div className="flex items-start justify-between gap-4">
             <div className="space-y-2">
               <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-                01. Boot Sequence
+                {translate("generated.eaaf80d6dbfb9275")}
               </p>
               <h1
                 className="pixel-heading glitch-title font-display text-xl text-white md:text-2xl"
-                data-text="Noland Connect Terminal"
+                data-text={translate("generated.d6ead8f648010ff6")}
               >
-                Noland Connect Terminal
+                {translate("generated.d6ead8f648010ff6")}
               </h1>
               <p className="text-[1.4rem] leading-[1.15] text-[#b4c8de]">
-                Add your local credentials and{" "}
+                {translate("generated.e0e2513766daa342")}{" "}
                 <a
                   className="text-neon-cyan underline decoration-[#61f7ff] underline-offset-2 hover:text-white"
                   href={VAST_API_KEY_URL}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  Vast.ai API key
+                  {translate("generated.df47b7d8d26b3651")}
                 </a>
-                . We will generate an SSH key pair, prepare the remote machine,
-                and handle the connection flow during provisioning.
+                {translate("generated.dc5e450638657605")}
               </p>
             </div>
 
             <Button variant="ghost" onClick={openTutorial}>
-              Help
+              {t("onboarding.help")}
             </Button>
           </div>
 
           <div className="mt-6 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.1rem] text-[#b4d7f4]">
             <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-              Vast.ai Account Setup
+              {t("onboarding.vast.setup")}
             </p>
             <p className="mt-2 leading-snug">
-              Use your normal browser to log in to Vast.ai, add billing, and create an API key. Then paste that API key into Noland below.
+              {t("onboarding.vast.instructions")}
             </p>
             <div className="mt-3 flex flex-wrap gap-3">
               <Button variant="secondary" disabled={busy} onClick={() => void openLoginPage()}>
-                Open Vast.ai Login
+                {t("onboarding.vast.login")}
               </Button>
               <Button variant="ghost" disabled={busy} onClick={() => void openBillingPage()}>
-                Open Vast.ai Billing
+                {t("onboarding.vast.billing")}
               </Button>
               <Button variant="ghost" disabled={busy} onClick={() => void openApiKeyPage()}>
-                Open API Key Page
+                {t("onboarding.vast.api.page")}
               </Button>
             </div>
             <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
-              <p>Sign in in your normal browser, then come back here and paste the API key.</p>
+               <p>{t("onboarding.vast.return")}</p>
 
             </div>
           </div>
 
           <div className="mt-8 grid gap-4">
             <InputField
-              label="Setup Username"
-              placeholder="noland-user"
+              label={t("onboarding.username")}
+              placeholder={translate("generated.d6a9372489d6c415")}
               value={form.appUsername}
               onChange={(event) =>
                 setForm((prev) => ({
@@ -184,7 +185,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               error={touched.appUsername ? errors.appUsername : undefined}
             />
             <InputField
-              label="Setup Password"
+              label={t("onboarding.password")}
               type="password"
               value={form.appPassword}
               onChange={(event) =>
@@ -199,9 +200,8 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               error={touched.appPassword ? errors.appPassword : undefined}
             />
             <p className="-mt-2 text-[1.1rem] text-[#8fb4d4]">
-              New here? The tutorial explains the full setup flow, and the
-              remote computer password is{" "}
-              <span className="text-neon-lime">password</span>.
+              {t("onboarding.new")} {" "}
+              <span className="text-neon-lime">{translate("generated.5e884898da280471")}</span>.
             </p>
             <InputField
               label={
@@ -212,13 +212,13 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                     target="_blank"
                     rel="noreferrer"
                   >
-                    Vast.ai
+                    {translate("generated.2cc62e16038b80bf")}
                   </a>{" "}
-                  API Key
+                    {t("onboarding.api.key")}
                 </span>
               }
               type="password"
-              placeholder="vast_xxxxx"
+              placeholder={translate("generated.6c11e6a2a007e6f5")}
               value={form.vastApiKey}
               onChange={(event) =>
                 setForm((prev) => ({ ...prev, vastApiKey: event.target.value }))
@@ -236,16 +236,16 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               type="button"
               onClick={openApiKeyPage}
             >
-              Get your Vast.ai API key
+              {t("onboarding.get.api.key")}
             </button>
             <Button
               disabled={busy}
               loading={busy}
-              loadingText="Configuring..."
+              loadingText={t("onboarding.configuring")}
               onClick={submitForm}
               className="px-8"
             >
-              Continue
+              {t("onboarding.continue")}
             </Button>
           </div>
         </Card>

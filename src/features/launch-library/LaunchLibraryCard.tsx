@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useState } from "react";
 import clsx from "clsx";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
@@ -99,16 +100,16 @@ export function LaunchPcCard({ available, disabled, onLaunch }: LaunchPcCardProp
       </div>
       <div className="flex flex-1 flex-col p-4">
         <div className="flex flex-wrap gap-2">
-          <Badge tone="green">Full desktop</Badge>
-          <Badge>Launch PC</Badge>
+          <Badge tone="green">{translate("generated.7de17df1b7df4997")}</Badge>
+          <Badge>{translate("generated.b0a68df2d0e8c623")}</Badge>
         </div>
-        <h3 className="mt-4 font-display text-lg text-white">Launch PC</h3>
+        <h3 className="mt-4 font-display text-lg text-white">{translate("generated.b0a68df2d0e8c623")}</h3>
         <p className="mt-2 text-sm leading-relaxed text-[#9db8d4]">
-          Start the full remote desktop and choose anything installed on the PC.
+          {translate("generated.e60132b831bfca35")}
         </p>
         <div className="mt-auto border-t border-[#283252] pt-4">
           <p className={clsx("font-display text-[10px] uppercase tracking-[0.12em]", available ? "text-neon-lime" : "text-amber-200")}>
-            {available ? "Ready to stream" : "Unavailable"}
+            {available ? translate("generated.92b1a98babadd225") : translate("generated.ca184496974204a0")}
           </p>
         </div>
       </div>
@@ -180,9 +181,9 @@ export function SoftwareLaunchCard({
 
       <div className="flex flex-1 flex-col p-4">
         <div className="flex flex-wrap gap-2">
-          {item.installed ? <Badge tone="green">Installed</Badge> : <Badge>Cloud tracked</Badge>}
-          {item.inSharedStorage ? <Badge>Shared storage</Badge> : null}
-          {item.restoreRequired ? <Badge tone="amber">Restore required</Badge> : null}
+          {item.installed ? <Badge tone="green">{translate("generated.f8b32f4e92bd84ce")}</Badge> : <Badge>{translate("generated.25a4c55bd7fc946a")}</Badge>}
+          {item.inSharedStorage ? <Badge>{translate("generated.7d6d3b3158b0ee5f")}</Badge> : null}
+          {item.restoreRequired ? <Badge tone="amber">{translate("generated.0d020c02b73983d3")}</Badge> : null}
         </div>
 
         <h3 className="mt-4 font-display text-base text-white">{item.displayName}</h3>
@@ -210,7 +211,7 @@ export function SoftwareLaunchCard({
             >
               {statusText}
             </p>
-            {job?.streamStarted ? <span className="text-xs text-neon-lime">Streaming</span> : null}
+            {job?.streamStarted ? <span className="text-xs text-neon-lime">{translate("generated.a951c5945635e2d3")}</span> : null}
           </div>
 
           {active ? (

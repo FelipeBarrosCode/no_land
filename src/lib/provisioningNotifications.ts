@@ -4,6 +4,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { isNotificationEnabled } from "./notificationPreferences";
+import { translate, translateSource } from "./i18n";
 
 export async function notifyProvisioningUpdate(
   kind: "attention" | "complete",
@@ -25,9 +26,11 @@ export async function notifyProvisioningUpdate(
 
     await sendNotification({
       title: kind === "complete"
-        ? "No Land — Provisioning complete"
-        : "No Land — Provisioning needs attention",
-      body: details ? `${message} ${details}` : message,
+        ? translate("notification.provisioning.complete")
+        : translate("notification.provisioning.attention"),
+      body: details
+        ? `${translateSource(message)} ${translateSource(details)}`
+        : translateSource(message),
       icon: "icons/icon.png",
       silent: false,
     });

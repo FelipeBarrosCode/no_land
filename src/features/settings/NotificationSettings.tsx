@@ -5,40 +5,42 @@ import {
   setNotificationPreference,
   type NotificationKind,
 } from "../../lib/notificationPreferences";
+import { useLocalization } from "../../lib/i18n";
 
 const SETTINGS: Array<{ kind: NotificationKind; title: string; description: string }> = [
   {
     kind: "instances",
-    title: "Unattended instances",
-    description: "Remind me every three hours when rented instances exist without an active stream.",
+    title: "notifications.instances.title",
+    description: "notifications.instances.description",
   },
   {
     kind: "network",
-    title: "Network warnings",
-    description: "Alert me when streaming has connection loss, high latency, jitter, or packet loss.",
+    title: "notifications.network.title",
+    description: "notifications.network.description",
   },
   {
     kind: "storage",
-    title: "Shared storage completion",
-    description: "Notify me when a shared-storage backup or restore finishes.",
+    title: "notifications.storage.title",
+    description: "notifications.storage.description",
   },
   {
     kind: "provisioning",
-    title: "Provisioning updates",
-    description: "Notify me when provisioning needs your attention or finishes.",
+    title: "notifications.provisioning.title",
+    description: "notifications.provisioning.description",
   },
 ];
 
 export function NotificationSettings() {
+  const { t } = useLocalization();
   const [preferences, setPreferences] = useState(getNotificationPreferences);
 
   return (
     <Card className="pixel-frame">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        System Notifications
+        {t("notifications.system")}
       </h2>
       <p className="mt-2 text-[1.05rem] text-[#a8bed6]">
-        Choose which Noland events may appear as operating-system notifications.
+        {t("notifications.description")}
       </p>
       <div className="mt-5 space-y-3">
         {SETTINGS.map(({ kind, title, description }) => (
@@ -48,10 +50,10 @@ export function NotificationSettings() {
           >
             <span>
               <span className="block font-display text-[11px] uppercase tracking-[0.08em] text-white">
-                {title}
+                 {t(title)}
               </span>
               <span className="mt-1 block text-[1rem] leading-snug text-[#a8bed6]">
-                {description}
+                 {t(description)}
               </span>
             </span>
             <input

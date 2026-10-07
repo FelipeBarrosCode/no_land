@@ -1,5 +1,6 @@
 import clsx from "clsx";
 import type { InputHTMLAttributes, ReactNode } from "react";
+import { translateSource } from "../../lib/i18n";
 
 interface Props extends InputHTMLAttributes<HTMLInputElement> {
   label: ReactNode;
@@ -20,7 +21,7 @@ export function InputField({ label, className, error, ...props }: Props) {
         )}
         {...props}
       />
-      {error && <span className="font-display text-[11px] uppercase text-[#ff9eb0]">{error}</span>}
+      {error && <span className="font-display text-[11px] uppercase text-[#ff9eb0]">{translateSource(error)}</span>}
     </label>
   );
 }

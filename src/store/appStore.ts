@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { translate, translateSource } from "../lib/i18n";
 import {
   isPermissionGranted,
   requestPermission,
@@ -436,7 +437,7 @@ function mapError(error: unknown): string {
     }
   }
 
-  return "Something went wrong. Check logs and try again.";
+  return translate("generated.66523a826df69fac");
 }
 
 function serializeErrorForReport(error: unknown): string {
@@ -581,8 +582,8 @@ async function applyProvisioningEventState(
   if (needsUserAttention || provisioningFinished) {
     void notifyProvisioningUpdate(
       provisioningFinished ? "complete" : "attention",
-      provisioningFinished ? "Your instance is ready to use." : event.message,
-      event.details,
+        provisioningFinished ? translateSource("Your instance is ready to use.") : translateSource(event.message),
+        event.details ? translateSource(event.details) : event.details,
     );
   }
 
@@ -671,11 +672,11 @@ async function applyProvisioningEventState(
     updates.isBlocking = true;
     updates.blockingAction = createBlockingAction(state, {
       key: "provisioning.flow",
-      label: "Provisioning session",
+      label: translate("generated.83fae8da085af6f1"),
       detail:
-        event.message ||
+        translateSource(event.message ||
         PROVISIONING_STEP_LABELS[event.state] ||
-        "Preparing your instance",
+        "Preparing your instance"),
       progress: getProvisioningProgress(event.state),
       mode: "determinate",
       stage: event.state,
@@ -758,7 +759,7 @@ async function notifyStorageCompletion(body: string) {
     if (granted) {
       await sendNotification({
         title: "Noland Connect",
-        body,
+        body: translateSource(body),
         icon: "icons/icon.png",
         // Use the platform notification sound, independently of the optional
         // in-app arcade sound setting.
@@ -1045,7 +1046,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       error: null,
       blockingAction: createBlockingAction(state, {
         key: "provisioning.flow",
-        label: "Provisioning session",
+        label: translate("generated.83fae8da085af6f1"),
         detail,
         progress:
           getProvisioningProgress(
@@ -1216,8 +1217,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "onboarding.setup",
-          label: "Configuring Noland Connect",
-          detail: "Saving local credentials and preparing your account.",
+          label: translate("generated.2cdfbc3a3d292f50"),
+          detail: translate("generated.b408c35971eea6b2"),
           blocking: true,
         },
         async () => {
@@ -1235,8 +1236,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "server.location",
-          label: "Updating search location",
-          detail: "Saving your server region filters.",
+          label: translate("generated.3d4d51046bee2119"),
+          detail: translate("generated.4c9fcb0c035aa50c"),
           blocking: true,
         },
         async () => {
@@ -1295,8 +1296,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "server.select",
-          label: "Selecting server offer",
-          detail: "Applying the selected GPU host and storage size.",
+          label: translate("generated.5aac0f6894e3a6ca"),
+          detail: translate("generated.387bf210b7ee9e4f"),
           blocking: true,
         },
         async () => {
@@ -1311,7 +1312,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     startPlay: async () => {
       set({ provisioningModalDismissed: false });
       beginProvisioningBlock(
-        "Reserving hardware and starting your cloud gaming session.",
+        translate("generated.50e4a7cd052ffc5b"),
       );
       try {
         await startPlayFlow();
@@ -1328,7 +1329,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     resumeProvisioningExisting: async (instanceId) => {
       set({ provisioningModalDismissed: false });
-      beginProvisioningBlock("Resuming this instance from its saved provisioning checkpoint.");
+      beginProvisioningBlock(translate("generated.0cad13633ca98925"));
       try {
         const mode = await resumeProvisioningExistingInstance(instanceId);
         const [appState, postWireguardSetup] = await Promise.all([
@@ -1359,7 +1360,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     startPlayExisting: async (instanceId) => {
       set({ provisioningModalDismissed: false });
-      beginProvisioningBlock("Reconnecting to your existing gaming instance.");
+      beginProvisioningBlock(translate("generated.39caee49c0f6c0c0"));
       try {
         const mode = await startPlayExistingInstance(instanceId);
 
@@ -1533,8 +1534,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "vast.wallet.summary",
-          label: "Refreshing Vast.ai wallet",
-          detail: "Fetching your current Vast.ai account balance.",
+          label: translate("generated.b4b7b6c350e77d3e"),
+          detail: translate("generated.0334905e355667d6"),
           blocking: false,
         },
         async () => {
@@ -1561,8 +1562,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "settings.server",
-          label: "Saving server preferences",
-          detail: "Updating your offer filters and hardware requirements.",
+          label: translate("generated.2521114569981723"),
+          detail: translate("generated.9ef0d1b429d68ee2"),
           blocking: true,
         },
         async () => {
@@ -1671,8 +1672,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "settings.edid.regenerate",
-          label: "Regenerating EDID",
-          detail: "Rebuilding headless display profile and saving it to state.",
+          label: translate("generated.7bc7f18667d6292e"),
+          detail: translate("generated.954d774bb4958e32"),
           blocking: true,
         },
         async () => {
@@ -1689,8 +1690,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "wireguard.local.setup",
-          label: "Setting up WireGuard",
-          detail: "Installing the local tunnel configuration on this PC.",
+          label: translate("generated.8098b515e447f693"),
+          detail: translate("generated.e6b39e688c3860fd"),
         },
         async () => {
           await setupWireguardClient();
@@ -1703,8 +1704,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runBusyTask(
         {
           key: "wireguard.local.reconnect",
-          label: "Reconnecting managed tunnel",
-          detail: "Restarting the local GotaTun-backed tunnel.",
+          label: translate("generated.aabbaeeacad4f4ce"),
+          detail: translate("generated.3e79c8197ad6505b"),
         },
         async () => {
           const result = await reconnectLocalWireguardClientQuick();
@@ -1720,8 +1721,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "wireguard.appHandoff",
-          label: "Starting managed tunnel",
-          detail: "Applying the generated config through the local GotaTun-backed tunnel flow.",
+          label: translate("generated.90761a385f94f43b"),
+          detail: translate("generated.7d2e7707685d9a47"),
           blocking: true,
         },
         async () => {
@@ -1739,8 +1740,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "wireguard.verify",
-          label: "Verifying secure tunnel",
-          detail: "Checking 10.77.0.1 over the WireGuard tunnel.",
+          label: translate("generated.760776423c921b81"),
+          detail: translate("generated.0763c57dbc8bef1a"),
           blocking: true,
         },
         async () => {
@@ -1758,8 +1759,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "sunshine.verify",
-          label: "Verifying Sunshine",
-          detail: "Checking Sunshine over 10.77.0.1.",
+          label: translate("generated.8223cc2719eed72f"),
+          detail: translate("generated.df342aa9339c72df"),
         },
         async () => {
           const result = await verifySunshine();
@@ -1775,8 +1776,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "moonlightSunshine.setup",
-          label: "Setting up Moonlight and Sunshine",
-          detail: "Preparing Moonlight pairing over the secure tunnel.",
+          label: translate("generated.9aee8c9595c041c0"),
+          detail: translate("generated.e41be2004d42571a"),
           blocking: true,
         },
         async () => {
@@ -1799,8 +1800,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return runBusyTask(
         {
           key: "postWireguard.retry",
-          label: "Retrying setup step",
-          detail: "Repeating only the failed post-WireGuard step.",
+          label: translate("generated.d9de282938c0ee98"),
+          detail: translate("generated.ef55d2a88ab577c8"),
           blocking: true,
         },
         async () => {
@@ -1846,8 +1847,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.settings.load",
-          label: "Loading shared storage settings",
-          detail: "Fetching your Backblaze and rclone configuration.",
+          label: translate("generated.87ac872c323d842b"),
+          detail: translate("generated.addaa0f4cf57fd2e"),
         },
         async () => {
           const settings = await getSharedStorageSettings();
@@ -1861,8 +1862,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "settings.auto-shutdown",
-          label: "Saving automatic backup settings",
-          detail: "Updating the inactivity timeout and backup limit.",
+          label: translate("generated.04faf7b562ab89a9"),
+          detail: translate("generated.4433c51386acf4c6"),
         },
         async () => {
           const appState = await saveAutoShutdownSettingsCommand(settings);
@@ -1876,8 +1877,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.settings.save",
-          label: "Saving shared storage settings",
-          detail: "Updating backup credentials and destination settings.",
+          label: translate("generated.b935b0e63f135682"),
+          detail: translate("generated.c57f7dddbf6b4327"),
           blocking: true,
         },
         async () => {
@@ -1893,8 +1894,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runBusyTask(
         {
           key: "storage.settings.test",
-          label: "Testing shared storage connection",
-          detail: "Checking your Backblaze bucket and remote access.",
+          label: translate("generated.eb27b7e8ded23881"),
+          detail: translate("generated.2ccad01060281a32"),
         },
         async () => await testSharedStorageConfig(),
         null,
@@ -1920,7 +1921,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.connect",
-          label: "Connecting storage",
+          label: translate("generated.2c7ddc59b61759fd"),
           blocking: true,
         },
         async () => {
@@ -1943,7 +1944,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.test",
-          label: "Testing connection",
+          label: translate("generated.04dfed9c1dcdcb4a"),
         },
         async () => {
           const result = await testSharedStorageConnection(profileId);
@@ -1967,7 +1968,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.profile.activate",
-          label: "Switching storage profile",
+          label: translate("generated.60b763646d4c3fd7"),
         },
         async () => {
           await setActiveSharedStorageProfile(profileId);
@@ -1981,7 +1982,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.disconnect",
-          label: "Disconnecting storage",
+          label: translate("generated.f1ac1eaaca0ce497"),
         },
         async () => {
           await disconnectSharedStorageProfile(profileId);
@@ -1996,20 +1997,20 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.sync.active-instance",
-          label: "Whole-instance export removed",
+          label: translate("generated.42e34f252c7666b0"),
           detail:
-            "Use the shared storage export flow to choose specific files or folders instead of syncing the whole filesystem.",
+            translate("generated.33116ae646f2cd4e"),
           blocking: true,
         },
         async () => {
           const instanceId = get().appState?.instance.instanceId;
           if (!instanceId) {
             throw new Error(
-              "No active instance selected. Start or select a server first.",
+              translate("generated.2a5f6344635d6380"),
             );
           }
           throw new Error(
-            "Whole-instance shared-storage export has been removed. Use Export Selected Files from the dashboard/shared storage UI.",
+            translate("generated.7083e842fe19eac2"),
           );
         },
         null,
@@ -2057,7 +2058,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.oauth.complete",
-          label: "Completing authorization",
+          label: translate("generated.3e9fecfcc6f84c62"),
         },
         async () => {
           const result = await completeOauthAuthorization(sessionId);
@@ -2110,9 +2111,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.sync",
-          label: "Restoring application state",
+          label: translate("generated.38928c388adf6720"),
           detail:
-            "Downloading, verifying, and applying selected app bundles on the instance.",
+            translate("generated.ddf87f6b45c36b44"),
           blocking: false,
           background: true,
         },
@@ -2122,7 +2123,7 @@ export const useAppStore = create<AppStore>((set, get) => {
             selectedCount: selectedPaths.length,
           });
           if (selectedPaths.length === 0) {
-            throw new Error("Select at least one file or folder to sync.");
+            throw new Error(translate("generated.54cc33a5d2f591d4"));
           }
           const message = await syncInstanceFromSharedStorageSelected(
             instanceId,
@@ -2168,8 +2169,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
-          label: "Backing up application state",
-          detail: "The state agent is packing, encrypting, and committing selected apps.",
+          label: translate("generated.6e9fc8a84aaaa28a"),
+          detail: translate("generated.744d5005ed49ebf5"),
           blocking: false,
           background: true,
         },
@@ -2179,7 +2180,7 @@ export const useAppStore = create<AppStore>((set, get) => {
             selectedPaths,
             performanceMode,
           );
-          await notifyStorageCompletion("Your selected files are backed up and ready.");
+          await notifyStorageCompletion(translate("generated.57893731ab390a3d"));
           return result;
         },
         null,
@@ -2195,7 +2196,7 @@ export const useAppStore = create<AppStore>((set, get) => {
                 ...state.blockingAction,
                 cancelRequested: true,
                 cancellable: false,
-                detail: "Cancel requested. Waiting for the state agent to stop.",
+                detail: translate("generated.acf1e4361a83466b"),
               }
             : null,
         }));
@@ -2217,8 +2218,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "instance.files.upload",
-          label: "Uploading directly to instance",
-          detail: "Preparing selected files and folders for direct SCP transfer.",
+          label: translate("generated.e91ca92cc5ad0131"),
+          detail: translate("generated.f49ff416f3bf8c04"),
           blocking: false,
           background: true,
         },
@@ -2272,16 +2273,14 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     setupBackupSchedule: async () => {
       set({
-        error:
-          "Scheduled backups are disabled. Save selected files manually from the shared storage interface.",
+        error: translate("storage.scheduled.disabled.manual"),
       });
       return null;
     },
 
     removeBackupSchedule: async () => {
       set({
-        error:
-          "Scheduled backups are disabled. There is no active schedule to remove.",
+        error: translate("storage.scheduled.disabled.none"),
       });
       return null;
     },
@@ -2294,9 +2293,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "sunshine.settings.load",
-          label: "Loading Sunshine settings",
+          label: translate("generated.945fb00f0760ef39"),
           detail:
-            "Fetching the current Sunshine configuration from the instance.",
+            translate("generated.3443a1150ce732cc"),
         },
         async () => {
           const settings = await getInstanceSunshineSettings(
@@ -2319,9 +2318,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "sunshine.settings.save",
-          label: "Saving Sunshine settings",
+          label: translate("generated.f53602b17f93e906"),
           detail:
-            "Applying the updated Sunshine configuration on the instance.",
+            translate("generated.c1ae07f1a3806161"),
         },
         async () => {
           await updateInstanceSunshineSettings(
@@ -2349,9 +2348,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "sunshine.settings.reset",
-          label: "Resetting Sunshine settings",
+          label: translate("generated.24922a092534f322"),
           detail:
-            "Restoring the provisioned Sunshine defaults on the instance.",
+            translate("generated.fa24897734cbdaf5"),
         },
         async () => {
           await resetInstanceSunshineSettings(
@@ -2374,7 +2373,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "instance.moonlight.pipeline",
-          label: enabled ? "Enabling embedded Moonlight" : "Disabling embedded Moonlight",
+          label: translate(enabled ? "moonlight.enabling" : "moonlight.disabling"),
           detail: enabled
             ? "Turning on the built-in Moonlight pipeline for this instance."
             : "Turning off the built-in Moonlight pipeline for this instance.",
@@ -2402,8 +2401,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.moonlight.status",
-          label: "Loading embedded Moonlight status",
-          detail: "Checking whether this instance is ready for the built-in stream pipeline.",
+          label: translate("generated.0358066e035e3c63"),
+          detail: translate("generated.70ede56625b44c42"),
         },
         async () => {
           const embeddedMoonlightStatus = await getInstanceMoonlightPipelineStatus(instanceId);
@@ -2424,8 +2423,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.moonlight.pair.begin",
-          label: "Starting embedded Moonlight pairing",
-          detail: "Generating a Sunshine pairing PIN for the built-in Moonlight pipeline.",
+          label: translate("generated.15bedff6d793f86a"),
+          detail: translate("generated.c1a13260aa639112"),
           blocking: true,
         },
         async () => {
@@ -2449,8 +2448,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.moonlight.pair.complete",
-          label: "Completing embedded Moonlight pairing",
-          detail: "Finalizing Sunshine pairing for the built-in Moonlight pipeline.",
+          label: translate("generated.4f3885d0851d75b3"),
+          detail: translate("generated.6a8d371fa5d4d888"),
           blocking: true,
         },
         async () => {
@@ -2475,9 +2474,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.services.reboot",
-          label: "Rebooting instance services",
+          label: translate("generated.f87a66adc3a6aab5"),
           detail:
-            "Restarting Sunshine, networking, and related streaming services.",
+            translate("generated.3fd8445568ced854"),
           blocking: true,
         },
         async () => await rebootInstanceServices(instanceId),
@@ -2490,9 +2489,9 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runInstanceTask(
         {
           key: "instance.destroy",
-          label: "Destroying instance",
+          label: translate("generated.0c9df74dc6eeab50"),
           detail:
-            "Tearing down the rented machine and finalizing any backup steps.",
+            translate("generated.9bb868b4f3f40791"),
           blocking: true,
         },
         async () => {

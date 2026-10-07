@@ -1,3 +1,4 @@
+import { translate, translateSource, useLocalization } from "../lib/i18n";
 import { useEffect, useRef, useState } from "react";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -322,16 +323,16 @@ function UpdateAvailableModal({
         <div>
           <h2
             className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
-            data-text="Update Available"
+            data-text={translate("generated.5ae200f91c64da48")}
           >
-            Update Available
+            {translate("generated.5ae200f91c64da48")}
           </h2>
             <p className="text-[1.15rem] leading-none text-[#b4c8de]">
-             Noland Connect {update.latestVersion} is ready to install.
+             {translate("generated.939edfedc701440a")} {update.latestVersion} {translate("generated.37cb959efa7c6035")}
           </p>
         </div>
         <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
-          Later
+          {translate("generated.73b6e48a1b552d11")}
         </Button>
       </div>
 
@@ -339,12 +340,12 @@ function UpdateAvailableModal({
         <Card className="text-[1.2rem] text-[#c6dbf4]">
           <div className="grid gap-2">
             <p>
-              Current version: <span className="text-[#9ad9ff]">{update.currentVersion}</span>
+              {translate("generated.0dd606e783fc3ffa")} <span className="text-[#9ad9ff]">{update.currentVersion}</span>
             </p>
             <p>
-              New version: <span className="text-neon-lime">{update.latestVersion}</span>
+              {translate("generated.df6e756fc120eb45")} <span className="text-neon-lime">{update.latestVersion}</span>
             </p>
-            {releaseDate && <p>Published: {releaseDate}</p>}
+            {releaseDate && <p>{translate("generated.806da0ed547eb206")} {releaseDate}</p>}
           </div>
 
           <div className="mt-4 max-h-48 overflow-y-auto whitespace-pre-wrap border border-[#3e4270] bg-[#070b1b] p-3 text-[1.05rem] leading-snug text-[#b4c8de]">
@@ -353,8 +354,8 @@ function UpdateAvailableModal({
           {progress && (
             <div className="mt-4 space-y-2">
               <div className="flex justify-between text-[1.05rem] text-[#9ad9ff]">
-                <span>{progress.phase === "downloading" ? "Downloading update" : progress.phase === "installing" ? "Installing update" : "Restarting Noland Connect"}</span>
-                <span>{progress.percent != null ? `${progress.percent}%` : "Working..."}</span>
+                <span>{progress.phase === "downloading" ? translate("generated.01436823867550f9") : progress.phase === "installing" ? translate("generated.572b4e4107ee207d") : translate("generated.315f0d627222fee0")}</span>
+                <span>{progress.percent != null ? `${progress.percent}%` : translate("generated.b93900bded315d04")}</span>
               </div>
               <div className="h-2 overflow-hidden rounded bg-[#171d35]">
                 <div className={`h-full bg-neon-cyan transition-[width] ${progress.percent == null ? "w-1/3 animate-pulse" : ""}`} style={progress.percent != null ? { width: `${progress.percent}%` } : undefined} />
@@ -368,15 +369,15 @@ function UpdateAvailableModal({
           <SocialLinks />
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
-              Skip for now
+              {translate("generated.b58eb52c8810b978")}
             </Button>
             <Button
               variant="secondary"
               loading={progress !== null}
-              loadingText={progress?.phase === "installing" ? "Installing..." : "Downloading..."}
+              loadingText={progress?.phase === "installing" ? translate("generated.07ae7fd684564e68") : translate("generated.f976eb284ebb156b")}
               onClick={installUpdate}
             >
-              Install and Restart
+              {translate("generated.b1a21af734bf97f5")}
             </Button>
           </div>
         </div>
@@ -391,14 +392,14 @@ function BootScreen() {
       <Card className="pixel-frame animate-fade-in p-6 text-center">
         <img
           src={appLogo}
-          alt="Noland logo"
+          alt={translate("generated.9b455e14fd50b59b")}
           className="mx-auto mb-4 max-h-40 w-auto border border-[#3d426f]"
         />
         <p
           className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-          data-text="Loading Noland Connect..."
+          data-text={translate("generated.c1c50ca3cce58dfd")}
         >
-          Loading Noland Connect...
+          {translate("generated.c1c50ca3cce58dfd")}
         </p>
       </Card>
     </main>
@@ -427,25 +428,25 @@ function CloseWithInstancesModal({
   return (
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[140]">
       <div className="border-b-2 border-[#9a6536] px-5 py-4">
-        <h2 className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text="Instances still running">
-          Instances still running
+        <h2 className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text={translate("generated.7a9be85b62a5b21e")}>
+          {translate("generated.7a9be85b62a5b21e")}
         </h2>
         <p className="mt-2 text-[1.15rem] leading-snug text-[#d7e6f7]">
-          You have {instances} rented instance{instances === 1 ? "" : "s"}. Quitting Noland does not stop them — they will continue charging until they are destroyed.
+          {translate("generated.af3f12e161fdb1cb")} {instances} {translate("generated.16c237378e5229bd")}{instances === 1 ? "" : translate("generated.043a718774c572bd")}{translate("generated.c46da1442255e3e3")}
         </p>
       </div>
       <ModalBody className="space-y-4 px-5 py-5">
         <Card className="border border-[#9a6536] bg-[#3a2518]/60 text-[1.1rem] text-[#ffd3a3]">
-          Choose what to do before closing the app. Inactive instances are included because they may still be billable.
+          {translate("generated.e05b165fa8ba1860")}
         </Card>
-        {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{error}</p>}
+        {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{translateSource(error)}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
-          <Button variant="ghost" onClick={onContinue} disabled={deleting}>Continue using app</Button>
-          <Button variant="secondary" onClick={onQuit} disabled={deleting}>Quit — keep instances on</Button>
-          <Button className="border-red-500/60 text-red-300 hover:bg-red-900/30" onClick={onDeleteAll} loading={deleting} loadingText="Deleting instances...">
-            Delete all, then quit
+          <Button variant="ghost" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
+          <Button variant="secondary" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
+          <Button className="border-red-500/60 text-red-300 hover:bg-red-900/30" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
+            {translate("generated.d83cd3e78affba6d")}
           </Button>
-          <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>Setup shared storage</Button>
+          <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>{translate("generated.5539df1fa82ec53e")}</Button>
         </div>
       </ModalBody>
     </ModalFrame>
@@ -453,6 +454,9 @@ function CloseWithInstancesModal({
 }
 
 export function App() {
+  // Subscribe the application tree so statically translated copy refreshes
+  // immediately when the user changes locale.
+  useLocalization();
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [windowLabelResolved, setWindowLabelResolved] = useState(false);
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
@@ -810,35 +814,35 @@ export function App() {
       {error && (
         <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
           <div className="flex items-start justify-between gap-3">
-            <p className="break-words break-all">{error}</p>
+            <p className="break-words break-all">{translateSource(error)}</p>
             <div className="flex shrink-0 flex-col items-end gap-2">
               <button
                 className="font-display text-[10px] uppercase tracking-[0.12em]"
                 onClick={() => void openCrashIssue("error-toast", error)}
                 type="button"
               >
-                GitHub issue
+                {translate("generated.7d94e2e7acad3b70")}
               </button>
               <button
                 className="font-display text-[10px] uppercase tracking-[0.12em]"
                 onClick={toggleAutoGithubIssues}
                 type="button"
-                title="Automatically open a prefilled GitHub issue whenever a new app error appears."
+                title={translate("generated.6a3dfee4b30efe35")}
               >
-                Auto issue: {autoGithubIssuesEnabled ? "on" : "off"}
+                {translate("generated.afa8c6d0eac55073")} {autoGithubIssuesEnabled ? translate("generated.b8d31e852725afb1") : translate("generated.b4dc66dde806261b")}
               </button>
               <button
                 className="font-display text-[10px] uppercase tracking-[0.12em]"
                 onClick={clearError}
                 type="button"
               >
-                Dismiss
+                {translate("generated.48845bff334a50a5")}
               </button>
             </div>
           </div>
           {lastDiagnosticReport && (
             <p className="mt-2 break-all text-[0.95rem] text-[#ffc1cf]">
-              Report: {lastDiagnosticReport.path}
+              {translate("generated.0a90864de9a6575f")} {lastDiagnosticReport.path}
             </p>
           )}
         </div>

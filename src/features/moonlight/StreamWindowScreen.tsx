@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -12,6 +13,7 @@ import {
 } from "../../lib/backend";
 import {
   networkWarningBody,
+  notifyBadConnection,
   type NetworkStatusEvent,
 } from "../../lib/networkNotifications";
 
@@ -105,11 +107,11 @@ const EMPTY_DEBUG: DebugState = {
 function captureModeLabel(mode: number): string {
   switch (mode) {
     case 1:
-      return "relative";
+      return translate("generated.d2d9e1f13413d3e0");
     case 2:
-      return "absolute";
+      return translate("generated.747355bdc2a22403");
     default:
-      return "none";
+      return translate("generated.140bedbf9c3f6d56");
   }
 }
 
@@ -267,6 +269,7 @@ export function StreamWindowScreen() {
           return;
         }
         networkBadEpisodeRef.current = true;
+        void notifyBadConnection(payload);
         if (networkWarningTimeoutRef.current != null) {
           window.clearTimeout(networkWarningTimeoutRef.current);
         }
@@ -290,22 +293,22 @@ export function StreamWindowScreen() {
 
   const captureHint = useMemo(() => {
     if (preferredMouseMode === "absolute") {
-      return "Native stream window active — desktop mouse capture should activate automatically · Ctrl+Alt+Shift+Z to release";
+      return translate("generated.3f80a4810bcc5dfa");
     }
     if (preferredMouseMode === "relative") {
-      return "Native stream window active — relative mouse capture should activate automatically · Ctrl+Alt+Shift+Z to release";
+      return translate("generated.2aba47a8a332de64");
     }
-    return "Native stream window active — input capture should activate automatically · Ctrl+Alt+Shift+Z to release";
+    return translate("generated.121453cf700c2ef9");
   }, [preferredMouseMode]);
 
   const detail = useMemo(() => {
     if (preferredMouseMode === "absolute") {
-      return "Native stream window owns desktop mouse and keyboard input. Capture restores when the window regains focus.";
+      return translate("generated.6aa8acf82d2aec6f");
     }
     if (preferredMouseMode === "relative") {
-      return "Native stream window owns relative mouse and keyboard input. Capture restores when the window regains focus.";
+      return translate("generated.a06e6bc5e72c99cb");
     }
-    return "Native stream window owns stream input. Capture restores when the window regains focus.";
+    return translate("generated.34339a32584c67b4");
   }, [preferredMouseMode]);
 
   const handleDisconnectStream = async () => {
@@ -336,7 +339,9 @@ export function StreamWindowScreen() {
         ? await moonlightSendClipboardToRemote()
         : await moonlightGetClipboardFromRemote();
       setClipboardStatus(
-        `${direction === "send" ? "Sent" : "Received"} ${result.byteCount} bytes`,
+        translate(direction === "send" ? "stream.clipboard.sent" : "stream.clipboard.received", {
+          count: result.byteCount,
+        }),
       );
     } catch (error) {
       setClipboardStatus(error instanceof Error ? error.message : String(error));
@@ -360,7 +365,7 @@ export function StreamWindowScreen() {
           <div className="absolute inset-x-0 top-20 flex justify-center px-4">
             <div className="max-w-lg rounded border border-amber-300/80 bg-amber-950/90 px-5 py-4 font-mono text-amber-50 shadow-[0_0_24px_rgba(251,191,36,0.3)] backdrop-blur-sm">
               <div className="text-sm font-semibold uppercase tracking-[0.12em]">
-                ⚠ Connection unstable
+                {translate("generated.d6f0569777748206")}
               </div>
               <div className="mt-2 text-xs leading-5 text-amber-100">
                 {networkWarningBody(networkWarning)}
@@ -368,10 +373,10 @@ export function StreamWindowScreen() {
               {networkWarning.keyMetrics ? (
                 <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-amber-200">
                   {networkWarning.keyMetrics.medianRttMs != null ? (
-                    <span>ping {networkWarning.keyMetrics.medianRttMs.toFixed(1)} ms</span>
+                    <span>{translate("generated.758d61f26a444483")} {networkWarning.keyMetrics.medianRttMs.toFixed(1)} {translate("generated.f785c3ce1d580c8f")}</span>
                   ) : null}
-                  <span>jitter {(networkWarning.keyMetrics.jitterMs ?? 0).toFixed(1)} ms</span>
-                  <span>loss {(networkWarning.keyMetrics.lossPercent ?? 0).toFixed(1)}%</span>
+                  <span>{translate("generated.16c7dc721bc2a15a")} {(networkWarning.keyMetrics.jitterMs ?? 0).toFixed(1)} {translate("generated.f785c3ce1d580c8f")}</span>
+                  <span>{translate("generated.2ea71c18131a7f03")} {(networkWarning.keyMetrics.lossPercent ?? 0).toFixed(1)}%</span>
                 </div>
               ) : null}
             </div>
@@ -386,7 +391,7 @@ export function StreamWindowScreen() {
               disabled={clipboardBusy !== null || disconnecting}
               className="rounded border border-violet-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-violet-100 shadow-[0_0_18px_rgba(196,181,253,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
             >
-              {clipboardBusy === "send" ? "Sending…" : "Send clipboard to remote"}
+              {clipboardBusy === "send" ? translate("generated.b8ed5279e897be5d") : translate("generated.639d984d9ffc0361")}
             </button>
             <button
               type="button"
@@ -394,14 +399,14 @@ export function StreamWindowScreen() {
               disabled={clipboardBusy !== null || disconnecting}
               className="rounded border border-violet-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-violet-100 shadow-[0_0_18px_rgba(196,181,253,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
             >
-              {clipboardBusy === "get" ? "Getting…" : "Get clipboard from remote"}
+              {clipboardBusy === "get" ? translate("generated.eaa6c37a1811815b") : translate("generated.9d060e4dd135b141")}
             </button>
             <button
               type="button"
               onClick={() => setShowHud((value) => !value)}
               className="rounded border border-cyan-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90"
             >
-              {showHud ? "Hide HUD" : "Show HUD"}
+              {showHud ? translate("generated.9af4b195a28a6dd4") : translate("generated.a3980e524819578a")}
             </button>
             <button
               type="button"
@@ -411,7 +416,7 @@ export function StreamWindowScreen() {
               disabled={disconnecting}
               className="rounded border border-amber-300/70 bg-slate-950/80 px-4 py-2 font-mono text-sm text-amber-100 shadow-[0_0_18px_rgba(251,191,36,0.18)] backdrop-blur-sm transition hover:bg-slate-900/90 disabled:cursor-wait disabled:opacity-70"
             >
-              {disconnecting ? "Ending stream…" : "End stream"}
+              {disconnecting ? translate("generated.6feadc6d3b71fbcc") : translate("generated.23c13af33709b5e3")}
             </button>
           </div>
           {disconnectError ? (
@@ -429,35 +434,35 @@ export function StreamWindowScreen() {
         {showHud && latencyStats && (latencyStats.frameTimingRingCount > 0 || latencyStats.adaptivePacketSizeEnabled) ? (
           <div className="absolute bottom-4 left-4 max-w-md rounded border border-emerald-400/60 bg-slate-950/70 px-3 py-2 font-mono text-[11px] leading-5 text-emerald-50 shadow-[0_0_18px_rgba(52,211,153,0.18)] backdrop-blur-sm">
             <div>
-              render {(latencyStats.renderedFpsX100 / 100).toFixed(1)} FPS · stream {latencyStats.streamFps} FPS · display {(latencyStats.clientRefreshRateX100 / 100).toFixed(2)} Hz
+              {translate("generated.887270d0cbc560af")} {(latencyStats.renderedFpsX100 / 100).toFixed(1)} {translate("generated.fe131b2fea5626c8")} {latencyStats.streamFps} {translate("generated.ae45f5198135a65b")} {(latencyStats.clientRefreshRateX100 / 100).toFixed(2)} {translate("generated.987d2c1d9216b34f")}
             </div>
             <div>
-              pacing {latencyStats.effectivePacingMode} (configured {latencyStats.configuredPacingMode})
+              {translate("generated.7bfef0ad1b273d14")} {latencyStats.effectivePacingMode} {translate("generated.3ac452a0b121b531")} {latencyStats.configuredPacingMode})
             </div>
             <div>
-              queues core={latencyStats.pendingCoreVideoFrames} decoder={latencyStats.decoderQueueDepth} render={latencyStats.renderQueueDepth}
+              {translate("generated.017964127e8f37cb")}{latencyStats.pendingCoreVideoFrames} {translate("generated.48482d640fea00e5")}{latencyStats.decoderQueueDepth} {translate("generated.972409a7bfd12f9e")}{latencyStats.renderQueueDepth}
             </div>
             <div>
-              decode {(latencyStats.averageDecodePipelineUs / 1000).toFixed(2)} ms · render dwell {(latencyStats.averageRenderQueueDwellUs / 1000).toFixed(2)} ms
+              {translate("generated.713a1417c769dc75")} {(latencyStats.averageDecodePipelineUs / 1000).toFixed(2)} {translate("generated.43afaea4575e0f3e")} {(latencyStats.averageRenderQueueDwellUs / 1000).toFixed(2)} {translate("generated.f785c3ce1d580c8f")}
             </div>
             <div>
-              RTP {latencyStats.videoPacketsInterval} · FEC total={latencyStats.fecPacketsInterval} recovered={latencyStats.fecRecoveriesInterval} failed={latencyStats.fecFailuresInterval} · OOS={latencyStats.outOfSequencePacketsInterval} invalid={latencyStats.invalidPacketsInterval}/{latencyStats.invalidFecPacketsInterval}
+              {translate("generated.f8c4379da2505d21")} {latencyStats.videoPacketsInterval} {translate("generated.26fc7d3ffe801152")}{latencyStats.fecPacketsInterval} {translate("generated.7a201874276741b8")}{latencyStats.fecRecoveriesInterval} {translate("generated.c1b4613b8a026a3c")}{latencyStats.fecFailuresInterval} {translate("generated.ba753f2339339812")}{latencyStats.outOfSequencePacketsInterval} {translate("generated.4a08ee798120df9c")}{latencyStats.invalidPacketsInterval}/{latencyStats.invalidFecPacketsInterval}
             </div>
             <div>
-              late={latencyStats.lateFrameCount} stale drops={latencyStats.adaptiveStaleDropCount} pacer drops={latencyStats.pacerBacklogDropCount} peak={(latencyStats.maximumLatenessUs / 1000).toFixed(2)} ms
+              {translate("generated.f006b6812e1f7b90")}{latencyStats.lateFrameCount} {translate("generated.c0e324810b9b3d4f")}{latencyStats.adaptiveStaleDropCount} {translate("generated.a36d2f345c55e08e")}{latencyStats.pacerBacklogDropCount} {translate("generated.c786bfd89235078f")}{(latencyStats.maximumLatenessUs / 1000).toFixed(2)} {translate("generated.f785c3ce1d580c8f")}
             </div>
             <div>
-              backpressure {latencyStats.decoderBackpressured ? "active" : "idle"} · accumulated {(latencyStats.decoderBackpressureTimeUs / 1000).toFixed(1)} ms
+              {translate("generated.6a06ac7024efc018")} {latencyStats.decoderBackpressured ? translate("generated.96879611650f80a8") : translate("generated.4fb62348858c2f6f")} {translate("generated.6831906b60c54d01")} {(latencyStats.decoderBackpressureTimeUs / 1000).toFixed(1)} {translate("generated.f785c3ce1d580c8f")}
             </div>
             <div>
-              smoothing {latencyStats.smoothingQueueDepth}/{latencyStats.smoothingQueueCapacity} · budget ≤ {(latencyStats.smoothingReserveBudgetUs / 1000).toFixed(1)} ms · overflow={latencyStats.smoothingOverflowDrops} repeat={latencyStats.smoothingUnderflowRepeats}
+              {translate("generated.3637a614cb738f81")} {latencyStats.smoothingQueueDepth}/{latencyStats.smoothingQueueCapacity} {translate("generated.8a113c449d88dd3b")} {(latencyStats.smoothingReserveBudgetUs / 1000).toFixed(1)} {translate("generated.55aa8179210d5963")}{latencyStats.smoothingOverflowDrops} {translate("generated.6d4ba7ac63a8c0a3")}{latencyStats.smoothingUnderflowRepeats}
             </div>
             <div>
-              reconnect {latencyStats.reconnectSuccessCount}/{latencyStats.reconnectAttemptCount} · adaptive={latencyStats.adaptivePacketReconnectCount} · remote={latencyStats.resolvedRemoteStreamMode} packet={latencyStats.requestedPacketSize}
+              {translate("generated.91669c43679f4342")} {latencyStats.reconnectSuccessCount}/{latencyStats.reconnectAttemptCount} {translate("generated.397f813b7b2e8f16")}{latencyStats.adaptivePacketReconnectCount} {translate("generated.e69c7ec749a66341")}{latencyStats.resolvedRemoteStreamMode} {translate("generated.1bfee5cf707e1cbd")}{latencyStats.requestedPacketSize}
             </div>
             {latencyStats.adaptivePacketSizeEnabled ? (
               <div>
-                packet controller={latencyStats.packetSizeControllerState} path={latencyStats.packetPathLabel} MTU hint={latencyStats.packetPathMtuHint ?? "unknown"} · good={latencyStats.packetSizeLastGood ?? "none"} bad windows={latencyStats.packetSizeBadWindowCount}/3 confidence={(latencyStats.packetSizeConfidence * 100).toFixed(0)}% · path #{latencyStats.packetPathFingerprint.slice(0, 8)}
+                {translate("generated.8010851385091b52")}{latencyStats.packetSizeControllerState} {translate("generated.f23ab60eeb1d9247")}{latencyStats.packetPathLabel} {translate("generated.73555efb472501a6")}{latencyStats.packetPathMtuHint ?? "unknown"} {translate("generated.2395ff0b33c72fd0")}{latencyStats.packetSizeLastGood ?? "none"} {translate("generated.d495f5384e8b9784")}{latencyStats.packetSizeBadWindowCount}{translate("generated.4b63af8c396475c2")}{(latencyStats.packetSizeConfidence * 100).toFixed(0)}{translate("generated.fc48f5a69120449a")}{latencyStats.packetPathFingerprint.slice(0, 8)}
               </div>
             ) : null}
           </div>
@@ -467,30 +472,30 @@ export function StreamWindowScreen() {
           <div className="absolute bottom-4 right-4 max-w-lg rounded border border-slate-700/80 bg-slate-950/65 px-3 py-2 font-mono text-xs text-slate-100 shadow-[0_0_18px_rgba(15,23,42,0.35)] backdrop-blur-sm">
             <div>{detail}</div>
             <div className="mt-1 text-slate-300">
-              Input capture should begin automatically when the stream window opens
+              {translate("generated.9d00ac2a5bb863a5")}
             </div>
             <div className="mt-1 text-slate-400">
-              Ctrl+Alt+Shift+Z releases capture · Ctrl+Alt+Shift+Q remains a compatibility alias
+              {translate("generated.13722278f53c8e51")}
             </div>
             <div className="mt-1 text-slate-400">
-              Use End stream if audio/video gets into a bad state, then start the session again from the main app.
+              {translate("generated.682c736f3810d7be")}
             </div>
 
             <div className="mt-3 border-t border-slate-700/80 pt-2 text-[11px] leading-5 text-cyan-100">
               <div>
-                capture: {debugState.captureActive ? "active" : "inactive"} ({captureModeLabel(debugState.captureMode)}) · requests: {debugState.captureRequests}
+                {translate("generated.6516af620c324a03")} {debugState.captureActive ? translate("generated.96879611650f80a8") : translate("generated.d1022618b99a974b")} ({captureModeLabel(debugState.captureMode)}{translate("generated.a82c11cd2e358ef0")} {debugState.captureRequests}
               </div>
               <div>
-                native events: move={debugState.nativeMouseMoves} down={debugState.nativeMouseDowns} up={debugState.nativeMouseUps} key={debugState.nativeKeys}
+                {translate("generated.bd1825d7d0c9ca5e")}{debugState.nativeMouseMoves} {translate("generated.2410128cd7f0bb44")}{debugState.nativeMouseDowns} {translate("generated.2a600496b53f8060")}{debugState.nativeMouseUps} {translate("generated.a61a3f400a99f825")}{debugState.nativeKeys}
               </div>
               <div>
-                rust callbacks: rel={debugState.rustRelativeCallbacks} abs={debugState.rustAbsoluteCallbacks} btn={debugState.rustButtonCallbacks} key={debugState.rustKeyCallbacks}
+                {translate("generated.c7b3b4255dc33778")}{debugState.rustRelativeCallbacks} {translate("generated.1e44e918f93acc37")}{debugState.rustAbsoluteCallbacks} {translate("generated.68f5c2e560ba7c7c")}{debugState.rustButtonCallbacks} {translate("generated.a61a3f400a99f825")}{debugState.rustKeyCallbacks}
               </div>
               <div>
-                send attempts: rel={debugState.relativeSendAttempts} abs={debugState.absoluteSendAttempts} btn={debugState.buttonSendAttempts} key={debugState.keySendAttempts} scroll={debugState.scrollSendAttempts}
+                {translate("generated.a172c95553d0ee21")}{debugState.relativeSendAttempts} {translate("generated.1e44e918f93acc37")}{debugState.absoluteSendAttempts} {translate("generated.68f5c2e560ba7c7c")}{debugState.buttonSendAttempts} {translate("generated.a61a3f400a99f825")}{debugState.keySendAttempts} {translate("generated.89a7d32040600cd2")}{debugState.scrollSendAttempts}
               </div>
               <div>
-                send errors: {debugState.sendErrors}
+                {translate("generated.d2e4dda7b6298cef")} {debugState.sendErrors}
               </div>
             </div>
           </div>

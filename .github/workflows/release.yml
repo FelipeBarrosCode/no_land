@@ -32,6 +32,8 @@ jobs:
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
+      - name: Validate localization bundles
+        run: npm run i18n:check
       - name: Validate release scripts parse
         run: |
           for script in scripts/*.mjs scripts/ci/*.mjs; do node --check "$script"; done

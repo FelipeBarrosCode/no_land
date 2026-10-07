@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./app/App";
+import { LocalizationProvider } from "./lib/i18n";
 import appLogo from "./public/noland.png";
 import "./index.css";
 
@@ -14,6 +15,8 @@ if (!favicon.parentNode) {
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <App />
+    <LocalizationProvider>
+      <App />
+    </LocalizationProvider>
   </React.StrictMode>
 );

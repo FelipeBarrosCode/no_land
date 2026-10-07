@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ModalFrame } from "./ModalFrame";
+import { translateSource, useLocalization, translate } from "../../lib/i18n";
 
 export type BlockingLoaderMode = "indeterminate" | "determinate";
 
@@ -48,6 +49,7 @@ export function BlockingLoaderOverlay({
   onStopProvisioning,
   stopRequested = false,
 }: Props) {
+  const { t } = useLocalization();
   const [now, setNow] = useState(() => Date.now());
   const stageRef = useRef<string | null | undefined>(action.stage);
   const [stageStartedAt, setStageStartedAt] = useState(() => action.startedAt);
@@ -91,11 +93,11 @@ export function BlockingLoaderOverlay({
           type="button"
           onClick={onStopProvisioning}
           disabled={stopRequested}
-          aria-label="Stop provisioning"
-          title="Stop provisioning after the current step finishes"
+           aria-label={t("loader.stop.provisioning")}
+           title={t("loader.stop.provisioning.title")}
           className="absolute right-3 top-3 flex h-8 w-8 items-center justify-center border border-[#3f476c] bg-[#10152f] text-[18px] leading-none text-[#cfe7ff] transition hover:border-[#ff8ca2] hover:text-[#ffc1cf] disabled:cursor-not-allowed disabled:opacity-50"
         >
-          ×
+          {translate("generated.8db71ed28b0f2f14")}
         </button>
       )}
 
@@ -107,23 +109,20 @@ export function BlockingLoaderOverlay({
 
         <div className="min-w-0 flex-1">
           <p className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
-            Action In Progress
+            {translate("generated.1d45424d88d8b8d5")}
           </p>
-          <h2 className="mt-1 font-display text-base text-white md:text-lg">{action.label}</h2>
-          {action.detail && <p className="mt-2 text-[1.25rem] leading-[1.08] text-[#c6dbf4]">{action.detail}</p>}
+          <h2 className="mt-1 font-display text-base text-white md:text-lg">{translateSource(action.label)}</h2>
+          {action.detail && <p className="mt-2 text-[1.25rem] leading-[1.08] text-[#c6dbf4]">{translateSource(action.detail)}</p>}
 
           {showInstanceInactiveWarning && (
             <div className="mt-4 border border-[#ffd76b] bg-[#4a3c12] p-3 text-[1.05rem] leading-snug text-[#ffe9a8]">
-              This step is taking longer than expected. The instance might be
-              inactive. You can stop provisioning and start again with a
-              different server.
+              {translate("generated.a623106d12af4417")}
             </div>
           )}
 
           {showStopControl && stopRequested && (
             <div className="mt-4 border border-neon-cyan bg-[#0e2840] p-3 text-[1.05rem] leading-snug text-[#cfe7ff]">
-              Stop requested. Noland will finish the current step, then stop
-              before starting the next one.
+              {translate("generated.bf6474e6e3b1f963")}
             </div>
           )}
 
@@ -140,7 +139,7 @@ export function BlockingLoaderOverlay({
             </div>
 
             <div className="mt-2 flex items-center justify-between gap-2 text-[1.05rem] text-[#91b7d8]">
-              <span>{progress === null ? "Working..." : `${Math.round(progress)}% complete`}</span>
+              <span>{progress === null ? translate("generated.b93900bded315d04") : `${Math.round(progress)}% complete`}</span>
               <span>{formatElapsed(action.startedAt, now)}</span>
             </div>
           </div>
@@ -153,7 +152,7 @@ export function BlockingLoaderOverlay({
                 disabled={action.cancelRequested}
                 onClick={onCancel}
               >
-                {action.cancelRequested ? "Cancelling..." : "Cancel"}
+                 {action.cancelRequested ? t("loader.cancelling") : t("loader.cancel")}
               </button>
             </div>
           )}

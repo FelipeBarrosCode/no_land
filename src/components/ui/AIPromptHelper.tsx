@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useState, useRef } from "react";
 
 interface Props {
@@ -72,7 +73,7 @@ export function AIPromptHelper({ topic, promptText, variant = "both", className 
           <button
             onClick={handleAction}
             className="flex h-7 w-7 items-center justify-center border border-[#3e4270] bg-[#10152f] hover:bg-[#202754] transition-colors duration-100 shadow-[0_0_10px_rgba(97,247,255,0.1)] rounded"
-            title={`Copy AI explanation prompt about ${topic}`}
+            title={translate("prompt.copy.about", { topic })}
             type="button"
           >
             <RobotIcon />
@@ -84,7 +85,7 @@ export function AIPromptHelper({ topic, promptText, variant = "both", className 
             onClick={handleAction}
             className="cursor-pointer text-[1.1rem] font-bold text-neon-cyan underline decoration-[#61f7ff]/40 underline-offset-2 hover:text-white hover:decoration-white transition-all duration-100"
           >
-            Copy Explanation Prompt
+            {translate("generated.77859050fea527f8")}
           </span>
         )}
       </div>
@@ -92,16 +93,16 @@ export function AIPromptHelper({ topic, promptText, variant = "both", className 
       {showNotification && (
         <div className="absolute left-0 top-full z-50 mt-2 w-72 border border-[#44d6ff]/50 bg-[#090b16] p-3 text-[1.05rem] leading-snug text-[#cfe7ff] shadow-[0_0_15px_rgba(68,214,255,0.3)] animate-fade-in text-left">
           <p className="font-semibold text-neon-cyan mb-1">
-            {isCopied ? "Prompt Copied! 🤖" : "AI Explanation Prompt"}
+            {isCopied ? translate("generated.484fb24266f4468a") : translate("generated.313724aa8890d9fb")}
           </p>
           <p>
             {isCopied ? (
               <>
-                You just copied a prompt about <strong className="text-white">{topic}</strong>. Go to your AI provider and paste the prompt; it will be explained.
+                {translate("generated.dd671e5d745c13a3")} <strong className="text-white">{topic}</strong>{translate("generated.db15b469ad062469")}
               </>
             ) : (
               <>
-                Click the robot icon to copy an AI explanation prompt about <strong className="text-white">{topic}</strong> to your clipboard.
+                {translate("generated.a67aa3d1d5fcb91b")} <strong className="text-white">{topic}</strong> {translate("generated.92c47ab965b04aa7")}
               </>
             )}
           </p>
