@@ -1310,7 +1310,13 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     startPlay: async () => {
-      set({ provisioningModalDismissed: false });
+      set((state) => ({
+        provisioningModalDismissed: false,
+        provisioningStopRequested: false,
+        appState: state.appState
+          ? { ...state.appState, orchestrationState: "CreatingInstance" }
+          : state.appState,
+      }));
       beginProvisioningBlock(
         translate("generated.50e4a7cd052ffc5b"),
       );
@@ -1328,7 +1334,10 @@ export const useAppStore = create<AppStore>((set, get) => {
     },
 
     resumeProvisioningExisting: async (instanceId) => {
-      set({ provisioningModalDismissed: false });
+      set({
+        provisioningModalDismissed: false,
+        provisioningStopRequested: false,
+      });
       beginProvisioningBlock(translate("generated.0cad13633ca98925"));
       try {
         const mode = await resumeProvisioningExistingInstance(instanceId);

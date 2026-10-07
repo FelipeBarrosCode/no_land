@@ -441,9 +441,9 @@ function CloseWithInstancesModal({
         </Card>
         {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{translateSource(error)}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
-          <Button variant="ghost" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
+          <Button variant="danger" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
           <Button variant="secondary" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
-          <Button className="border-red-500/60 text-red-300 hover:bg-red-900/30" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
+          <Button variant="secondary" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
             {translate("generated.d83cd3e78affba6d")}
           </Button>
           <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>{translate("generated.5539df1fa82ec53e")}</Button>
