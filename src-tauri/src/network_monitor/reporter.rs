@@ -125,22 +125,25 @@ impl Reporter {
             return;
         }
 
-        let title = if value
-            .get("reasons")
-            .and_then(Value::as_array)
-            .is_some_and(|reasons| {
-                reasons
-                    .iter()
-                    .any(|reason| reason.as_str() == Some("CONNECTION_LOST"))
-            }) {
-            "No Land — Connection lost"
+        let connection_lost =
+            value
+                .get("reasons")
+                .and_then(Value::as_array)
+                .is_some_and(|reasons| {
+                    reasons
+                        .iter()
+                        .any(|reason| reason.as_str() == Some("CONNECTION_LOST"))
+                });
+        let (title, body) = if connection_lost {
+            (
+                "No Land — Connection lost",
+                "The connection to your gaming PC appears to be lost.",
+            )
         } else {
-            "No Land — Connection unstable"
-        };
-        let body = if title.ends_with("Connection lost") {
-            "The connection to your gaming PC appears to be lost."
-        } else {
-            "High latency variation or packet loss may affect streaming."
+            (
+                "No Land — Connection unstable",
+                "High latency variation or packet loss may affect streaming.",
+            )
         };
 
         if let Err(error) = self

@@ -1,3 +1,4 @@
+import { translate, translateSource } from "../../lib/i18n";
 import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
@@ -67,7 +68,7 @@ export function SharedStorageSyncModal({
 
     const timeoutId = window.setTimeout(() => {
       if (active) {
-        setLoadError("Loading is taking too long. Please retry.");
+        setLoadError(translateSource("Loading is taking too long. Please retry."));
         setLoading(false);
       }
     }, 600000);
@@ -79,7 +80,7 @@ export function SharedStorageSyncModal({
         }
         setEntries(result ?? []);
         if (!result) {
-          setLoadError("Unable to retrieve files from shared storage.");
+          setLoadError(translateSource("Unable to retrieve files from shared storage."));
         }
       })
       .finally(() => {
@@ -143,7 +144,7 @@ export function SharedStorageSyncModal({
               checked={isChecked}
               onChange={() => toggleSelected(entry.path)}
               className="h-4 w-4"
-              aria-label={`Select ${entry.name}`}
+              aria-label={translate("storage.select.entry", { name: entry.name })}
             />
           )}
 
@@ -164,39 +165,39 @@ export function SharedStorageSyncModal({
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">Sync From Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Expand an application and choose a specific backup bundle to restore.</p>
+            <h2 className="font-display text-base text-white">{translate("generated.1b960ecf6eeca27a")}</h2>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.82ff64053e2388b9")}</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
-            Close
+            {translate("generated.7d9eb7acb13e2462")}
           </Button>
         </div>
 
         <ModalBody className="px-5 py-4">
           {loading ? (
-            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote index...</p>
+            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.e27db4f54bd77cb7")}</p>
           ) : loadError ? (
             <div className="space-y-2">
-              <p className="text-[1.2rem] text-red-300">{loadError}</p>
-              <p className="text-[1.05rem] text-[#b4c8de]">Close and reopen Sync to retry.</p>
+              <p className="text-[1.2rem] text-red-300">{translateSource(loadError)}</p>
+              <p className="text-[1.05rem] text-[#b4c8de]">{translate("generated.39be046863357c72")}</p>
             </div>
           ) : roots.length === 0 ? (
-            <p className="text-[1.2rem] text-[#b4c8de]">No files found in shared storage.</p>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.2f7333eb84bedeb2")}</p>
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
         </ModalBody>
 
         <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
-          <p className="text-[1.1rem] text-[#9ec0e4]">Selected bundles: {selectedPaths.length}</p>
+          <p className="text-[1.1rem] text-[#9ec0e4]">{translate("generated.4c74fbd5d0a2bd1b")} {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
-              Cancel
+              {translate("generated.19766ed6ccb2f4a3")}
             </Button>
             <Button
               disabled={busy || loading || selectedPaths.length === 0}
               loading={busy}
-              loadingText="Syncing..."
+              loadingText={translate("generated.1567e1dadfa15b87")}
               onClick={async () => {
                 setPendingAction({
                   key: "sync-modal.run",
@@ -210,7 +211,7 @@ export function SharedStorageSyncModal({
                 setPendingAction(null);
               }}
             >
-              Sync Selected
+              {translate("generated.f4de742cf7d701d4")}
             </Button>
           </div>
         </div>

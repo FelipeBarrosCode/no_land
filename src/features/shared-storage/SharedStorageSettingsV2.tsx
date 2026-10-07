@@ -1,3 +1,4 @@
+import { translate, translateSource } from "../../lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -34,9 +35,9 @@ interface Props {
 }
 
 const CATEGORY_LABELS: Record<string, string> = {
-  "object-storage": "Object Storage",
-  "cloud-drives": "Cloud Drives",
-  "enterprise-and-self-hosted": "Enterprise and Self-hosted",
+  "object-storage": "storage.category.object",
+  "cloud-drives": "storage.category.drives",
+  "enterprise-and-self-hosted": "storage.category.enterprise",
 };
 
 export function SharedStorageSettingsV2({
@@ -161,10 +162,10 @@ export function SharedStorageSettingsV2({
         <Card className="p-6">
           <div className="flex items-center gap-2 mb-4">
             <h3 className="text-lg font-display text-neon-cyan">
-              Shared Storage
+              {translate("generated.0e9614b59ef4c78b")}
             </h3>
             <AIPromptHelper
-              topic="Shared Storage Overview"
+              topic={translate("generated.db4dc7d44e7e2a36")}
               promptText={`# Shared Storage
 
 Noland Shared Storage keeps your games, applications, saves, settings, and mods available across your Noland instances.
@@ -180,14 +181,13 @@ All data is encrypted before upload and can only be decrypted with your reposito
             />
           </div>
           <p className="text-sm text-gray-400 mb-6">
-            Keep your games, applications, saves, settings, and mods
-            available across your Noland instances.
+            {translate("generated.1d70042e1ff9b60f")}
           </p>
           <p className="text-sm text-gray-500 mb-4">
-            No storage provider connected.
+            {translate("generated.567127c5b616cc02")}
           </p>
           <Button variant="primary" onClick={() => setShowProviderPicker(true)} disabled={busy}>
-            Connect Storage Provider
+            {translate("generated.320c8881eac2ca36")}
           </Button>
         </Card>
       )}
@@ -196,34 +196,34 @@ All data is encrypted before upload and can only be decrypted with your reposito
       {connectedProfile && !selectedProvider && (
         <Card className="p-6">
           <h3 className="text-lg font-display text-neon-cyan mb-4">
-            Shared Storage
+            {translate("generated.0e9614b59ef4c78b")}
           </h3>
           <div className="space-y-3 mb-6">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-400">Provider</span>
+              <span className="text-sm text-gray-400">{translate("generated.472590ae974d4c1f")}</span>
               <span className="text-sm text-neon-lime">{connectedProfile.providerLabel}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-400">Status</span>
-              <span className="text-sm text-green-400">Connected</span>
+              <span className="text-sm text-gray-400">{translate("generated.920e413c7d411b61")}</span>
+              <span className="text-sm text-green-400">{translate("generated.22965568d22a14ee")}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-400">Repository</span>
+              <span className="text-sm text-gray-400">{translate("generated.13d6ff07b8a5d792")}</span>
               <span className="text-sm text-gray-200 font-mono">{connectedProfile.id.substring(0, 12)}...</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-400">Display Name</span>
+              <span className="text-sm text-gray-400">{translate("generated.18d67c992b71ce69")}</span>
               <span className="text-sm text-gray-200">{connectedProfile.displayName}</span>
             </div>
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-400">Active profile</span>
-              <span className="text-sm text-gray-200">{connectedProfile.active ? "Yes" : "No"}</span>
+              <span className="text-sm text-gray-400">{translate("generated.5608b89a81125b78")}</span>
+              <span className="text-sm text-gray-200">{connectedProfile.active ? translate("generated.85a39ab345d672ff") : translate("generated.1ea442a134b2a184")}</span>
             </div>
           </div>
 
           {profiles.length > 1 && (
             <div className="mb-6 rounded border border-[#3f476c] bg-[#0b0f23]/60 p-3">
-              <p className="text-sm text-gray-200">Connected profiles</p>
+              <p className="text-sm text-gray-200">{translate("generated.17ee1bb8b8821502")}</p>
               <div className="mt-3 space-y-2">
                 {profiles.map((profile) => (
                   <div
@@ -236,14 +236,14 @@ All data is encrypted before upload and can only be decrypted with your reposito
                     </div>
                     <div className="flex items-center gap-2">
                       {profile.active ? (
-                        <span className="text-xs uppercase tracking-wide text-neon-lime">Active</span>
+                        <span className="text-xs uppercase tracking-wide text-neon-lime">{translate("generated.92340695899bd2d8")}</span>
                       ) : (
                         <Button
                           variant="secondary"
                           onClick={() => onSetActiveProfile(profile.id)}
                           disabled={busy}
                         >
-                          Use This Profile
+                          {translate("generated.edec3be72b3ed02b")}
                         </Button>
                       )}
                       <Button
@@ -252,7 +252,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                         onClick={() => onDisconnect(profile.id)}
                         disabled={busy}
                       >
-                        Disconnect
+                        {translate("generated.acfc5be785a9bb3d")}
                       </Button>
                     </div>
                   </div>
@@ -270,16 +270,16 @@ All data is encrypted before upload and can only be decrypted with your reposito
               {testResult.error || "Connection test passed successfully"}
               {testResult.latencyMs != null && (
                 <span className="ml-2 text-gray-400">
-                  ({testResult.latencyMs}ms latency)
+                  ({testResult.latencyMs}{translate("generated.abe01774f0229206")}
                 </span>
               )}
             </div>
           )}
 
           <div className="mb-4 rounded border border-[#3f476c] bg-[#0b0f23]/60 p-3">
-            <p className="text-sm text-gray-200">How to use shared storage</p>
+            <p className="text-sm text-gray-200">{translate("generated.31cc6e316ec6b651")}</p>
             <p className="mt-1 text-xs text-gray-500">
-              Whole-instance sync is no longer supported here. Use the dashboard actions to export or sync only the files and folders you explicitly choose for a running instance.
+              {translate("generated.eba933bf191e8079")}
             </p>
           </div>
 
@@ -289,16 +289,16 @@ All data is encrypted before upload and can only be decrypted with your reposito
               onClick={() => onTestConnection(connectedProfile.id)}
               disabled={busy}
               loading={busy}
-              loadingText="Testing..."
+              loadingText={translate("generated.6c02a28421f8ad91")}
             >
-              Test Connection
+              {translate("generated.c02977b07ec93816")}
             </Button>
             <Button
               variant="ghost"
               onClick={() => setShowProviderPicker(true)}
               disabled={busy}
             >
-              Change Provider
+              {translate("generated.70fed393a3cc3aef")}
             </Button>
             <Button
               variant="ghost"
@@ -306,7 +306,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
               onClick={() => onDisconnect(connectedProfile.id)}
               disabled={busy}
             >
-              Disconnect
+              {translate("generated.acfc5be785a9bb3d")}
             </Button>
           </div>
         </Card>
@@ -316,16 +316,16 @@ All data is encrypted before upload and can only be decrypted with your reposito
       {showProviderPicker && (
         <Card className="p-6">
           <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-display text-neon-cyan">Select Storage Provider</h3>
+            <h3 className="text-lg font-display text-neon-cyan">{translate("generated.c2f590058ef5d597")}</h3>
             <Button variant="ghost" onClick={() => setShowProviderPicker(false)}>
-              Back
+              {translate("generated.76900f1bfd16c8d4")}
             </Button>
           </div>
           <div className="space-y-6">
             {Object.entries(categorizedProviders).map(([category, catProviders]) => (
               <div key={category}>
                 <h4 className="text-xs font-display uppercase tracking-wider text-gray-500 mb-2">
-                  {CATEGORY_LABELS[category] || category}
+                  {CATEGORY_LABELS[category] ? translate(CATEGORY_LABELS[category]) : category}
                 </h4>
                 <div className="grid gap-2 sm:grid-cols-2">
                   {catProviders.map((provider) => (
@@ -337,23 +337,23 @@ All data is encrypted before upload and can only be decrypted with your reposito
                       {provider.provider === "google_drive" && (
                         <span
                           className="absolute right-2 top-2 text-lg leading-none text-amber-300"
-                          title="Uniquely optimized provider"
+                          title={translate("generated.53aa318cddeb0e19")}
                         >
                           <span aria-hidden="true">★</span>
-                          <span className="sr-only">Uniquely optimized provider</span>
+                          <span className="sr-only">{translate("generated.53aa318cddeb0e19")}</span>
                         </span>
                       )}
                       <div className="flex items-center justify-between gap-2">
-                        <p className="text-gray-200 font-medium">{provider.label}</p>
+                        <p className="text-gray-200 font-medium">{translateSource(provider.label)}</p>
                         {PROVIDER_PROMPT_MAP[provider.provider] && (
                           <AIPromptHelper
-                            topic={`${provider.label} Setup Guide`}
+                            topic={translate("storage.provider.setup.topic", { provider: provider.label })}
                             promptText={PROVIDER_PROMPT_MAP[provider.provider]}
                             variant="icon"
                           />
                         )}
                       </div>
-                      <p className="text-xs text-gray-500 mt-1">{provider.description}</p>
+                      <p className="text-xs text-gray-500 mt-1">{translateSource(provider.description)}</p>
                     </button>
                   ))}
                 </div>
@@ -369,34 +369,34 @@ All data is encrypted before upload and can only be decrypted with your reposito
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-display text-neon-cyan">
-                Configure {selectedProvider.label}
+                {translate("generated.6defafa2caa65304")} {selectedProvider.label}
               </h3>
               {PROVIDER_PROMPT_MAP[selectedProvider.provider] && (
                 <AIPromptHelper
-                  topic={`${selectedProvider.label} Setup Guide`}
+                  topic={translate("storage.provider.setup.topic", { provider: selectedProvider.label })}
                   promptText={PROVIDER_PROMPT_MAP[selectedProvider.provider]}
                   variant="icon"
                 />
               )}
             </div>
             <Button variant="ghost" onClick={() => setSelectedProvider(null)}>
-              Back to Providers
+              {translate("generated.9f73d5ebe9024c6b")}
             </Button>
           </div>
 
           <div className="space-y-4">
             <InputField
-              label="Display Name"
+              label={translate("generated.18d67c992b71ce69")}
               value={displayName}
               onChange={(e) => setDisplayName(e.currentTarget.value)}
-              placeholder="My Backup Storage"
+              placeholder={translate("generated.7bad6ea57de19d52")}
             />
 
             {staticCredentialFields.map((field) => {
               if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
                 return (
                   <label key={field.key} className="flex flex-col gap-2 text-base">
-                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{field.label}</span>
+                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{translateSource(field.label)}</span>
                     <select
                       className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] outline-none shadow-[inset_0_0_0_2px_#121731] focus:border-neon-cyan"
                       value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
@@ -405,7 +405,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                     >
                       {field.fieldType.options.map((option) => (
                         <option key={option.value} value={option.value}>
-                          {option.label}
+                          {translateSource(option.label)}
                         </option>
                       ))}
                     </select>
@@ -415,7 +415,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
               if (field.fieldType === "toggle") {
                 return (
                   <label key={field.key} className="flex items-center justify-between rounded border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-sm text-[#dff8ff]">
-                    <span>{field.label}</span>
+                    <span>{translateSource(field.label)}</span>
                     <input
                       type="checkbox"
                       checked={(formValues[field.key] || "false") === "true"}
@@ -428,10 +428,10 @@ All data is encrypted before upload and can only be decrypted with your reposito
               return (
                 <InputField
                   key={field.key}
-                  label={field.label}
+                  label={translateSource(field.label)}
                   value={formValues[field.key] || ""}
                   onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
-                  placeholder={field.placeholder || ""}
+                  placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
                   type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
                   disabled={busy}
                 />
@@ -440,18 +440,18 @@ All data is encrypted before upload and can only be decrypted with your reposito
 
             {!hasDedicatedBucketField && (
               <InputField
-                label="Bucket (optional)"
+                label={translate("generated.ebb53106f5eb44b5")}
                 value={bucket || ""}
                 onChange={(e) => setBucket(e.currentTarget.value || null)}
-                placeholder="Bucket name"
+                placeholder={translate("generated.800f2e137fa1c022")}
               />
             )}
             {!hasDedicatedPrefixField && (
               <InputField
-                label="Prefix (optional)"
+                label={translate("generated.9eb94e768d3f763e")}
                 value={prefix || ""}
                 onChange={(e) => setPrefix(e.currentTarget.value || null)}
-                placeholder="repositories/"
+                placeholder={translate("generated.d00182a96d461ba3")}
               />
             )}
 
@@ -460,9 +460,9 @@ All data is encrypted before upload and can only be decrypted with your reposito
               onClick={handleConnect}
               disabled={busy || displayName.trim().length < 2}
               loading={busy}
-              loadingText="Connecting..."
+              loadingText={translate("generated.5f04ae9ed6a865bb")}
             >
-              Connect {selectedProvider.label}
+              {translate("generated.1a2303ede07493ac")} {selectedProvider.label}
             </Button>
           </div>
         </Card>
@@ -474,52 +474,51 @@ All data is encrypted before upload and can only be decrypted with your reposito
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-display text-neon-cyan">
-                Authorize {selectedProvider.label}
+                {translate("generated.b6741b4ccf6d675a")} {selectedProvider.label}
               </h3>
               {PROVIDER_PROMPT_MAP[selectedProvider.provider] && (
                 <AIPromptHelper
-                  topic={`${selectedProvider.label} Setup Guide`}
+                  topic={translate("storage.provider.setup.topic", { provider: selectedProvider.label })}
                   promptText={PROVIDER_PROMPT_MAP[selectedProvider.provider]}
                   variant="icon"
                 />
               )}
             </div>
             <Button variant="ghost" onClick={() => setSelectedProvider(null)}>
-              Back to Providers
+              {translate("generated.9f73d5ebe9024c6b")}
             </Button>
           </div>
 
           <p className="text-sm text-gray-400 mb-4">
-            {selectedProvider.label} requires you to create your own OAuth application.
-            Click the robot icon for step-by-step instructions, then enter your credentials below.
+            {selectedProvider.label} {translate("generated.1bb25cdb464ff46a")}
           </p>
 
           {!oauthSessionId && (
             <div className="space-y-4 mb-4">
               <InputField
-                label="Display Name"
+                label={translate("generated.18d67c992b71ce69")}
                 value={displayName}
                 onChange={(e) => setDisplayName(e.currentTarget.value)}
-                placeholder="My Cloud Storage"
+                placeholder={translate("generated.a6689cd30e6831c7")}
               />
               <InputField
-                label="Client ID"
+                label={translate("generated.8726db013948f070")}
                 value={formValues["client_id"] || ""}
                 onChange={(e) => handleFieldChange("client_id", e.currentTarget.value)}
-                placeholder="Your OAuth Client ID from the developer console"
+                placeholder={translate("generated.c85f2a53bfb9575b")}
               />
               <InputField
-                label="Client Secret"
+                label={translate("generated.ae21cf6d24b8ca46")}
                 value={formValues["client_secret"] || ""}
                 onChange={(e) => handleFieldChange("client_secret", e.currentTarget.value)}
-                placeholder="Your OAuth Client Secret"
+                placeholder={translate("generated.245c6b7190118758")}
                 type="password"
               />
               {oauthProviderFields.map((field) => {
                 if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
                   return (
                     <label key={field.key} className="flex flex-col gap-2 text-base">
-                      <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{field.label}</span>
+                      <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{translateSource(field.label)}</span>
                       <select
                         className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] outline-none shadow-[inset_0_0_0_2px_#121731] focus:border-neon-cyan"
                         value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
@@ -528,21 +527,21 @@ All data is encrypted before upload and can only be decrypted with your reposito
                       >
                         {field.fieldType.options.map((option) => (
                           <option key={option.value} value={option.value}>
-                            {option.label}
+                            {translateSource(option.label)}
                           </option>
                         ))}
                       </select>
-                      {field.helpText && <span className="text-xs text-gray-400">{field.helpText}</span>}
+                      {field.helpText && <span className="text-xs text-gray-400">{translateSource(field.helpText)}</span>}
                     </label>
                   );
                 }
                 return (
                   <InputField
                     key={field.key}
-                    label={field.label}
+                    label={translateSource(field.label)}
                     value={formValues[field.key] || ""}
                     onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
-                    placeholder={field.placeholder || ""}
+                    placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
                     type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
                     disabled={busy}
                   />
@@ -554,18 +553,18 @@ All data is encrypted before upload and can only be decrypted with your reposito
           {oauthSessionId ? (
             <div className="space-y-4">
               <div className="p-3 bg-yellow-900/30 border border-yellow-500/50 rounded text-yellow-300 text-sm">
-                Authorization in progress. Complete the sign-in in your browser, then click below.
+                {translate("generated.e16e0b5717baf8a9")}
               </div>
               {storeError && (
                 <div className="p-3 bg-red-900/30 border border-red-500/50 rounded text-red-300 text-sm space-y-2">
                   <p>{storeError}</p>
                   {storeError.toLowerCase().includes("still in progress") ? (
                     <p className="text-red-200">
-                      The token exchange hasn't finished yet. Wait a few seconds and click "Complete Authorization" again.
+                      {translate("generated.ed2d84eef1dc37cc")}
                     </p>
                   ) : (
                     <p className="text-red-200">
-                      The authorization failed. Click "Cancel" and start again with the correct credentials.
+                      {translate("generated.00fb9e51e0f2476b")}
                     </p>
                   )}
                   <button
@@ -573,7 +572,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                     className="text-xs underline text-red-400 hover:text-red-200"
                     onClick={clearStoreError}
                   >
-                    Dismiss
+                    {translate("generated.48845bff334a50a5")}
                   </button>
                 </div>
               )}
@@ -583,9 +582,9 @@ All data is encrypted before upload and can only be decrypted with your reposito
                   onClick={() => onCompleteOauthFlow(oauthSessionId)}
                   disabled={busy}
                   loading={busy}
-                  loadingText="Completing..."
+                  loadingText={translate("generated.6196d07de6390a38")}
                 >
-                  Complete Authorization
+                  {translate("generated.dcd37480d04ed6ce")}
                 </Button>
                 <Button
                   variant="ghost"
@@ -595,7 +594,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                   }}
                   disabled={busy}
                 >
-                  Stop Authorization
+                  {translate("generated.130cba879fa80380")}
                 </Button>
               </div>
             </div>
@@ -618,9 +617,9 @@ All data is encrypted before upload and can only be decrypted with your reposito
               }}
               disabled={busy || !(formValues["client_id"] || "").trim()}
               loading={busy}
-              loadingText="Opening browser..."
+              loadingText={translate("generated.814c72d767dc6efb")}
             >
-              Continue with {selectedProvider.label}
+              {translate("generated.d2b79489c9e61b64")} {selectedProvider.label}
             </Button>
           )}
         </Card>

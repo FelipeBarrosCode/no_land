@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -71,11 +72,10 @@ export function SharedStorageSettings({
     <div className="space-y-6">
       <Card className="p-6">
         <h3 className="text-lg font-display text-neon-cyan mb-4">
-          Backblaze B2 Cloud Backup
+          {translate("generated.2bcf3907d3fc476e")}
         </h3>
         <p className="text-sm text-gray-400 mb-6">
-          Configure automatic backups of your VM user files to Backblaze B2 cloud storage.
-          Only changed files are uploaded on each run.
+          {translate("generated.2c799e0af94550e9")}
         </p>
 
         <div className="space-y-4">
@@ -88,62 +88,62 @@ export function SharedStorageSettings({
               className="w-4 h-4 accent-neon-cyan"
             />
             <label htmlFor="backup-enabled" className="text-sm text-gray-200">
-              Enable automatic cloud backups
+              {translate("generated.a6a6fef22fc00560")}
             </label>
           </div>
 
           <InputField
-            label="Backblaze Key ID"
+            label={translate("generated.1c88cedec1241047")}
             value={keyId}
             onChange={(event) => setKeyId(event.target.value)}
-            placeholder="Your Backblaze key ID"
+            placeholder={translate("generated.b9a66e510468f6bb")}
             disabled={busy}
           />
 
           <InputField
-            label="Backblaze Application Key"
+            label={translate("generated.18492bf90c8e067e")}
             value={appKey}
             onChange={(event) => setAppKey(event.target.value)}
-            placeholder="Your Backblaze application key (secret)"
+            placeholder={translate("generated.b830ed73c1106680")}
             type="password"
             disabled={busy}
           />
 
           <InputField
-            label="Bucket Name"
+            label={translate("generated.f104ff0ab0b1fb9f")}
             value={bucketName}
             onChange={(event) => setBucketName(event.target.value)}
-            placeholder="noland"
+            placeholder={translate("generated.9c1a1a0b3fbde6f2")}
             disabled={busy}
           />
 
           <InputField
-            label="rclone Remote Name"
+            label={translate("generated.6be23a2a79556eb1")}
             value={remoteName}
             onChange={(event) => setRemoteName(event.target.value)}
-            placeholder="b2"
+            placeholder={translate("generated.4814d92093ac8a0f")}
             disabled={busy}
           />
 
           <InputField
-            label="Destination Prefix"
+            label={translate("generated.26cacfd4800d06b5")}
             value={destinationPrefix}
             onChange={(event) => setDestinationPrefix(event.target.value)}
-            placeholder="vm-backup"
+            placeholder={translate("generated.582ee20d1881e627")}
             disabled={busy}
           />
 
           <InputField
-            label="Encryption Password (optional)"
+            label={translate("generated.c717199ca8c27c62")}
             value={cryptPassword}
             onChange={(event) => setCryptPassword(event.target.value)}
-            placeholder="Leave empty for no encryption"
+            placeholder={translate("generated.4971759ad95db6ea")}
             type="password"
             disabled={busy}
           />
           {settings?.cryptPasswordSet && !cryptPassword && (
             <p className="text-xs text-neon-cyan">
-              Encryption is already configured. Enter a new password to change it, or leave empty to keep existing.
+              {translate("generated.cb741282e0ec321c")}
             </p>
           )}
         </div>
@@ -166,18 +166,18 @@ export function SharedStorageSettings({
             onClick={handleSave}
             disabled={busy}
             loading={busy}
-            loadingText="Saving..."
+            loadingText={translate("generated.dc85af8f2b1d0d67")}
           >
-            Save Settings
+            {translate("generated.ec92e1dc9bb3bf7b")}
           </Button>
           <Button
             variant="secondary"
             onClick={handleTest}
             disabled={busy || !keyId.trim()}
             loading={busy}
-            loadingText="Testing..."
+            loadingText={translate("generated.6c02a28421f8ad91")}
           >
-            Test Connection
+            {translate("generated.c02977b07ec93816")}
           </Button>
         </div>
       </Card>

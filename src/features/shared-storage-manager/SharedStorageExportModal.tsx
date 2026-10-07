@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
@@ -125,16 +126,16 @@ export function SharedStorageExportModal({
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">Export To Shared Storage</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">Choose applications the tracker learned. Noland packs their state through the state agent.</p>
+            <h2 className="font-display text-base text-white">{translate("generated.0dceb770d4a955fe")}</h2>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.38d2e6068bcfc7ab")}</p>
           </div>
-          <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Close</Button>
+          <Button variant="ghost" onClick={onClose} disabled={busy || loading}>{translate("generated.7d9eb7acb13e2462")}</Button>
         </div>
         <ModalBody className="px-5 py-4">
           {loading ? (
-            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">Loading remote machine files...</p>
+            pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.db69feb354d65693")}</p>
           ) : roots.length === 0 ? (
-            <p className="text-[1.2rem] text-[#b4c8de]">No files found to export.</p>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.648afc13de8af296")}</p>
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
@@ -143,7 +144,7 @@ export function SharedStorageExportModal({
           <div className="flex items-end gap-4">
             <label className="flex flex-col gap-1">
               <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Backup performance
+                {translate("generated.71ed8028334c4e88")}
               </span>
               <select
                 className="h-10 border border-[#3f476c] bg-[#0b0f23] px-3 text-[1.15rem] text-[#dff8ff] outline-none focus:border-neon-cyan"
@@ -153,13 +154,13 @@ export function SharedStorageExportModal({
                   setPerformanceMode(event.target.value as BackupPerformanceMode)
                 }
               >
-                <option value="fast">Fast — prioritize completion time</option>
-                <option value="balanced">Balanced — recommended default</option>
-                <option value="full">Full — maximum backup processing</option>
+                <option value="fast">{translate("generated.ca85e53c44cd9df6")}</option>
+                <option value="balanced">{translate("generated.0637fc5e37f3ded2")}</option>
+                <option value="full">{translate("generated.0746b3ba22bbfa4f")}</option>
               </select>
             </label>
             <p className="pb-2 text-[1.1rem] text-[#9ec0e4]">
-              Selected: {selectedPaths.length}
+              {translate("generated.bef9d85df8ea13fe")} {selectedPaths.length}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -190,14 +191,14 @@ export function SharedStorageExportModal({
                   }
                 }}
               >
-                Refresh Indexing
+                {translate("generated.f09ae0be0e10c568")}
               </Button>
             )}
-            <Button variant="ghost" onClick={onClose} disabled={busy || loading}>Cancel</Button>
+            <Button variant="ghost" onClick={onClose} disabled={busy || loading}>{translate("generated.19766ed6ccb2f4a3")}</Button>
             <Button
               disabled={busy || loading || selectedPaths.length === 0}
               loading={busy}
-              loadingText="Exporting..."
+              loadingText={translate("generated.639e45361badf069")}
               onClick={async () => {
                 setPendingAction({
                   key: "export-modal.run",
@@ -211,7 +212,7 @@ export function SharedStorageExportModal({
                 setPendingAction(null);
               }}
             >
-              Export Selected
+              {translate("generated.7065bfb98240f7ba")}
             </Button>
           </div>
         </div>

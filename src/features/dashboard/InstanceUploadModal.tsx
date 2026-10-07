@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -36,7 +37,7 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
   const openNativePicker = async () => {
     if (startingRef.current) return;
     const selection = await open({
-      title: pickerMode === "files" ? "Choose files to upload" : "Choose folders to upload",
+      title: pickerMode === "files" ? translate("upload.picker.files") : translate("upload.picker.folders"),
       multiple: true,
       directory: pickerMode === "folders",
       recursive: pickerMode === "folders",
@@ -80,10 +81,10 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
       <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="flex shrink-0 items-start justify-between gap-4 border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">Direct SCP transfer</p>
-            <h2 className="mt-1 font-display text-base text-white">Upload to {instance.label}</h2>
+            <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">{translate("generated.9fe1f37a020c969b")}</p>
+            <h2 className="mt-1 font-display text-base text-white">{translate("generated.e2077215883b01d5")} {instance.label}</h2>
           </div>
-          <Button variant="ghost" onClick={onClose} disabled={starting}>Close</Button>
+          <Button variant="ghost" onClick={onClose} disabled={starting}>{translate("generated.7d9eb7acb13e2462")}</Button>
         </div>
 
         <ModalBody className="space-y-4 px-5 py-4">
@@ -94,13 +95,13 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
             disabled={starting}
           >
             <span>
-              <span className="block font-display text-[10px] uppercase tracking-[0.14em] text-[#9ec4df]">Remote destination</span>
+              <span className="block font-display text-[10px] uppercase tracking-[0.14em] text-[#9ec4df]">{translate("generated.4db44d2f38d9d67c")}</span>
               <span className="mt-1 block font-mono text-sm text-white">{destination.startsWith("/") ? destination : `~/${destination}`}</span>
             </span>
-            <span className="shrink-0 font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">Choose folder &gt;</span>
+            <span className="shrink-0 font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">{translate("generated.037c4ce4231de42b")}</span>
           </button>
 
-          <div className="flex rounded border border-[#30365d] bg-[#0b0f23] p-1" aria-label="Native picker type">
+          <div className="flex rounded border border-[#30365d] bg-[#0b0f23] p-1" aria-label={translate("generated.94a105d3ea1d2919")}>
             <button
               type="button"
               className={`flex-1 rounded px-3 py-2 font-display text-[10px] uppercase tracking-[0.14em] transition ${pickerMode === "files" ? "bg-neon-cyan/15 text-neon-cyan" : "text-[#7183ac] hover:text-white"}`}
@@ -108,7 +109,7 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
               disabled={starting}
               aria-pressed={pickerMode === "files"}
             >
-              Select Files
+              {translate("generated.ff52da8b75c1415a")}
             </button>
             <button
               type="button"
@@ -117,7 +118,7 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
               disabled={starting}
               aria-pressed={pickerMode === "folders"}
             >
-              Select Folders
+              {translate("generated.27c2025c2f249a1b")}
             </button>
           </div>
 
@@ -129,15 +130,15 @@ export function InstanceUploadModal({ instance, onUpload, onClose }: Props) {
           >
             <span className={`font-mono text-5xl ${dragActive ? "text-neon-lime" : "text-neon-cyan"}`} aria-hidden="true">↑</span>
             <p className="mt-5 font-display text-sm uppercase tracking-[0.16em] text-white">
-              {starting ? "Starting transfer" : dragActive ? "Drop to upload" : `Drag and drop or click to choose ${pickerMode}`}
+              {starting ? translate("generated.d9d5d1751c2ad9ba") : dragActive ? translate("generated.936e6ec129907e97") : `Drag and drop or click to choose ${pickerMode}`}
             </p>
-            <p className="mt-3 max-w-md text-sm leading-6 text-[#8fa9c8]">Drag files and folders together, or click to open {navigator.userAgent.includes("Mac") ? "Finder" : "the native file explorer"}. Upload begins immediately after selection.</p>
-            {starting && <p className="mt-4 animate-pulse font-mono text-xs text-[#ffd166]">Connecting to the remote instance...</p>}
+            <p className="mt-3 max-w-md text-sm leading-6 text-[#8fa9c8]">{translate("generated.9880fc08275f8198")} {navigator.userAgent.includes("Mac") ? translate("generated.ba40ff241db36ac3") : translate("generated.00b727971d92aae7")}{translate("generated.57bfddc523cbd31c")}</p>
+            {starting && <p className="mt-4 animate-pulse font-mono text-xs text-[#ffd166]">{translate("generated.b78f1e8687063919")}</p>}
           </button>
         </ModalBody>
 
         <div className="shrink-0 border-t-2 border-[#3e4270] px-5 py-4">
-          <p className="text-xs text-[#7183ac]">No browse button, hashing, or cloud staging. Files move directly to the desktop user over SSH.</p>
+          <p className="text-xs text-[#7183ac]">{translate("generated.efbe363713aede47")}</p>
         </div>
       </ModalFrame>
 
@@ -237,7 +238,7 @@ function RemoteFolderPicker({ instanceId, selectedDestination, onSelect, onClose
           className={`flex items-center gap-2 rounded border px-2 py-1 ${isSelected ? "border-neon-cyan bg-neon-cyan/10" : "border-[#30365d] bg-[#11162a]"}`}
           style={{ marginLeft: `${depth * 12}px` }}
         >
-          <button type="button" className="w-5 text-left text-[#7ab6ff]" onClick={() => void toggleFolder(path)} aria-label={`${isExpanded ? "Collapse" : "Expand"} ${pathName(path)}`}>
+          <button type="button" className="w-5 text-left text-[#7ab6ff]" onClick={() => void toggleFolder(path)} aria-label={translate("upload.folder.toggle", { action: isExpanded ? translate("generated.be6eb1fc3b05bf9d") : translate("generated.07548c2c6511d4d1"), name: pathName(path) })}>
             {loadingPaths[path] ? "·" : isExpanded ? "▾" : "▸"}
           </button>
           <button type="button" className="flex min-w-0 flex-1 items-center gap-2 text-left" onClick={() => setSelectedPath(path)}>
@@ -254,21 +255,21 @@ function RemoteFolderPicker({ instanceId, selectedDestination, onSelect, onClose
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl" zIndexClassName="z-[60]">
       <div className="flex shrink-0 items-start justify-between gap-4 border-b-2 border-[#3e4270] px-5 py-4">
         <div>
-          <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">Remote filesystem · desktop user</p>
-          <h3 className="mt-1 font-display text-base text-white">Choose Destination Folder</h3>
+          <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">{translate("generated.fae086c847bd4314")}</p>
+          <h3 className="mt-1 font-display text-base text-white">{translate("generated.abf86db80291ae09")}</h3>
         </div>
-        <Button variant="ghost" onClick={onClose}>Back</Button>
+        <Button variant="ghost" onClick={onClose}>{translate("generated.76900f1bfd16c8d4")}</Button>
       </div>
 
       <ModalBody className="space-y-4 px-5 py-4">
         <div className="flex flex-wrap items-center gap-2">
-          <Button variant="ghost" onClick={() => void loadRoot(homePath ?? undefined)} disabled={!homePath}>User Home</Button>
-          <Button variant="ghost" onClick={() => void loadRoot("/")}>Filesystem Root</Button>
+          <Button variant="ghost" onClick={() => void loadRoot(homePath ?? undefined)} disabled={!homePath}>{translate("generated.2a928311c492a8c3")}</Button>
+          <Button variant="ghost" onClick={() => void loadRoot("/")}>{translate("generated.a6e0f1c0b1785edf")}</Button>
         </div>
 
         <div className="min-h-64 max-h-[45dvh] overflow-y-auto rounded border border-[#38466e] bg-[#080b18] p-2">
           {!rootPath ? (
-            <p className="animate-pulse p-3 text-[1.15rem] text-[#ffd166]">Loading folder tree...</p>
+            <p className="animate-pulse p-3 text-[1.15rem] text-[#ffd166]">{translate("generated.3c398000244e9477")}</p>
           ) : (
             <div className="space-y-1">{renderFolder(rootPath, 0)}</div>
           )}
@@ -279,8 +280,8 @@ function RemoteFolderPicker({ instanceId, selectedDestination, onSelect, onClose
       <div className="flex shrink-0 items-center justify-between gap-3 border-t-2 border-[#3e4270] px-5 py-4">
         <p className="min-w-0 truncate font-mono text-xs text-[#9ec0e4]">{selectedPath ?? "Select a folder"}</p>
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button disabled={!selectedPath} onClick={() => selectedPath && onSelect(selectedPath)}>Use This Folder</Button>
+          <Button variant="ghost" onClick={onClose}>{translate("generated.19766ed6ccb2f4a3")}</Button>
+          <Button disabled={!selectedPath} onClick={() => selectedPath && onSelect(selectedPath)}>{translate("generated.f1d287f0663ad243")}</Button>
         </div>
       </div>
     </ModalFrame>

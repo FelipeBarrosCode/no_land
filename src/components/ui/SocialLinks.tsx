@@ -1,4 +1,5 @@
 import clsx from "clsx";
+import { translateSource } from "../../lib/i18n";
 
 const SOCIAL_LINKS = [
   {
@@ -27,9 +28,9 @@ export function SocialLinks({ className }: Props) {
           href={link.url}
           target="_blank"
           rel="noreferrer"
-          aria-label={link.ariaLabel}
+          aria-label={translateSource(link.ariaLabel)}
         >
-          {link.label}
+          {translateSource(link.label)}
         </a>
       ))}
     </div>

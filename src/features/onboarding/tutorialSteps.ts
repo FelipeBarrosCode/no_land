@@ -15,65 +15,65 @@ export interface TutorialStep {
 
 export const tutorialSteps: TutorialStep[] = [
   {
-    eyebrow: "Step 1",
-    title: "Open the app",
+    eyebrow: "tutorial.step1.eyebrow",
+    title: "tutorial.step1.title",
     description:
-      "You are in the right place. Noland Connect will walk you from account setup to launching your first cloud computer.",
+      "tutorial.step1.description",
   },
   {
-    eyebrow: "Step 2",
-    title: "Open Vast.ai",
+    eyebrow: "tutorial.step2.eyebrow",
+    title: "tutorial.step2.title",
     description:
-      "Head to Vast.ai next. That is where you rent the GPU machine that Noland Connect will prepare for you.",
-    linkLabel: "Open Vast.ai",
+      "tutorial.step2.description",
+    linkLabel: "tutorial.link.vast",
     linkUrl: VAST_HOME_URL,
   },
   {
-    eyebrow: "Step 3",
-    title: "Create your Vast.ai account",
+    eyebrow: "tutorial.step3.eyebrow",
+    title: "tutorial.step3.title",
     description:
-      "Make your Vast.ai account if you are new. It only takes a minute and unlocks server access.",
-    linkLabel: "Open Vast.ai",
+      "tutorial.step3.description",
+    linkLabel: "tutorial.link.vast",
     linkUrl: VAST_HOME_URL,
   },
   {
-    eyebrow: "Step 4",
-    title: "Add billing",
+    eyebrow: "tutorial.step4.eyebrow",
+    title: "tutorial.step4.title",
     description:
-      "Add payment in Vast.ai billing so you can rent a server when you are ready to launch.",
-    linkLabel: "Open Vast.ai Billing",
+      "tutorial.step4.description",
+    linkLabel: "tutorial.link.billing",
     linkUrl: VAST_BILLING_URL,
   },
   {
-    eyebrow: "Step 5",
-    title: "Get your API key",
+    eyebrow: "tutorial.step5.eyebrow",
+    title: "tutorial.step5.title",
     description:
-      "Copy your Vast.ai API key. Noland Connect uses it to find servers, start them, and manage the setup for you.",
-    linkLabel: "Manage Vast.ai keys",
+      "tutorial.step5.description",
+    linkLabel: "tutorial.link.keys",
     linkUrl: VAST_API_KEY_URL,
   },
   {
-    eyebrow: "Step 6",
-    title: "Return to Noland",
+    eyebrow: "tutorial.step6.eyebrow",
+    title: "tutorial.step6.title",
     description:
-      "After billing and API key setup, return to Noland Connect and paste your Vast.ai API key into onboarding.",
+      "tutorial.step6.description",
   },
   {
-    eyebrow: "Step 7",
-    title: "Select a server",
+    eyebrow: "tutorial.step7.eyebrow",
+    title: "tutorial.step7.title",
     description:
-      "After setup, pick a server inside Noland Connect. Choose the one that fits your location, budget, and performance needs.",
+      "tutorial.step7.description",
   },
   {
-    eyebrow: "Step 8",
-    title: "Follow the instructions",
+    eyebrow: "tutorial.step8.eyebrow",
+    title: "tutorial.step8.title",
     description:
-      "Keep following the on-screen instructions during setup. The app will guide you through the remaining pairing steps for Sunshine and Moonlight.",
+      "tutorial.step8.description",
   },
   {
-    eyebrow: "Step 9",
-    title: "Sign in to your computer",
+    eyebrow: "tutorial.step9.eyebrow",
+    title: "tutorial.step9.title",
     description:
-      "Use the credentials configured for your session when the remote computer asks you to sign in.",
+      "tutorial.step9.description",
   },
 ];

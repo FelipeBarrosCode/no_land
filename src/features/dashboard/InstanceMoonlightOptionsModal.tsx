@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
@@ -20,7 +21,7 @@ interface Props {
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
-  return "The Moonlight stream options could not be updated.";
+  return translate("generated.9eb5233b9fc7dc18");
 }
 
 const EMPTY_LATENCY: NolandLatencyConfig = {
@@ -123,7 +124,7 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
       <div className="flex items-start justify-between gap-4 border-b border-[#283252] p-5">
         <div>
           <p className="font-display text-[10px] uppercase tracking-[0.16em] text-neon-cyan">
-            Moonlight stream options
+            {translate("generated.8a7d65d36229a83f")}
           </p>
           <h2
             id="instance-moonlight-options-title"
@@ -133,18 +134,18 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
           </h2>
         </div>
         <Button variant="ghost" disabled={saving} onClick={onClose}>
-          Close
+          {translate("generated.7d9eb7acb13e2462")}
         </Button>
       </div>
 
       <ModalBody className="space-y-4 p-5">
         {loading ? (
-          <p className="text-[#a8bed6]">Reading Moonlight preferences…</p>
+          <p className="text-[#a8bed6]">{translate("generated.e1348b3458708ca8")}</p>
         ) : (
           <>
             <ToggleRow
-              label="Adaptive packet size"
-              description="Learn the largest safe GameStream video packet size for this instance's network path, downshift automatically, and cache it. Starts conservatively and never probes the network actively."
+              label={translate("generated.044899d0a0485f06")}
+              description={translate("generated.1886c38e5dd5174d")}
               checked={latency.adaptivePacketSizeEnabled}
               disabled={saving}
               onChange={(checked) =>
@@ -152,8 +153,8 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
               }
             />
             <ToggleRow
-              label="Adaptive late frame drop"
-              description="Drop a stale decoded frame only when a newer frame is queued, the decoder is back-pressured, and latency priority mode is active."
+              label={translate("generated.ad57b1c4e5a3227b")}
+              description={translate("generated.01c35e756819639a")}
               checked={latency.adaptiveLateFrameDropEnabled}
               disabled={saving}
               onChange={(checked) =>
@@ -161,8 +162,8 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
               }
             />
             <ToggleRow
-              label="Decoder back-pressure policy"
-              description="Keep decode/render queues bounded and adapt queue limits with hysteresis so temporary GPU pressure does not become permanent end-to-end latency."
+              label={translate("generated.9c17a4e9a9528324")}
+              description={translate("generated.c7c37e882cbeeacf")}
               checked={latency.decoderBackpressurePolicyEnabled}
               disabled={saving}
               onChange={(checked) =>
@@ -170,8 +171,8 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
               }
             />
             <ToggleRow
-              label="Reconnect after unexpected termination"
-              description="Perform one bounded reconnect attempt without quitting the remote application after an unexpected connection loss."
+              label={translate("generated.262eecd575e76638")}
+              description={translate("generated.59b0122e9530fbed")}
               checked={latency.autoReconnectOnUnexpectedTermination}
               disabled={saving}
               onChange={(checked) =>
@@ -182,7 +183,7 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-[#d7e6f7]">
-                  Frame pacing
+                  {translate("generated.3d82644280c832dc")}
                 </span>
                 <select
                   className="w-full rounded border border-[#354269] bg-[#080d1f] px-3 py-2 text-white outline-none focus:border-neon-cyan"
@@ -194,15 +195,15 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
                     })
                   }
                 >
-                  <option value="off">Off</option>
-                  <option value="automatic">Automatic</option>
-                  <option value="software">Software</option>
-                  <option value="hardwareMultiple">Hardware multiple</option>
+                  <option value="off">{translate("generated.ca7981b46ecf2c17")}</option>
+                  <option value="automatic">{translate("generated.d461a493a3753877")}</option>
+                  <option value="software">{translate("generated.9b3289a385a5301e")}</option>
+                  <option value="hardwareMultiple">{translate("generated.a2562853e81c4347")}</option>
                 </select>
               </label>
               <label className="block">
                 <span className="mb-2 block text-sm font-medium text-[#d7e6f7]">
-                  Frame buffer
+                  {translate("generated.174bb641a341407c")}
                 </span>
                 <select
                   className="w-full rounded border border-[#354269] bg-[#080d1f] px-3 py-2 text-white outline-none focus:border-neon-cyan"
@@ -215,19 +216,16 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
                     })
                   }
                 >
-                  <option value="off">Off (lowest latency)</option>
-                  <option value="oneFrame">1 frame</option>
-                  <option value="twoFrames">2 frames</option>
-                  <option value="threeFrames">3 frames</option>
+                  <option value="off">{translate("generated.7976238fbfa4a2ac")}</option>
+                  <option value="oneFrame">{translate("generated.7b6ae5d47c287709")}</option>
+                  <option value="twoFrames">{translate("generated.d2e40bcf12edaec0")}</option>
+                  <option value="threeFrames">{translate("generated.32f0047e2904db75")}</option>
                 </select>
               </label>
             </div>
 
             <p className="text-xs text-[#8fa7c6]">
-              Changes are stored as an override for this instance and take
-              effect the next time its stream starts. The adaptive packet-size
-              controller and adaptive late-frame dropping default to off for
-              safety.
+              {translate("generated.364c7533383aad88")}
             </p>
           </>
         )}
@@ -241,10 +239,10 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
 
       <div className="flex justify-end gap-2 border-t border-[#283252] p-4">
         <Button variant="ghost" disabled={saving} onClick={onClose}>
-          Cancel
+          {translate("generated.19766ed6ccb2f4a3")}
         </Button>
-        <Button loading={saving} loadingText="Saving…" onClick={() => void save()}>
-          Save
+        <Button loading={saving} loadingText={translate("generated.23e39291d6135814")} onClick={() => void save()}>
+          {translate("generated.1509f561f2416598")}
         </Button>
       </div>
     </ModalFrame>

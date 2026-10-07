@@ -3,6 +3,7 @@ import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type { TutorialStep } from "./tutorialSteps";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
+import { useLocalization } from "../../lib/i18n";
 
 interface Props {
   open: boolean;
@@ -23,6 +24,7 @@ export function TutorialModal({
   onNext,
   onClose
 }: Props) {
+  const { t } = useLocalization();
   if (!open) {
     return null;
   }
@@ -37,27 +39,27 @@ export function TutorialModal({
           <div>
             <div className="flex items-center gap-3">
               <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-                {step.eyebrow}
+                {t(step.eyebrow)}
               </p>
               <AIPromptHelper
-                topic={`Noland tutorial: ${step.title}`}
+                topic={t("tutorial.topic", { title: t(step.title) })}
                 promptText={APP_PROMPTS[`helpStep${stepIndex + 1}` as keyof typeof APP_PROMPTS] || ""}
                 variant="icon"
               />
             </div>
             <h2 className="pixel-heading mt-2 font-display text-lg text-white md:text-xl">
-              {step.title}
+              {t(step.title)}
             </h2>
           </div>
 
           {closable && onClose ? (
             <Button variant="ghost" onClick={onClose}>
-              Close
+              {t("common.close")}
             </Button>
           ) : null}
         </div>
 
-        <p className="mt-4 text-[1.35rem] leading-[1.15] text-[#c5d8ec]">{step.description}</p>
+        <p className="mt-4 text-[1.35rem] leading-[1.15] text-[#c5d8ec]">{t(step.description)}</p>
 
         {step.links ? (
           <div className="mt-4 flex flex-wrap gap-2">
@@ -69,7 +71,7 @@ export function TutorialModal({
                 target="_blank"
                 rel="noreferrer"
               >
-                {link.label}
+                 {t(link.label)}
               </a>
             ))}
           </div>
@@ -80,7 +82,7 @@ export function TutorialModal({
             target="_blank"
             rel="noreferrer"
           >
-            {step.linkLabel}
+             {t(step.linkLabel)}
           </a>
         ) : null}
 
@@ -90,10 +92,10 @@ export function TutorialModal({
           </p>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onBack} disabled={stepIndex === 0}>
-              Back
+              {t("tutorial.back")}
             </Button>
             <Button onClick={onNext}>
-              {isLastStep ? (closable ? "Done" : "Start Setup") : "Next"}
+              {isLastStep ? (closable ? t("tutorial.done") : t("tutorial.start")) : t("tutorial.next")}
             </Button>
           </div>
         </div>

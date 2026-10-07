@@ -1,3 +1,4 @@
+import { translate, translateSource } from "../../lib/i18n";
 import { useMemo, useState } from "react";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { APP_PROMPTS } from "../../prompts/appPrompts";
@@ -428,13 +429,13 @@ export function DashboardScreen({
         <header className="flex flex-wrap items-center justify-between gap-4">
           <div>
             <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-              Noland Connect
+              {translate("generated.939edfedc701440a")}
             </p>
             <h1
               className="pixel-heading glitch-title font-display text-lg text-white md:text-2xl"
-              data-text="Arcade Control Deck"
+              data-text={translate("generated.5abdf7d9b9336afa")}
             >
-              Arcade Control Deck
+              {translate("generated.5abdf7d9b9336afa")}
             </h1>
           </div>
 
@@ -444,23 +445,23 @@ export function DashboardScreen({
               variant={systemHealth?.ok === false ? "danger" : "secondary"}
               onClick={handleHealthClick}
               loading={healthChecking}
-              loadingText="Checking..."
+              loadingText={translate("generated.2e5f79bb94a8c40b")}
               title={systemHealth?.summary ?? "Run local health check"}
             >
-              {systemHealth?.ok === false ? "✕" : "✓"} Health
+              {systemHealth?.ok === false ? "✕" : "✓"} {translate("generated.55898449eb74fb2e")}
             </Button>
             <Button variant="ghost" onClick={() => setWalletModalOpen(true)}>
-              Wallet {walletAmountLabel}
+              {translate("generated.d1c9a01d57e90086")} {walletAmountLabel}
             </Button>
             <Button variant="ghost" onClick={openTutorial}>
               <SpriteIcon icon="help" />
-              <span className="ml-1">Help</span>
+              <span className="ml-1">{translate("generated.b79cac926e0b2e34")}</span>
             </Button>
             <Button variant="ghost" onClick={() => navigate("/settings")}>
-              Settings
+              {translate("generated.74a883a037bc227f")}
             </Button>
             <Button variant="secondary" onClick={openServerPicker}>
-              Select Server
+              {translate("generated.7f67df7f92611db8")}
             </Button>
             <ArcadeSoundToggle />
           </div>
@@ -473,11 +474,11 @@ export function DashboardScreen({
             >
               <div className="flex items-center justify-between">
                 <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                  Panel 1
+                  {translate("generated.93c334eff4680565")}
                 </p>
                 <div className="flex items-center gap-2">
                   <AIPromptHelper
-                    topic="Embedded Streaming"
+                    topic={translate("generated.02ae4e56fc76195a")}
                     promptText={APP_PROMPTS.moonlightCard}
                     variant="icon"
                   />
@@ -485,10 +486,10 @@ export function DashboardScreen({
                 </div>
               </div>
               <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-                Managed Streaming
+                {translate("generated.5529d73ce1cd5079")}
               </h2>
                 <p className="mt-2 max-w-md text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                Noland now handles the streaming and connection flow inside the app. Just complete Vast.ai billing and API key setup, then continue from the dashboard.
+                {translate("generated.8d59aafff35c681f")}
               </p>
             </Card>
 
@@ -501,11 +502,11 @@ export function DashboardScreen({
                 <div>
                   <div className="flex items-center justify-between">
                     <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-                      Connection Type
+                      {translate("generated.52a74e1ffc3f1baa")}
                     </p>
                     <div className="flex items-center gap-2">
                       <AIPromptHelper
-                        topic="Managed Tunnel Connection Option"
+                        topic={translate("generated.f2e5326591175e88")}
                         promptText={APP_PROMPTS.wireguardCard}
                         variant="icon"
                       />
@@ -513,10 +514,10 @@ export function DashboardScreen({
                     </div>
                   </div>
                   <h2 className="mt-2 font-display text-base text-neon-cyan md:text-lg">
-                    Managed Secure Connection
+                    {translate("generated.2b5c7b7fbbe383ab")}
                   </h2>
                   <p className="mt-1 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                    Noland activates and verifies the secure connection flow for you inside the app before moving on to streaming setup.
+                    {translate("generated.b9650fee430ae7ef")}
                   </p>
                 </div>
               </Card>
@@ -529,11 +530,11 @@ export function DashboardScreen({
             >
               <div className="flex items-center justify-between">
                 <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                  Panel 3
+                  {translate("generated.63de981f20f1b79e")}
                 </p>
                 <div className="flex items-center gap-2">
                   <AIPromptHelper
-                    topic="Set Server Selection Offering"
+                    topic={translate("generated.0715b661bc09caf0")}
                     promptText={APP_PROMPTS.setServerCard}
                     variant="icon"
                   />
@@ -541,12 +542,10 @@ export function DashboardScreen({
                 </div>
               </div>
               <h2 className="mt-3 font-display text-lg text-neon-cyan md:text-xl">
-                Set Server
+                {translate("generated.13a1dea00f2fb883")}
               </h2>
               <p className="mt-2 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
-                Discover nearby high-performance GPU server offers filtered by
-                price, reliability, and network distance. Adjust template hash
-                and storage allocation prior to launching your machine.
+                {translate("generated.944448cfcf5a0ab6")}
               </p>
             </Card>
           </section>
@@ -570,17 +569,17 @@ export function DashboardScreen({
             <div className="flex items-start justify-between border-b border-[#28345f] p-4">
               <div>
                 <p className="font-display text-[10px] uppercase tracking-[0.18em] text-neon-lime">
-                  Pre-provisioning health
+                  {translate("generated.da665adafe48a74d")}
                 </p>
                 <h2 id="health-modal-title" className="mt-1 font-display text-lg text-white">
-                  {systemHealth?.ok === false ? "Environment needs attention" : "Environment ready"}
+                  {systemHealth?.ok === false ? translate("generated.b8e8c4ff7f1d634d") : translate("generated.3ea7982fb433d012")}
                 </h2>
                 <p className="mt-1 text-[1.15rem] leading-[1.2] text-[#9ec4df]">
                   {systemHealth?.summary ?? "Run the checker before provisioning to catch local OS, resource, tunnel, and credential issues."}
                 </p>
               </div>
               <Button variant="ghost" onClick={() => setHealthModalOpen(false)}>
-                Close
+                {translate("generated.7d9eb7acb13e2462")}
               </Button>
             </div>
             <ModalBody className="space-y-4 p-4">
@@ -589,16 +588,16 @@ export function DashboardScreen({
                   variant="secondary"
                   onClick={onRefreshSystemHealth}
                   loading={healthChecking}
-                  loadingText="Checking..."
+                  loadingText={translate("generated.2e5f79bb94a8c40b")}
                 >
-                  Re-run checks
+                  {translate("generated.9df526d3b6303b71")}
                 </Button>
                 <Button variant="ghost" onClick={handleExportDiagnostics}>
-                  Open GitHub issue
+                  {translate("generated.ab1e59fdbe6ad32c")}
                 </Button>
                 {lastDiagnosticReport && (
                   <span className="text-[1rem] text-[#9ec4df]">
-                    Report saved: {lastDiagnosticReport.path}
+                    {translate("generated.79eddc25561b75c0")} {lastDiagnosticReport.path}
                   </span>
                 )}
               </div>
@@ -628,14 +627,14 @@ export function DashboardScreen({
                         <p className="mt-2 break-all text-[0.95rem] opacity-85">{probe.details}</p>
                       )}
                       {probe.fixHint && (
-                        <p className="mt-2 text-[1rem] leading-[1.15] opacity-95">Fix: {probe.fixHint}</p>
+                        <p className="mt-2 text-[1rem] leading-[1.15] opacity-95">{translate("generated.943df968a5021d33")} {probe.fixHint}</p>
                       )}
                     </div>
                   ))}
                 </div>
               ) : (
                 <p className="text-[1.15rem] text-[#9ec4df]">
-                  No health report loaded yet. Click “Re-run checks”.
+                  {translate("generated.823cb6b61328a1d2")}
                 </p>
               )}
             </ModalBody>
@@ -647,10 +646,10 @@ export function DashboardScreen({
             <div className="mb-3 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
-                  Rented Servers
+                  {translate("generated.377987be4b69f067")}
                 </h3>
                 <AIPromptHelper
-                  topic="Managing Rented Servers"
+                  topic={translate("generated.1c38c4fc3cc17d82")}
                   promptText={APP_PROMPTS.rentedServersSection}
                   variant="icon"
                 />
@@ -670,9 +669,9 @@ export function DashboardScreen({
                 onClick={onLoadRentedInstances}
                 disabled={busy}
                 loading={busy && !blockingAction}
-                loadingText="Refreshing..."
+                loadingText={translate("generated.69d2daed978a7b05")}
               >
-                Refresh Rented
+                {translate("generated.6324abb41281d96a")}
               </Button>
             </div>
 
@@ -696,13 +695,13 @@ export function DashboardScreen({
                         state={
                           isActive
                             ? "Ready"
-                            : isInactive ? "Inactive" : "WaitingForInstance"
+                            : isInactive ? "Inactive" : "Waiting for instance"
                         }
                       />
                       <Button
                         variant="ghost"
-                        aria-label={`Upload files to ${instance.label}`}
-                        title="Upload files and folders directly to this instance"
+                        aria-label={translate("dashboard.upload.for", { instance: instance.label })}
+                        title={translate("generated.3a831e097826f713")}
                         className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
                          disabled={busy || backgroundTransferRunning || !isActive}
                         onClick={() => setUploadInstanceId(instance.instanceId)}
@@ -711,18 +710,18 @@ export function DashboardScreen({
                       </Button>
                       <Button
                         variant="ghost"
-                        aria-label={`Open terminal for ${instance.label}`}
-                        title="Open an SSH terminal for this instance"
+                        aria-label={translate("dashboard.terminal.for", { instance: instance.label })}
+                        title={translate("generated.786dd1c4619c5886")}
                         className="h-8 w-8 rounded border border-[#3a4068] p-0 font-mono text-lg leading-none"
                          disabled={busy || !isActive}
                         onClick={() => setTerminalInstanceId(instance.instanceId)}
                       >
-                        <span aria-hidden="true">&gt;</span>
+                        <span aria-hidden="true">{translate("generated.77d57e39b407cbca")}</span>
                       </Button>
                       <Button
                         variant="ghost"
-                        aria-label={`Moonlight options for ${instance.label}`}
-                        title="Moonlight stream options"
+                        aria-label={translate("dashboard.moonlight.for", { instance: instance.label })}
+                        title={translate("generated.8a7d65d36229a83f")}
                         className="h-8 w-8 rounded border border-[#3a4068] p-0"
                         disabled={busy}
                         onClick={() =>
@@ -734,21 +733,21 @@ export function DashboardScreen({
                     </div>
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-2 text-[1rem] leading-[1.25] text-[#bfd3ee]">
-                    <p>ID: {instance.instanceId}</p>
-                    <p>Status: {instance.status}</p>
-                    <p>GPU: {instance.gpuName}</p>
-                    <p>SSH: {instance.sshHost || "pending"}</p>
+                    <p>{translate("generated.3ea36adcd1e02c94")} {instance.instanceId}</p>
+                    <p>{translate("generated.755c8b2a9fb11446")} {instance.status}</p>
+                    <p>{translate("generated.4728386bbdc046f4")} {instance.gpuName}</p>
+                    <p>{translate("generated.2057beebaff849ee")} {instance.sshHost || "pending"}</p>
                   </div>
                   {isInactive && (
                     <div className="mt-3 border border-[#9a6536]/70 bg-[#3a2518]/70 px-3 py-2 text-sm text-[#ffd3a3]">
-                      <strong className="uppercase tracking-wide">Inactive instance</strong>
-                      <p className="mt-1">This instance is not running, but it may still incur charges until it is destroyed.</p>
+                      <strong className="uppercase tracking-wide">{translate("generated.25d176847e116da8")}</strong>
+                      <p className="mt-1">{translate("generated.071ed7ead80c2626")}</p>
                     </div>
                   )}
                   {instance.embeddedMoonlightPipelineEnabled && (
                     <div className="mt-2 space-y-2">
                       <div className="rounded border border-neon-cyan/30 bg-neon-cyan/10 px-2 py-1 text-[11px] uppercase tracking-wide text-neon-cyan">
-                        Embedded Moonlight pipeline enabled
+                        {translate("generated.90dd80c0a2d8e7d4")}
                       </div>
                       {(instance.embeddedMoonlightSessionState ||
                         instance.embeddedMoonlightLastRuntimeEvent ||
@@ -756,55 +755,55 @@ export function DashboardScreen({
                         embeddedMoonlightStatus?.instanceId === instance.instanceId) && (
                         <div className="rounded border border-[#3a4068] bg-[#10152f]/60 px-2 py-2 text-[11px] text-[#bfd3ee]">
                           <p>
-                            Session: {instance.embeddedMoonlightSessionState ?? embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.35706b2709641cb1")} {instance.embeddedMoonlightSessionState ?? embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? instance.embeddedMoonlightSessionState ?? embeddedMoonlightStatus?.sessionState
-                              : "unknown"}
+                              : translate("generated.b23a6a8439c0dde5")}
                           </p>
                           <p>
-                            Paired: {instance.embeddedMoonlightPaired ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.725e54082418e563")} {instance.embeddedMoonlightPaired ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.paired
                               : null)
-                              ? "yes"
-                              : "no"}
+                              ? translate("generated.8a798890fe938171")
+                              : translate("generated.9390298f3fb0c5b1")}
                           </p>
                           <p>
-                            Connected: {instance.embeddedMoonlightRuntimeConnected ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.a556d13c016c9697")} {instance.embeddedMoonlightRuntimeConnected ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.runtimeConnected
                               : null)
-                              ? "yes"
-                              : "no"}
+                              ? translate("generated.8a798890fe938171")
+                              : translate("generated.9390298f3fb0c5b1")}
                           </p>
                           <p>
-                            Renderer ready: {instance.embeddedMoonlightRendererReady ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.2c0ceb233eb03475")} {instance.embeddedMoonlightRendererReady ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.rendererReady
                               : null)
-                              ? "yes"
-                              : "no"}
+                              ? translate("generated.8a798890fe938171")
+                              : translate("generated.9390298f3fb0c5b1")}
                           </p>
                           <p>
-                            Video active: {instance.embeddedMoonlightVideoSessionActive ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.9f6b0ae27fd4ff8a")} {instance.embeddedMoonlightVideoSessionActive ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.videoSessionActive
                               : null)
-                              ? "yes"
-                              : "no"}
+                              ? translate("generated.8a798890fe938171")
+                              : translate("generated.9390298f3fb0c5b1")}
                           </p>
                           <p>
-                            Video frames: {instance.embeddedMoonlightVideoFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.d84f0a52f55e9937")} {instance.embeddedMoonlightVideoFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.videoFrameCount
                               : 0) ?? 0}
                           </p>
                           <p>
-                            Rendered frames: {instance.embeddedMoonlightRendererSubmittedFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.8d69a105ef6dfff2")} {instance.embeddedMoonlightRendererSubmittedFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.rendererSubmittedFrameCount
                               : 0) ?? 0}
                           </p>
                           <p>
-                            Dropped frames: {instance.embeddedMoonlightRendererDroppedFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.5f19c10a4dd6983e")} {instance.embeddedMoonlightRendererDroppedFrameCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.rendererDroppedFrameCount
                               : 0) ?? 0}
                           </p>
                           <p>
-                            Audio samples: {instance.embeddedMoonlightAudioSampleCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
+                            {translate("generated.b36b7d106c26870f")} {instance.embeddedMoonlightAudioSampleCount ?? (embeddedMoonlightStatus?.instanceId === instance.instanceId
                               ? embeddedMoonlightStatus?.audioSampleCount
                               : 0) ?? 0}
                           </p>
@@ -824,10 +823,10 @@ export function DashboardScreen({
                               ? embeddedMoonlightStatus?.lastError
                               : null)) ? (
                             <p className="mt-1 text-[#ff8fb7]">
-                              {instance.embeddedMoonlightLastError ??
+                              {translateSource(instance.embeddedMoonlightLastError ??
                                 (embeddedMoonlightStatus?.instanceId === instance.instanceId
                                   ? embeddedMoonlightStatus?.lastError
-                                  : null)}
+                                  : null) ?? "")}
                             </p>
                           ) : null}
                         </div>
@@ -879,10 +878,10 @@ export function DashboardScreen({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
                 <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
-                  Selected Server
+                  {translate("generated.8167946ca4e902a1")}
                 </h3>
                 <AIPromptHelper
-                  topic="Selected Server Specifications"
+                  topic={translate("generated.4635f03c5fe75af6")}
                   promptText={APP_PROMPTS.selectedServerSection}
                   variant="icon"
                 />
@@ -894,39 +893,39 @@ export function DashboardScreen({
               <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-3 text-[1.05rem] leading-[1.25] text-[#d9efff] md:grid-cols-4">
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Host
+                    {translate("generated.4a823118b9ba8baa")}
                   </p>
                   <p>{appState.selectedOffer.hostLabel}</p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Location
+                    {translate("generated.15b61974b2707a7b")}
                   </p>
                   <p>{appState.selectedOffer.locationLabel}</p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    GPU
+                    {translate("generated.ea49523d744c40bc")}
                   </p>
                   <p>{appState.selectedOffer.gpuName}</p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Est. total/hour
+                    {translate("generated.38b80f7fd7ffabfa")}
                   </p>
                   <p>${appState.selectedOffer.hourlyPrice.toFixed(3)}</p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Distance
+                    {translate("generated.b7bdf7a2d6e73e58")}
                   </p>
                   <p>
-                    {appState.selectedOffer.estimatedDistanceKm.toFixed(0)} km
+                    {appState.selectedOffer.estimatedDistanceKm.toFixed(0)} {translate("generated.1f34503f65b4a355")}
                   </p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Reliability
+                    {translate("generated.71d0acd465564246")}
                   </p>
                   <p>
                     {(appState.selectedOffer.reliability * 100).toFixed(1)}%
@@ -934,13 +933,13 @@ export function DashboardScreen({
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Storage
+                    {translate("generated.a69c4dece144a46e")}
                   </p>
-                  <p>{appState.serverPreferences.storageGb} GB</p>
+                  <p>{appState.serverPreferences.storageGb} {translate("generated.b4043b0b8297e379")}</p>
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Template
+                    {translate("generated.0575f29df888a27e")}
                   </p>
                   <p className="truncate">
                     {appState.serverPreferences.templateHash}
@@ -952,18 +951,18 @@ export function DashboardScreen({
             {appState.selectedOffer ? (
               <div className="mt-4 grid gap-2 md:grid-cols-3">
                 <HudBar
-                  label="Reliability"
+                  label={translate("generated.71d0acd465564246")}
                   value={appState.selectedOffer.reliability}
                   valueLabel={`${Math.round(appState.selectedOffer.reliability * 100)}%`}
                 />
                 <HudBar
-                  label="VRAM"
+                  label={translate("generated.de956947095b0d2d")}
                   value={appState.selectedOffer.gpuRamMb}
                   max={49152}
                   valueLabel={`${(appState.selectedOffer.gpuRamMb / 1024).toFixed(1)} GB`}
                 />
                 <HudBar
-                  label="Distance"
+                  label={translate("generated.b7bdf7a2d6e73e58")}
                   value={Math.max(
                     0,
                     1000 - appState.selectedOffer.estimatedDistanceKm,
@@ -974,7 +973,7 @@ export function DashboardScreen({
               </div>
             ) : (
                 <p className="mt-4 max-w-prose text-[1.1rem] leading-[1.35] text-[#bfd3ee]">
-                No offer selected yet. Use Select Server to pick a machine.
+                {translate("generated.2ec222346cf0a907")}
               </p>
             )}
           </Card>
@@ -984,32 +983,32 @@ export function DashboardScreen({
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
-                    Action
+                    {translate("generated.64cff1319d2fd2cb")}
                   </p>
                   <AIPromptHelper
-                    topic="Provisioning and Play Execution"
+                    topic={translate("generated.b1eb2b632a9b1918")}
                     promptText={APP_PROMPTS.playButtonSection}
                     variant="icon"
                   />
                 </div>
                 <SpriteIcon icon="play" />
               </div>
-              <h3 className="mt-2 font-display text-lg text-neon-cyan">Play</h3>
+              <h3 className="mt-2 font-display text-lg text-neon-cyan">{translate("generated.436e61016e26fcb7")}</h3>
               <p className="mt-2 text-[1.05rem] leading-[1.35] text-[#bfd3ee]">
                 {hasProvisioningToResume
-                  ? "Returns to your current provisioning session exactly where it stopped."
-                  : "Creates the instance, waits for readiness, runs provisioning, and opens pairing guidance."}
+                  ? translate("generated.8c63ca6078501e9d")
+                  : translate("generated.b6d25b1d2fc7727e")}
               </p>
             </div>
             <Button
               className="h-12 w-full justify-center text-[16px]"
               disabled={busy || !appState.selectedOffer}
               loading={blockingAction?.key === "provisioning.flow"}
-              loadingText="Starting session..."
+              loadingText={translate("generated.ddd6be90f145f44e")}
               onClick={handlePlay}
             >
               <SpriteIcon icon="play" />
-              <span className="ml-1">{hasProvisioningToResume ? "Resume Provisioning" : "Play"}</span>
+              <span className="ml-1">{hasProvisioningToResume ? translate("generated.4f1edcaa1c3caf53") : translate("generated.436e61016e26fcb7")}</span>
             </Button>
           </Card>
         </section>
@@ -1055,19 +1054,19 @@ export function DashboardScreen({
             <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#3e4270] pb-3">
               <div>
                 <p className="font-display text-[10px] uppercase tracking-[0.14em] text-neon-cyan">
-                  Vast.ai Wallet
+                  {translate("generated.894e753bb88cb1bd")}
                 </p>
                 <h3 className="mt-1 font-display text-lg text-white">
                   {walletAmountLabel}
                 </h3>
               </div>
               <Button variant="ghost" onClick={() => setWalletModalOpen(false)}>
-                Close
+                {translate("generated.7d9eb7acb13e2462")}
               </Button>
             </div>
 
             <p className="text-[1.15rem] leading-snug text-[#bfd3ee]">
-              Open the correct Vast.ai page in your normal browser to add account credit, configure automatic top-ups, or manage API keys.
+              {translate("generated.2b3c522de8b33dc6")}
             </p>
 
             <div className="mt-4 space-y-3">
@@ -1077,7 +1076,7 @@ export function DashboardScreen({
                 disabled={busy}
                 onClick={() => void handleOpenWalletBilling("open-add-credit")}
               >
-                Add More Credits
+                {translate("generated.790569733b9584b7")}
               </Button>
               <Button
                 className="w-full justify-center"
@@ -1085,7 +1084,7 @@ export function DashboardScreen({
                 disabled={busy}
                 onClick={() => void handleOpenWalletBilling("open-auto-topup")}
               >
-                Add Credits at a Limit
+                {translate("generated.0a80df7c34ab6f73")}
               </Button>
               <Button
                 className="w-full justify-center"
@@ -1093,7 +1092,7 @@ export function DashboardScreen({
                 disabled={busy}
                 onClick={() => void handleOpenWalletBilling("snapshot")}
               >
-                Open Billing Overview
+                {translate("generated.3ac15a5b73ee0fba")}
               </Button>
               <Button
                 className="w-full justify-center"
@@ -1101,15 +1100,15 @@ export function DashboardScreen({
                 disabled={busy}
                 onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
               >
-                Open API Key Page
+                {translate("generated.c533d3f8d6384008")}
               </Button>
             </div>
 
             <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-[#3e4270] pt-4 text-[1rem] text-[#8db7d8]">
               <div className="space-y-1">
-                <p>Amount in account: {walletAmountLabel}</p>
+                <p>{translate("generated.300c7d1736fdf817")} {walletAmountLabel}</p>
                 <p>
-                  Source: {vastWalletSummary?.source === "vast_api" ? "Vast API" : "Unavailable"}
+                  {translate("generated.c707ee4ecc240442")} {vastWalletSummary?.source === "vast_api" ? translate("generated.795c074989a911aa") : translate("generated.ca184496974204a0")}
                 </p>
               </div>
               <Button
@@ -1117,7 +1116,7 @@ export function DashboardScreen({
                 disabled={busy}
                 onClick={() => void onRefreshVastWalletSummary()}
               >
-                Refresh Balance
+                {translate("generated.28258f27617c03b4")}
               </Button>
             </div>
           </ModalBody>
@@ -1185,12 +1184,12 @@ export function DashboardScreen({
             <div className="mb-4 flex items-center justify-between gap-2 border-b border-[#3e4270] pb-2">
               <h3
                 className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
-                data-text="Managed Tunnel Info"
+                data-text={translate("generated.91d66582898286d6")}
               >
-                Managed Tunnel Info
+                {translate("generated.91d66582898286d6")}
               </h3>
               <AIPromptHelper
-                topic="Managed WireGuard-Compatible Tunnel"
+                topic={translate("generated.baa665733259cd2c")}
                 promptText={APP_PROMPTS.wireguardModalInfo}
                 variant="both"
               />
@@ -1198,22 +1197,22 @@ export function DashboardScreen({
 
             <div className="space-y-4 text-[1.2rem] leading-relaxed text-[#c5d8ec]">
               <p>
-                Noland manages the secure desktop connection flow for you inside the app.
+                {translate("generated.5eafc4cc64f90e35")}
               </p>
               <div>
                 <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
-                  How it works
+                  {translate("generated.9c870aa6e5e93270")}
                 </p>
                 <p className="text-[1.15rem] text-[#b9cce2]">
-                  Noland generates the connection config, starts the managed link locally, verifies connectivity to the remote instance, and then continues into streaming setup.
+                  {translate("generated.a2090f22f42ac636")}
                 </p>
               </div>
               <div>
                 <p className="mb-0.5 font-display text-[10px] uppercase tracking-[0.1em] text-neon-lime">
-                  Requirements
+                  {translate("generated.e0cdd07f6a270b82")}
                 </p>
                 <p className="text-[1.15rem] text-[#b9cce2]">
-                  No separate streaming client, VPN app, or networking-tool setup is required. If macOS or Linux asks for elevation, approve it so Noland can finish local configuration.
+                  {translate("generated.94e7cc34553f60b3")}
                 </p>
               </div>
             </div>
@@ -1223,7 +1222,7 @@ export function DashboardScreen({
                 variant="secondary"
                 onClick={() => setConnectionInfoModalType(null)}
               >
-                Got it
+                {translate("generated.5ad3dbd1242a4cea")}
               </Button>
 
             </div>

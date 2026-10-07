@@ -455,6 +455,7 @@ pub async fn begin_oauth_authorization(
     client_id: String,
     client_secret: Option<String>,
     provider_fields_json: Option<String>,
+    locale: Option<String>,
 ) -> Result<OAuthBeginResponse, FrontendError> {
     clear_pending_oauth_sessions(context.inner()).await?;
     let provider: StorageProvider = serde_json::from_str(&format!("\"{}\"", provider))
@@ -523,6 +524,7 @@ pub async fn begin_oauth_authorization(
     let display_name_clone = display_name.clone();
     let config_clone = config.clone();
     let app_context = context.inner().clone();
+    let locale_clone = locale.unwrap_or_else(|| "en-US".to_string());
     tokio::spawn(async move {
         if let Err(e) = run_loopback_server(
             app_context,
@@ -531,6 +533,7 @@ pub async fn begin_oauth_authorization(
             provider_clone,
             display_name_clone,
             config_clone,
+            locale_clone,
         )
         .await
         {
@@ -664,6 +667,36 @@ pub async fn complete_oauth_authorization(
     })
 }
 
+struct OAuthLocalizedText {
+    lang: &'static str,
+    state_mismatch: &'static str,
+    session_not_found: &'static str,
+    authorization_denied: &'static str,
+    no_code: &'static str,
+    no_refresh_token: &'static str,
+    token_exchange_failed: &'static str,
+    success_title: &'static str,
+    success_body: &'static str,
+    success_close: &'static str,
+    failed_title: &'static str,
+    incomplete_title: &'static str,
+    retry_close: &'static str,
+}
+
+fn oauth_localized_text(locale: &str) -> OAuthLocalizedText {
+    match locale.split(['-', '_']).next().unwrap_or("en").to_ascii_lowercase().as_str() {
+        "pt" => OAuthLocalizedText { lang: "pt-BR", state_mismatch: "Incompatibilidade de estado — tente novamente.", session_not_found: "Sessão não encontrada — tente novamente.", authorization_denied: "Autorização negada", no_code: "Nenhum código de autorização foi recebido.", no_refresh_token: "não forneceu um token de atualização. Revogue a autorização existente do Noland e reconecte para manter as transferências em segundo plano autorizadas.", token_exchange_failed: "A troca do token falhou", success_title: "Autorização concluída", success_body: "Você autorizou o Noland com sucesso.", success_close: "Feche esta janela e volte ao Noland para concluir a configuração.", failed_title: "Falha na autorização", incomplete_title: "Autorização não concluída", retry_close: "Feche esta janela e tente novamente no Noland." },
+        "es" => OAuthLocalizedText { lang: "es", state_mismatch: "El estado no coincide. Inténtalo de nuevo.", session_not_found: "No se encontró la sesión. Inténtalo de nuevo.", authorization_denied: "Autorización denegada", no_code: "No se recibió ningún código de autorización.", no_refresh_token: "no proporcionó un token de actualización. Revoca la autorización existente de Noland y vuelve a conectarte para mantener autorizadas las transferencias en segundo plano.", token_exchange_failed: "Error al intercambiar el token", success_title: "Autorización completada", success_body: "Has autorizado Noland correctamente.", success_close: "Cierra esta ventana y vuelve a Noland para completar la configuración.", failed_title: "Error de autorización", incomplete_title: "Autorización incompleta", retry_close: "Cierra esta ventana e inténtalo de nuevo en Noland." },
+        "fr" => OAuthLocalizedText { lang: "fr", state_mismatch: "L’état ne correspond pas. Réessayez.", session_not_found: "Session introuvable. Réessayez.", authorization_denied: "Autorisation refusée", no_code: "Aucun code d’autorisation reçu.", no_refresh_token: "n’a fourni aucun jeton d’actualisation. Révoquez l’autorisation existante de Noland, puis reconnectez-vous afin que les transferts en arrière-plan restent autorisés.", token_exchange_failed: "Échec de l’échange du jeton", success_title: "Autorisation terminée", success_body: "Vous avez autorisé Noland.", success_close: "Fermez cette fenêtre et revenez dans Noland pour terminer la configuration.", failed_title: "Échec de l’autorisation", incomplete_title: "Autorisation incomplète", retry_close: "Fermez cette fenêtre et réessayez dans Noland." },
+        "de" => OAuthLocalizedText { lang: "de", state_mismatch: "Der Status stimmt nicht überein. Versuchen Sie es erneut.", session_not_found: "Sitzung nicht gefunden. Versuchen Sie es erneut.", authorization_denied: "Autorisierung abgelehnt", no_code: "Es wurde kein Autorisierungscode empfangen.", no_refresh_token: "hat kein Aktualisierungstoken bereitgestellt. Widerrufen Sie die bestehende Noland-Autorisierung und stellen Sie die Verbindung erneut her, damit Hintergrundübertragungen autorisiert bleiben.", token_exchange_failed: "Token-Austausch fehlgeschlagen", success_title: "Autorisierung abgeschlossen", success_body: "Noland wurde erfolgreich autorisiert.", success_close: "Schließen Sie dieses Fenster und kehren Sie zu Noland zurück, um die Einrichtung abzuschließen.", failed_title: "Autorisierung fehlgeschlagen", incomplete_title: "Autorisierung unvollständig", retry_close: "Schließen Sie dieses Fenster und versuchen Sie es in Noland erneut." },
+        "it" => OAuthLocalizedText { lang: "it", state_mismatch: "Lo stato non corrisponde. Riprova.", session_not_found: "Sessione non trovata. Riprova.", authorization_denied: "Autorizzazione negata", no_code: "Nessun codice di autorizzazione ricevuto.", no_refresh_token: "non ha fornito un token di aggiornamento. Revoca l’autorizzazione esistente di Noland e riconnettiti per mantenere autorizzati i trasferimenti in background.", token_exchange_failed: "Scambio del token non riuscito", success_title: "Autorizzazione completata", success_body: "Noland è stato autorizzato correttamente.", success_close: "Chiudi questa finestra e torna a Noland per completare la configurazione.", failed_title: "Autorizzazione non riuscita", incomplete_title: "Autorizzazione incompleta", retry_close: "Chiudi questa finestra e riprova in Noland." },
+        "ja" => OAuthLocalizedText { lang: "ja", state_mismatch: "状態が一致しません。もう一度お試しください。", session_not_found: "セッションが見つかりません。もう一度お試しください。", authorization_denied: "認証が拒否されました", no_code: "認証コードを受信できませんでした。", no_refresh_token: "から更新トークンが提供されませんでした。Noland の既存の認証を取り消して再接続し、バックグラウンド転送の認証を維持してください。", token_exchange_failed: "トークンの交換に失敗しました", success_title: "認証が完了しました", success_body: "Noland を正常に認証しました。", success_close: "このウィンドウを閉じ、Noland に戻って設定を完了してください。", failed_title: "認証に失敗しました", incomplete_title: "認証が完了していません", retry_close: "このウィンドウを閉じ、Noland でもう一度お試しください。" },
+        "ko" => OAuthLocalizedText { lang: "ko", state_mismatch: "상태가 일치하지 않습니다. 다시 시도하세요.", session_not_found: "세션을 찾을 수 없습니다. 다시 시도하세요.", authorization_denied: "인증이 거부되었습니다", no_code: "인증 코드를 받지 못했습니다.", no_refresh_token: "에서 새로 고침 토큰을 제공하지 않았습니다. Noland의 기존 인증을 취소한 후 다시 연결하여 백그라운드 전송 인증을 유지하세요.", token_exchange_failed: "토큰 교환 실패", success_title: "인증 완료", success_body: "Noland 인증을 완료했습니다.", success_close: "이 창을 닫고 Noland로 돌아가 설정을 완료하세요.", failed_title: "인증 실패", incomplete_title: "인증 미완료", retry_close: "이 창을 닫고 Noland에서 다시 시도하세요." },
+        "zh" => OAuthLocalizedText { lang: "zh-CN", state_mismatch: "状态不匹配，请重试。", session_not_found: "未找到会话，请重试。", authorization_denied: "授权被拒绝", no_code: "未收到授权代码。", no_refresh_token: "未提供刷新令牌。请撤销 Noland 的现有授权并重新连接，以保持后台传输获得授权。", token_exchange_failed: "令牌交换失败", success_title: "授权完成", success_body: "你已成功授权 Noland。", success_close: "请关闭此窗口并返回 Noland 完成设置。", failed_title: "授权失败", incomplete_title: "授权未完成", retry_close: "请关闭此窗口并在 Noland 中重试。" },
+        _ => OAuthLocalizedText { lang: "en", state_mismatch: "State mismatch — please try again.", session_not_found: "Session not found — please try again.", authorization_denied: "Authorization denied", no_code: "No authorization code received.", no_refresh_token: "did not provide a refresh token. Revoke Noland's existing authorization and reconnect so background transfers remain authorized.", token_exchange_failed: "Token exchange failed", success_title: "Authorization Complete", success_body: "You've successfully authorized Noland.", success_close: "You can close this window and return to Noland to complete setup.", failed_title: "Authorization Failed", incomplete_title: "Authorization Incomplete", retry_close: "You can close this window and try again in Noland." },
+    }
+}
+
 async fn run_loopback_server(
     context: AppContext,
     port: u16,
@@ -671,6 +704,7 @@ async fn run_loopback_server(
     provider: StorageProvider,
     _display_name: String,
     oauth_config: crate::services::shared_storage::oauth_flow::OAuthProviderConfig,
+    locale: String,
 ) -> Result<(), String> {
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
@@ -712,6 +746,7 @@ async fn run_loopback_server(
     // bounced back to the start.
     let mut outcome_ok = false;
     let mut outcome_message = String::new();
+    let copy = oauth_localized_text(&locale);
 
     if let Some(auth_code) = code {
         let stored_state = {
@@ -728,7 +763,7 @@ async fn run_loopback_server(
         if let Some((expected_state, code_verifier, _display_name)) = stored_state {
             if returned_state.as_deref() != Some(&expected_state) {
                 tracing::warn!("OAuth state mismatch for session {session_id}");
-                outcome_message = "State mismatch — please try again.".to_string();
+                outcome_message = copy.state_mismatch.to_string();
                 {
                     let mut sessions = get_oauth_sessions().write().await;
                     if let Some(s) = sessions.get_mut(&session_id) {
@@ -752,10 +787,8 @@ async fn run_loopback_server(
                             .clone()
                             .filter(|value| !value.trim().is_empty());
                         if refresh_token.is_none() {
-                            outcome_message = format!(
-                                "{} did not provide a refresh token. Revoke Noland's existing authorization and reconnect so background transfers remain authorized.",
-                                provider.label()
-                            );
+                            outcome_message =
+                                format!("{} {}", provider.label(), copy.no_refresh_token);
                             let mut sessions = get_oauth_sessions().write().await;
                             if let Some(s) = sessions.get_mut(&session_id) {
                                 s.status = OAuthSessionStatus::Failed(outcome_message.clone());
@@ -797,7 +830,7 @@ async fn run_loopback_server(
                     }
                     Err(e) => {
                         tracing::warn!("OAuth token exchange failed for {session_id}: {e}");
-                        outcome_message = format!("Token exchange failed: {e}");
+                        outcome_message = format!("{}: {e}", copy.token_exchange_failed);
                         // Mark session as failed
                         {
                             let mut sessions = get_oauth_sessions().write().await;
@@ -809,10 +842,10 @@ async fn run_loopback_server(
                 }
             }
         } else {
-            outcome_message = "Session not found — please try again.".to_string();
+            outcome_message = copy.session_not_found.to_string();
         }
     } else if let Some(err) = error {
-        outcome_message = format!("Authorization denied: {err}");
+        outcome_message = format!("{}: {err}", copy.authorization_denied);
         // Mark session as failed
         {
             let mut sessions = get_oauth_sessions().write().await;
@@ -822,16 +855,19 @@ async fn run_loopback_server(
         }
         tracing::warn!("OAuth authorization denied for session {session_id}");
     } else {
-        outcome_message = "No authorization code received.".to_string();
+        outcome_message = copy.no_code.to_string();
     }
 
     // NOW respond to the browser with the accurate outcome
     let response_body: String = if outcome_ok {
-        "<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#2e7d32'>Authorization Complete</h1><p>You've successfully authorized Noland.</p><p>You can close this window and return to Noland to complete setup.</p></body></html>".to_string()
-    } else if had_callback_error || outcome_message.contains("denied") {
-        format!("<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>Authorization Failed</h1><p>{}</p><p>You can close this window and try again in Noland.</p></body></html>", html_escape(&outcome_message))
+        format!("<html lang='{}'><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#2e7d32'>{}</h1><p>{}</p><p>{}</p></body></html>", copy.lang, copy.success_title, copy.success_body, copy.success_close)
     } else {
-        format!("<html><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>Authorization Incomplete</h1><p>{}</p><p>You can close this window and try again in Noland.</p></body></html>", html_escape(&outcome_message))
+        let title = if had_callback_error {
+            copy.failed_title
+        } else {
+            copy.incomplete_title
+        };
+        format!("<html lang='{}'><body style='font-family:sans-serif;max-width:500px;margin:50px auto;text-align:center'><h1 style='color:#d32f2f'>{}</h1><p>{}</p><p>{}</p></body></html>", copy.lang, title, html_escape(&outcome_message), copy.retry_close)
     };
 
     let response = format!(

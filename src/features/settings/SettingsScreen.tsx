@@ -11,6 +11,7 @@ import { InputField } from "../../components/ui/InputField";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import { NotificationSettings } from "./NotificationSettings";
+import { LOCALE_OPTIONS, translateSource, useLocalization, type LocalePreference, translate } from "../../lib/i18n";
 import {
   getInstanceConnectionStatus,
   repairInstanceConnection,
@@ -45,7 +46,8 @@ type SettingsSection =
   | "client"
   | "storage"
   | "connection"
-  | "notifications";
+  | "notifications"
+  | "language";
 type ClientForm = {
   bitrate: string;
   fps: string;
@@ -212,7 +214,7 @@ function SelectField({
       >
         {options.map((option) => (
           <option key={option.value} value={option.value}>
-            {option.label}
+            {translateSource(option.label)}
           </option>
         ))}
       </select>
@@ -251,6 +253,7 @@ export function SettingsScreen({
   onClearCloudflareTurnSettings,
   onRegenerateEdid,
 }: Props) {
+  const { preference, setLocale, t } = useLocalization();
   const [searchParams] = useSearchParams();
   const [section, setSection] = useState<SettingsSection>(() =>
     searchParams.get("section") === "storage" ? "storage" : "profile",
@@ -439,16 +442,16 @@ export function SettingsScreen({
   const profilePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Profile
+        {translate("generated.d696a35bdd1883da")}
       </h2>
       <div className="mt-4 grid gap-3 md:grid-cols-2">
         <InputField
-          label="Platform Username"
+          label={translate("generated.c08537e7f04a3efa")}
           value={platformUsername}
           onChange={(event) => setPlatformUsername(event.target.value)}
         />
         <InputField
-          label="Platform Password"
+          label={translate("generated.05b11713ab17a2e3")}
           type="password"
           value={platformPassword}
           onChange={(event) => setPlatformPassword(event.target.value)}
@@ -468,25 +471,24 @@ export function SettingsScreen({
             })
           }
         >
-          Save Platform Credentials
+          {translate("generated.40d82323d391ccb1")}
         </Button>
       </div>
       <div className="mt-4 border-t border-[#3b4067] pt-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          SSH Login Credentials
+          {translate("generated.96e6b34fbf9d39dd")}
         </h3>
         <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Used after key-based connection when the VM asks for
-          username/password.
+          {translate("generated.9bd3d7ccb5f02d10")}
         </p>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <InputField
-            label="SSH Username"
+            label={translate("generated.303e54ef24533234")}
             value={sshUsername}
             onChange={(event) => setSshUsername(event.target.value)}
           />
           <InputField
-            label="SSH Password"
+            label={translate("generated.02f98228994bcb2c")}
             type="password"
             value={sshPassword}
             onChange={(event) => setSshPassword(event.target.value)}
@@ -504,30 +506,30 @@ export function SettingsScreen({
               })
             }
           >
-            Save SSH Credentials
+            {translate("generated.c039ea9cff322096")}
           </Button>
         </div>
       </div>
       <div className="mt-4 border-t border-[#3b4067] pt-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          IGDB Artwork (Twitch Auth)
+          {translate("generated.a2c4b0522b462de6")}
         </h3>
         <p className="mt-1 text-[1.1rem] text-[#a8bed6]">
-          Add your Twitch app credentials so Noland can fetch IGDB artwork for software cards.
+          {translate("generated.174e20f522dcf24d")}
         </p>
         <div className="mt-3 grid gap-3 md:grid-cols-2">
           <InputField
-            label="Twitch Client ID"
+            label={translate("generated.07eb3cc614eb6f23")}
             value={twitchClientId}
             onChange={(event) => setTwitchClientId(event.target.value)}
-            placeholder="Paste your Twitch app client ID"
+            placeholder={translate("generated.46b176be62e06122")}
           />
           <InputField
-            label="Twitch Client Secret"
+            label={translate("generated.fe496d7aa0227730")}
             type="password"
             value={twitchClientSecret}
             onChange={(event) => setTwitchClientSecret(event.target.value)}
-            placeholder="Paste your Twitch app client secret"
+            placeholder={translate("generated.33d9856abb59955f")}
           />
         </div>
         <div className="mt-3 flex flex-wrap gap-3">
@@ -544,7 +546,7 @@ export function SettingsScreen({
               })
             }
           >
-            Save IGDB Credentials
+            {translate("generated.d8eeb242249ba7ea")}
           </Button>
           <Button
             variant="ghost"
@@ -556,28 +558,28 @@ export function SettingsScreen({
               })
             }
           >
-            Clear
+            {translate("generated.83b12c2216efb4fd")}
           </Button>
           <Button
             variant="secondary"
             disabled={busy}
             onClick={() => void openExternalUrl("https://dev.twitch.tv/console/apps")}
           >
-            Open Twitch Dev Console
+            {translate("generated.b323fecaa6164d1f")}
           </Button>
         </div>
         <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
-          <p>Use the Twitch app Client ID and Client Secret. IGDB itself is free to query through Twitch auth.</p>
-          <p>After saving, reopen the launch library or refresh artwork requests to fetch banners.</p>
+          <p>{translate("generated.35c5f3a7ba14f7f0")}</p>
+          <p>{translate("generated.f4bd0220e25db120")}</p>
         </div>
       </div>
 
       <div className="mt-4 rounded-md border border-[#35506e] bg-[#0d1630]/80 p-4 text-[1.05rem] text-[#b4d7f4]">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Vast.ai Links
+          {translate("generated.a2e96e42782998b6")}
         </h3>
         <p className="mt-2 leading-snug">
-          Use your normal browser for Vast.ai account access. Log in there, manage billing, create an API key, and then paste that API key into Noland.
+          {translate("generated.79720ad3c8d7b854")}
         </p>
         <div className="mt-3 flex flex-wrap gap-3">
           <Button
@@ -585,32 +587,32 @@ export function SettingsScreen({
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_LOGIN_URL)}
           >
-            Open Vast.ai Login
+            {translate("generated.a248fc9201615139")}
           </Button>
           <Button
             variant="ghost"
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_BILLING_URL)}
           >
-            Open Vast.ai Billing
+            {translate("generated.c90601c5e840eab8")}
           </Button>
           <Button
             variant="ghost"
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
           >
-            Open API Key Page
+            {translate("generated.c533d3f8d6384008")}
           </Button>
         </div>
         <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
-          <p>Use the normal browser pages above, then save the API key here.</p>
+          <p>{translate("generated.6f996752a0b0926b")}</p>
 
         </div>
       </div>
 
       <div className="mt-4 grid gap-3">
         <InputField
-          label="Vast API Key"
+          label={translate("generated.3923f29377d4ce31")}
           value={apiKey}
           type="password"
           onChange={(event) => setApiKey(event.target.value)}
@@ -620,14 +622,14 @@ export function SettingsScreen({
             disabled={busy || apiKey.trim().length < 16}
             onClick={() => onSaveApiKey(apiKey.trim())}
           >
-            Save API Key
+            {translate("generated.89e24d7c78a1182a")}
           </Button>
           <Button
             variant="secondary"
             disabled={busy}
             onClick={() => void openExternalUrl(VAST_API_KEY_URL)}
           >
-            Open API Key Page
+            {translate("generated.c533d3f8d6384008")}
           </Button>
         </div>
       </div>
@@ -637,11 +639,11 @@ export function SettingsScreen({
   const serverPanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Server Configuration
+        {translate("generated.65f170073c221c60")}
       </h2>
       <div className="mt-4 grid gap-3 md:grid-cols-3">
         <InputField
-          label="Min Reliability (0.8-1)"
+          label={translate("generated.7e04950e0f3e2234")}
           value={serverForm.minReliability}
           onChange={(event) =>
             setServerForm((prev) => ({
@@ -651,7 +653,7 @@ export function SettingsScreen({
           }
         />
         <InputField
-          label="Storage (GB)"
+          label={translate("generated.a40284164df96090")}
           value={serverForm.storageGb}
           onChange={(event) =>
             setServerForm((prev) => ({
@@ -661,7 +663,7 @@ export function SettingsScreen({
           }
         />
         <InputField
-          label="Template Hash"
+          label={translate("generated.ba60293671c08c9d")}
           value={serverForm.templateHash}
           onChange={(event) =>
             setServerForm((prev) => ({
@@ -713,7 +715,7 @@ export function SettingsScreen({
             })
           }
         >
-          Save Server Config
+          {translate("generated.2f84105cebcdfbc2")}
         </Button>
       </div>
     </Card>
@@ -722,21 +724,19 @@ export function SettingsScreen({
   const clientPanel = (
     <Card className="pixel-frame min-w-0 overflow-x-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Client (Moonlight)
+        {translate("generated.37170ceaa4a77b3c")}
       </h2>
       <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
-        Tune how Moonlight streams video, audio, and input to this device. Use
-        the text boxes for custom performance targets like bitrate, frame rate,
-        and resolution. Use the dropdowns for fixed on/off and codec choices.
+        {translate("generated.7c3ce72f82bf0f7a")}
       </p>
 
       <SettingsSubsection
-        title="Headless EDID"
-        description={`Display source: ${appState.sunshine.edidSourceLabel || "Unknown"}. The app refreshes the native profile at startup; apply it to a running VM from its Display action.`}
+        title={translate("generated.9a12d65bf2f96b18")}
+        description={translate("settings.display.source", { source: appState.sunshine.edidSourceLabel || translate("common.unknown") })}
       >
         <div className="grid gap-3 md:grid-cols-2">
           <SelectField
-            label="EDID Mode"
+            label={translate("generated.4efbc56987dc1373")}
             value={edidMode}
             options={[
               { value: "auto_detect", label: "Auto detect (Scaling matched)" },
@@ -752,14 +752,12 @@ export function SettingsScreen({
           />
           <div>
             <InputField
-              label="EDID Refresh Rate (30–240 Hz)"
+              label={translate("generated.2ef8a7821645caab")}
               value={edidRefreshRateHz}
               onChange={(event) => setEdidRefreshRateHz(event.target.value)}
             />
             <SettingHelp>
-              Set this to match your local display refresh rate. If that timing
-              cannot fit the current EDID format, the app uses a safe 60 Hz
-              native-resolution profile.
+              {translate("generated.5eaebf46eb9441b5")}
             </SettingHelp>
           </div>
         </div>
@@ -792,20 +790,20 @@ export function SettingsScreen({
               })
             }
           >
-            Refresh EDID Profile
+            {translate("generated.d6df35e700b6035e")}
           </Button>
         </div>
       </SettingsSubsection>
 
       <div className="mt-4 space-y-4">
         <SettingsSubsection
-          title="Video Quality"
-          description="Choose your target bitrate, frame rate, resolution, and codec preferences."
+          title={translate("generated.255da5c20861b5ef")}
+          description={translate("generated.7289eed4407cdf13")}
         >
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div>
               <InputField
-                label="Bitrate (Kbps)"
+                label={translate("generated.b90eb0818758391f")}
                 value={clientForm.bitrate}
                 onChange={(event) =>
                   setClientForm((prev) => ({ ...prev, bitrate: event.target.value }))
@@ -813,12 +811,12 @@ export function SettingsScreen({
                 placeholder="20000"
               />
               <SettingHelp>
-                Higher values improve image quality but require more bandwidth.
+                {translate("generated.2bfd5d867dafe410")}
               </SettingHelp>
             </div>
             <div>
               <InputField
-                label="Target FPS"
+                label={translate("generated.b22a096dcccd743c")}
                 value={clientForm.fps}
                 onChange={(event) =>
                   setClientForm((prev) => ({ ...prev, fps: event.target.value }))
@@ -826,12 +824,11 @@ export function SettingsScreen({
                 placeholder="60"
               />
               <SettingHelp>
-                Common values are 30, 60, and 120. Do not exceed your display
-                refresh rate.
+                {translate("generated.fa976965ffa51518")}
               </SettingHelp>
             </div>
             <SelectField
-              label="Refresh Timing"
+              label={translate("generated.21cf51fa69ed0901")}
               value={clientForm.refreshRateMode}
               options={[
                 { value: "60", label: "60.00 Hz" },
@@ -843,7 +840,7 @@ export function SettingsScreen({
             />
             <div>
               <InputField
-                label="Resolution Width"
+                label={translate("generated.c0b66d7b2e5374e7")}
                 value={clientForm.width}
                 onChange={(event) =>
                   setClientForm((prev) => ({ ...prev, width: event.target.value }))
@@ -851,12 +848,12 @@ export function SettingsScreen({
                 placeholder="1920"
               />
               <SettingHelp>
-                Horizontal resolution to stream, such as 1920 for 1080p.
+                {translate("generated.5408dc4ec4438c08")}
               </SettingHelp>
             </div>
             <div>
               <InputField
-                label="Resolution Height"
+                label={translate("generated.7cc52d7673689833")}
                 value={clientForm.height}
                 onChange={(event) =>
                   setClientForm((prev) => ({ ...prev, height: event.target.value }))
@@ -864,11 +861,11 @@ export function SettingsScreen({
                 placeholder="1080"
               />
               <SettingHelp>
-                Vertical resolution to stream, such as 1080 for 1080p.
+                {translate("generated.c7fb95547160e90b")}
               </SettingHelp>
             </div>
             <SelectField
-              label="Aspect Ratio"
+              label={translate("generated.556f85efa2beec52")}
               value={clientForm.aspectRatio}
               options={[
                 { value: "", label: "Automatic (use width and height)" },
@@ -883,7 +880,7 @@ export function SettingsScreen({
             />
             <div>
               <InputField
-                label="Display Output"
+                label={translate("generated.72b02f11664acc57")}
                 value={clientForm.displayOutput}
                 onChange={(event) =>
                   setClientForm((prev) => ({
@@ -891,16 +888,15 @@ export function SettingsScreen({
                     displayOutput: event.target.value,
                   }))
                 }
-                placeholder="Leave blank for default"
+                placeholder={translate("generated.cdfa93bbd715a2e3")}
               />
               <SettingHelp>
-                Optional monitor/output identifier on the cloud machine. Leave
-                blank unless you know the exact output to target.
+                {translate("generated.bfe983dd7d4eefe9")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Preferred Codec"
+                label={translate("generated.4fd5c321a4cb1c71")}
                 value={clientForm.videocfg}
                 options={codecOptions}
                 onChange={(value) =>
@@ -908,13 +904,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Automatic is safest. Force a codec only if you are chasing
-                compatibility or quality issues.
+                {translate("generated.49fb42d1f367f2e2")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Video Decoder"
+                label={translate("generated.27ba55a55b481cdc")}
                 value={clientForm.videodec}
                 options={decoderOptions}
                 onChange={(value) =>
@@ -922,13 +917,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Hardware decode is usually fastest. Software decode can help on
-                unsupported systems.
+                {translate("generated.759435568bdbd6b1")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="HDR Streaming"
+                label={translate("generated.212f66f8e53f6911")}
                 value={clientForm.hdr}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -936,13 +930,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Enable only when both the cloud machine and your local display
-                support HDR.
+                {translate("generated.5d28b3fdf85470fa")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="YUV444 Colour"
+                label={translate("generated.69726e40d09b2887")}
                 value={clientForm.yuv444}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -950,20 +943,20 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Improves text and colour accuracy, but uses more bandwidth.
+                {translate("generated.1ba9c5b8f4ae31ab")}
               </SettingHelp>
             </div>
           </div>
         </SettingsSubsection>
 
         <SettingsSubsection
-          title="Audio and Session"
-          description="Control where audio plays and how the client behaves during long sessions."
+          title={translate("generated.2e616a54da2f24b2")}
+          description={translate("generated.f6c4a1e6457c2848")}
         >
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div>
               <SelectField
-                label="Host Audio"
+                label={translate("generated.83ee39129dfebf6a")}
                 value={clientForm.hostaudio}
                 options={hostAudioOptions}
                 onChange={(value) =>
@@ -971,12 +964,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Usually you want audio to play locally, not on the remote host.
+                {translate("generated.b3115760b96af5f4")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Default Performance Overlay"
+                label={translate("generated.acfe057e2170a661")}
                 value={clientForm.showperfoverlay}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -984,13 +977,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Default for instances without a saved choice. Each instance card
-                controls its live FPS, latency, jitter and bitrate overlay.
+                {translate("generated.eb05426e0a537a9c")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Input Debug HUD"
+                label={translate("generated.620826e20f92aa2a")}
                 value={clientForm.showInputDebugHud}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -998,13 +990,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Shows the yellow native macOS input debug box. Keep this disabled
-                unless you are debugging mouse or keyboard capture.
+                {translate("generated.a538cf0e6b35f405")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Keep Device Awake"
+                label={translate("generated.1bc024181f58d2e3")}
                 value={clientForm.keepawake}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1012,20 +1003,20 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Prevents your local machine from sleeping during long sessions.
+                {translate("generated.071adfaf3fa01245")}
               </SettingHelp>
             </div>
           </div>
         </SettingsSubsection>
 
         <SettingsSubsection
-          title="Smoothness and Compatibility"
-          description="Adjust stream behavior for lower latency, smoother motion, and input compatibility."
+          title={translate("generated.933883a62afc9e5e")}
+          description={translate("generated.696d66b7576733db")}
         >
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             <div>
               <SelectField
-                label="Frame Pacing"
+                label={translate("generated.4da963d9d49530a3")}
                 value={clientForm.framepacing}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1033,12 +1024,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Helps smooth out motion. Recommended enabled for most users.
+                {translate("generated.554120fa3bafd2f6")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="VSync"
+                label={translate("generated.052810dae19607f5")}
                 value={clientForm.vsync}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1046,12 +1037,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Reduces tearing, but may add a little input latency.
+                {translate("generated.c9f5a66692d7c752")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Game Optimizations"
+                label={translate("generated.6c8f53fd15dc7140")}
                 value={clientForm.gameopts}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1059,13 +1050,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Keeps Moonlight tuned for game streaming. Usually best left
-                enabled.
+                {translate("generated.ddc6fb0c53ddd6d3")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Gamepad Mouse"
+                label={translate("generated.193276f2323cb566")}
                 value={clientForm.gamepadmouse}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1073,12 +1063,12 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Lets a connected controller also move the remote mouse cursor.
+                {translate("generated.50c3b4093d619442")}
               </SettingHelp>
             </div>
             <div>
               <SelectField
-                label="Detect Network Blocking"
+                label={translate("generated.edaaebf7b6d865cf")}
                 value={clientForm.detectnetblocking}
                 options={binaryOptions}
                 onChange={(value) =>
@@ -1086,8 +1076,7 @@ export function SettingsScreen({
                 }
               />
               <SettingHelp>
-                Helps the app detect network interruptions and blocked stream
-                traffic.
+                {translate("generated.68f8901e5d60611b")}
               </SettingHelp>
             </div>
           </div>
@@ -1215,7 +1204,7 @@ export function SettingsScreen({
             })
           }
         >
-          Save Client Config
+          {translate("generated.17f8dec4dbda2261")}
         </Button>
       </div>
     </Card>
@@ -1224,7 +1213,7 @@ export function SettingsScreen({
   const storagePanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Shared Storage (BETA)
+        {translate("generated.370fbbd74fb331da")}
       </h2>
       <div className="mt-4">
         <SharedStorageSettingsV2
@@ -1263,21 +1252,21 @@ export function SettingsScreen({
   const connectionPanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
-        Connection Provider
+        {translate("generated.5b4122b3c427915c")}
       </h2>
       <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
-        Noland now uses a managed secure tunnel for the desktop connection flow. The app brings the connection up locally and verifies it before continuing to streaming setup.
+        {translate("generated.4dc31a0d7900db71")}
       </p>
 
       <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Active Desktop Tunnel Mode
+          {translate("generated.5915dd34a63038c4")}
         </h3>
         <p className="mt-2 text-[1.15rem] text-white">
-          Managed secure tunnel
+          {translate("generated.9030dbbe6db96245")}
         </p>
         <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
-          Keep this set to the managed tunnel option so Noland can configure the local desktop connection automatically.
+          {translate("generated.61392d867c0e5960")}
         </p>
       </div>
 
@@ -1285,10 +1274,10 @@ export function SettingsScreen({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-              Cloudflare TURN Relay
+              {translate("generated.6557737f10551aa5")}
             </h3>
             <p className="mt-2 max-w-3xl text-[1.05rem] leading-snug text-[#a8bed6]">
-              Adds an encrypted WireGuard relay path for networks where the direct UDP path is unavailable or unstable. The long-lived API token is stored only in your operating system secure credential store.
+              {translate("generated.bee2301df48007b8")}
             </p>
           </div>
           <span className="rounded border border-[#48527a] px-2 py-1 font-display text-[9px] uppercase tracking-[0.12em] text-[#b7d7f2]">
@@ -1302,28 +1291,28 @@ export function SettingsScreen({
             checked={turnEnabled}
             onChange={(event) => setTurnEnabled(event.target.checked)}
           />
-          Enable relay preparation for new connections
+          {translate("generated.04c9f19b783de730")}
         </label>
 
         {cloudflareTurnSettings?.tokenSet ? (
           <p className="mt-3 text-[1rem] text-[#8fb4d4]">
-            Stored key: {cloudflareTurnSettings.keyIdHint ?? "configured"}. Enter both values again to replace it.
+            {translate("generated.9cb5175c6c6c397f")} {cloudflareTurnSettings.keyIdHint ?? "configured"}{translate("generated.689736c74f9ae689")}
           </p>
         ) : null}
 
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <InputField
-            label="TURN Key ID"
+            label={translate("generated.479f3da799e56d1a")}
             value={turnKeyId}
             onChange={(event) => setTurnKeyId(event.target.value)}
-            placeholder="Cloudflare TURN Key ID"
+            placeholder={translate("generated.9fec9ced2af2afcf")}
           />
           <InputField
-            label="TURN API Token"
+            label={translate("generated.3a6eafb10eeb3368")}
             type="password"
             value={turnApiToken}
             onChange={(event) => setTurnApiToken(event.target.value)}
-            placeholder="Cloudflare TURN API token"
+            placeholder={translate("generated.37905870b7054d0b")}
           />
         </div>
 
@@ -1339,7 +1328,7 @@ export function SettingsScreen({
               })
             }
           >
-            Test Credentials
+            {translate("generated.2643f644855bb881")}
           </Button>
           <Button
             disabled={busy || !turnKeyId.trim() || !turnApiToken.trim()}
@@ -1351,34 +1340,34 @@ export function SettingsScreen({
               })
             }
           >
-            Validate &amp; Save
+            {translate("generated.3772aaca2ec5db8e")}
           </Button>
           <Button
             variant="ghost"
             disabled={busy || !cloudflareTurnSettings?.tokenSet}
             onClick={() => void onClearCloudflareTurnSettings()}
           >
-            Remove Credentials
+            {translate("generated.385a5247e7736bc0")}
           </Button>
         </div>
 
         {cloudflareTurnTestResult?.valid ? (
           <p className="mt-3 text-[1rem] text-neon-lime">
-            Credentials are valid; Cloudflare returned {cloudflareTurnTestResult.udpUrls.length} UDP relay endpoint{cloudflareTurnTestResult.udpUrls.length === 1 ? "" : "s"}.
+            {translate("generated.fc90b0c389b8b0dd")} {cloudflareTurnTestResult.udpUrls.length} {translate("generated.990dd54f914614f2")}{cloudflareTurnTestResult.udpUrls.length === 1 ? "" : translate("generated.043a718774c572bd")}.
           </p>
         ) : null}
       </div>
 
       <div className="mt-4 rounded-md border border-[#3b4067] bg-[#10152f] p-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-          Per-instance transport
+          {translate("generated.457aaf87691571fa")}
         </h3>
         <p className="mt-2 text-[1.05rem] leading-snug text-[#a8bed6]">
-          Endpoint changes commit only after the managed tunnel and Sunshine are reachable. Failed changes roll back to the previous transport.
+          {translate("generated.ee3d1dff1b2b6f7c")}
         </p>
         <div className="mt-4 grid gap-3">
           {appState.provisionedServers.length === 0 ? (
-            <p className="text-[1rem] text-[#8fb4d4]">No provisioned instances.</p>
+            <p className="text-[1rem] text-[#8fb4d4]">{translate("generated.317c3454ab9a1050")}</p>
           ) : (
             appState.provisionedServers.map((server) => {
               const status = connectionStatuses[server.instanceId];
@@ -1390,10 +1379,10 @@ export function SettingsScreen({
                 >
                   <div>
                     <p className="font-display text-[9px] uppercase tracking-[0.12em] text-white">
-                      Instance {server.instanceId}
+                      {translate("generated.425f233626b3cd02")} {server.instanceId}
                     </p>
                     <p className="mt-1 text-[1rem] text-[#8fb4d4]">
-                      Requested: {network.preference} · Active: {network.activeTransport ?? "not validated"}
+                      {translate("generated.65d7deb02f4bc24b")} {network.preference} {translate("generated.fd53dfb399f155ec")} {network.activeTransport ?? "not validated"}
                       {network.lastEvaluation
                         ? ` · ${network.lastEvaluation.reason}`
                         : ""}
@@ -1401,7 +1390,7 @@ export function SettingsScreen({
                     <p className="mt-1 text-[0.95rem] text-[#789aba]">
                       {network.connectionProfile
                         ? `Verified profile r${network.connectionProfile.profileRevision} · MTU ${network.connectionProfile.innerMtu} · ${network.connectionProfile.packetLimits.measurementMethod}`
-                        : "No committed connection profile"}
+                        : translate("generated.b1feaf1905d89b26")}
                       {network.lastTransition
                         ? ` · Last transition: ${network.lastTransition.phase}`
                         : ""}
@@ -1420,14 +1409,14 @@ export function SettingsScreen({
                       }
                     >
                       {status?.automaticSelectionEnabled ? (
-                        <option value="auto">Automatic (gaming-v1)</option>
+                        <option value="auto">{translate("generated.8e302a5e0a46fca1")}</option>
                       ) : network.preference === "auto" ? (
-                        <option value="auto" disabled>Automatic (locked)</option>
+                        <option value="auto" disabled>{translate("generated.99ece9a6d062c12b")}</option>
                       ) : null}
-                      <option value="direct">Direct WireGuard</option>
+                      <option value="direct">{translate("generated.941a194944d452cc")}</option>
                       {status?.manualTurnSwitchingEnabled &&
                       network.cloudflareTurn.enabled ? (
-                        <option value="cloudflare_turn">Cloudflare TURN</option>
+                        <option value="cloudflare_turn">{translate("generated.8b51f06b7f19cf3f")}</option>
                       ) : null}
                     </select>
                     <Button
@@ -1436,8 +1425,8 @@ export function SettingsScreen({
                       onClick={() => void repairConnection(server.instanceId)}
                     >
                       {switchingInstanceId === server.instanceId
-                        ? "Repairing…"
-                        : "Repair connection"}
+                        ? translate("generated.fb4c616eb4907704")
+                        : translate("generated.483aefecfb711622")}
                     </Button>
                   </div>
                 </div>
@@ -1452,7 +1441,7 @@ export function SettingsScreen({
           (server) => !connectionStatuses[server.instanceId]?.manualTurnSwitchingEnabled,
         ) ? (
           <p className="mt-3 text-[0.95rem] text-[#8fb4d4]">
-            TURN selection is available when Cloudflare TURN is enabled and the validated credentials are present in secure storage.
+            {translate("generated.3d768a955278c50b")}
           </p>
         ) : null}
       </div>
@@ -1461,6 +1450,24 @@ export function SettingsScreen({
   );
 
   const notificationsPanel = <NotificationSettings />;
+  const languagePanel = (
+    <Card className="pixel-frame">
+      <SettingsSubsection
+        title={t("settings.language")}
+        description={t("settings.language.description")}
+      >
+        <SelectField
+          label={t("settings.language")}
+          value={preference}
+          options={LOCALE_OPTIONS.map((option) => ({
+            value: option.value,
+            label: option.value === "system" ? t("settings.language.system") : option.label,
+          }))}
+          onChange={(value) => setLocale(value as LocalePreference)}
+        />
+      </SettingsSubsection>
+    </Card>
+  );
 
   const panel =
     section === "profile"
@@ -1473,7 +1480,9 @@ export function SettingsScreen({
             ? connectionPanel
             : section === "notifications"
               ? notificationsPanel
-              : clientPanel;
+              : section === "language"
+                ? languagePanel
+                : clientPanel;
 
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-6 pt-6 md:px-8">
@@ -1482,17 +1491,17 @@ export function SettingsScreen({
           <div className="flex items-center gap-3">
             <div>
               <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
-                Settings
+                {t("app.settings")}
               </p>
               <h1
                 className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
-                data-text="Preferences"
+                data-text={t("app.preferences")}
               >
-                Preferences
+                {t("app.preferences")}
               </h1>
             </div>
             <AIPromptHelper
-              topic="App Configuration & Settings"
+              topic={translate("generated.329d5f59f3636df1")}
               promptText={APP_PROMPTS.settingsPage}
               variant="both"
             />
@@ -1501,7 +1510,7 @@ export function SettingsScreen({
           <div className="flex items-center gap-2">
             <ArcadeSoundToggle />
             <Link to="/">
-              <Button variant="ghost">Back</Button>
+              <Button variant="ghost">{t("settings.back")}</Button>
             </Link>
           </div>
         </div>
@@ -1513,37 +1522,43 @@ export function SettingsScreen({
                 variant={section === "profile" ? "secondary" : "ghost"}
                 onClick={() => setSection("profile")}
               >
-                Profile
+                {t("settings.profile")}
               </Button>
               <Button
                 variant={section === "server" ? "secondary" : "ghost"}
                 onClick={() => setSection("server")}
               >
-                Server Configuration
+                {t("settings.server")}
               </Button>
               <Button
                 variant={section === "client" ? "secondary" : "ghost"}
                 onClick={() => setSection("client")}
               >
-                Client
+                {t("settings.client")}
               </Button>
               <Button
                 variant={section === "storage" ? "secondary" : "ghost"}
                 onClick={() => setSection("storage")}
               >
-                Shared Storage (BETA)
+                {t("settings.storage")}
               </Button>
               <Button
                 variant={section === "connection" ? "secondary" : "ghost"}
                 onClick={() => setSection("connection")}
               >
-                Connection
+                {t("settings.connection")}
               </Button>
               <Button
                 variant={section === "notifications" ? "secondary" : "ghost"}
                 onClick={() => setSection("notifications")}
               >
-                Notifications
+                {t("settings.notifications")}
+              </Button>
+              <Button
+                variant={section === "language" ? "secondary" : "ghost"}
+                onClick={() => setSection("language")}
+              >
+                {t("settings.language")}
               </Button>
             </div>
           </Card>

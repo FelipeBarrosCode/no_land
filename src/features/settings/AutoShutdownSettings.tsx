@@ -1,3 +1,4 @@
+import { translate, translateSource, useLocalization } from "../../lib/i18n";
 import { useEffect, useState } from "react";
 import { getInstanceAutoShutdownStatus } from "../../lib/backend";
 import { Button } from "../../components/ui/Button";
@@ -37,13 +38,13 @@ function formatStatus(status: string): string {
   return status.split("_").join(" ");
 }
 
-function formatLastRun(value: string | null): string {
+function formatLastRun(value: string | null, formatDate: (value: Date) => string): string {
   if (!value) {
-    return "Never";
+    return translate("generated.6300ef800bb88429");
   }
 
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
+  return Number.isNaN(parsed.getTime()) ? value : formatDate(parsed);
 }
 
 export function AutoShutdownSettings({
@@ -55,6 +56,7 @@ export function AutoShutdownSettings({
   instanceId,
   onSave,
 }: Props) {
+  const { formatDate } = useLocalization();
   const [enabled, setEnabled] = useState(state.settings.enabled);
   const [timeoutMode, setTimeoutMode] = useState(() =>
     timeoutModeFor(state.settings.inactivityHours),
@@ -121,13 +123,10 @@ export function AutoShutdownSettings({
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="max-w-3xl">
           <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
-            Automatic Backup & Shutdown
+            {translate("generated.f2456fbc93e36a09")}
           </h3>
           <p className="mt-2 text-[1.1rem] leading-snug text-[#a8bed6]">
-            After continuous inactivity, No Land backs up your top-used apps to
-            the active shared-storage profile, then releases the cloud instance
-            to stop further instance charges. This feature is disabled by
-            default.
+            {translate("generated.3c8d70539066621e")}
           </p>
         </div>
 
@@ -139,22 +138,20 @@ export function AutoShutdownSettings({
             disabled={busy || (!hasActiveStorageProfile && !enabled)}
             onChange={(event) => setEnabled(event.currentTarget.checked)}
           />
-          <span>Enable automatic backup & shutdown</span>
+          <span>{translate("generated.b4ff14f408a85202")}</span>
         </label>
       </div>
 
       {!hasActiveStorageProfile ? (
         <div className="mt-4 border border-amber-400/40 bg-amber-950/30 p-3 text-[1.05rem] leading-snug text-amber-200">
-          Connect and activate a shared-storage profile above before enabling
-          this feature. Storage credentials and a repository key are verified
-          again when you save.
+          {translate("generated.953e47f2f6f5d8c2")}
         </div>
       ) : null}
 
       <div className="mt-4 grid gap-4 md:grid-cols-2">
         <label className="flex flex-col gap-2 text-base">
           <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">
-            Inactivity timeout
+            {translate("generated.d96b63117f00e362")}
           </span>
           <select
             value={timeoutMode}
@@ -164,19 +161,19 @@ export function AutoShutdownSettings({
           >
             {TIMEOUT_OPTIONS.map(({ value, label }) => (
               <option key={value} value={value}>
-                {label}
+                {translateSource(label)}
               </option>
             ))}
-            <option value="custom">Custom</option>
+            <option value="custom">{translate("generated.494ca78f7374e46f")}</option>
           </select>
           <p className="text-[1rem] leading-snug text-[#8fa9c8]">
-            The timer resets whenever activity is detected.
+            {translate("generated.789d7db22ba48a3a")}
           </p>
         </label>
 
         {timeoutMode === "custom" ? (
           <InputField
-            label="Custom timeout (5 minutes–24 hours)"
+            label={translate("generated.19fddf42c94ff940")}
             type="number"
             min={1 / 12}
             max={24}
@@ -185,21 +182,21 @@ export function AutoShutdownSettings({
             disabled={busy}
             error={
               inactivityHoursInvalid
-                ? "Enter a finite value from 5 minutes to 24 hours"
+                ? translateSource("Enter a finite value from 5 minutes to 24 hours")
                 : undefined
             }
             onChange={(event) => setCustomHours(event.currentTarget.value)}
           />
         ) : (
           <div className="rounded border border-[#30385d] bg-[#0b0f23]/60 p-3 text-[1.05rem] text-[#8fa9c8]">
-            Shutdown starts after {inactivityHours} continuous inactive
-            {inactivityHours === 1 ? " hour" : " hours"}.
+            {translate("generated.f753a7568dcf82d0")} {inactivityHours} {translate("generated.1ad85be7aa101f0c")}
+            {inactivityHours === 1 ? translate("generated.9ac0add475dd38e6") : translate("generated.404314b1f4bd8fa2")}.
           </div>
         )}
 
         <div>
           <InputField
-            label="Top apps to back up (1–10)"
+            label={translate("generated.e9b821e096de8190")}
             type="number"
             min={1}
             max={10}
@@ -208,35 +205,34 @@ export function AutoShutdownSettings({
             disabled={busy}
             error={
               backupAppLimitInvalid
-                ? "Enter a whole number from 1 to 10"
+                ? translateSource("Enter a whole number from 1 to 10")
                 : undefined
             }
             onChange={(event) => setBackupAppLimit(event.currentTarget.value)}
           />
           <p className="mt-1 text-[1rem] leading-snug text-[#8fa9c8]">
-            No Land will select up to this many of the most-used apps for the
-            automatic backup.
+            {translate("generated.61b46bc620b7f758")}
           </p>
         </div>
       </div>
 
       <div className="mt-4 grid gap-2 rounded border border-[#30385d] bg-[#0b0f23]/60 p-3 text-[1.05rem] md:grid-cols-3">
         <p className="text-[#a8bed6]">
-          Last status:{" "}
+          {translate("generated.061f04c97492547c")}{" "}
           <span className="capitalize text-[#dff8ff]">
             {formatStatus(state.lastStatus)}
           </span>
         </p>
         <p className="text-[#a8bed6]">
-          Last run:{" "}
-          <span className="text-[#dff8ff]">{formatLastRun(state.lastRunAt)}</span>
+          {translate("generated.f636f90bbb7941ad")}{" "}
+          <span className="text-[#dff8ff]">{formatLastRun(state.lastRunAt, (date) => formatDate(date, { dateStyle: "medium", timeStyle: "short" }))}</span>
         </p>
         <p className="text-[#a8bed6]">
-          Prerequisites:{" "}
+          {translate("generated.376438316e1b758e")}{" "}
           <span className="text-[#dff8ff]">
             {hasActiveStorageProfile && hasVastApiKey && hasProvisionedServer
-              ? "Ready"
-              : "Setup required"}
+              ? translate("generated.5fa7aac5375c5815")
+              : translate("generated.1a367c79441e13b7")}
           </span>
         </p>
       </div>
@@ -244,26 +240,26 @@ export function AutoShutdownSettings({
       {runtimeStatus ? (
         <div className="mt-3 rounded border border-cyan-400/30 bg-cyan-950/20 p-3 text-[1.05rem] text-cyan-100">
           <div className="flex flex-wrap gap-x-5 gap-y-1">
-            <span>Runtime: {runtimeStatus.state}</span>
+            <span>{translate("generated.2997436a97cea98a")} {runtimeStatus.state}</span>
             <span>
-              Time remaining: {Math.ceil(runtimeStatus.timeRemainingMs / 60_000)} min
+              {translate("generated.9b6d3c5c8412c3bd")} {Math.ceil(runtimeStatus.timeRemainingMs / 60_000)} {translate("generated.1f6fa6f69d185e60")}
             </span>
-            <span>Tracked apps: {runtimeStatus.rankedApps.length}</span>
+            <span>{translate("generated.8b29a07bfb78e991")} {runtimeStatus.rankedApps.length}</span>
           </div>
           {runtimeStatus.rankedApps.length > 0 ? (
             <p className="mt-2 text-[1rem] text-cyan-200/80">
-              Current ranking: {runtimeStatus.rankedApps.map((app) => app.appId).join(", ")}
+              {translate("generated.3f94f7b19f393260")} {runtimeStatus.rankedApps.map((app) => app.appId).join(", ")}
             </p>
           ) : null}
           {runtimeStatus.lastError ? (
-            <p className="mt-2 text-amber-200">Runtime warning: {runtimeStatus.lastError}</p>
+            <p className="mt-2 text-amber-200">{translate("generated.24a3e3af823c7da4")} {translateSource(runtimeStatus.lastError)}</p>
           ) : null}
         </div>
       ) : null}
 
       {state.lastError ? (
         <p className="mt-3 border border-red-500/40 bg-red-950/30 p-3 text-[1.05rem] leading-snug text-red-200">
-          Last error: {state.lastError}
+          {translate("generated.af73af0200229dfd")} {translateSource(state.lastError)}
         </p>
       ) : null}
 
@@ -283,16 +279,16 @@ export function AutoShutdownSettings({
             })
           }
         >
-          Save Automatic Backup Settings
+          {translate("generated.1a89dd84d87e7b5d")}
         </Button>
         {!hasVastApiKey ? (
           <span className="text-[1rem] text-amber-200">
-            A Vast.ai API key is required before enabling.
+            {translate("generated.e3cb540b1c2d0046")}
           </span>
         ) : null}
         {!hasProvisionedServer ? (
           <span className="text-[1rem] text-amber-200">
-            At least one provisioned server is required before enabling.
+            {translate("generated.dfbd219f2ca344bc")}
           </span>
         ) : null}
       </div>

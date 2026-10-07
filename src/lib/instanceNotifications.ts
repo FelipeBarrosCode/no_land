@@ -4,6 +4,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { isNotificationEnabled } from "./notificationPreferences";
+import { translate } from "./i18n";
 
 export async function notifyInstancesNeedAttention(instanceCount: number): Promise<void> {
   if (!isNotificationEnabled("instances")) {
@@ -19,8 +20,8 @@ export async function notifyInstancesNeedAttention(instanceCount: number): Promi
     }
 
     await sendNotification({
-      title: "No Land — Instances need attention",
-      body: `You have ${instanceCount} rented instance${instanceCount === 1 ? "" : "s"} with no active stream. They may continue charging. Open No Land to continue, set up shared storage, or delete them.`,
+      title: translate("notification.instances.title"),
+      body: translate("notification.instances.body", { count: instanceCount }),
       icon: "icons/icon.png",
       silent: false,
     });

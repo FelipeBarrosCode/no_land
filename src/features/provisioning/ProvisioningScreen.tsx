@@ -12,6 +12,7 @@ import type {
   MoonlightPairingSessionResponse,
 } from "../../lib/types";
 import { PostWireguardModal } from "./PostWireguardModal";
+import { useLocalization, translate } from "../../lib/i18n";
 
 interface Props {
   appState: PersistedAppState;
@@ -61,6 +62,7 @@ export function ProvisioningScreen({
   onStartSleepPrevention,
   onStopSleepPrevention,
 }: Props) {
+  const { t } = useLocalization();
   const currentIndex = useMemo(() => {
     const index = PROVISIONING_ORDER.indexOf(
       appState.orchestrationState as (typeof PROVISIONING_ORDER)[number],
@@ -93,13 +95,13 @@ export function ProvisioningScreen({
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <p className="font-display text-[16px] uppercase tracking-[0.2em] text-neon-cyan">
-              Provisioning
+              {t("provisioning.title")}
             </p>
             <h1
               className="pixel-heading glitch-title font-display text-lg text-white md:text-xl"
-              data-text="Session Setup Timeline"
+              data-text={t("provisioning.timeline")}
             >
-              Session Setup Timeline
+              {t("provisioning.timeline")}
             </h1>
           </div>
 
@@ -107,14 +109,14 @@ export function ProvisioningScreen({
             <ArcadeSoundToggle />
             {provisioningModalRequested && provisioningModalDismissed ? (
               <Button variant="ghost" onClick={onReopenProvisioningModal}>
-                Reopen Setup Modal
+                {t("provisioning.reopen")}
               </Button>
             ) : null}
             <Link to="/">
-              <Button variant="ghost">Close</Button>
+              <Button variant="ghost">{t("common.close")}</Button>
             </Link>
             <Link to="/">
-              <Button variant="ghost">Back to Dashboard</Button>
+              <Button variant="ghost">{t("settings.back")}</Button>
             </Link>
           </div>
         </div>
@@ -130,13 +132,13 @@ export function ProvisioningScreen({
                       <span>
                         {typeof blockingAction.progress === "number"
                           ? `${Math.round(blockingAction.progress)}%`
-                          : "Working..."}
+                          : translate("generated.b93900bded315d04")}
                       </span>
                     </div>
                   </div>
                   <Link to="/">
                     <Button variant="ghost" className="px-3 py-1 text-[16px]">
-                      Close
+                      {translate("generated.7d9eb7acb13e2462")}
                     </Button>
                   </Link>
                 </div>
@@ -155,8 +157,8 @@ export function ProvisioningScreen({
                 )}
               </div>
             )}
-            <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">
-              Pipeline Steps
+              <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">
+                {t("provisioning.pipeline")}
             </h2>
             <ul className="mt-4 space-y-2">
               {PROVISIONING_ORDER.map((step, index) => {
@@ -187,14 +189,14 @@ export function ProvisioningScreen({
           <Card className="pixel-frame">
             <div className="flex items-center justify-between gap-2">
               <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">
-                Progress Logs
+                {t("provisioning.logs")}
               </h2>
               <Button
                 variant={sleepPreventionActive ? "secondary" : "ghost"}
                 disabled={busy}
                 loading={busy && blockingAction?.key !== "provisioning.flow"}
                 loadingText={
-                  sleepPreventionActive ? "Stopping..." : "Starting..."
+                  sleepPreventionActive ? translate("generated.6f68db105f37fff1") : translate("generated.82b93630a921dddf")
                 }
                 onClick={() =>
                   sleepPreventionActive
@@ -202,7 +204,7 @@ export function ProvisioningScreen({
                     : onStartSleepPrevention()
                 }
               >
-                {sleepPreventionActive ? "Stop Awake" : "Keep PC Awake"}
+                {sleepPreventionActive ? translate("generated.ed2392a4425be756") : translate("generated.e87613226c827dd2")}
               </Button>
             </div>
             <details
@@ -210,12 +212,12 @@ export function ProvisioningScreen({
               open
             >
               <summary className="cursor-pointer font-display text-[10px] uppercase text-[#b4c8de]">
-                Show details
+                {translate("generated.1af77ee273cbdaae")}
               </summary>
               <div className="mt-3 max-h-[440px] space-y-2 overflow-auto pr-1 text-xs">
                 {logs.length === 0 ? (
                   <p className="text-[1.25rem] text-[#98adc9]">
-                    No events yet.
+                    {translate("generated.80c652c4eeecf7a1")}
                   </p>
                 ) : (
                   logs.map((entry, index) => (
