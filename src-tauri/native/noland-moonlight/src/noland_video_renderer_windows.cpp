@@ -28,7 +28,12 @@
 
 using Microsoft::WRL::ComPtr;
 
-// A click-through child surface stays above both the DXGI and GDI presenters.
+// A click-through owned popup is composed independently above the DXGI swap
+// chain. A WS_CHILD GDI surface can be occluded by flip-model presentation on
+// Windows even when its sibling order says it is on top.
+static const wchar_t* NL_PERFORMANCE_OVERLAY_CLASS = L"NoLandPerformanceOverlay";
+static const wchar_t* NL_PERFORMANCE_OVERLAY_PROPERTY = L"NoLandPerformanceOverlayHandle";
+
 static LRESULT CALLBACK nl_performance_overlay_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
   if (message == WM_NCHITTEST) return HTTRANSPARENT;
   if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATE;
@@ -63,9 +68,14 @@ static LRESULT CALLBACK nl_performance_overlay_proc(HWND hwnd, UINT message, WPA
 extern "C" void noland_performance_overlay_update(void* handle, const char* text) {
   HWND parent = static_cast<HWND>(handle);
   if (!IsWindow(parent) || text == nullptr) return;
-  const wchar_t* class_name = L"NoLandPerformanceOverlay";
-  HWND overlay = FindWindowExW(parent, nullptr, class_name, nullptr);
-  if (text[0] == '\0') {
+
+  HWND overlay = reinterpret_cast<HWND>(
+      GetPropW(parent, NL_PERFORMANCE_OVERLAY_PROPERTY));
+  if (overlay != nullptr && !IsWindow(overlay)) {
+    RemovePropW(parent, NL_PERFORMANCE_OVERLAY_PROPERTY);
+    overlay = nullptr;
+  }
+  if (text[0] == '\0' || !IsWindowVisible(parent) || IsIconic(parent)) {
     if (overlay != nullptr) ShowWindow(overlay, SW_HIDE);
     return;
   }
@@ -73,27 +83,43 @@ extern "C" void noland_performance_overlay_update(void* handle, const char* text
     WNDCLASSW window_class = {};
     window_class.lpfnWndProc = nl_performance_overlay_proc;
     window_class.hInstance = GetModuleHandleW(nullptr);
-    window_class.lpszClassName = class_name;
-    RegisterClassW(&window_class);
-    overlay = CreateWindowExW(WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
-                             class_name, L"", WS_CHILD, 12, 12, 640, 310,
-                             parent, nullptr, window_class.hInstance, nullptr);
+    window_class.lpszClassName = NL_PERFORMANCE_OVERLAY_CLASS;
+    window_class.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
+    if (RegisterClassW(&window_class) == 0 &&
+        GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+      return;
+    }
+    overlay = CreateWindowExW(
+        WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        NL_PERFORMANCE_OVERLAY_CLASS, L"", WS_POPUP, 0, 0, 640, 310,
+        parent, nullptr, window_class.hInstance, nullptr);
     if (overlay == nullptr) return;
+    SetPropW(parent, NL_PERFORMANCE_OVERLAY_PROPERTY, overlay);
     SetLayeredWindowAttributes(overlay, 0, 235, LWA_ALPHA);
   }
+
   wchar_t wide[4096] = {};
   MultiByteToWideChar(CP_UTF8, 0, text, -1, wide, 4096);
   SetWindowTextW(overlay, wide);
+
   HDC dc = GetDC(parent);
-  int dpi = GetDeviceCaps(dc, LOGPIXELSY);
-  ReleaseDC(parent, dc);
-  RECT bounds;
-  GetClientRect(parent, &bounds);
-  SetWindowPos(overlay, HWND_TOP, 12, 12,
-               std::max(1L, std::min(bounds.right - 24, (LONG)MulDiv(640, dpi, 96))),
-               std::max(1L, std::min(bounds.bottom - 24, (LONG)MulDiv(310, dpi, 96))),
+  int dpi = dc != nullptr ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+  if (dc != nullptr) ReleaseDC(parent, dc);
+  RECT bounds = {};
+  if (!GetClientRect(parent, &bounds)) return;
+  POINT origin = {bounds.left, bounds.top};
+  if (!ClientToScreen(parent, &origin)) return;
+  const LONG available_width = std::max(1L, bounds.right - bounds.left - 24);
+  const LONG available_height = std::max(1L, bounds.bottom - bounds.top - 24);
+  const LONG overlay_width =
+      std::max(1L, std::min(available_width, (LONG)MulDiv(640, dpi, 96)));
+  const LONG overlay_height =
+      std::max(1L, std::min(available_height, (LONG)MulDiv(310, dpi, 96)));
+  SetWindowPos(overlay, HWND_TOP, origin.x + 12, origin.y + 12,
+               overlay_width, overlay_height,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
   InvalidateRect(overlay, nullptr, FALSE);
+  UpdateWindow(overlay);
 }
 
 struct nl_windows_input_view {

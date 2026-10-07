@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { exit as exitApp } from "@tauri-apps/plugin-process";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
@@ -441,8 +442,8 @@ function CloseWithInstancesModal({
         </Card>
         {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{translateSource(error)}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
-          <Button variant="danger" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
-          <Button variant="secondary" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
+          <Button variant="primary" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
+          <Button variant="danger" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
           <Button variant="secondary" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
             {translate("generated.d83cd3e78affba6d")}
           </Button>
@@ -463,7 +464,6 @@ export function App() {
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
   const [deletingBeforeClose, setDeletingBeforeClose] = useState(false);
   const [closeGuardError, setCloseGuardError] = useState<string | null>(null);
-  const allowWindowCloseRef = useRef(false);
   const attentionNotificationAtRef = useRef<number | null>(null);
   const [autoGithubIssuesEnabled, setAutoGithubIssuesEnabled] = useState(() => {
     try {
@@ -596,9 +596,6 @@ export function App() {
 
     const currentWindow = getCurrentWindow();
     const unlistenPromise = currentWindow.onCloseRequested((event) => {
-      if (allowWindowCloseRef.current) {
-        return;
-      }
       if (rentedInstances.length === 0) {
         return;
       }
@@ -675,9 +672,14 @@ export function App() {
   ]);
 
   async function quitWindow() {
-    allowWindowCloseRef.current = true;
+    setCloseGuardError(null);
     setCloseGuardOpen(false);
-    await getCurrentWindow().close();
+    try {
+      await exitApp(0);
+    } catch (error) {
+      setCloseGuardError(error instanceof Error ? error.message : String(error));
+      setCloseGuardOpen(true);
+    }
   }
 
   async function deleteAllAndQuit() {
