@@ -71,7 +71,12 @@ static LRESULT CALLBACK nl_stream_window_proc(HWND window,
     return TRUE;
   }
 
-  if (context->previous_window_proc != NULL) {
+  // Never forward to our own subclass procedure. If the stream window is
+  // restored while the native input bridge is being reinstalled, Windows can
+  // otherwise return nl_stream_window_proc as the previous procedure and
+  // recursively call this function until the process stack overflows.
+  if (context->previous_window_proc != NULL &&
+      context->previous_window_proc != nl_stream_window_proc) {
     return CallWindowProcW(context->previous_window_proc,
                            window,
                            message,
@@ -86,6 +91,14 @@ static bool nl_install_windows_cursor_guard(nl_desktop_input_context_t* context,
   LONG_PTR previous;
   if (context == NULL || window_handle == NULL) return false;
 
+  // Reinstalling the subclass on the same HWND must not replace our
+  // procedure with itself. This can happen when the stream window is reused
+  // during Windows display/focus restoration.
+  if (context->native_window == (HWND)window_handle &&
+      context->previous_window_proc != NULL) {
+    return true;
+  }
+
   context->native_window = (HWND)window_handle;
   SetLastError(0);
   previous = SetWindowLongPtrW(context->native_window,
@@ -96,6 +109,9 @@ static bool nl_install_windows_cursor_guard(nl_desktop_input_context_t* context,
     return false;
   }
   context->previous_window_proc = (WNDPROC)previous;
+  if (context->previous_window_proc == nl_stream_window_proc) {
+    context->previous_window_proc = NULL;
+  }
   return true;
 }
 
