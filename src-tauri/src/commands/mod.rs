@@ -1642,6 +1642,13 @@ async fn start_embedded_stream_for_host(
         prepared.preferences.video.height,
     );
 
+    info!(
+        host_id = %host_id,
+        app_id,
+        width = prepared.preferences.video.width,
+        height = prepared.preferences.video.height,
+        "Moonlight Play reached native stream-window creation"
+    );
     let stream_window = create_or_reuse_stream_window(
         app,
         prepared.preferences.video.width,
@@ -1649,6 +1656,7 @@ async fn start_embedded_stream_for_host(
         &prepared.host_address,
     )
     .map_err(moonlight_frontend_error)?;
+    info!("Moonlight native stream window created or reused");
     set_native_stream_input_debug_overlay_enabled(
         app.state::<AppContext>()
             .state
@@ -1660,13 +1668,22 @@ async fn start_embedded_stream_for_host(
     );
     install_native_stream_input(&stream_window, moonlight.input.clone())
         .map_err(moonlight_frontend_error)?;
+    info!("Moonlight native stream input bridge installed");
     let surface =
         stream_window_surface_descriptor(&stream_window).map_err(moonlight_frontend_error)?;
+    info!(
+        surface_type = ?surface.surface_type,
+        window_handle = surface.window_handle,
+        width = surface.width,
+        height = surface.height,
+        "Moonlight native stream surface acquired"
+    );
 
     if let Err(error) = moonlight.runtime.attach_surface(surface).await {
         let _ = close_stream_window(app);
         return Err(moonlight_frontend_error(error));
     }
+    info!("Moonlight native renderer surface attached");
 
     if let Ok(mut active_preferences) = moonlight.active_session_preferences.lock() {
         *active_preferences = Some(prepared.preferences.clone());
@@ -2352,10 +2369,49 @@ pub async fn resume_provisioning_existing_instance(
 pub async fn start_play_existing_instance(
     app: AppHandle,
     instance_id: u64,
-    context: State<'_, AppContext>,
-    moonlight: State<'_, MoonlightManager>,
 ) -> Result<String, FrontendError> {
-    start_launch_pc_for_instance(&app, instance_id, context.inner(), moonlight.inner()).await
+    #[cfg(target_os = "windows")]
+    {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let worker_app = app.clone();
+        std::thread::Builder::new()
+            .name("noland-play-launch".to_string())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                let result = tauri::async_runtime::block_on(async {
+                    let context = worker_app.state::<AppContext>();
+                    let moonlight = worker_app.state::<MoonlightManager>();
+                    start_launch_pc_for_instance(
+                        &worker_app,
+                        instance_id,
+                        context.inner(),
+                        moonlight.inner(),
+                    )
+                    .await
+                });
+                let _ = sender.send(result);
+            })
+            .map_err(|error| FrontendError {
+                code: "play_worker_error".to_string(),
+                message: "Could not start the Windows streaming worker".to_string(),
+                details: Some(error.to_string()),
+                retryable: true,
+            })?;
+
+        return receiver.await.map_err(|error| FrontendError {
+            code: "play_worker_error".to_string(),
+            message: "The Windows streaming worker stopped unexpectedly".to_string(),
+            details: Some(error.to_string()),
+            retryable: true,
+        })?;
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let context = app.state::<AppContext>();
+        let moonlight = app.state::<MoonlightManager>();
+        start_launch_pc_for_instance(&app, instance_id, context.inner(), moonlight.inner()).await
+    }
 }
 
 pub(super) async fn start_launch_pc_for_instance(
@@ -3021,9 +3077,6 @@ pub async fn moonlight_get_instance_pipeline_status(
     } else {
         server.embedded_moonlight_host_id.clone()
     };
-
-    let _ =
-        ensure_embedded_moonlight_host(moonlight.repository.as_ref(), &state, instance_id).await;
 
     let paired = embedded_host_is_paired(moonlight.repository.as_ref(), &host_id);
     let runtime_stats = moonlight.runtime.latest_statistics();
