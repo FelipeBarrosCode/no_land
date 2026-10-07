@@ -285,7 +285,9 @@ impl RemoteExec {
 
         info!(
             "SSH command: ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
-            port_str, connection_string, remote_command
+            port_str,
+            connection_string,
+            redact_sensitive_remote_command(remote_command)
         );
 
         let ssh_binary = resolve_ssh_binary("ssh")?;
@@ -339,7 +341,9 @@ impl RemoteExec {
 
         info!(
             "SSH command with redacted stdin: ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
-            port_str, connection_string, remote_command
+            port_str,
+            connection_string,
+            redact_sensitive_remote_command(remote_command)
         );
 
         let ssh_binary = resolve_ssh_binary("ssh")?;
@@ -388,7 +392,9 @@ impl RemoteExec {
 
         info!(
             "SSH command (no timeout): ssh -T -p {} -i <key> -o StrictHostKeyChecking=no {} {}",
-            port_str, connection_string, remote_command
+            port_str,
+            connection_string,
+            redact_sensitive_remote_command(remote_command)
         );
 
         let ssh_binary = resolve_ssh_binary("ssh")?;
@@ -529,6 +535,20 @@ fn spawn_terminal_reader<R: Read + Send + 'static>(
 
 fn shell_single_quote_escape(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn redact_sensitive_remote_command(command: &str) -> String {
+    let marker = "sunshine --creds";
+    let Some(start) = command.find(marker) else {
+        return command.to_string();
+    };
+
+    let prefix_end = start + marker.len();
+    let suffix = command[prefix_end..]
+        .find("'")
+        .map(|offset| &command[prefix_end + offset..])
+        .unwrap_or_default();
+    format!("{}{} <redacted>{}", &command[..start], marker, suffix)
 }
 
 fn ensure_command_available(command: &str) -> AppResult<()> {

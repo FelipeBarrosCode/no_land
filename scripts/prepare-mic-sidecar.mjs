@@ -21,7 +21,7 @@ const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
   || process.env.GSTREAMER_VERSION?.trim()
   || '1.24.13';
 
-const cargoArgs = ['build', '--manifest-path', join(sidecarCrateDir, 'Cargo.toml')];
+const cargoArgs = ['build', '--locked', '--manifest-path', join(sidecarCrateDir, 'Cargo.toml')];
 if (release) cargoArgs.push('--release');
 if (target) cargoArgs.push('--target', target);
 
@@ -78,6 +78,7 @@ if (cargo.status !== 0) {
 
 const netHelperCargoArgs = [
   'build',
+  '--locked',
   '--manifest-path', join(netHelperCrateDir, 'Cargo.toml'),
 ];
 if (release) netHelperCargoArgs.push('--release');

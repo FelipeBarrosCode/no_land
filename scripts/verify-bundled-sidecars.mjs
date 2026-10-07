@@ -642,6 +642,20 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
     fail(`Could not locate the installed Noland executable for smoke testing in ${label}`);
   }
 
+  const appDirectory = normalize(resolve(dirname(appExecutable))).toLocaleLowerCase();
+  const micSender = findRequiredSidecar(root, targetTriple, 'noland-mic-sender');
+  for (const [name, sidecar] of [
+    ['noland-net-helper', helper],
+    ['noland-mic-sender', micSender],
+  ]) {
+    const sidecarDirectory = normalize(resolve(dirname(sidecar))).toLocaleLowerCase();
+    if (sidecarDirectory !== appDirectory) {
+      fail(
+        `${name} must be installed beside the Noland executable for the production runtime trust check in ${label}: app=${appExecutable}, sidecar=${sidecar}`,
+      );
+    }
+  }
+
   const quotePowerShell = (value) => `'${String(value).replaceAll("'", "''")}'`;
   const script = [
     `$process = Start-Process -FilePath ${quotePowerShell(appExecutable)} -PassThru`,
