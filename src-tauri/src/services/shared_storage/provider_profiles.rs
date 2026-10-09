@@ -75,8 +75,7 @@ impl SharedStorageProfileManager {
             bucket: bucket.map(String::from),
             prefix: prefix.map(String::from),
             credential_vault_reference: format!(
-                "state.json:sharedStorageCredentials.profiles.{}",
-                profile_id
+                "secure-store://shared-storage/profile/{profile_id}"
             ),
             repository_id,
             status: SharedStorageStatus::Connected,

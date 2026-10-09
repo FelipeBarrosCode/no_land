@@ -175,8 +175,7 @@ pub async fn disconnect_shared_storage_profile(
             bucket: pref.bucket.clone(),
             prefix: pref.prefix.clone(),
             credential_vault_reference: format!(
-                "state.json:sharedStorageCredentials.profiles.{}",
-                profile_id
+                "secure-store://shared-storage/profile/{profile_id}"
             ),
             repository_id: String::new(),
             status: SharedStorageStatus::NotConfigured,

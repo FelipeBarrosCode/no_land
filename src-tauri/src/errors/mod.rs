@@ -25,6 +25,8 @@ pub enum AppError {
     Provisioning(String),
     #[error("State error: {0}")]
     State(String),
+    #[error("Secure storage error: {0}")]
+    SecureStorage(String),
     #[error("NVIDIA driver mismatch: {0}")]
     DriverMismatch(String),
     #[error("Operation cancelled")]

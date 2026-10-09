@@ -78,7 +78,7 @@ impl Default for AppConfig {
         // API key setup flow:
         // https://cloud.vast.ai/cli/
         Self {
-            state_schema_version: 3,
+            state_schema_version: 4,
             default_template_hash: env::var("NOLAND_TEMPLATE_HASH")
                 .unwrap_or_else(|_| "566868bff8b15eef891ee706acbbb5e5".to_string()),
             min_host_reliability: env::var("NOLAND_MIN_RELIABILITY")
