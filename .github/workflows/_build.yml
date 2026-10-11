@@ -188,7 +188,7 @@ jobs:
         run: bash scripts/validate-deb.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle"
 
       - name: Build and validate Arch Linux package
-        if: matrix.platform == 'linux'
+        if: matrix.platform == 'linux' && matrix.arch == 'x64'
         run: bash scripts/build-arch-package.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle" --arch "${{ matrix.arch }}"
 
       - name: Generate local artifact checksums

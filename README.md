@@ -175,7 +175,7 @@ The repository includes GitHub Actions workflows for direct-download desktop bui
 
 - macOS artifacts include `.dmg` / app archives;
 - Windows builds produce installer artifacts;
-- Linux builds produce AppImage, Debian, RPM, and native Arch Linux packages for x86_64 and aarch64;
+- Linux builds produce AppImage, Debian, and RPM packages for x86_64 and ARM64, plus a native Arch Linux x86_64 package;
 - pushes to `main` can update a rolling prerelease;
 - version tags can publish release artifacts.
 
