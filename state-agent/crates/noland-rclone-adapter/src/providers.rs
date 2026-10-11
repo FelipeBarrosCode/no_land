@@ -189,17 +189,19 @@ impl RcloneProviderAdapter for Dispatcher {
                     .get("url")
                     .cloned()
                     .ok_or_else(|| AdapterError::Invalid("WebDAV URL is missing.".into()))?;
-                Ok(RcloneRemoteConfig::new(name, "webdav")
+                let vendor = fields
+                    .get("vendor")
+                    .cloned()
+                    .unwrap_or_else(|| "other".into());
+                let mut config = RcloneRemoteConfig::new(name, "webdav")
                     .entry("url", url)
-                    .entry(
-                        "vendor",
-                        fields
-                            .get("vendor")
-                            .cloned()
-                            .unwrap_or_else(|| "other".into()),
-                    )
+                    .entry("vendor", &vendor)
                     .entry("user", username)
-                    .entry("pass", password))
+                    .entry("pass", password);
+                if vendor == "nextcloud" {
+                    config = config.entry("nextcloud_chunk_size", "64M");
+                }
+                Ok(config)
             }
             (ProviderKind::Local, AdapterCredential::LocalPath { path }) => {
                 Ok(RcloneRemoteConfig::new(name, "local").entry("nounc", path))
@@ -360,5 +362,25 @@ mod tests {
         let session = session_from_input(&input, "op", TokenMode::Ephemeral).unwrap();
         assert!(session.config_ini.contains("type = local"));
         assert_eq!(session.backend_type, "local");
+    }
+
+    #[test]
+    fn nextcloud_webdav_uses_larger_upload_chunks() {
+        let input = AdapterInput {
+            provider: ProviderKind::Webdav,
+            remote_name: "noland_webdav".into(),
+            credentials: AdapterCredential::UsernamePassword {
+                username: "user".into(),
+                password: "secret".into(),
+            },
+            fields: BTreeMap::from([
+                ("url".into(), "https://cloud.example.test/dav".into()),
+                ("vendor".into(), "nextcloud".into()),
+            ]),
+            bucket: None,
+            prefix: None,
+        };
+        let session = session_from_input(&input, "op", TokenMode::Ephemeral).unwrap();
+        assert!(session.config_ini.contains("nextcloud_chunk_size = 64M"));
     }
 }

@@ -175,45 +175,17 @@ impl StorageProvider {
                 category: self.category(),
                 is_oauth: self.is_oauth(),
                 description: "Google Drive cloud storage for your application backups".to_string(),
-                fields: vec![
-                    ProviderField {
-                        key: "folder".to_string(),
-                        label: "Folder Name".to_string(),
-                        field_type: ProviderFieldType::Text,
-                        required: false,
-                        placeholder: Some("Noland Shared Storage".to_string()),
-                        help_text: Some(
-                            "Folder in your Google Drive (will be created if it doesn't exist)"
-                                .to_string(),
-                        ),
-                    },
-                    ProviderField {
-                        key: "upload_concurrency".to_string(),
-                        label: "Upload Concurrency".to_string(),
-                        field_type: ProviderFieldType::Select {
-                            options: vec![
-                                ProviderSelectOption {
-                                    value: "1".to_string(),
-                                    label: "1 upload (lowest resource use)".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "2".to_string(),
-                                    label: "2 uploads".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "4".to_string(),
-                                    label: "4 uploads (recommended for fast connections)".to_string(),
-                                },
-                            ],
-                        },
-                        required: false,
-                        placeholder: None,
-                        help_text: Some(
-                            "Use four uploads for fast connections, or reduce concurrency to limit bandwidth and memory use."
-                                .to_string(),
-                        ),
-                    },
-                ],
+                fields: vec![ProviderField {
+                    key: "folder".to_string(),
+                    label: "Folder Name".to_string(),
+                    field_type: ProviderFieldType::Text,
+                    required: false,
+                    placeholder: Some("Noland Shared Storage".to_string()),
+                    help_text: Some(
+                        "Folder in your Google Drive (will be created if it doesn't exist)"
+                            .to_string(),
+                    ),
+                }],
             },
             Self::MicrosoftOneDrive => ProviderDefinition {
                 provider: self.clone(),

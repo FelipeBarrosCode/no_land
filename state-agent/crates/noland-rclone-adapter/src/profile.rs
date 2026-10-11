@@ -23,6 +23,13 @@ impl Default for GoogleDriveTransferOptions {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProviderOptions {
     GoogleDrive(GoogleDriveTransferOptions),
+    S3,
+    BackblazeB2,
+    AzureBlob,
+    OneDrive,
+    Dropbox,
+    Box,
+    Sftp,
     #[default]
     Generic,
 }
@@ -36,18 +43,30 @@ pub struct ProviderTransferConfig {
 
 impl ProviderTransferConfig {
     pub fn for_provider(provider: ProviderKind) -> Self {
-        if provider == ProviderKind::GoogleDrive {
-            Self {
-                upload_concurrency: 4,
-                download_concurrency: 4,
-                options: ProviderOptions::GoogleDrive(GoogleDriveTransferOptions::default()),
+        let capabilities = ProviderCapabilities::for_provider(provider);
+        let options = match provider {
+            ProviderKind::AmazonS3
+            | ProviderKind::CloudflareR2
+            | ProviderKind::Wasabi
+            | ProviderKind::DigitalOceanSpaces
+            | ProviderKind::GenericS3 => ProviderOptions::S3,
+            ProviderKind::BackblazeB2 => ProviderOptions::BackblazeB2,
+            ProviderKind::GoogleDrive => {
+                ProviderOptions::GoogleDrive(GoogleDriveTransferOptions::default())
             }
-        } else {
-            Self {
-                upload_concurrency: 2,
-                download_concurrency: 4,
-                options: ProviderOptions::Generic,
+            ProviderKind::MicrosoftOneDrive => ProviderOptions::OneDrive,
+            ProviderKind::Dropbox => ProviderOptions::Dropbox,
+            ProviderKind::Box => ProviderOptions::Box,
+            ProviderKind::AzureBlob => ProviderOptions::AzureBlob,
+            ProviderKind::Sftp => ProviderOptions::Sftp,
+            ProviderKind::GoogleCloudStorage | ProviderKind::Webdav | ProviderKind::Local => {
+                ProviderOptions::Generic
             }
+        };
+        Self {
+            upload_concurrency: capabilities.preferred_upload_concurrency,
+            download_concurrency: capabilities.preferred_download_concurrency,
+            options,
         }
     }
 }
@@ -62,6 +81,8 @@ pub struct ProviderCapabilities {
     pub preferred_upload_concurrency: usize,
     pub max_upload_concurrency: usize,
     pub preferred_download_concurrency: usize,
+    pub max_download_concurrency: usize,
+    pub estimated_memory_per_transfer: u64,
     pub preferred_remote_object_size: Option<u64>,
 }
 
@@ -82,15 +103,29 @@ impl ProviderCapabilities {
                 | ProviderKind::Box
                 | ProviderKind::AzureBlob
         );
-        let preferred_upload_concurrency = if provider == ProviderKind::GoogleDrive {
-            4
-        } else {
-            2
-        };
-        let max_upload_concurrency = if provider == ProviderKind::GoogleDrive {
-            4
-        } else {
-            usize::MAX
+        let (
+            preferred_upload_concurrency,
+            max_upload_concurrency,
+            preferred_download_concurrency,
+            max_download_concurrency,
+            estimated_memory_per_transfer,
+        ) = match provider {
+            ProviderKind::BackblazeB2 => (16, 32, 16, 32, 128 * MIB),
+            ProviderKind::AmazonS3
+            | ProviderKind::CloudflareR2
+            | ProviderKind::Wasabi
+            | ProviderKind::DigitalOceanSpaces
+            | ProviderKind::GenericS3
+            | ProviderKind::GoogleCloudStorage => (8, 32, 8, 32, 128 * MIB),
+            ProviderKind::AzureBlob => (8, 32, 8, 32, 128 * MIB),
+            ProviderKind::Dropbox => (8, 32, 8, 32, 128 * MIB),
+            ProviderKind::GoogleDrive | ProviderKind::MicrosoftOneDrive => {
+                (4, 16, 4, 16, 128 * MIB)
+            }
+            ProviderKind::Box => (4, 8, 4, 8, 64 * MIB),
+            ProviderKind::Sftp => (4, 8, 4, 8, 32 * MIB),
+            ProviderKind::Webdav => (4, 8, 4, 8, 64 * MIB),
+            ProviderKind::Local => (8, 32, 8, 32, 32 * MIB),
         };
 
         Self {
@@ -104,7 +139,9 @@ impl ProviderCapabilities {
             supports_native_multipart,
             preferred_upload_concurrency,
             max_upload_concurrency,
-            preferred_download_concurrency: 4,
+            preferred_download_concurrency,
+            max_download_concurrency,
+            estimated_memory_per_transfer,
             preferred_remote_object_size: None,
         }
     }
@@ -129,6 +166,39 @@ impl TransferProfile {
                 "--drive-upload-cutoff".into(),
                 format_size_mib(options.upload_cutoff)?,
             ],
+            ProviderOptions::S3 => vec![
+                "--s3-upload-cutoff".into(),
+                "64M".into(),
+                "--s3-chunk-size".into(),
+                "16M".into(),
+                "--s3-upload-concurrency".into(),
+                "4".into(),
+            ],
+            ProviderOptions::BackblazeB2 => vec![
+                "--b2-upload-cutoff".into(),
+                "64M".into(),
+                "--b2-chunk-size".into(),
+                "16M".into(),
+                "--b2-upload-concurrency".into(),
+                "4".into(),
+            ],
+            ProviderOptions::AzureBlob => vec![
+                "--azureblob-chunk-size".into(),
+                "8M".into(),
+                "--azureblob-upload-concurrency".into(),
+                "8".into(),
+            ],
+            ProviderOptions::OneDrive => {
+                vec!["--onedrive-chunk-size".into(), "20M".into()]
+            }
+            ProviderOptions::Dropbox => vec![
+                "--dropbox-chunk-size".into(),
+                "64M".into(),
+                "--dropbox-batch-mode".into(),
+                "sync".into(),
+            ],
+            ProviderOptions::Box => vec!["--box-upload-cutoff".into(), "50M".into()],
+            ProviderOptions::Sftp => vec!["--sftp-concurrency".into(), "128".into()],
             ProviderOptions::Generic => Vec::new(),
         };
         Ok(Self {
@@ -138,23 +208,40 @@ impl TransferProfile {
             rclone_global_args: Vec::new(),
         })
     }
+}
 
-    pub fn with_upload_concurrency(
-        mut self,
-        provider: ProviderKind,
-        concurrency: usize,
-    ) -> Result<Self> {
-        let capabilities = ProviderCapabilities::for_provider(provider);
-        if concurrency == 0 || concurrency > capabilities.max_upload_concurrency {
-            return Err(AdapterError::Invalid(format!(
-                "{} upload concurrency must be between 1 and {}",
-                provider.label(),
-                capabilities.max_upload_concurrency
-            )));
-        }
-        self.upload_concurrency = concurrency;
-        Ok(self)
-    }
+pub fn provider_arg_is_allowed(provider: ProviderKind, arg: &str) -> bool {
+    let required_provider = if arg.starts_with("--s3-") {
+        matches!(
+            provider,
+            ProviderKind::AmazonS3
+                | ProviderKind::CloudflareR2
+                | ProviderKind::Wasabi
+                | ProviderKind::DigitalOceanSpaces
+                | ProviderKind::GenericS3
+        )
+    } else if arg.starts_with("--b2-") {
+        provider == ProviderKind::BackblazeB2
+    } else if arg.starts_with("--drive-") {
+        provider == ProviderKind::GoogleDrive
+    } else if arg.starts_with("--gcs-") {
+        provider == ProviderKind::GoogleCloudStorage
+    } else if arg.starts_with("--onedrive-") {
+        provider == ProviderKind::MicrosoftOneDrive
+    } else if arg.starts_with("--dropbox-") {
+        provider == ProviderKind::Dropbox
+    } else if arg.starts_with("--box-") {
+        provider == ProviderKind::Box
+    } else if arg.starts_with("--azureblob-") {
+        provider == ProviderKind::AzureBlob
+    } else if arg.starts_with("--sftp-") {
+        provider == ProviderKind::Sftp
+    } else if arg.starts_with("--webdav-") {
+        provider == ProviderKind::Webdav
+    } else {
+        true
+    };
+    required_provider
 }
 
 pub fn configured_backend_type<'a>(config_ini: &'a str, remote_name: &str) -> Option<&'a str> {
@@ -219,7 +306,7 @@ mod tests {
     ];
 
     #[test]
-    fn drive_profile_uses_four_uploads_and_larger_chunks() {
+    fn drive_profile_defaults_to_four_uploads_and_has_automatic_ceiling() {
         let profile = TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive").unwrap();
         assert_eq!(profile.upload_concurrency, 4);
         assert_eq!(
@@ -227,16 +314,9 @@ mod tests {
             ["--drive-chunk-size", "64M", "--drive-upload-cutoff", "8M"]
         );
 
-        let profile = profile
-            .with_upload_concurrency(ProviderKind::GoogleDrive, 2)
-            .unwrap();
-        assert_eq!(profile.upload_concurrency, 2);
-        assert!(
-            TransferProfile::for_provider(ProviderKind::GoogleDrive, "drive")
-                .unwrap()
-                .with_upload_concurrency(ProviderKind::GoogleDrive, 5)
-                .is_err()
-        );
+        let capabilities = ProviderCapabilities::for_provider(ProviderKind::GoogleDrive);
+        assert_eq!(capabilities.max_upload_concurrency, 16);
+        assert_eq!(capabilities.max_download_concurrency, 16);
     }
 
     #[test]
@@ -248,6 +328,44 @@ mod tests {
                 .rclone_backend_args
                 .iter()
                 .all(|arg| !arg.starts_with("--drive-")));
+        }
+    }
+
+    #[test]
+    fn every_tunable_backend_receives_only_its_own_optimization_flags() {
+        let expected = [
+            (ProviderKind::AmazonS3, "--s3-chunk-size"),
+            (ProviderKind::CloudflareR2, "--s3-chunk-size"),
+            (ProviderKind::Wasabi, "--s3-chunk-size"),
+            (ProviderKind::DigitalOceanSpaces, "--s3-chunk-size"),
+            (ProviderKind::GenericS3, "--s3-chunk-size"),
+            (ProviderKind::BackblazeB2, "--b2-chunk-size"),
+            (ProviderKind::GoogleDrive, "--drive-chunk-size"),
+            (ProviderKind::MicrosoftOneDrive, "--onedrive-chunk-size"),
+            (ProviderKind::Dropbox, "--dropbox-chunk-size"),
+            (ProviderKind::Box, "--box-upload-cutoff"),
+            (ProviderKind::AzureBlob, "--azureblob-chunk-size"),
+            (ProviderKind::Sftp, "--sftp-concurrency"),
+        ];
+        for (provider, flag) in expected {
+            let profile = TransferProfile::for_provider(provider, provider.backend_type()).unwrap();
+            assert!(profile.rclone_backend_args.iter().any(|arg| arg == flag));
+            assert!(profile
+                .rclone_backend_args
+                .iter()
+                .all(|arg| provider_arg_is_allowed(provider, arg)));
+        }
+        for provider in [
+            ProviderKind::GoogleCloudStorage,
+            ProviderKind::Webdav,
+            ProviderKind::Local,
+        ] {
+            assert!(
+                TransferProfile::for_provider(provider, provider.backend_type())
+                    .unwrap()
+                    .rclone_backend_args
+                    .is_empty()
+            );
         }
     }
 

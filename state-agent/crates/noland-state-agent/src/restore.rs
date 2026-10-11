@@ -5,7 +5,9 @@ use std::{
 };
 
 use noland_crypto::MasterKey;
-use noland_rclone_adapter::{EphemeralRcloneSession, TransferTuning};
+use noland_rclone_adapter::{
+    EphemeralRcloneSession, ProviderKind, TransferTuning, TransferWorkload,
+};
 use noland_restore::{
     download_and_verify_to, prepare_restore, DownloadJournal, DownloadOptions, DownloadReport,
     RestoreTarget, RestoreTransaction,
@@ -126,10 +128,23 @@ pub async fn run_restore_with_session(
     )?;
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
-    let tuning = if agent.db.open_session_app_ids()?.is_empty() {
-        TransferTuning::throughput()
+    let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
+    let workload = if agent.db.open_session_app_ids()?.is_empty() {
+        TransferWorkload::Throughput
     } else {
-        TransferTuning::gameplay_safe()
+        TransferWorkload::GameplaySafe
+    };
+    let tuning = TransferTuning::automatic(provider, workload);
+    tracing::info!(
+        provider = provider.as_str(),
+        ?workload,
+        uploads = tuning.max_parallel_uploads,
+        downloads = tuning.max_parallel_downloads,
+        rclone_transfers = tuning.rclone_transfers,
+        "resolved automatic shared-storage restore parallelism"
+    );
+    let download_options = DownloadOptions {
+        max_parallel_packs: tuning.parallel_download_processes(),
     };
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
@@ -266,7 +281,7 @@ pub async fn run_restore_with_session(
                     &plan,
                     &index,
                     RestoreTarget::ReadyToLaunch,
-                    DownloadOptions::default(),
+                    download_options,
                     download_journal,
                 )
                 .await?;
@@ -327,7 +342,7 @@ pub async fn run_restore_with_session(
                     &plan,
                     &index,
                     RestoreTarget::Soon,
-                    DownloadOptions::default(),
+                    download_options,
                     download_journal,
                 )
                 .await?;
@@ -361,7 +376,7 @@ pub async fn run_restore_with_session(
                     &plan,
                     &index,
                     RestoreTarget::Complete,
-                    DownloadOptions::default(),
+                    download_options,
                     download_journal,
                 )
                 .await?;

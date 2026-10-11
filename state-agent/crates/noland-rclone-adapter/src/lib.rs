@@ -17,12 +17,15 @@ mod tuning;
 
 pub use config::{RcloneRemoteConfig, RcloneRoot};
 pub use profile::{
-    configured_backend_type, validate_provider_backend, GoogleDriveTransferOptions,
-    ProviderCapabilities, ProviderOptions, ProviderTransferConfig, TransferProfile,
+    configured_backend_type, provider_arg_is_allowed, validate_provider_backend,
+    GoogleDriveTransferOptions, ProviderCapabilities, ProviderOptions, ProviderTransferConfig,
+    TransferProfile,
 };
 pub use providers::{adapter_for, Dispatcher};
 pub use session::{session_from_input, TokenMode};
-pub use tuning::{classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning};
+pub use tuning::{
+    classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning, TransferWorkload,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {

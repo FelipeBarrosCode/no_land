@@ -16,7 +16,7 @@ pub use local::LocalStorage;
 pub use noland_rclone_adapter::{
     classify_remote_error, GoogleDriveTransferOptions, ProviderCapabilities, ProviderKind,
     ProviderOptions, ProviderRootIdentity, ProviderTransferConfig, RemoteErrorClass,
-    TransferProfile, TransferTuning,
+    TransferProfile, TransferTuning, TransferWorkload,
 };
 pub use rclone::{
     shred_all_ephemeral_sessions, shred_ephemeral_session, write_ephemeral_session,

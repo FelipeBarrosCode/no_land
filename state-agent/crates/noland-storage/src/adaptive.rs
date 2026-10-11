@@ -42,7 +42,7 @@ impl AdaptiveConcurrency {
     }
 
     pub fn for_downloads(tuning: &TransferTuning) -> Arc<Self> {
-        let max = tuning.max_parallel_downloads.max(1);
+        let max = tuning.parallel_download_processes().max(1);
         Self::new(max, 1, max)
     }
 

@@ -1,5 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{ProviderCapabilities, ProviderKind};
+
+#[cfg(test)]
+const MIB: u64 = 1024 * 1024;
+#[cfg(test)]
+const MEMORY_PER_TRANSFER: u64 = 128 * MIB;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferWorkload {
+    Balanced,
+    Throughput,
+    GameplaySafe,
+}
+
 /// Provider-neutral transfer controls. Defaults intentionally favor reliability
 /// and low remote API pressure over maximum throughput.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -16,6 +30,7 @@ pub struct TransferTuning {
     pub min_request_interval_ms: u64,
     pub rclone_transfers: usize,
     pub rclone_checkers: usize,
+    pub rclone_download_streams: usize,
 }
 
 impl Default for TransferTuning {
@@ -32,11 +47,63 @@ impl Default for TransferTuning {
             min_request_interval_ms: 0,
             rclone_transfers: 4,
             rclone_checkers: 4,
+            rclone_download_streams: 4,
         }
     }
 }
 
 impl TransferTuning {
+    /// Resolves a hidden, provider-aware transfer budget on the machine doing
+    /// the work. The desktop never needs to ask the user for a worker count.
+    pub fn automatic(provider: ProviderKind, workload: TransferWorkload) -> Self {
+        let cpus = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(4);
+        Self::for_resources(provider, workload, cpus, available_memory_bytes())
+    }
+
+    pub fn for_resources(
+        provider: ProviderKind,
+        workload: TransferWorkload,
+        logical_cpus: usize,
+        available_memory: Option<u64>,
+    ) -> Self {
+        let cpus = logical_cpus.max(1);
+        let cpu_budget = match workload {
+            TransferWorkload::Balanced => cpus.max(2),
+            TransferWorkload::Throughput => cpus.saturating_mul(2).max(4),
+            TransferWorkload::GameplaySafe => cpus.div_ceil(4).max(1),
+        };
+        let capabilities = ProviderCapabilities::for_provider(provider);
+        let memory_per_transfer = capabilities.estimated_memory_per_transfer.max(1);
+        let memory_budget = available_memory
+            .map(|bytes| {
+                usize::try_from((bytes / memory_per_transfer).max(1)).unwrap_or(usize::MAX)
+            })
+            .unwrap_or(cpu_budget);
+        let upload_budget = cpu_budget
+            .min(memory_budget)
+            .min(capabilities.max_upload_concurrency)
+            .max(1);
+        let download_budget = cpu_budget
+            .min(memory_budget)
+            .min(capabilities.max_download_concurrency)
+            .max(1);
+        let transfer_budget = upload_budget.max(download_budget);
+
+        let mut tuning = match workload {
+            TransferWorkload::Balanced => Self::default(),
+            TransferWorkload::Throughput => Self::throughput(),
+            TransferWorkload::GameplaySafe => Self::gameplay_safe(),
+        };
+        tuning.max_parallel_uploads = upload_budget;
+        tuning.max_parallel_downloads = download_budget;
+        tuning.rclone_transfers = upload_budget;
+        tuning.rclone_checkers = transfer_budget;
+        tuning.rclone_download_streams = download_budget.min(4);
+        tuning.normalized()
+    }
+
     /// Higher provider-neutral concurrency for foreground user-initiated transfers.
     pub fn throughput() -> Self {
         Self {
@@ -60,6 +127,7 @@ impl TransferTuning {
             min_request_interval_ms: 25,
             rclone_transfers: 2,
             rclone_checkers: 2,
+            rclone_download_streams: 1,
             ..Self::default()
         }
     }
@@ -74,7 +142,14 @@ impl TransferTuning {
         tuning.max_backoff_ms = tuning.max_backoff_ms.max(tuning.initial_backoff_ms);
         tuning.rclone_transfers = tuning.rclone_transfers.max(1);
         tuning.rclone_checkers = tuning.rclone_checkers.max(1);
+        tuning.rclone_download_streams = tuning.rclone_download_streams.max(1);
         tuning
+    }
+
+    pub fn parallel_download_processes(&self) -> usize {
+        self.max_parallel_downloads
+            .max(1)
+            .div_ceil(self.rclone_download_streams.max(1))
     }
 
     pub fn backoff_ms(&self, failed_attempt: u32, rate_limited: bool) -> u64 {
@@ -89,6 +164,50 @@ impl TransferTuning {
             exponential
         }
     }
+}
+
+fn available_memory_bytes() -> Option<u64> {
+    let cgroup_v2_available = read_trimmed("/sys/fs/cgroup/memory.max").and_then(|limit| {
+        if limit == "max" {
+            return None;
+        }
+        let limit = limit.parse::<u64>().ok()?;
+        let current = read_trimmed("/sys/fs/cgroup/memory.current")?
+            .parse::<u64>()
+            .ok()?;
+        Some(limit.saturating_sub(current))
+    });
+    let cgroup_v1_available =
+        read_trimmed("/sys/fs/cgroup/memory/memory.limit_in_bytes").and_then(|limit| {
+            let limit = limit.parse::<u64>().ok()?;
+            let current = read_trimmed("/sys/fs/cgroup/memory/memory.usage_in_bytes")?
+                .parse::<u64>()
+                .ok()?;
+            Some(limit.saturating_sub(current))
+        });
+    let cgroup_available = cgroup_v2_available.or(cgroup_v1_available);
+    let host_available = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let kib = line
+                    .strip_prefix("MemAvailable:")?
+                    .split_whitespace()
+                    .next()?;
+                kib.parse::<u64>().ok()?.checked_mul(1024)
+            })
+        });
+    match (cgroup_available, host_available) {
+        (Some(cgroup), Some(host)) => Some(cgroup.min(host)),
+        (Some(bytes), None) | (None, Some(bytes)) => Some(bytes),
+        (None, None) => None,
+    }
+}
+
+fn read_trimmed(path: &str) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|value| value.trim().to_string())
 }
 
 /// Credential-free identity suitable for provider/root-scoped caches.
@@ -290,6 +409,51 @@ mod tests {
         assert_eq!(throughput.rclone_checkers, 8);
         assert_eq!(gameplay.max_bulk_bytes, 1024 * 1024 * 1024);
         assert!(gameplay.min_request_interval_ms > 0);
+    }
+
+    #[test]
+    fn automatic_budget_uses_resources_and_provider_limits() {
+        let object = TransferTuning::for_resources(
+            ProviderKind::AmazonS3,
+            TransferWorkload::Throughput,
+            16,
+            Some(16 * 1024 * MIB),
+        );
+        assert_eq!(object.max_parallel_uploads, 32);
+        assert_eq!(object.max_parallel_downloads, 32);
+
+        let drive = TransferTuning::for_resources(
+            ProviderKind::GoogleDrive,
+            TransferWorkload::Throughput,
+            64,
+            Some(64 * 1024 * MIB),
+        );
+        assert_eq!(drive.max_parallel_uploads, 16);
+        assert_eq!(drive.rclone_transfers, 16);
+        assert_eq!(drive.rclone_download_streams, 4);
+        assert_eq!(drive.parallel_download_processes(), 4);
+    }
+
+    #[test]
+    fn automatic_budget_respects_memory_and_gameplay_pressure() {
+        let memory_limited = TransferTuning::for_resources(
+            ProviderKind::AmazonS3,
+            TransferWorkload::Throughput,
+            32,
+            Some(2 * MEMORY_PER_TRANSFER),
+        );
+        assert_eq!(memory_limited.max_parallel_uploads, 2);
+
+        let gameplay = TransferTuning::for_resources(
+            ProviderKind::AmazonS3,
+            TransferWorkload::GameplaySafe,
+            16,
+            None,
+        );
+        assert_eq!(gameplay.max_parallel_uploads, 4);
+        assert_eq!(gameplay.rclone_download_streams, 4);
+        assert_eq!(gameplay.parallel_download_processes(), 1);
+        assert!(gameplay.max_parallel_uploads < 32);
     }
 
     #[test]

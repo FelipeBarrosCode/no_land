@@ -10,7 +10,9 @@ use noland_cas::{chunk_file_streaming, LocalCas};
 use noland_classifier::Classifier;
 use noland_crypto::MasterKey;
 use noland_pack::{pack_chunk_files_with_limits, BuiltPack, PackIndexEntry};
-use noland_rclone_adapter::{EphemeralRcloneSession, ProviderRootIdentity, TransferTuning};
+use noland_rclone_adapter::{
+    EphemeralRcloneSession, ProviderKind, ProviderRootIdentity, TransferTuning, TransferWorkload,
+};
 use noland_snapshot::{create_view, discard};
 use noland_state_core::*;
 use noland_storage::{
@@ -1621,7 +1623,7 @@ pub async fn run_backup_with_session_performance(
 ) -> Result<BundleManifest> {
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
-    let tuning = transfer_tuning(agent, performance);
+    let tuning = transfer_tuning(agent, performance, session);
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup(
@@ -1663,7 +1665,7 @@ pub async fn run_backup_all_with_session_performance(
 ) -> Result<Vec<BundleManifest>> {
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
-    let tuning = transfer_tuning(agent, performance);
+    let tuning = transfer_tuning(agent, performance, session);
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     run_backup_all(agent, mode, performance, &storage, master, operation_id).await
@@ -1736,18 +1738,44 @@ fn restore_mode_for_backup(mode: BackupMode) -> RestoreMode {
     }
 }
 
-fn transfer_tuning(agent: &StateAgent, performance: BackupPerformanceMode) -> TransferTuning {
+fn transfer_tuning(
+    agent: &StateAgent,
+    performance: BackupPerformanceMode,
+    session: &EphemeralRcloneSession,
+) -> TransferTuning {
+    let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
     if agent
         .db
         .open_session_app_ids()
         .is_ok_and(|sessions| !sessions.is_empty())
     {
-        return TransferTuning::gameplay_safe();
+        let tuning = TransferTuning::automatic(provider, TransferWorkload::GameplaySafe);
+        log_transfer_tuning(provider, TransferWorkload::GameplaySafe, &tuning);
+        return tuning;
     }
-    match performance {
-        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => TransferTuning::throughput(),
-        BackupPerformanceMode::Balanced => TransferTuning::default(),
-    }
+    let workload = match performance {
+        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => TransferWorkload::Throughput,
+        BackupPerformanceMode::Balanced => TransferWorkload::Balanced,
+    };
+    let tuning = TransferTuning::automatic(provider, workload);
+    log_transfer_tuning(provider, workload, &tuning);
+    tuning
+}
+
+fn log_transfer_tuning(
+    provider: ProviderKind,
+    workload: TransferWorkload,
+    tuning: &TransferTuning,
+) {
+    tracing::info!(
+        provider = provider.as_str(),
+        ?workload,
+        uploads = tuning.max_parallel_uploads,
+        downloads = tuning.max_parallel_downloads,
+        rclone_transfers = tuning.rclone_transfers,
+        rclone_checkers = tuning.rclone_checkers,
+        "resolved automatic shared-storage parallelism"
+    );
 }
 
 #[cfg(test)]

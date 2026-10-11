@@ -27,18 +27,6 @@ pub fn session_from_input(
         AdapterCredential::OAuth2 { expires_at, .. } => *expires_at,
         _ => 0,
     };
-    let upload_concurrency = input
-        .fields
-        .get("upload_concurrency")
-        .map(|raw| {
-            raw.parse::<usize>().map_err(|_| {
-                crate::AdapterError::Invalid(format!(
-                    "invalid upload_concurrency `{raw}` for {}",
-                    input.provider.label()
-                ))
-            })
-        })
-        .transpose()?;
     Ok(EphemeralRcloneSession {
         operation_id: operation_id.into(),
         provider: input.provider.as_str().into(),
@@ -47,7 +35,9 @@ pub fn session_from_input(
         root: root.root,
         config_ini: config.to_ini_string(),
         expires_at_unix,
-        upload_concurrency,
+        // Kept in the wire format for compatibility with older clients and
+        // agents. Runtime parallelism is now resolved automatically by the VM.
+        upload_concurrency: None,
     })
 }
 
@@ -90,16 +80,16 @@ mod tests {
     }
 
     #[test]
-    fn session_carries_explicit_provider_upload_concurrency() {
+    fn session_ignores_legacy_provider_upload_concurrency() {
         let session =
             session_from_input(&drive_input(Some("2")), "op", TokenMode::Operation).unwrap();
-        assert_eq!(session.upload_concurrency, Some(2));
+        assert_eq!(session.upload_concurrency, None);
     }
 
     #[test]
-    fn session_rejects_non_numeric_upload_concurrency() {
-        assert!(
-            session_from_input(&drive_input(Some("many")), "op", TokenMode::Operation).is_err()
-        );
+    fn session_ignores_invalid_legacy_upload_concurrency() {
+        let session =
+            session_from_input(&drive_input(Some("many")), "op", TokenMode::Operation).unwrap();
+        assert_eq!(session.upload_concurrency, None);
     }
 }
