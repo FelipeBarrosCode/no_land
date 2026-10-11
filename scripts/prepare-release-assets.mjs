@@ -161,6 +161,7 @@ function shouldPublish(relativePath, baseName) {
   if (baseName.endsWith('.AppImage') || baseName.endsWith('.AppImage.sig')) return true;
   if (baseName.endsWith('.deb')) return true;
   if (baseName.endsWith('.rpm')) return true;
+  if (baseName.endsWith('.pkg.tar.zst')) return true;
   if (baseName.endsWith('.msi')) return true;
   if (/_(x64|arm64)\.app\.zip$/iu.test(baseName)) return true;
   if (/_(x64|arm64)-store-setup\.exe$/iu.test(baseName)) return true;

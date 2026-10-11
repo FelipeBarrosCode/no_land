@@ -1,0 +1,50 @@
+pkgname=noland-connect
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Connect to and manage remote Linux workstations'
+arch=('@ARCH@')
+url='https://no-land.net'
+license=('GPL-3.0-only')
+depends=(
+  'alsa-lib'
+  'gst-libav'
+  'gst-plugin-pipewire'
+  'gst-plugins-bad'
+  'gst-plugins-base'
+  'gst-plugins-good'
+  'gtk3'
+  'iproute2'
+  'libayatana-appindicator'
+  'libdecor'
+  'libgudev'
+  'libpulse'
+  'librsvg'
+  'libva'
+  'libvdpau'
+  'openssh'
+  'procps-ng'
+  'webkit2gtk-4.1'
+  'xdg-utils'
+)
+conflicts=('noland-connect-git')
+options=('!debug' '!strip')
+source=('noland-connect.deb')
+noextract=('noland-connect.deb')
+sha256sums=('@DEB_SHA256@')
+
+package() {
+  cd "$srcdir"
+
+  mkdir deb-payload
+  cd deb-payload
+  ar x ../noland-connect.deb
+
+  local data_archive
+  data_archive=$(find . -maxdepth 1 -type f -name 'data.tar.*' -print -quit)
+  if [[ -z "$data_archive" ]]; then
+    error 'The Debian package has no data archive'
+    return 1
+  fi
+
+  bsdtar -xf "$data_archive" -C "$pkgdir"
+}

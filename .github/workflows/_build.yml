@@ -186,6 +186,10 @@ jobs:
         if: matrix.platform == 'linux'
         run: bash scripts/validate-deb.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle"
 
+      - name: Build and validate Arch Linux package
+        if: matrix.platform == 'linux'
+        run: bash scripts/build-arch-package.sh --bundle-dir "src-tauri/target/${{ matrix.target }}/release/bundle" --arch "${{ matrix.arch }}"
+
       - name: Generate local artifact checksums
         run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-${{ matrix.platform }}-${{ matrix.arch }}"
 

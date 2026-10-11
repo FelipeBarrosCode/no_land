@@ -171,7 +171,7 @@ Tauri bundle outputs are uploaded from target release bundle folders and include
 
 - macOS: `.dmg` / `.app`
 - Windows: `.msi` / `.exe`
-- Linux: `.deb`, `.rpm`, and `.AppImage`
+- Linux: `.deb`, `.rpm`, `.AppImage`, and Arch Linux `.pkg.tar.zst`
 
 Linux artifacts are built on Ubuntu 22.04, the oldest supported glibc baseline. This keeps
 the AppImage compatible with GLIBC 2.35 rather than accidentally requiring the build host's
