@@ -40,6 +40,16 @@ mkdir -p "$extract_dir"
 )
 appdir="$extract_dir/squashfs-root"
 
+# AppRun is the AppImage entry point. Some Tauri/linuxdeploy combinations
+# leave it without an executable bit, which makes sandboxed catalog checks
+# fail before the application can start.
+if [[ ! -e "$appdir/AppRun" ]]; then
+  echo "The extracted AppImage has no AppRun entry point." >&2
+  exit 1
+fi
+chmod 0755 "$appdir/AppRun"
+test -x "$appdir/AppRun"
+
 mapfile -d '' desktop_files < <(find "$appdir/usr/share/applications" -maxdepth 1 -type f -name '*.desktop' -print0)
 if [[ ${#desktop_files[@]} -ne 1 ]]; then
   echo "Expected exactly one packaged desktop file; found ${#desktop_files[@]}." >&2
@@ -102,6 +112,7 @@ mkdir -p "$verify_dir"
 (
   cd "$verify_dir"
   "$appimage" --appimage-extract >/dev/null
+  test -x squashfs-root/AppRun
   test -s squashfs-root/.DirIcon
   file squashfs-root/.DirIcon | grep -q 'PNG image data'
   desktop=$(find squashfs-root -maxdepth 1 -name '*.desktop' -print -quit)

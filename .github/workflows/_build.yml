@@ -37,11 +37,14 @@ jobs:
             platform: macos
             arch: x64
             target: x86_64-apple-darwin
-          - os: ubuntu-24.04
+          # Build on the oldest supported glibc baseline. AppImages built on
+          # Ubuntu 24.04 require GLIBC_2.39 and cannot run on Ubuntu 22.04,
+          # Debian 12, or equivalent distributions.
+          - os: ubuntu-22.04
             platform: linux
             arch: x64
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04-arm
             platform: linux
             arch: arm64
             target: aarch64-unknown-linux-gnu

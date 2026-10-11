@@ -67,9 +67,16 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
 
   const appImage = findFirstPath(bundleRoot, (path) => path.endsWith('.AppImage'));
   if (appImage) {
+    if (!isExecutableFile(appImage)) {
+      fail(`AppImage is not executable: ${appImage}`);
+    }
     withExtractedTemp('linux-appimage-', (extractRoot) => {
       run(appImage, ['--appimage-extract'], { cwd: extractRoot });
       const extractedAppDir = join(extractRoot, 'squashfs-root');
+      const appRun = join(extractedAppDir, 'AppRun');
+      if (!isExecutableFile(appRun)) {
+        fail(`AppImage ${basename(appImage)} contains a non-executable AppRun entry point`);
+      }
       const dirIcon = join(extractedAppDir, '.DirIcon');
       if (!existsSync(dirIcon) || !statSync(dirIcon).isFile() || statSync(dirIcon).size === 0) {
         fail(`AppImage ${basename(appImage)} is missing a usable root .DirIcon`);

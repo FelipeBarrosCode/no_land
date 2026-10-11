@@ -171,13 +171,16 @@ Tauri bundle outputs are uploaded from target release bundle folders and include
 
 - macOS: `.dmg` / `.app`
 - Windows: `.msi` / `.exe`
-- Linux: `.deb` and `.rpm` only
+- Linux: `.deb`, `.rpm`, and `.AppImage`
 
-Linux AppImage is intentionally **not** produced or published. WebKitGTK/GIO loads host
-modules at runtime while AppImage injects a bundled `usr/lib` into the loader path; mixing
-the two produces GLib/GIO/libcurl symbol lookups failures on Ubuntu/Zorin LTS (for example
-`g_task_set_static_name`, `g_assertion_message_cmpint`). Native packages keep the distro's
-GTK/WebKit/GIO stack as one compatible set.
+Linux artifacts are built on Ubuntu 22.04, the oldest supported glibc baseline. This keeps
+the AppImage compatible with GLIBC 2.35 rather than accidentally requiring the build host's
+newer GLIBC 2.39. The release pipeline also repacks and verifies the AppImage so both the
+outer image and its internal `AppRun` entry point are executable.
+
+The AppImage carries its portable runtime. Native `.deb` and `.rpm` packages instead keep
+the distro's GTK/WebKit/GIO stack as one compatible set, avoiding mixed host/bundled
+GLib/GIO/libcurl symbol lookups on Ubuntu/Zorin LTS.
 
 ## Linux .deb dependency model
 
