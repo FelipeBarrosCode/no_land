@@ -59,17 +59,20 @@ sed \
   "$repo_root/packaging/arch/PKGBUILD.in" > "$work_dir/PKGBUILD"
 
 docker run --rm \
+  --env HOST_UID="$(id -u)" \
+  --env HOST_GID="$(id -g)" \
   --volume "$work_dir:/build" \
   --workdir /build \
   "${ARCHLINUX_IMAGE:-archlinux:base-devel}" \
   bash -Eeuo pipefail -c '
     useradd --create-home builder
     chown -R builder:builder /build
-    runuser -u builder -- makepkg --noconfirm --cleanbuild
+    runuser -u builder -- makepkg --noconfirm --cleanbuild --nodeps
     package=$(find /build -maxdepth 1 -type f -name "*.pkg.tar.zst" -print -quit)
     test -n "$package"
     pacman -Qip "$package"
     pacman -Qlp "$package" | grep -Eq "usr/bin/noland-connect$"
+    chown -R "$HOST_UID:$HOST_GID" /build
   '
 
 output_dir="$bundle_dir/arch"
