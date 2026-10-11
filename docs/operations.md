@@ -171,7 +171,7 @@ Tauri bundle outputs are uploaded from target release bundle folders and include
 
 - macOS: `.dmg` / `.app`
 - Windows: `.msi` / `.exe`
-- Linux: `.deb` and `.rpm` only
+- Linux: `.deb`, `.rpm`, and Arch Linux `.pkg.tar.zst`
 
 Linux AppImage is intentionally **not** produced or published. WebKitGTK/GIO loads host
 modules at runtime while AppImage injects a bundled `usr/lib` into the loader path; mixing
