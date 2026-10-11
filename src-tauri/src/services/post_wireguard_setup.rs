@@ -529,13 +529,13 @@ pub async fn verify_sunshine_api(
             SetupStage::SunshineCredentialsConfiguring,
             OrchestrationState::SunshineCredentialsConfiguring,
             "missing_platform_credentials",
-            "Sunshine setup requires app username and password from state.json.",
+            "Sunshine setup requires an app username and password from protected settings.",
             Some("Set platform credentials in onboarding/settings, then retry.".to_string()),
             true,
         )
         .await?;
         return Err(AppError::InvalidInput(
-            "Sunshine setup requires app username/password from state.json.".to_string(),
+            "Sunshine setup requires an app username/password from protected settings.".to_string(),
         ));
     }
 

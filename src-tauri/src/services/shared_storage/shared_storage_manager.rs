@@ -692,7 +692,7 @@ impl SharedStorageManager {
             bucket: reference.bucket.clone(),
             prefix: reference.prefix.clone(),
             credential_vault_reference: format!(
-                "state.json:sharedStorageCredentials.profiles.{}",
+                "secure-store://shared-storage/profile/{}",
                 reference.id
             ),
             repository_id: String::new(),

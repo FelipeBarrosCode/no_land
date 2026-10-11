@@ -31,6 +31,7 @@ pub mod shared_storage;
 pub mod sleep_inhibit;
 pub mod software_artwork;
 pub mod ssh_keys;
+pub mod state_secrets;
 pub mod state_store;
 pub mod sunshine;
 pub mod vast_api;

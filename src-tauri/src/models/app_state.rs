@@ -44,7 +44,7 @@ pub struct PersistedAppState {
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             onboarding_completed: false,
             has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
@@ -141,7 +141,7 @@ impl Default for SshState {
             public_key_path: String::new(),
             uploaded_to_vast: false,
             ssh_username: "root".to_string(),
-            ssh_password: "password".to_string(),
+            ssh_password: String::new(),
         }
     }
 }

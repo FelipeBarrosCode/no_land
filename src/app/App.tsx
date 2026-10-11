@@ -104,6 +104,43 @@ function RootRoute() {
   );
 
   useEffect(() => {
+    if (
+      !appState ||
+      !appState.onboardingCompleted ||
+      appState.credentials.vastApiKey.trim().length === 0
+    ) {
+      return;
+    }
+
+    let checking = false;
+    const reconcileInstances = async () => {
+      if (checking || document.visibilityState === "hidden") {
+        return;
+      }
+      checking = true;
+      try {
+        await loadRentedInstances({ background: true });
+      } finally {
+        checking = false;
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void reconcileInstances();
+      }
+    };
+
+    const interval = window.setInterval(() => void reconcileInstances(), 60_000);
+    window.addEventListener("focus", reconcileInstances);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("focus", reconcileInstances);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [appState?.credentials.vastApiKey, appState?.onboardingCompleted, loadRentedInstances]);
+
+  useEffect(() => {
     if (!embeddedMoonlightStatus?.enabled) {
       return;
     }
