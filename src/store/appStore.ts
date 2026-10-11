@@ -204,7 +204,7 @@ interface AppStore {
   pollLaunchSoftwareJob: (jobId: string) => Promise<LaunchSoftwareJob | null>;
   loadSoftwareArtwork: (name: string) => Promise<SoftwareArtworkResult | null>;
   clearLaunchLibrary: () => void;
-  loadRentedInstances: () => Promise<void>;
+  loadRentedInstances: (options?: { background?: boolean }) => Promise<void>;
   saveVastApiKey: (apiKey: string) => Promise<void>;
   refreshVastWalletSummary: () => Promise<VastWalletSummary | null>;
   savePlatformCredentials: (
@@ -1130,7 +1130,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           appState.credentials.vastApiKey.trim().length > 0
         ) {
           const [instances, wallet] = await Promise.all([
-            getRentedInstances(),
+            getRentedInstances().catch(() => []),
             getVastWalletSummaryCommand().catch(() => null),
           ]);
           rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(instances);
@@ -1507,15 +1507,20 @@ export const useAppStore = create<AppStore>((set, get) => {
       }
     },
 
-    loadRentedInstances: async () => {
-      set({ busy: true, error: null });
+    loadRentedInstances: async (options) => {
+      const background = options?.background === true;
+      if (!background) {
+        set({ busy: true, error: null });
+      }
       try {
         const rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(
           await getRentedInstances(),
         );
-        set({ rentedInstances, busy: false });
+        set(background ? { rentedInstances } : { rentedInstances, busy: false });
       } catch (error) {
-        set({ busy: false, error: mapError(error) });
+        if (!background) {
+          set({ busy: false, error: mapError(error) });
+        }
       }
     },
 
