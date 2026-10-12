@@ -2,6 +2,9 @@ import { listen } from "@tauri-apps/api/event";
 import { invokeSafe } from "./tauri";
 import { getActiveLocale, translate } from "./i18n";
 import type {
+  BudgetSettings,
+  SpendAlert,
+  SpendSummary,
   AutoShutdownSettings,
   AutoShutdownState,
   LifecycleAgentStatus,
@@ -66,6 +69,28 @@ import type {
 
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
+}
+
+export async function getSpendSummary(): Promise<SpendSummary> {
+  return invokeSafe<SpendSummary>("get_spend_summary");
+}
+
+export async function updateBudgetSettings(settings: BudgetSettings): Promise<SpendSummary> {
+  return invokeSafe<SpendSummary>("update_budget_settings", { settings });
+}
+
+export async function subscribeSpendUpdates(
+  callback: (summary: SpendSummary) => void,
+): Promise<() => void> {
+  const unlisten = await listen<SpendSummary>("spend:updated", ({ payload }) => callback(payload));
+  return () => unlisten();
+}
+
+export async function subscribeSpendAlerts(
+  callback: (alert: SpendAlert) => void,
+): Promise<() => void> {
+  const unlisten = await listen<SpendAlert>("spend:alert", ({ payload }) => callback(payload));
+  return () => unlisten();
 }
 
 export async function getAutoShutdownSettings(): Promise<AutoShutdownState> {

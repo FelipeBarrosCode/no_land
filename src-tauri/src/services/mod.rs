@@ -32,6 +32,7 @@ pub mod secure_store;
 pub mod shared_storage;
 pub mod sleep_inhibit;
 pub mod software_artwork;
+pub mod spend_tracker;
 pub mod ssh_keys;
 pub mod state_secrets;
 pub mod state_store;

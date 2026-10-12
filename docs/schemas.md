@@ -24,6 +24,7 @@ Top-level fields:
 - `provisionedServers`
 - `postWireguardSetup`
 - `orchestrationState`
+- `spend` (see `docs/spend-tracking.md`)
 - `lastError`
 
 Storage file path is managed by `JsonStateStore` and defaults to app data `state.json`.
