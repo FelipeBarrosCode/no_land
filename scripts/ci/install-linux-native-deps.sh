@@ -13,6 +13,7 @@ sudo apt-get install -y --no-install-recommends \
   libasound2-dev \
   libudev-dev \
   libssl-dev \
+  libunwind-dev \
   libgstreamer1.0-dev \
   libgstreamer-plugins-base1.0-dev \
   libopus-dev \
