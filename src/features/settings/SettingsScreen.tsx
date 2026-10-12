@@ -1560,7 +1560,7 @@ export function SettingsScreen({
                 variant={section === "budget" ? "secondary" : "ghost"}
                 onClick={() => setSection("budget")}
               >
-                Budget
+                {t("settings.budget")}
               </Button>
               <Button
                 variant={section === "notifications" ? "secondary" : "ghost"}

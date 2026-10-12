@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import type { BudgetStatus } from "../../lib/types";
 
 export function formatUsd(value: number, fractionDigits = 2): string {
@@ -8,7 +9,7 @@ export function formatUsd(value: number, fractionDigits = 2): string {
 }
 
 export function formatHourlyUsd(value: number): string {
-  return `${formatUsd(value, 3)}/hr`;
+  return translate("spend.per_hour", { amount: formatUsd(value, 3) });
 }
 
 export function formatMonth(month: string): string {
@@ -40,13 +41,13 @@ export function formatSessionDuration(startedAt: string | null, now: Date = new 
 export function budgetStatusLabel(status: BudgetStatus): string {
   switch (status) {
     case "exceeded":
-      return "Budget reached";
+      return translate("spend.status.exceeded");
     case "warning":
-      return "Approaching budget";
+      return translate("spend.status.warning");
     case "ok":
-      return "Within budget";
+      return translate("spend.status.ok");
     default:
-      return "No budget set";
+      return translate("spend.status.disabled");
   }
 }
 

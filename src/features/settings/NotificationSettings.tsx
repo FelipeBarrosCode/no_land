@@ -30,8 +30,8 @@ const SETTINGS: Array<{ kind: NotificationKind; title: string; description: stri
   },
   {
     kind: "budget",
-    title: "Budget alerts",
-    description: "Warn me as monthly spend approaches my budget and when instances are stopped because of it.",
+    title: "notifications.budget.title",
+    description: "notifications.budget.description",
   },
 ];
 
