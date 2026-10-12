@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "../../components/ui/Button";
+import { VastReferralDisclosure } from "../../components/VastReferralDisclosure";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import {
@@ -162,6 +163,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
                 {t("onboarding.vast.api.page")}
               </Button>
             </div>
+            <VastReferralDisclosure className="mt-3" />
             <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
                <p>{t("onboarding.vast.return")}</p>
 

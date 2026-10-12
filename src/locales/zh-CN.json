@@ -1163,5 +1163,6 @@
   "generated.619a9c9311e479e1": "国家错配——请再试一次.",
   "generated.e5d2f74dcea05591": "找不到会话 —— 请再试一次 。",
   "generated.b1bdd96c50fd0389": "没有收到授权代码 。",
-  "status.waiting.instance": "正在等待实例"
+  "status.waiting.instance": "正在等待实例",
+  "vast.referral.disclosure": "这些是 Vast.ai 推荐链接，用于跟踪来自 Noland 的转化。符合条件的注册或购买会让项目获得佣金，用于支持项目开发。如果您不想以这种方式支持项目，请在浏览器中直接输入 https://vast.ai，或者复刻该代码仓库并替换推荐链接。"
 }

@@ -1163,5 +1163,6 @@
   "generated.619a9c9311e479e1": "Inadéquation de l'état — veuillez réessayer.",
   "generated.e5d2f74dcea05591": "La séance n'a pas été trouvée — veuillez réessayer.",
   "generated.b1bdd96c50fd0389": "Aucun code d'autorisation reçu.",
-  "status.waiting.instance": "En attente de l’instance"
+  "status.waiting.instance": "En attente de l’instance",
+  "vast.referral.disclosure": "Il s’agit de liens de parrainage Vast.ai utilisés pour suivre les conversions provenant de Noland. Le projet reçoit une commission pour les inscriptions ou achats admissibles, ce qui soutient son développement. Si vous ne souhaitez pas soutenir le projet de cette façon, saisissez https://vast.ai directement dans votre navigateur ou créez un fork du dépôt et remplacez les liens de parrainage."
 }

@@ -1163,5 +1163,6 @@
   "generated.619a9c9311e479e1": "Mismatch di Stato — si prega di riprovare.",
   "generated.e5d2f74dcea05591": "Sessione non trovata — si prega di riprovare.",
   "generated.b1bdd96c50fd0389": "Nessun codice di autorizzazione ricevuto.",
-  "status.waiting.instance": "In attesa dell’istanza"
+  "status.waiting.instance": "In attesa dell’istanza",
+  "vast.referral.disclosure": "Questi sono link di referral Vast.ai usati per tracciare le conversioni provenienti da Noland. Il progetto riceve una commissione per registrazioni o acquisti idonei, che contribuisce a sostenerne lo sviluppo. Se non vuoi supportare il progetto in questo modo, digita https://vast.ai direttamente nel browser oppure crea un fork del repository e sostituisci i link di referral."
 }

@@ -1163,5 +1163,6 @@
   "generated.619a9c9311e479e1": "Incompatibilidade de estado — tente novamente.",
   "generated.e5d2f74dcea05591": "Sessão não encontrada — tente novamente.",
   "generated.b1bdd96c50fd0389": "Nenhum código de autorização foi recebido.",
-  "status.waiting.instance": "Aguardando a instância"
+  "status.waiting.instance": "Aguardando a instância",
+  "vast.referral.disclosure": "Estes são links de indicação da Vast.ai usados para acompanhar conversões vindas do Noland. O projeto recebe uma comissão por cadastros ou compras qualificadas, ajudando a financiar seu desenvolvimento. Se não quiser apoiar o projeto dessa forma, digite https://vast.ai diretamente no navegador ou faça um fork do repositório e substitua os links de indicação."
 }

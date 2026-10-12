@@ -1163,5 +1163,6 @@
   "generated.619a9c9311e479e1": "Desajuste del Estado — inténtelo de nuevo.",
   "generated.e5d2f74dcea05591": "Sesión no encontrada — por favor intente de nuevo.",
   "generated.b1bdd96c50fd0389": "No se ha recibido ningún código de autorización.",
-  "status.waiting.instance": "Esperando la instancia"
+  "status.waiting.instance": "Esperando la instancia",
+  "vast.referral.disclosure": "Estos son enlaces de referido de Vast.ai usados para registrar las conversiones provenientes de Noland. El proyecto recibe una comisión por registros o compras que cumplan los requisitos, lo que ayuda a financiar su desarrollo. Si no desea apoyar el proyecto de esta manera, escriba https://vast.ai directamente en su navegador o haga un fork del repositorio y reemplace los enlaces de referido."
 }

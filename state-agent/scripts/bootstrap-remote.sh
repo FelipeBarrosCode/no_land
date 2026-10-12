@@ -93,7 +93,9 @@ if ! command -v cargo >/dev/null 2>&1; then
   source "$HOME/.cargo/env"
 fi
 cd "$SRC"
-cargo build --release -p noland-state-agent
+rustc --version
+cargo --version
+cargo build --locked --release -p noland-state-agent
 install -m 0755 "$SRC/target/release/noland-state-agent" "$BIN"
 
 BPF_OBJECT="$(find_bpf_object)"
