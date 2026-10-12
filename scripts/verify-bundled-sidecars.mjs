@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { verifyRemoteAgentArtifacts } from './remote-agent-artifacts.mjs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -572,6 +573,7 @@ function verifyMicReceiverSourceDirectory(receiverDir, label) {
 }
 
 function verifyBundledNetworkAgentSource(root, label) {
+  verifyBundledRemoteAgents(root, label);
   const agentDir = findFirstPath(
     root,
     (path) => basename(path) === 'network-agent' && existsSync(join(path, 'Cargo.toml')),
@@ -592,6 +594,12 @@ function verifyBundledNetworkAgentSource(root, label) {
       fail(`Missing bundled network-contracts sibling file '${relativePath}' in ${label}`);
     }
   }
+}
+
+function verifyBundledRemoteAgents(root, label) {
+  const source = findFirstPath(root, (path) => basename(path) === 'state-agent' && existsSync(join(path, 'prebuilt')));
+  if (!source) fail(`Missing prebuilt remote agents in ${label}`);
+  verifyRemoteAgentArtifacts(source);
 }
 
 function verifyWindowsNsisInstallation(targetTriple, nsisInstallerPath) {

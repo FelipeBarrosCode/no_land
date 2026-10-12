@@ -7,6 +7,49 @@ use crate::{
     services::remote_exec::RemoteExec,
 };
 
+/// Run once before launching independent provisioning lanes. Never invoke
+/// destructive dpkg lock recovery while another lane may be installing.
+pub async fn prepare_provisioning_packages(remote: &RemoteExec) -> AppResult<()> {
+    if !wait_for_dpkg_lock(remote, 180).await? {
+        return Err(AppError::Provisioning(
+            "Remote package manager is not ready".into(),
+        ));
+    }
+    let prebuilt =
+        super::shared_storage::agent_runtime::locate_state_agent_source_dir().is_ok_and(|source| {
+            ["x86_64", "aarch64"].iter().all(|arch| {
+                source
+                    .join("prebuilt")
+                    .join(arch)
+                    .join("SHA256SUMS")
+                    .is_file()
+            })
+        });
+    let script =
+        include_str!("../../scripts/bootstrap_provisioning_packages.sh").replace("\r\n", "\n");
+    let script = format!(
+        "export NOLAND_PREBUILT_AGENTS={}\n{script}",
+        u8::from(prebuilt)
+    );
+    let remote = remote.clone();
+    let output = tokio::task::spawn_blocking(move || {
+        remote.ssh_with_stdin(
+            "sudo bash -s",
+            script.into_bytes(),
+            Duration::from_secs(1200),
+        )
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("package bootstrap join failure: {error}")))??;
+    if output.status_code != 0 || !output.stdout.contains("NOLAND_PROVISION_PACKAGES_READY") {
+        return Err(AppError::Provisioning(format!(
+            "Combined provisioning package installation failed: {} {}",
+            output.stdout, output.stderr
+        )));
+    }
+    Ok(())
+}
+
 /// Quiesce Ubuntu's periodic APT jobs and acquire the dpkg locks for provisioning.
 ///
 /// Fresh cloud images frequently start `apt-daily-upgrade` while provisioning is
@@ -27,6 +70,17 @@ GRACE_SECONDS=30
 TERM_GRACE_SECONDS=15
 started=$(date +%s)
 term_sent_at=0
+
+# During coordinated provisioning another lane may own APT. Never kill it.
+# The initial recovery gate runs before this per-boot marker is created.
+if [ -f /run/noland-provision-packages-ready ]; then
+  while sudo fuser $LOCK_FILES >/dev/null 2>&1; do
+    if [ $(( $(date +%s) - started )) -ge "$MAX_WAIT" ]; then exit 20; fi
+    sleep 1
+  done
+  echo NOLAND_DPKG_READY
+  exit 0
+fi
 
 sudo systemctl stop --no-block $APT_UNITS >/dev/null 2>&1 || true
 sudo systemctl mask $APT_UNITS >/dev/null 2>&1 || true

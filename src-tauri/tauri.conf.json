@@ -46,6 +46,7 @@
       "binaries/ssh-keygen-*",
       "binaries/ssh-runtime/**/*",
       "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/Cargo.lock",
       "../vm-cloud-mic-agent/src/**/*",
       "../network-agent/Cargo.toml",
       "../network-agent/Cargo.lock",
@@ -57,6 +58,7 @@
       "../state-agent/Cargo.lock",
       "../state-agent/rust-toolchain.toml",
       "../state-agent/crates/**/*",
+      "../state-agent/prebuilt/**/*",
       "../state-agent/scripts/**/*",
       "../state-agent/systemd/**/*"
     ],
