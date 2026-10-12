@@ -78,6 +78,12 @@ export DEBIAN_FRONTEND=noninteractive
 export RUSTUP_HOME=/root/.rustup
 export CARGO_HOME=/root/.cargo
 export PATH="$CARGO_HOME/bin:$PATH"
+PREBUILT="/opt/noland/state-agent/prebuilt/$(uname -m)"
+if [ -f "$PREBUILT/SHA256SUMS" ]; then
+  (cd "$PREBUILT" && sha256sum -c SHA256SUMS)
+  install -m 0755 "$PREBUILT/noland-mic-receiver" /tmp/noland-mic-receiver
+  exit 0
+fi
 apt-get update -y
 apt-get install -y --no-install-recommends build-essential pkg-config curl clang ca-certificates libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev pipewire pipewire-pulse wireplumber gstreamer1.0-tools gstreamer1.0-pipewire gstreamer1.0-plugins-base gstreamer1.0-plugins-good pulseaudio-utils python3 ufw
 if ! command -v rustup >/dev/null 2>&1; then
@@ -91,8 +97,7 @@ rm -rf /tmp/noland-mic-build
 mkdir -p /tmp/noland-mic-build
 cd /tmp/noland-mic-build
 tar -xzf /tmp/noland-mic-agent-src.tgz 2>/tmp/noland-mic-tar.log
-rm -f /tmp/noland-mic-build/vm-cloud-mic-agent/Cargo.lock
-if ! cargo build --release --manifest-path /tmp/noland-mic-build/vm-cloud-mic-agent/Cargo.toml >/tmp/noland-mic-build.stdout.log 2>/tmp/noland-mic-build.stderr.log; then
+if ! cargo build --locked --release --manifest-path /tmp/noland-mic-build/vm-cloud-mic-agent/Cargo.toml >/tmp/noland-mic-build.stdout.log 2>/tmp/noland-mic-build.stderr.log; then
   echo "=== RUSTUP STDOUT ==="
   tail -n 60 /tmp/noland-rustup.stdout.log || true
   echo "=== RUSTUP STDERR ==="
@@ -389,7 +394,7 @@ fn append_source_tree<W: std::io::Write>(
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
-        if source_root && (name == "Cargo.lock" || name == "target") {
+        if source_root && name == "target" {
             continue;
         }
         let path = entry.path();

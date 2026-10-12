@@ -1,4 +1,5 @@
 import { Button } from "../../components/ui/Button";
+import { VastReferralDisclosure } from "../../components/VastReferralDisclosure";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type { TutorialStep } from "./tutorialSteps";
 import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
@@ -31,6 +32,8 @@ export function TutorialModal({
 
   const step = steps[stepIndex];
   const isLastStep = stepIndex === steps.length - 1;
+  const hasVastReferralLink = [step.linkUrl, ...(step.links ?? []).map((link) => link.url)]
+    .some((url) => url?.includes("ref_id="));
 
   return (
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-lg animate-fade-in">
@@ -85,6 +88,8 @@ export function TutorialModal({
              {t(step.linkLabel)}
           </a>
         ) : null}
+
+        {hasVastReferralLink ? <VastReferralDisclosure className="mt-4" /> : null}
 
         <div className="mt-6 flex items-center justify-between gap-3">
           <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#8fb4d4]">

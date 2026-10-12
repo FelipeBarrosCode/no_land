@@ -1,9 +1,0 @@
-#!/usr/bin/expect -f
-set timeout 300
-set archive "tools/debug/artifacts/agent.tar.gz"
-spawn scp -o StrictHostKeyChecking=no -P 61761 -i ~/vastai $archive root@142.170.96.180:/tmp/noland-state-agent.tar.gz
-expect eof
-spawn scp -o StrictHostKeyChecking=no -P 61761 -i ~/vastai state-agent/scripts/bootstrap-remote.sh root@142.170.96.180:/tmp/bootstrap-remote.sh
-expect eof
-spawn ssh -o StrictHostKeyChecking=no -p 61761 -i ~/vastai root@142.170.96.180 "chmod +x /tmp/bootstrap-remote.sh && /tmp/bootstrap-remote.sh /tmp/noland-state-agent.tar.gz user"
-expect eof

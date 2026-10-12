@@ -22,7 +22,41 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
+  remote-agents:
+    name: remote-agents-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1
+        with:
+          workspaces: |
+            state-agent
+            network-agent
+            vm-cloud-mic-agent
+      - name: Install agent build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libelf-dev zlib1g-dev pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+      - name: Build and verify native remote agents
+        run: bash scripts/ci/build-remote-agents.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-agents-${{ matrix.arch }}
+          path: state-agent/prebuilt/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 2
+
   build-unix:
+    needs: remote-agents
     name: build-${{ matrix.platform }}-${{ matrix.arch }}
     environment: Secrets
     strategy:
@@ -127,6 +161,15 @@ jobs:
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           node scripts/set-release-version.mjs "${{ inputs.version }}"
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-x86_64
+          path: state-agent/prebuilt/x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-aarch64
+          path: state-agent/prebuilt/aarch64
+
       - name: Build signed/notarized Tauri application
         shell: bash
         timeout-minutes: 60
@@ -217,6 +260,7 @@ jobs:
           rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle"
 
   build-windows:
+    needs: remote-agents
     name: build-windows-${{ matrix.arch }}
     environment: Secrets
     permissions:
@@ -253,6 +297,15 @@ jobs:
           npm ci
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           node scripts/set-release-version.mjs "${{ inputs.version }}"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-x86_64
+          path: state-agent/prebuilt/x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-aarch64
+          path: state-agent/prebuilt/aarch64
 
       - name: Require Artifact Signing credentials
         shell: pwsh

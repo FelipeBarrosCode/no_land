@@ -79,3 +79,5 @@ src-tauri/platform/*
 /data/
 /skills/
 /skills-lock.json
+state-agent/prebuilt/*
+!state-agent/prebuilt/.gitkeep
