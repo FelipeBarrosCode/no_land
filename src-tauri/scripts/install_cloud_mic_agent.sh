@@ -184,7 +184,15 @@ Jitter latency:   ${JITTER_MS} ms
 SUMMARY
 
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
+MIC_RUNTIME_PACKAGES="pipewire pipewire-pulse wireplumber pulseaudio-utils python3 gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good ufw"
+missing_packages=""
+for package in $MIC_RUNTIME_PACKAGES; do
+    if [[ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" != 'install ok installed' ]]; then
+        missing_packages="$missing_packages $package"
+    fi
+done
+if [[ -n "$missing_packages" ]]; then
+apt-get -o DPkg::Lock::Timeout=600 update -y
 # Runtime-only packages used by the pipeline and verification. The receiver
 # writes raw PCM to a PipeWire-Pulse recording-source FIFO; no playback plugin is used.
 apt-get install -y --no-install-recommends \
@@ -197,6 +205,7 @@ apt-get install -y --no-install-recommends \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     ufw
+fi
 
 install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$INSTALL_DIR"
 install -d -m 0755 -o "$USER_NAME" -g "$group_name" "$SERVICE_DIR"

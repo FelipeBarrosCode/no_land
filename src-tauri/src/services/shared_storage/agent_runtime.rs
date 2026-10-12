@@ -1,5 +1,6 @@
 //! Deploy and start noland-state-agent on the remote disposable instance.
 
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -18,6 +19,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
             .get("agent_api_version")
             .and_then(serde_json::Value::as_u64)
     }) == Some(REQUIRED_AGENT_API_VERSION)
+        && prebuilt_deployment_matches(remote).await?
     {
         return Ok(());
     }
@@ -26,7 +28,11 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
 
     let stamp = chrono::Utc::now().timestamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
-    pack_state_agent_sources(&local_src, &local_tar)?;
+    let source = local_src.clone();
+    let archive_path = local_tar.clone();
+    tokio::task::spawn_blocking(move || pack_state_agent_sources(&source, &archive_path))
+        .await
+        .map_err(|error| AppError::Command(format!("agent archive join failure: {error}")))??;
 
     let remote_tar = format!("/tmp/noland-state-agent-{stamp}.tar.gz");
     {
@@ -84,6 +90,30 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     }
 
     wait_for_bootstrap(remote, &remote_status, &remote_log).await
+}
+
+/// API compatibility alone is insufficient: an updated application may ship
+/// new agents without changing the RPC schema. Refresh the managed workspace
+/// when its architecture-specific build manifest differs from the app bundle.
+async fn prebuilt_deployment_matches(remote: &RemoteExec) -> AppResult<bool> {
+    let source = find_state_agent_source_dir()?;
+    let mut cases = String::new();
+    for arch in ["x86_64", "aarch64"] {
+        let path = source.join("prebuilt").join(arch).join("SHA256SUMS");
+        if !path.is_file() {
+            // Development/source-only installs retain the existing API probe.
+            return Ok(true);
+        }
+        let hash = format!("{:x}", Sha256::digest(fs::read(path)?));
+        cases.push_str(&format!("{arch}) expected={hash} ;;\n"));
+    }
+    let command = format!(
+        "arch=$(uname -m); case \"$arch\" in\n{cases}*) exit 1 ;; esac\nactual=$(sha256sum /opt/noland/state-agent/prebuilt/$arch/SHA256SUMS 2>/dev/null | cut -d' ' -f1); test \"$actual\" = \"$expected\""
+    );
+    Ok(ssh_command(remote, command, Duration::from_secs(20))
+        .await?
+        .status_code
+        == 0)
 }
 
 pub fn locate_state_agent_source_dir() -> AppResult<PathBuf> {

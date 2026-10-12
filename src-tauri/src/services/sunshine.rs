@@ -495,7 +495,6 @@ if [ -z "$url" ]; then
 fi
 
 curl -fsSL "$url" -o "$pkg_path"
-sudo apt-get -o DPkg::Lock::Timeout=600 update
 sudo apt-get -o DPkg::Lock::Timeout=600 install -y "$pkg_path"
 sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || true"#;
 
@@ -544,9 +543,8 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
             ));
         }
 
-        let target_home = self.resolve_user_home(remote, target_user).await?;
-        let target_uid = self.resolve_user_uid(remote, target_user).await?;
-        let _target_gid = self.resolve_user_gid(remote, target_user).await?;
+        let (target_home, target_uid, target_group) =
+            self.resolve_user_identity(remote, target_user).await?;
         let packages_needed = self.check_sunshine_packages_needed(remote).await?;
 
         if packages_needed.is_empty() {
@@ -862,26 +860,8 @@ fi'"#,
             disable_screen_lock.stdout.trim()
         );
 
-        // 4. Open ALL Moonlight ports (TCP + UDP)
-        let firewall = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    "sudo ufw allow 47984/tcp 2>/dev/null || true && sudo ufw allow 47989/tcp 2>/dev/null || true && sudo ufw allow 47990/tcp 2>/dev/null || true && sudo ufw allow 47991/tcp 2>/dev/null || true && sudo ufw allow 47998/udp 2>/dev/null || true && sudo ufw allow 47999/udp 2>/dev/null || true && sudo ufw allow 48000/udp 2>/dev/null || true && sudo ufw allow 48002/udp 2>/dev/null || true && sudo ufw allow 48010/tcp 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47984 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47989 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47990 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47991 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 47998 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 47999 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 48000 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 48002 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 48010 -j ACCEPT 2>/dev/null || true && echo 'FIREWALL_OK'",
-                    Duration::from_secs(60),
-                )
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        if firewall.status_code != 0 {
-            warn!(
-                "Firewall setup had issues (continuing): stdout: {} | stderr: {}",
-                firewall.stdout.trim(),
-                firewall.stderr.trim()
-            );
-        }
+        // WireGuard owns the Sunshine firewall policy. Opening public rules
+        // here would race its tunnel-only rules in the parallel network lane.
 
         self.assert_rtsp_port_available(remote, target_user, &target_home)
             .await?;
@@ -935,7 +915,7 @@ WantedBy=multi-user.target"#,
             display_dependencies = display_dependencies,
             sunshine_xauthority = sunshine_xauthority,
             target_user = target_user,
-            target_group = self.resolve_user_group(remote, target_user).await?,
+            target_group = target_group,
             target_home = target_home,
             target_uid = target_uid,
         );
@@ -954,96 +934,29 @@ WantedBy=multi-user.target"#,
         let restart_service_cmd =
             "sudo bash -lc 'systemctl restart sunshine && echo SERVICE_RESTARTED'";
 
-        let prepare_service = {
+        // Keep ordering and failure markers, but pay SSH authentication latency
+        // once instead of six times for a single service transaction.
+        let command = [
+            prepare_service_cmd,
+            &write_service_cmd,
+            daemon_reload_cmd,
+            enable_service_cmd,
+            clear_ports_cmd,
+            restart_service_cmd,
+        ]
+        .join(" && ");
+        let output = {
             let remote = remote.clone();
-            let command = prepare_service_cmd.to_string();
-            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(180)))
                 .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+                .map_err(|error| {
+                    AppError::Command(format!("service setup join failure: {error}"))
+                })??
         };
-        if prepare_service.status_code != 0 || !prepare_service.stdout.contains("SERVICE_PREPARED")
-        {
+        if output.status_code != 0 || !output.stdout.contains("SERVICE_RESTARTED") {
             return Err(AppError::Provisioning(format!(
-                "Failed to prepare Sunshine systemd service path. stdout: {} | stderr: {}",
-                prepare_service.stdout.trim(),
-                prepare_service.stderr.trim()
-            )));
-        }
-
-        let write_service = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&write_service_cmd, Duration::from_secs(30))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if write_service.status_code != 0 || !write_service.stdout.contains("SERVICE_WRITTEN") {
-            return Err(AppError::Provisioning(format!(
-                "Failed to write Sunshine systemd service. stdout: {} | stderr: {}",
-                write_service.stdout.trim(),
-                write_service.stderr.trim()
-            )));
-        }
-
-        let daemon_reload = {
-            let remote = remote.clone();
-            let command = daemon_reload_cmd.to_string();
-            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if daemon_reload.status_code != 0 || !daemon_reload.stdout.contains("DAEMON_RELOADED") {
-            return Err(AppError::Provisioning(format!(
-                "Failed to reload systemd after writing Sunshine service. stdout: {} | stderr: {}",
-                daemon_reload.stdout.trim(),
-                daemon_reload.stderr.trim()
-            )));
-        }
-
-        let enable_service = {
-            let remote = remote.clone();
-            let command = enable_service_cmd.to_string();
-            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if enable_service.status_code != 0 || !enable_service.stdout.contains("SERVICE_ENABLED") {
-            return Err(AppError::Provisioning(format!(
-                "Failed to enable Sunshine systemd service. stdout: {} | stderr: {}",
-                enable_service.stdout.trim(),
-                enable_service.stderr.trim()
-            )));
-        }
-
-        let clear_ports = {
-            let remote = remote.clone();
-            let command = clear_ports_cmd.to_string();
-            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if clear_ports.status_code != 0 || !clear_ports.stdout.contains("PORTS_CLEARED") {
-            return Err(AppError::Provisioning(format!(
-                "Failed to clear Sunshine ports before restart. stdout: {} | stderr: {}",
-                clear_ports.stdout.trim(),
-                clear_ports.stderr.trim()
-            )));
-        }
-
-        let restart_service = {
-            let remote = remote.clone();
-            let command = restart_service_cmd.to_string();
-            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
-                .await
-                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-        if restart_service.status_code != 0 || !restart_service.stdout.contains("SERVICE_RESTARTED")
-        {
-            return Err(AppError::Provisioning(format!(
-                "Failed to restart Sunshine systemd service. stdout: {} | stderr: {}",
-                restart_service.stdout.trim(),
-                restart_service.stderr.trim()
+                "Sunshine service transaction failed: {} {}",
+                output.stdout, output.stderr
             )));
         }
 
@@ -1768,59 +1681,36 @@ echo "=== Setup Complete ==="
         }
     }
 
-    async fn resolve_user_uid(&self, remote: &RemoteExec, target_user: &str) -> AppResult<u32> {
-        let uid_command = {
-            let remote = remote.clone();
-            let target_user = target_user.to_string();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&format!("id -u {target_user}"), Duration::from_secs(10))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        uid_command.stdout.trim().parse::<u32>().map_err(|error| {
-            AppError::Provisioning(format!("Failed to resolve UID for {target_user}: {error}"))
-        })
-    }
-
-    async fn resolve_user_gid(&self, remote: &RemoteExec, target_user: &str) -> AppResult<u32> {
-        let gid_command = {
-            let remote = remote.clone();
-            let target_user = target_user.to_string();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&format!("id -g {target_user}"), Duration::from_secs(10))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        gid_command.stdout.trim().parse::<u32>().map_err(|error| {
-            AppError::Provisioning(format!("Failed to resolve GID for {target_user}: {error}"))
-        })
-    }
-
-    async fn resolve_user_group(
+    async fn resolve_user_identity(
         &self,
         remote: &RemoteExec,
         target_user: &str,
-    ) -> AppResult<String> {
-        let group_command = {
-            let remote = remote.clone();
-            let target_user = target_user.to_string();
-            tokio::task::spawn_blocking(move || {
-                remote.ssh(&format!("id -gn {target_user}"), Duration::from_secs(10))
-            })
-            .await
-            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
-        };
-
-        let group = group_command.stdout.trim();
-        if group.is_empty() {
-            Ok(target_user.to_string())
-        } else {
-            Ok(group.to_string())
+    ) -> AppResult<(String, u32, String)> {
+        let user = target_user.replace('\'', "'\\''");
+        let command = format!("getent passwd '{user}' && id -gn '{user}'");
+        let remote = remote.clone();
+        let output =
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("user identity join failure: {error}"))
+                })??;
+        let mut lines = output.stdout.lines();
+        let fields = lines
+            .next()
+            .unwrap_or_default()
+            .split(':')
+            .collect::<Vec<_>>();
+        let group = lines.next().unwrap_or_default().trim();
+        if output.status_code != 0 || fields.len() != 7 || group.is_empty() {
+            return Err(AppError::Provisioning(
+                "Could not resolve target user identity".into(),
+            ));
         }
+        let uid = fields[2]
+            .parse()
+            .map_err(|_| AppError::Provisioning("Invalid target user UID".into()))?;
+        Ok((fields[5].to_string(), uid, group.to_string()))
     }
 
     async fn cleanup_packaged_sunshine_launchers(

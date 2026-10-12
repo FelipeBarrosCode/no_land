@@ -31,7 +31,9 @@ use super::{
     moonlight::detect_client_display_for_provisioning,
     network_agent::NetworkAgentProvisioner,
     nvidia_headless::NvidiaHeadlessService,
+    package_manager::prepare_provisioning_packages,
     post_wireguard_setup::initialize_post_wireguard_flow,
+    provisioning::{join_lanes, measure},
     remote_exec::RemoteExec,
     shared_storage::agent_runtime::ensure_state_agent,
     ssh_keys::SshKeyService,
@@ -293,11 +295,22 @@ impl OrchestrationService {
         tauri::async_runtime::spawn(async move {
             let result = match request {
                 OrchestrationStartRequest::SelectedOffer => {
-                    run_orchestration(app.clone(), context.clone()).await
+                    measure(
+                        "new_instance_total",
+                        Box::pin(run_orchestration(app.clone(), context.clone())),
+                    )
+                    .await
                 }
                 OrchestrationStartRequest::ExistingInstance(instance_id) => {
-                    run_existing_instance_orchestration(app.clone(), context.clone(), instance_id)
-                        .await
+                    measure(
+                        "existing_instance_total",
+                        Box::pin(run_existing_instance_orchestration(
+                            app.clone(),
+                            context.clone(),
+                            instance_id,
+                        )),
+                    )
+                    .await
                 }
             };
 
@@ -693,7 +706,12 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
 
                     let _ = hydrate_state_from_server_record(&context, existing.id, false).await?;
 
-                    return run_existing_instance_orchestration(app, context, existing.id).await;
+                    return Box::pin(run_existing_instance_orchestration(
+                        app,
+                        context,
+                        existing.id,
+                    ))
+                    .await;
                 }
 
                 return Err(AppError::Provisioning(format!(
@@ -900,19 +918,12 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
+    measure("packages", prepare_provisioning_packages(&remote)).await?;
     info!(
         "Ensuring state-agent is installed and enabled on instance {}",
         instance.id
     );
-    ensure_state_agent(&remote, &target_user).await?;
-    provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
-    if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance.id).await {
-        warn!(
-            instance_id = instance.id,
-            %error,
-            "Network-agent provisioning failed without blocking instance setup"
-        );
-    }
+    measure("state_agent", ensure_state_agent(&remote, &target_user)).await?;
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -1016,86 +1027,93 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
-    let sunshine = SunshineService {
-        defaults: context.config.sunshine.clone(),
-    };
-    let sunshine_step_completed = server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::SunshineConfigured,
-    )
-    .await;
-    let mut should_install_sunshine = !sunshine_step_completed;
-    if sunshine_step_completed {
-        match sunshine.verify_resume_health(&remote, &target_user).await {
-            Ok(()) => {
-                emit_step_skipped(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringSunshine,
-                    "Skipping Sunshine install/config",
-                    instance.id,
-                )
-                .await;
-            }
-            Err(error) => {
-                warn!(
+    // Reboots invalidate the per-boot package coordination marker.
+    measure("packages_after_gpu", prepare_provisioning_packages(&remote)).await?;
+    let display_instance = instance.clone();
+    let display_remote = remote.clone();
+    let display_setup = Box::pin(async {
+        let instance = &display_instance;
+        let remote = &display_remote;
+        let sunshine = SunshineService {
+            defaults: context.config.sunshine.clone(),
+        };
+        let sunshine_step_completed = server_step_is_completed(
+            &context,
+            instance.id,
+            ProvisionStepMarker::SunshineConfigured,
+        )
+        .await;
+        let mut should_install_sunshine = !sunshine_step_completed;
+        if sunshine_step_completed {
+            match sunshine.verify_resume_health(&remote, &target_user).await {
+                Ok(()) => {
+                    emit_step_skipped(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringSunshine,
+                        "Skipping Sunshine install/config",
+                        instance.id,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(
                     "Saved Sunshine state drifted for instance {}. Forcing full reconfiguration. {}",
                     instance.id, error
                 );
-                emit_transition(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringSunshine,
-                    "Saved Sunshine state is stale. Reconfiguring Sunshine.",
-                    Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
-                    false,
-                )
-                .await;
-                should_install_sunshine = true;
+                    emit_transition(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringSunshine,
+                        "Saved Sunshine state is stale. Reconfiguring Sunshine.",
+                        Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
+                        false,
+                    )
+                    .await;
+                    should_install_sunshine = true;
+                }
             }
         }
-    }
-    if should_install_sunshine {
-        let (sunshine_username, sunshine_password) = {
-            let state = context.state.read().await;
-            (
-                state.credentials.app_username.clone(),
-                state.credentials.app_password.clone(),
-            )
-        };
-        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
-            let state = context.state.read().await;
-            (
-                state.moonlight_preferences.clone(),
-                state.sunshine.edid_mode,
-                state.sunshine.edid_refresh_rate_hz,
-                state.sunshine.headless_edid_base64.clone(),
-            )
-        };
-        let resolved_edid =
-            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
-        let should_generate_edid = headless_edid_base64.trim().is_empty();
-        let effective_edid_base64 = if should_generate_edid {
-            crate::services::sunshine::generate_headless_edid_base64(
-                resolved_edid.width,
-                resolved_edid.height,
-                resolved_edid.refresh_hz,
-            )?
-        } else {
-            headless_edid_base64
-        };
-        let display_profile =
-            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
-        let generated_edid_for_save = effective_edid_base64.clone();
-        let edid_source_for_save = resolved_edid.source_label.clone();
-        context
-            .update_state(|state| {
-                state.sunshine.headless_edid_base64 = generated_edid_for_save;
-                state.sunshine.edid_source_label = edid_source_for_save;
-            })
-            .await?;
-        info!(
+        if should_install_sunshine {
+            let (sunshine_username, sunshine_password) = {
+                let state = context.state.read().await;
+                (
+                    state.credentials.app_username.clone(),
+                    state.credentials.app_password.clone(),
+                )
+            };
+            let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+                let state = context.state.read().await;
+                (
+                    state.moonlight_preferences.clone(),
+                    state.sunshine.edid_mode,
+                    state.sunshine.edid_refresh_rate_hz,
+                    state.sunshine.headless_edid_base64.clone(),
+                )
+            };
+            let resolved_edid =
+                resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+            let should_generate_edid = headless_edid_base64.trim().is_empty();
+            let effective_edid_base64 = if should_generate_edid {
+                crate::services::sunshine::generate_headless_edid_base64(
+                    resolved_edid.width,
+                    resolved_edid.height,
+                    resolved_edid.refresh_hz,
+                )?
+            } else {
+                headless_edid_base64
+            };
+            let display_profile =
+                build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
+            let generated_edid_for_save = effective_edid_base64.clone();
+            let edid_source_for_save = resolved_edid.source_label.clone();
+            context
+                .update_state(|state| {
+                    state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                    state.sunshine.edid_source_label = edid_source_for_save;
+                })
+                .await?;
+            info!(
             "EDID selection (new instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (priority=autodetect->fallback)",
             edid_mode,
             resolved_edid.source_label,
@@ -1104,168 +1122,243 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             resolved_edid.refresh_hz,
             should_generate_edid
         );
-        info!(
-            "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
-            display_profile.width,
-            display_profile.height,
-            display_profile.virtual_hz_string(),
-            display_profile.fps
-        );
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Installing and configuring Sunshine",
-            Some(format!(
-                "Display: {}x{} @ {}Hz",
+            info!(
+                "Sunshine display profile: {}x{} @ {}Hz ({} FPS target)",
                 display_profile.width,
                 display_profile.height,
-                display_profile.virtual_hz_string()
-            )),
-            false,
-        )
-        .await;
-        sunshine
-            .install_and_configure(
-                &remote,
-                &target_user,
-                display_profile,
-                &effective_edid_base64,
-                &sunshine_username,
-                &sunshine_password,
+                display_profile.virtual_hz_string(),
+                display_profile.fps
+            );
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Installing and configuring Sunshine",
+                Some(format!(
+                    "Display: {}x{} @ {}Hz",
+                    display_profile.width,
+                    display_profile.height,
+                    display_profile.virtual_hz_string()
+                )),
+                false,
+            )
+            .await;
+            sunshine
+                .install_and_configure(
+                    &remote,
+                    &target_user,
+                    display_profile,
+                    &effective_edid_base64,
+                    &sunshine_username,
+                    &sunshine_password,
+                )
+                .await?;
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::SunshineConfigured,
+                OrchestrationState::ConfiguringSunshine,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                Some(offer.id),
             )
             .await?;
-        mark_server_step_completed(
-            &context,
-            instance.id,
-            ProvisionStepMarker::SunshineConfigured,
-            OrchestrationState::ConfiguringSunshine,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            Some(offer.id),
-        )
-        .await?;
-    }
-    ensure_not_cancelled(&context)?;
+        }
+        ensure_not_cancelled(&context)?;
 
-    let audio_latency = AudioLatencyService::from_config(&context.config);
-    if server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::LowLatencyAudioConfigured,
-    )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Skipping low-latency audio setup",
-            instance.id,
-        )
-        .await;
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Applying low-latency PipeWire/WirePlumber audio profile",
-            Some(format!(
-                "target_user={} profile={}",
-                context.config.audio_target_user, context.config.audio_profile
-            )),
-            false,
-        )
-        .await;
-
-        let audio_result = audio_latency.configure(&remote).await?;
-        mark_server_step_completed(
+        let audio_latency = AudioLatencyService::from_config(&context.config);
+        if server_step_is_completed(
             &context,
             instance.id,
             ProvisionStepMarker::LowLatencyAudioConfigured,
-            OrchestrationState::ConfiguringSunshine,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            Some(offer.id),
         )
-        .await?;
+        .await
+        {
+            emit_step_skipped(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Skipping low-latency audio setup",
+                instance.id,
+            )
+            .await;
+        } else {
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Applying low-latency PipeWire/WirePlumber audio profile",
+                Some(format!(
+                    "target_user={} profile={}",
+                    context.config.audio_target_user, context.config.audio_profile
+                )),
+                false,
+            )
+            .await;
 
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Low-latency audio profile configured",
-            Some(summarize_verification_output(
-                &audio_result.verification_output,
-            )),
-            false,
-        )
-        .await;
-    }
-    ensure_not_cancelled(&context)?;
+            let audio_result = audio_latency.configure(&remote).await?;
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::LowLatencyAudioConfigured,
+                OrchestrationState::ConfiguringSunshine,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                Some(offer.id),
+            )
+            .await?;
 
-    match vast.get_instance(instance.id).await {
-        Ok(refreshed_instance) => {
-            instance.public_ip = refreshed_instance.public_ip;
-            instance.ssh_host = refreshed_instance.ssh_host;
-            instance.wireguard_port = refreshed_instance.wireguard_port;
-            instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
-            instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
-            instance.network_probe_port = refreshed_instance.network_probe_port;
-            instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
-            instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
-            info!(
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Low-latency audio profile configured",
+                Some(summarize_verification_output(
+                    &audio_result.verification_output,
+                )),
+                false,
+            )
+            .await;
+        }
+        ensure_not_cancelled(&context)?;
+
+        Ok::<(), AppError>(())
+    });
+    let network_setup = Box::pin(async {
+        match vast.get_instance(instance.id).await {
+            Ok(refreshed_instance) => {
+                instance.public_ip = refreshed_instance.public_ip;
+                instance.ssh_host = refreshed_instance.ssh_host;
+                instance.wireguard_port = refreshed_instance.wireguard_port;
+                instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
+                instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
+                instance.network_probe_port = refreshed_instance.network_probe_port;
+                instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
+                instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
+                info!(
                 "Refreshed instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
                 instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
             );
-        }
-        Err(error) => {
-            warn!(
+            }
+            Err(error) => {
+                warn!(
                 "Failed to refresh instance networking before WireGuard; using cached values: {}",
                 error
             );
+            }
         }
-    }
 
-    let wireguard = WireGuardService {
-        defaults: context.config.wireguard.clone(),
-    };
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
-    let endpoint_host = instance.wireguard_endpoint_host();
-    let endpoint_port = instance.wireguard_port;
-    if endpoint_host.trim().is_empty() || endpoint_port == 0 {
-        return Err(AppError::Provisioning(format!(
+        let wireguard = WireGuardService {
+            defaults: context.config.wireguard.clone(),
+        };
+        let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
+        let endpoint_host = instance.wireguard_endpoint_host();
+        let endpoint_port = instance.wireguard_port;
+        if endpoint_host.trim().is_empty() || endpoint_port == 0 {
+            return Err(AppError::Provisioning(format!(
             "Instance {} does not expose a valid WireGuard endpoint on Vast (host='{}' port={}). Pick a VM-enabled offer with direct UDP ports.",
             instance.id, endpoint_host, endpoint_port
         )));
-    }
+        }
 
-    let wireguard_step_completed = server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::WireguardConfigured,
-    )
-    .await;
+        let wireguard_step_completed = server_step_is_completed(
+            &context,
+            instance.id,
+            ProvisionStepMarker::WireguardConfigured,
+        )
+        .await;
 
-    let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
-            if !cached_wireguard_endpoint_matches(
-                cached.client_config_path.as_path(),
-                &endpoint_host,
-                endpoint_port,
-            ) {
+        let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
+            if let Some(cached) =
+                load_wireguard_result_from_server_record(&context, instance.id).await
+            {
+                if !cached_wireguard_endpoint_matches(
+                    cached.client_config_path.as_path(),
+                    &endpoint_host,
+                    endpoint_port,
+                ) {
+                    emit_transition(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringWireGuard,
+                        "WireGuard endpoint changed. Regenerating tunnel config.",
+                        Some(format!(
+                            "Expected endpoint {}:{}, cached config endpoint mismatched",
+                            endpoint_host, endpoint_port
+                        )),
+                        false,
+                    )
+                    .await;
+
+                    clear_server_steps(
+                        &context,
+                        instance.id,
+                        &[
+                            ProvisionStepMarker::WireguardConfigured,
+                            ProvisionStepMarker::MicReceiverInstalled,
+                            ProvisionStepMarker::MoonlightConfigured,
+                            ProvisionStepMarker::AwaitingPairPin,
+                            ProvisionStepMarker::PairingCompleted,
+                        ],
+                    )
+                    .await?;
+
+                    let result = wireguard
+                        .configure(
+                            &remote,
+                            app_data_dir,
+                            instance.id,
+                            &endpoint_host,
+                            endpoint_port,
+                            instance.wireguard_listen_port,
+                            WireGuardProvisionMode::FreshProvision,
+                        )
+                        .await?;
+                    mark_server_step_completed(
+                        &context,
+                        instance.id,
+                        ProvisionStepMarker::WireguardConfigured,
+                        OrchestrationState::ConfiguringWireGuard,
+                        &instance.status,
+                        &instance.ssh_host,
+                        instance.ssh_port,
+                        Some(offer.id),
+                    )
+                    .await?;
+                    result
+                } else {
+                    emit_step_skipped(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringWireGuard,
+                        "Skipping WireGuard setup",
+                        instance.id,
+                    )
+                    .await;
+
+                    context
+                        .update_state(|state| {
+                            state.wireguard.server_ip = cached.server_ip.clone();
+                            state.wireguard.client_ip = cached.client_ip.clone();
+                            state.wireguard.server_public_key = cached.server_public_key.clone();
+                            state.wireguard.client_public_key = cached.client_public_key.clone();
+                            state.wireguard.config_path =
+                                cached.client_config_path.display().to_string();
+                            state.sunshine.configured = true;
+                        })
+                        .await?;
+
+                    cached
+                }
+            } else {
                 emit_transition(
                     &app,
                     &context,
                     OrchestrationState::ConfiguringWireGuard,
-                    "WireGuard endpoint changed. Regenerating tunnel config.",
-                    Some(format!(
-                        "Expected endpoint {}:{}, cached config endpoint mismatched",
-                        endpoint_host, endpoint_port
-                    )),
+                    "WireGuard checkpoint is stale. Reconfiguring tunnel.",
+                    Some("No saved WireGuard artifacts were found for this instance".to_string()),
                     false,
                 )
                 .await;
@@ -1282,6 +1375,16 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     ],
                 )
                 .await?;
+
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "Setting up WireGuard tunnel",
+                    None,
+                    false,
+                )
+                .await;
 
                 let result = wireguard
                     .configure(
@@ -1305,55 +1408,23 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     Some(offer.id),
                 )
                 .await?;
-                result
-            } else {
-                emit_step_skipped(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringWireGuard,
-                    "Skipping WireGuard setup",
-                    instance.id,
-                )
-                .await;
+                persist_wireguard_result_for_server(&context, instance.id, &result).await?;
 
                 context
                     .update_state(|state| {
-                        state.wireguard.server_ip = cached.server_ip.clone();
-                        state.wireguard.client_ip = cached.client_ip.clone();
-                        state.wireguard.server_public_key = cached.server_public_key.clone();
-                        state.wireguard.client_public_key = cached.client_public_key.clone();
+                        state.wireguard.server_ip = result.server_ip.clone();
+                        state.wireguard.client_ip = result.client_ip.clone();
+                        state.wireguard.server_public_key = result.server_public_key.clone();
+                        state.wireguard.client_public_key = result.client_public_key.clone();
                         state.wireguard.config_path =
-                            cached.client_config_path.display().to_string();
+                            result.client_config_path.display().to_string();
                         state.sunshine.configured = true;
                     })
                     .await?;
 
-                cached
+                result
             }
         } else {
-            emit_transition(
-                &app,
-                &context,
-                OrchestrationState::ConfiguringWireGuard,
-                "WireGuard checkpoint is stale. Reconfiguring tunnel.",
-                Some("No saved WireGuard artifacts were found for this instance".to_string()),
-                false,
-            )
-            .await;
-
-            clear_server_steps(
-                &context,
-                instance.id,
-                &[
-                    ProvisionStepMarker::WireguardConfigured,
-                    ProvisionStepMarker::MicReceiverInstalled,
-                    ProvisionStepMarker::MoonlightConfigured,
-                    ProvisionStepMarker::AwaitingPairPin,
-                    ProvisionStepMarker::PairingCompleted,
-                ],
-            )
-            .await?;
-
             emit_transition(
                 &app,
                 &context,
@@ -1400,95 +1471,68 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                 .await?;
 
             result
-        }
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Setting up WireGuard tunnel",
-            None,
-            false,
-        )
-        .await;
-
-        let result = wireguard
-            .configure(
-                &remote,
-                app_data_dir,
-                instance.id,
-                &endpoint_host,
-                endpoint_port,
-                instance.wireguard_listen_port,
-                WireGuardProvisionMode::FreshProvision,
-            )
-            .await?;
-        mark_server_step_completed(
+        };
+        persist_direct_network_metadata(
             &context,
             instance.id,
-            ProvisionStepMarker::WireguardConfigured,
-            OrchestrationState::ConfiguringWireGuard,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            Some(offer.id),
+            &endpoint_host,
+            endpoint_port,
+            &instance.network_probe_endpoint_host(),
+            instance.network_probe_port,
         )
         .await?;
-        persist_wireguard_result_for_server(&context, instance.id, &result).await?;
-
-        context
-            .update_state(|state| {
-                state.wireguard.server_ip = result.server_ip.clone();
-                state.wireguard.client_ip = result.client_ip.clone();
-                state.wireguard.server_public_key = result.server_public_key.clone();
-                state.wireguard.client_public_key = result.client_public_key.clone();
-                state.wireguard.config_path = result.client_config_path.display().to_string();
-                state.sunshine.configured = true;
-            })
-            .await?;
-
-        result
-    };
-    persist_direct_network_metadata(
-        &context,
-        instance.id,
-        &endpoint_host,
-        endpoint_port,
-        &instance.network_probe_endpoint_host(),
-        instance.network_probe_port,
-    )
-    .await?;
-    if !cached_wireguard_endpoint_matches(
-        wireguard_result.client_config_path.as_path(),
-        &endpoint_host,
-        endpoint_port,
-    ) {
-        return Err(AppError::Provisioning(format!(
+        if !cached_wireguard_endpoint_matches(
+            wireguard_result.client_config_path.as_path(),
+            &endpoint_host,
+            endpoint_port,
+        ) {
+            return Err(AppError::Provisioning(format!(
             "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
             endpoint_host,
             endpoint_port,
             wireguard_result.client_config_path.display()
         )));
-    }
-    persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
-    context
-        .update_state(|state| {
-            state.wireguard.server_ip = wireguard_result.server_ip.clone();
-            state.wireguard.client_ip = wireguard_result.client_ip.clone();
-            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
-            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
-            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
-            state.sunshine.configured = true;
-        })
-        .await?;
-    // The mutation guard protects remote WireGuard configuration only. Do not
-    // hold it through microphone setup, post-WireGuard initialization, or
-    // connection-manager evaluation: those flows may legitimately perform a
-    // separate managed-tunnel operation, and the UI can expose tunnel setup
-    // as soon as the config-ready state is emitted.
-    drop(_wireguard_mutation_guard);
-    ensure_not_cancelled(&context)?;
+        }
+        persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
+        context
+            .update_state(|state| {
+                state.wireguard.server_ip = wireguard_result.server_ip.clone();
+                state.wireguard.client_ip = wireguard_result.client_ip.clone();
+                state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
+                state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
+                state.wireguard.config_path =
+                    wireguard_result.client_config_path.display().to_string();
+                state.sunshine.configured = true;
+            })
+            .await?;
+        // The mutation guard protects remote WireGuard configuration only. Do not
+        // hold it through microphone setup, post-WireGuard initialization, or
+        // connection-manager evaluation: those flows may legitimately perform a
+        // separate managed-tunnel operation, and the UI can expose tunnel setup
+        // as soon as the config-ready state is emitted.
+        drop(_wireguard_mutation_guard);
+        ensure_not_cancelled(&context)?;
 
+        let (lifecycle, network_agent) = tokio::join!(
+            measure(
+                "lifecycle_agent",
+                provision_lifecycle_agent(&context, &remote, instance.id, &target_user)
+            ),
+            measure(
+                "network_agent",
+                NetworkAgentProvisioner::ensure(&remote, instance.id)
+            )
+        );
+        lifecycle?;
+        if let Err(error) = network_agent {
+            warn!(instance_id = instance.id, %error, "Network-agent unavailable; continuing core setup");
+        }
+        Ok::<_, AppError>((wireguard_result, wireguard_step_completed))
+    });
+    // Both lanes finish before returning an error: don't leave remote SSH
+    // mutations running while a retry or a server switch begins.
+    let (_, (wireguard_result, wireguard_step_completed)) =
+        join_lanes(display_setup, network_setup).await?;
     let microphone_provisioning_enabled = microphone_receiver_provisioning_enabled();
     emit_transition(
         &app,
@@ -1507,7 +1551,12 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     )
     .await;
 
-    match provision_microphone_receiver(&remote, &target_user).await {
+    match measure(
+        "microphone",
+        provision_microphone_receiver(&remote, &target_user),
+    )
+    .await
+    {
         Ok(install_output) => {
             mark_server_step_completed(
                 &context,
@@ -1897,19 +1946,12 @@ async fn run_existing_instance_orchestration(
     }
     ensure_not_cancelled(&context)?;
 
+    measure("packages", prepare_provisioning_packages(&remote)).await?;
     info!(
         "Ensuring state-agent is installed and enabled on existing instance {}",
         instance.id
     );
-    ensure_state_agent(&remote, &target_user).await?;
-    provision_lifecycle_agent(&context, &remote, instance.id, &target_user).await?;
-    if let Err(error) = NetworkAgentProvisioner::ensure(&remote, instance.id).await {
-        warn!(
-            instance_id = instance.id,
-            %error,
-            "Network-agent provisioning failed without blocking existing-instance setup"
-        );
-    }
+    measure("state_agent", ensure_state_agent(&remote, &target_user)).await?;
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -2006,86 +2048,92 @@ async fn run_existing_instance_orchestration(
 
     ensure_not_cancelled(&context)?;
 
-    let sunshine = SunshineService {
-        defaults: context.config.sunshine.clone(),
-    };
-    let sunshine_step_completed = server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::SunshineConfigured,
-    )
-    .await;
-    let mut should_install_sunshine = !sunshine_step_completed;
-    if sunshine_step_completed {
-        match sunshine.verify_resume_health(&remote, &target_user).await {
-            Ok(()) => {
-                emit_step_skipped(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringSunshine,
-                    "Skipping Sunshine install/config",
-                    instance.id,
-                )
-                .await;
-            }
-            Err(error) => {
-                warn!(
+    measure("packages_after_gpu", prepare_provisioning_packages(&remote)).await?;
+    let display_instance = instance.clone();
+    let display_remote = remote.clone();
+    let display_setup = Box::pin(async {
+        let instance = &display_instance;
+        let remote = &display_remote;
+        let sunshine = SunshineService {
+            defaults: context.config.sunshine.clone(),
+        };
+        let sunshine_step_completed = server_step_is_completed(
+            &context,
+            instance.id,
+            ProvisionStepMarker::SunshineConfigured,
+        )
+        .await;
+        let mut should_install_sunshine = !sunshine_step_completed;
+        if sunshine_step_completed {
+            match sunshine.verify_resume_health(&remote, &target_user).await {
+                Ok(()) => {
+                    emit_step_skipped(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringSunshine,
+                        "Skipping Sunshine install/config",
+                        instance.id,
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    warn!(
                     "Saved Sunshine state drifted for existing instance {}. Forcing full reconfiguration. {}",
                     instance.id, error
                 );
-                emit_transition(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringSunshine,
-                    "Saved Sunshine state is stale. Reconfiguring Sunshine.",
-                    Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
-                    false,
-                )
-                .await;
-                should_install_sunshine = true;
+                    emit_transition(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringSunshine,
+                        "Saved Sunshine state is stale. Reconfiguring Sunshine.",
+                        Some("Remote Sunshine preflight failed; rerunning full setup".to_string()),
+                        false,
+                    )
+                    .await;
+                    should_install_sunshine = true;
+                }
             }
         }
-    }
-    if should_install_sunshine {
-        let (sunshine_username, sunshine_password) = {
-            let state = context.state.read().await;
-            (
-                state.credentials.app_username.clone(),
-                state.credentials.app_password.clone(),
-            )
-        };
-        let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
-            let state = context.state.read().await;
-            (
-                state.moonlight_preferences.clone(),
-                state.sunshine.edid_mode,
-                state.sunshine.edid_refresh_rate_hz,
-                state.sunshine.headless_edid_base64.clone(),
-            )
-        };
-        let resolved_edid =
-            resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
-        let should_generate_edid = headless_edid_base64.trim().is_empty();
-        let effective_edid_base64 = if should_generate_edid {
-            crate::services::sunshine::generate_headless_edid_base64(
-                resolved_edid.width,
-                resolved_edid.height,
-                resolved_edid.refresh_hz,
-            )?
-        } else {
-            headless_edid_base64
-        };
-        let display_profile =
-            build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
-        let generated_edid_for_save = effective_edid_base64.clone();
-        let edid_source_for_save = resolved_edid.source_label.clone();
-        context
-            .update_state(|state| {
-                state.sunshine.headless_edid_base64 = generated_edid_for_save;
-                state.sunshine.edid_source_label = edid_source_for_save;
-            })
-            .await?;
-        info!(
+        if should_install_sunshine {
+            let (sunshine_username, sunshine_password) = {
+                let state = context.state.read().await;
+                (
+                    state.credentials.app_username.clone(),
+                    state.credentials.app_password.clone(),
+                )
+            };
+            let (moonlight_preferences, edid_mode, edid_refresh_rate_hz, headless_edid_base64) = {
+                let state = context.state.read().await;
+                (
+                    state.moonlight_preferences.clone(),
+                    state.sunshine.edid_mode,
+                    state.sunshine.edid_refresh_rate_hz,
+                    state.sunshine.headless_edid_base64.clone(),
+                )
+            };
+            let resolved_edid =
+                resolve_edid_profile(&moonlight_preferences, edid_mode, edid_refresh_rate_hz);
+            let should_generate_edid = headless_edid_base64.trim().is_empty();
+            let effective_edid_base64 = if should_generate_edid {
+                crate::services::sunshine::generate_headless_edid_base64(
+                    resolved_edid.width,
+                    resolved_edid.height,
+                    resolved_edid.refresh_hz,
+                )?
+            } else {
+                headless_edid_base64
+            };
+            let display_profile =
+                build_display_profile(&moonlight_preferences, &effective_edid_base64)?;
+            let generated_edid_for_save = effective_edid_base64.clone();
+            let edid_source_for_save = resolved_edid.source_label.clone();
+            context
+                .update_state(|state| {
+                    state.sunshine.headless_edid_base64 = generated_edid_for_save;
+                    state.sunshine.edid_source_label = edid_source_for_save;
+                })
+                .await?;
+            info!(
             "EDID selection (existing instance): mode={:?} source='{}' width={} height={} refresh_hz={} generate_new={} (priority=autodetect->fallback)",
             edid_mode,
             resolved_edid.source_label,
@@ -2094,168 +2142,243 @@ async fn run_existing_instance_orchestration(
             resolved_edid.refresh_hz,
             should_generate_edid
         );
-        info!(
-            "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
-            display_profile.width,
-            display_profile.height,
-            display_profile.virtual_hz_string(),
-            display_profile.fps
-        );
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Installing and configuring Sunshine",
-            Some(format!(
-                "Display: {}x{} @ {}Hz",
+            info!(
+                "Sunshine display profile (existing instance): {}x{} @ {}Hz ({} FPS target)",
                 display_profile.width,
                 display_profile.height,
-                display_profile.virtual_hz_string()
-            )),
-            false,
-        )
-        .await;
-        sunshine
-            .install_and_configure(
-                &remote,
-                &target_user,
-                display_profile,
-                &effective_edid_base64,
-                &sunshine_username,
-                &sunshine_password,
+                display_profile.virtual_hz_string(),
+                display_profile.fps
+            );
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Installing and configuring Sunshine",
+                Some(format!(
+                    "Display: {}x{} @ {}Hz",
+                    display_profile.width,
+                    display_profile.height,
+                    display_profile.virtual_hz_string()
+                )),
+                false,
+            )
+            .await;
+            sunshine
+                .install_and_configure(
+                    &remote,
+                    &target_user,
+                    display_profile,
+                    &effective_edid_base64,
+                    &sunshine_username,
+                    &sunshine_password,
+                )
+                .await?;
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::SunshineConfigured,
+                OrchestrationState::ConfiguringSunshine,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                offer_id,
             )
             .await?;
-        mark_server_step_completed(
-            &context,
-            instance.id,
-            ProvisionStepMarker::SunshineConfigured,
-            OrchestrationState::ConfiguringSunshine,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            offer_id,
-        )
-        .await?;
-    }
-    ensure_not_cancelled(&context)?;
+        }
+        ensure_not_cancelled(&context)?;
 
-    let audio_latency = AudioLatencyService::from_config(&context.config);
-    if server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::LowLatencyAudioConfigured,
-    )
-    .await
-    {
-        emit_step_skipped(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Skipping low-latency audio setup",
-            instance.id,
-        )
-        .await;
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Applying low-latency PipeWire/WirePlumber audio profile",
-            Some(format!(
-                "target_user={} profile={}",
-                context.config.audio_target_user, context.config.audio_profile
-            )),
-            false,
-        )
-        .await;
-
-        let audio_result = audio_latency.configure(&remote).await?;
-        mark_server_step_completed(
+        let audio_latency = AudioLatencyService::from_config(&context.config);
+        if server_step_is_completed(
             &context,
             instance.id,
             ProvisionStepMarker::LowLatencyAudioConfigured,
-            OrchestrationState::ConfiguringSunshine,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            offer_id,
         )
-        .await?;
+        .await
+        {
+            emit_step_skipped(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Skipping low-latency audio setup",
+                instance.id,
+            )
+            .await;
+        } else {
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Applying low-latency PipeWire/WirePlumber audio profile",
+                Some(format!(
+                    "target_user={} profile={}",
+                    context.config.audio_target_user, context.config.audio_profile
+                )),
+                false,
+            )
+            .await;
 
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringSunshine,
-            "Low-latency audio profile configured",
-            Some(summarize_verification_output(
-                &audio_result.verification_output,
-            )),
-            false,
-        )
-        .await;
-    }
-    ensure_not_cancelled(&context)?;
+            let audio_result = audio_latency.configure(&remote).await?;
+            mark_server_step_completed(
+                &context,
+                instance.id,
+                ProvisionStepMarker::LowLatencyAudioConfigured,
+                OrchestrationState::ConfiguringSunshine,
+                &instance.status,
+                &instance.ssh_host,
+                instance.ssh_port,
+                offer_id,
+            )
+            .await?;
 
-    match vast.get_instance(instance.id).await {
-        Ok(refreshed_instance) => {
-            instance.public_ip = refreshed_instance.public_ip;
-            instance.ssh_host = refreshed_instance.ssh_host;
-            instance.wireguard_port = refreshed_instance.wireguard_port;
-            instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
-            instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
-            instance.network_probe_port = refreshed_instance.network_probe_port;
-            instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
-            instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
-            info!(
+            emit_transition(
+                &app,
+                &context,
+                OrchestrationState::ConfiguringSunshine,
+                "Low-latency audio profile configured",
+                Some(summarize_verification_output(
+                    &audio_result.verification_output,
+                )),
+                false,
+            )
+            .await;
+        }
+        ensure_not_cancelled(&context)?;
+
+        Ok::<(), AppError>(())
+    });
+    let network_setup = Box::pin(async {
+        match vast.get_instance(instance.id).await {
+            Ok(refreshed_instance) => {
+                instance.public_ip = refreshed_instance.public_ip;
+                instance.ssh_host = refreshed_instance.ssh_host;
+                instance.wireguard_port = refreshed_instance.wireguard_port;
+                instance.wireguard_listen_port = refreshed_instance.wireguard_listen_port;
+                instance.wireguard_host_ip = refreshed_instance.wireguard_host_ip;
+                instance.network_probe_port = refreshed_instance.network_probe_port;
+                instance.network_probe_listen_port = refreshed_instance.network_probe_listen_port;
+                instance.network_probe_host_ip = refreshed_instance.network_probe_host_ip;
+                info!(
                 "Refreshed existing-instance networking before WireGuard: public_ip={} ssh_host={} wireguard_host_ip={} wireguard_port={} wireguard_listen_port={}",
                 instance.public_ip, instance.ssh_host, instance.wireguard_host_ip, instance.wireguard_port, instance.wireguard_listen_port
             );
-        }
-        Err(error) => {
-            warn!(
+            }
+            Err(error) => {
+                warn!(
                 "Failed to refresh existing-instance networking before WireGuard; using cached values: {}",
                 error
             );
+            }
         }
-    }
 
-    let wireguard = WireGuardService {
-        defaults: context.config.wireguard.clone(),
-    };
-    let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
-    let endpoint_host = instance.wireguard_endpoint_host();
-    let endpoint_port = instance.wireguard_port;
-    if endpoint_host.trim().is_empty() || endpoint_port == 0 {
-        return Err(AppError::Provisioning(format!(
+        let wireguard = WireGuardService {
+            defaults: context.config.wireguard.clone(),
+        };
+        let _wireguard_mutation_guard = context.begin_wireguard_mutation()?;
+        let endpoint_host = instance.wireguard_endpoint_host();
+        let endpoint_port = instance.wireguard_port;
+        if endpoint_host.trim().is_empty() || endpoint_port == 0 {
+            return Err(AppError::Provisioning(format!(
             "Instance {} does not expose a valid WireGuard endpoint on Vast (host='{}' port={}). Pick a VM-enabled offer with direct UDP ports.",
             instance.id, endpoint_host, endpoint_port
         )));
-    }
+        }
 
-    let wireguard_step_completed = server_step_is_completed(
-        &context,
-        instance.id,
-        ProvisionStepMarker::WireguardConfigured,
-    )
-    .await;
+        let wireguard_step_completed = server_step_is_completed(
+            &context,
+            instance.id,
+            ProvisionStepMarker::WireguardConfigured,
+        )
+        .await;
 
-    let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
-        if let Some(cached) = load_wireguard_result_from_server_record(&context, instance.id).await
-        {
-            if !cached_wireguard_endpoint_matches(
-                cached.client_config_path.as_path(),
-                &endpoint_host,
-                endpoint_port,
-            ) {
+        let wireguard_result: WireGuardProvisionResult = if wireguard_step_completed {
+            if let Some(cached) =
+                load_wireguard_result_from_server_record(&context, instance.id).await
+            {
+                if !cached_wireguard_endpoint_matches(
+                    cached.client_config_path.as_path(),
+                    &endpoint_host,
+                    endpoint_port,
+                ) {
+                    emit_transition(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringWireGuard,
+                        "WireGuard endpoint changed. Regenerating tunnel config.",
+                        Some(format!(
+                            "Expected endpoint {}:{}, cached config endpoint mismatched",
+                            endpoint_host, endpoint_port
+                        )),
+                        false,
+                    )
+                    .await;
+
+                    clear_server_steps(
+                        &context,
+                        instance.id,
+                        &[
+                            ProvisionStepMarker::WireguardConfigured,
+                            ProvisionStepMarker::MicReceiverInstalled,
+                            ProvisionStepMarker::MoonlightConfigured,
+                            ProvisionStepMarker::AwaitingPairPin,
+                            ProvisionStepMarker::PairingCompleted,
+                        ],
+                    )
+                    .await?;
+
+                    let result = wireguard
+                        .configure(
+                            &remote,
+                            app_data_dir,
+                            instance.id,
+                            &endpoint_host,
+                            endpoint_port,
+                            instance.wireguard_listen_port,
+                            WireGuardProvisionMode::ReinitializeExisting,
+                        )
+                        .await?;
+                    mark_server_step_completed(
+                        &context,
+                        instance.id,
+                        ProvisionStepMarker::WireguardConfigured,
+                        OrchestrationState::ConfiguringWireGuard,
+                        &instance.status,
+                        &instance.ssh_host,
+                        instance.ssh_port,
+                        offer_id,
+                    )
+                    .await?;
+                    result
+                } else {
+                    emit_step_skipped(
+                        &app,
+                        &context,
+                        OrchestrationState::ConfiguringWireGuard,
+                        "Skipping WireGuard setup",
+                        instance.id,
+                    )
+                    .await;
+
+                    context
+                        .update_state(|state| {
+                            state.wireguard.server_ip = cached.server_ip.clone();
+                            state.wireguard.client_ip = cached.client_ip.clone();
+                            state.wireguard.server_public_key = cached.server_public_key.clone();
+                            state.wireguard.client_public_key = cached.client_public_key.clone();
+                            state.wireguard.config_path =
+                                cached.client_config_path.display().to_string();
+                            state.sunshine.configured = true;
+                        })
+                        .await?;
+
+                    cached
+                }
+            } else {
                 emit_transition(
                     &app,
                     &context,
                     OrchestrationState::ConfiguringWireGuard,
-                    "WireGuard endpoint changed. Regenerating tunnel config.",
-                    Some(format!(
-                        "Expected endpoint {}:{}, cached config endpoint mismatched",
-                        endpoint_host, endpoint_port
-                    )),
+                    "WireGuard checkpoint is stale. Reconfiguring tunnel.",
+                    Some("No saved WireGuard artifacts were found for this instance".to_string()),
                     false,
                 )
                 .await;
@@ -2273,6 +2396,16 @@ async fn run_existing_instance_orchestration(
                 )
                 .await?;
 
+                emit_transition(
+                    &app,
+                    &context,
+                    OrchestrationState::ConfiguringWireGuard,
+                    "Setting up WireGuard tunnel",
+                    None,
+                    false,
+                )
+                .await;
+
                 let result = wireguard
                     .configure(
                         &remote,
@@ -2281,7 +2414,7 @@ async fn run_existing_instance_orchestration(
                         &endpoint_host,
                         endpoint_port,
                         instance.wireguard_listen_port,
-                        WireGuardProvisionMode::ReinitializeExisting,
+                        WireGuardProvisionMode::FreshProvision,
                     )
                     .await?;
                 mark_server_step_completed(
@@ -2295,55 +2428,23 @@ async fn run_existing_instance_orchestration(
                     offer_id,
                 )
                 .await?;
-                result
-            } else {
-                emit_step_skipped(
-                    &app,
-                    &context,
-                    OrchestrationState::ConfiguringWireGuard,
-                    "Skipping WireGuard setup",
-                    instance.id,
-                )
-                .await;
+                persist_wireguard_result_for_server(&context, instance.id, &result).await?;
 
                 context
                     .update_state(|state| {
-                        state.wireguard.server_ip = cached.server_ip.clone();
-                        state.wireguard.client_ip = cached.client_ip.clone();
-                        state.wireguard.server_public_key = cached.server_public_key.clone();
-                        state.wireguard.client_public_key = cached.client_public_key.clone();
+                        state.wireguard.server_ip = result.server_ip.clone();
+                        state.wireguard.client_ip = result.client_ip.clone();
+                        state.wireguard.server_public_key = result.server_public_key.clone();
+                        state.wireguard.client_public_key = result.client_public_key.clone();
                         state.wireguard.config_path =
-                            cached.client_config_path.display().to_string();
+                            result.client_config_path.display().to_string();
                         state.sunshine.configured = true;
                     })
                     .await?;
 
-                cached
+                result
             }
         } else {
-            emit_transition(
-                &app,
-                &context,
-                OrchestrationState::ConfiguringWireGuard,
-                "WireGuard checkpoint is stale. Reconfiguring tunnel.",
-                Some("No saved WireGuard artifacts were found for this instance".to_string()),
-                false,
-            )
-            .await;
-
-            clear_server_steps(
-                &context,
-                instance.id,
-                &[
-                    ProvisionStepMarker::WireguardConfigured,
-                    ProvisionStepMarker::MicReceiverInstalled,
-                    ProvisionStepMarker::MoonlightConfigured,
-                    ProvisionStepMarker::AwaitingPairPin,
-                    ProvisionStepMarker::PairingCompleted,
-                ],
-            )
-            .await?;
-
             emit_transition(
                 &app,
                 &context,
@@ -2362,7 +2463,7 @@ async fn run_existing_instance_orchestration(
                     &endpoint_host,
                     endpoint_port,
                     instance.wireguard_listen_port,
-                    WireGuardProvisionMode::FreshProvision,
+                    WireGuardProvisionMode::ReinitializeExisting,
                 )
                 .await?;
             mark_server_step_completed(
@@ -2390,92 +2491,63 @@ async fn run_existing_instance_orchestration(
                 .await?;
 
             result
-        }
-    } else {
-        emit_transition(
-            &app,
-            &context,
-            OrchestrationState::ConfiguringWireGuard,
-            "Setting up WireGuard tunnel",
-            None,
-            false,
-        )
-        .await;
-
-        let result = wireguard
-            .configure(
-                &remote,
-                app_data_dir,
-                instance.id,
-                &endpoint_host,
-                endpoint_port,
-                instance.wireguard_listen_port,
-                WireGuardProvisionMode::ReinitializeExisting,
-            )
-            .await?;
-        mark_server_step_completed(
+        };
+        // Release the provisioning mutation lock before the remaining existing-
+        // instance setup and connection-manager evaluation stages.
+        drop(_wireguard_mutation_guard);
+        persist_direct_network_metadata(
             &context,
             instance.id,
-            ProvisionStepMarker::WireguardConfigured,
-            OrchestrationState::ConfiguringWireGuard,
-            &instance.status,
-            &instance.ssh_host,
-            instance.ssh_port,
-            offer_id,
+            &endpoint_host,
+            endpoint_port,
+            &instance.network_probe_endpoint_host(),
+            instance.network_probe_port,
         )
         .await?;
-        persist_wireguard_result_for_server(&context, instance.id, &result).await?;
-
-        context
-            .update_state(|state| {
-                state.wireguard.server_ip = result.server_ip.clone();
-                state.wireguard.client_ip = result.client_ip.clone();
-                state.wireguard.server_public_key = result.server_public_key.clone();
-                state.wireguard.client_public_key = result.client_public_key.clone();
-                state.wireguard.config_path = result.client_config_path.display().to_string();
-                state.sunshine.configured = true;
-            })
-            .await?;
-
-        result
-    };
-    // Release the provisioning mutation lock before the remaining existing-
-    // instance setup and connection-manager evaluation stages.
-    drop(_wireguard_mutation_guard);
-    persist_direct_network_metadata(
-        &context,
-        instance.id,
-        &endpoint_host,
-        endpoint_port,
-        &instance.network_probe_endpoint_host(),
-        instance.network_probe_port,
-    )
-    .await?;
-    if !cached_wireguard_endpoint_matches(
-        wireguard_result.client_config_path.as_path(),
-        &endpoint_host,
-        endpoint_port,
-    ) {
-        return Err(AppError::Provisioning(format!(
+        if !cached_wireguard_endpoint_matches(
+            wireguard_result.client_config_path.as_path(),
+            &endpoint_host,
+            endpoint_port,
+        ) {
+            return Err(AppError::Provisioning(format!(
             "Generated WireGuard config endpoint does not match active Vast endpoint (expected {}:{}, config path {}).",
             endpoint_host,
             endpoint_port,
             wireguard_result.client_config_path.display()
         )));
-    }
-    persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
-    context
-        .update_state(|state| {
-            state.wireguard.server_ip = wireguard_result.server_ip.clone();
-            state.wireguard.client_ip = wireguard_result.client_ip.clone();
-            state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
-            state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
-            state.wireguard.config_path = wireguard_result.client_config_path.display().to_string();
-            state.sunshine.configured = true;
-        })
-        .await?;
-    ensure_not_cancelled(&context)?;
+        }
+        persist_wireguard_result_for_server(&context, instance.id, &wireguard_result).await?;
+        context
+            .update_state(|state| {
+                state.wireguard.server_ip = wireguard_result.server_ip.clone();
+                state.wireguard.client_ip = wireguard_result.client_ip.clone();
+                state.wireguard.server_public_key = wireguard_result.server_public_key.clone();
+                state.wireguard.client_public_key = wireguard_result.client_public_key.clone();
+                state.wireguard.config_path =
+                    wireguard_result.client_config_path.display().to_string();
+                state.sunshine.configured = true;
+            })
+            .await?;
+        ensure_not_cancelled(&context)?;
 
+        let (lifecycle, network_agent) = tokio::join!(
+            measure(
+                "lifecycle_agent",
+                provision_lifecycle_agent(&context, &remote, instance.id, &target_user)
+            ),
+            measure(
+                "network_agent",
+                NetworkAgentProvisioner::ensure(&remote, instance.id)
+            )
+        );
+        lifecycle?;
+        if let Err(error) = network_agent {
+            warn!(instance_id = instance.id, %error, "Network-agent unavailable; continuing core setup");
+        }
+        Ok::<_, AppError>((wireguard_result, wireguard_step_completed))
+    });
+    let (_, (wireguard_result, wireguard_step_completed)) =
+        join_lanes(display_setup, network_setup).await?;
     let microphone_provisioning_enabled = microphone_receiver_provisioning_enabled();
     emit_transition(
         &app,
@@ -2494,7 +2566,12 @@ async fn run_existing_instance_orchestration(
     )
     .await;
 
-    match provision_microphone_receiver(&remote, &target_user).await {
+    match measure(
+        "microphone",
+        provision_microphone_receiver(&remote, &target_user),
+    )
+    .await
+    {
         Ok(install_output) => {
             mark_server_step_completed(
                 &context,

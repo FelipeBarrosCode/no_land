@@ -25,6 +25,8 @@ jobs:
       - run: npm ci
       - name: Existing unit-test entry point
         run: npm run test:unit
+      - name: Verify provisioning package plans and dual-architecture artifacts
+        run: node --test scripts/remote-agent-artifacts.test.mjs scripts/provisioning-packages.test.mjs
 
   desktop-tests:
     name: Desktop and net-helper tests

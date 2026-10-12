@@ -48,7 +48,13 @@ impl InstanceManager {
         const FAST_API_RETRY_DELAY: Duration = Duration::from_secs(10);
         let mut last_error: Option<String> = None;
 
-        for attempt in 1..=self.max_attempts {
+        let started = tokio::time::Instant::now();
+        // Keep the existing overall wait budget, rather than reducing it by
+        // increasing polling frequency on slow-booting high-RAM hosts.
+        let deadline = started + self.poll_interval.saturating_mul(self.max_attempts as u32);
+        let mut attempt = 0;
+        while tokio::time::Instant::now() < deadline {
+            attempt += 1;
             if should_cancel() {
                 return Err(AppError::Cancelled);
             }
@@ -66,7 +72,7 @@ impl InstanceManager {
                     warn!("{message}");
                     last_error = Some(message);
 
-                    if attempt < self.max_attempts {
+                    if tokio::time::Instant::now() < deadline {
                         let retry_delay = if self.poll_interval > FAST_API_RETRY_DELAY {
                             FAST_API_RETRY_DELAY
                         } else {
@@ -126,7 +132,7 @@ impl InstanceManager {
                 return Err(AppError::Cancelled);
             }
 
-            sleep(self.poll_interval).await;
+            sleep(readiness_poll_delay(started.elapsed(), self.poll_interval)).await;
         }
 
         if let Some(last_error) = last_error {
@@ -140,6 +146,40 @@ impl InstanceManager {
             "Instance {instance_id} did not become SSH-ready after {} attempts",
             self.max_attempts
         )))
+    }
+}
+
+fn readiness_poll_delay(elapsed: Duration, maximum: Duration) -> Duration {
+    let delay = if elapsed < Duration::from_secs(60) {
+        Duration::from_secs(5)
+    } else if elapsed < Duration::from_secs(180) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(30)
+    };
+    delay.min(maximum).max(Duration::from_millis(100))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readiness_polls_fast_initially_without_exceeding_configured_interval() {
+        let maximum = Duration::from_secs(60);
+        assert_eq!(readiness_poll_delay(Duration::ZERO, maximum).as_secs(), 5);
+        assert_eq!(
+            readiness_poll_delay(Duration::from_secs(90), maximum).as_secs(),
+            10
+        );
+        assert_eq!(
+            readiness_poll_delay(Duration::from_secs(200), maximum).as_secs(),
+            30
+        );
+        assert_eq!(
+            readiness_poll_delay(Duration::ZERO, Duration::from_secs(2)).as_secs(),
+            2
+        );
     }
 }
 

@@ -105,20 +105,26 @@ export HOME=/root
 export CARGO_HOME=/root/.cargo
 export RUSTUP_HOME=/root/.rustup
 export PATH="$CARGO_HOME/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+cd "$SOURCE_ROOT"
+PREBUILT="$SOURCE_ROOT/prebuilt/$(uname -m)"
+if [[ -f "$PREBUILT/SHA256SUMS" ]]; then
+  (cd "$PREBUILT" && sha256sum -c SHA256SUMS)
+  LIFECYCLE_BINARY="$PREBUILT/noland-lifecycle-agent"
+else
 if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
     | sh -s -- -y --default-toolchain stable --profile minimal \
       >"$STAGING_ROOT/rustup.log" 2>&1
 fi
-
-cd "$SOURCE_ROOT"
 if ! cargo build --release -p noland-lifecycle-agent --locked \
   >"$STAGING_ROOT/build.log" 2>&1; then
   echo "noland-lifecycle-agent build failed" >&2
   tail -n 120 "$STAGING_ROOT/build.log" >&2 || true
   exit 1
 fi
-if [[ ! -x "$SOURCE_ROOT/target/release/noland-lifecycle-agent" ]]; then
+LIFECYCLE_BINARY="$SOURCE_ROOT/target/release/noland-lifecycle-agent"
+fi
+if [[ ! -s "$LIFECYCLE_BINARY" ]]; then
   echo "lifecycle-agent build completed without an executable" >&2
   exit 1
 fi
@@ -136,7 +142,7 @@ cleanup_destination_temps() {
 trap cleanup_destination_temps EXIT
 
 install -o root -g root -m 0755 \
-  "$SOURCE_ROOT/target/release/noland-lifecycle-agent" "$real_temp"
+  "$LIFECYCLE_BINARY" "$real_temp"
 mv -f "$real_temp" "$REAL_BINARY"
 
 cat >"$wrapper_temp" <<EOF

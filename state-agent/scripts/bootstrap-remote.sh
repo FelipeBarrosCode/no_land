@@ -78,6 +78,12 @@ find_bpf_object() {
 
 mkdir -p "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
 
+PREBUILT="$SRC/prebuilt/$(uname -m)"
+if [[ -f "$PREBUILT/SHA256SUMS" ]]; then
+  (cd "$PREBUILT" && sha256sum -c SHA256SUMS)
+  install -m 0755 "$PREBUILT/noland-state-agent" "$BIN"
+  export NOLAND_BPF_OBJECT="$PREBUILT/noland_observer.bpf.o"
+else
 if ! command -v clang >/dev/null 2>&1 \
   || ! command -v cc >/dev/null 2>&1 \
   || ! command -v make >/dev/null 2>&1 \
@@ -97,6 +103,7 @@ rustc --version
 cargo --version
 cargo build --locked --release -p noland-state-agent
 install -m 0755 "$SRC/target/release/noland-state-agent" "$BIN"
+fi
 
 BPF_OBJECT="$(find_bpf_object)"
 if [[ ! -f "$BPF_OBJECT" ]]; then

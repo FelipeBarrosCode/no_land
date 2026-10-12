@@ -37,6 +37,11 @@ export RUSTUP_HOME=/root/.rustup
 export CARGO_HOME=/root/.cargo
 export PATH="/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+PREBUILT="/opt/noland/state-agent/prebuilt/$(uname -m)"
+if [[ -f "$PREBUILT/SHA256SUMS" ]]; then
+    (cd "$PREBUILT" && sha256sum -c SHA256SUMS)
+    NETWORK_BINARY="$PREBUILT/noland-network-agent"
+else
 if ! command -v cargo >/dev/null 2>&1; then
     if ! command -v curl >/dev/null 2>&1; then
         echo "cargo is unavailable and curl is required for the minimal rustup bootstrap" >&2
@@ -70,7 +75,9 @@ if [[ ! -x target/release/noland-network-agent ]]; then
     exit 1
 fi
 
-install -o root -g root -m 0755 target/release/noland-network-agent "$BINARY_PATH"
+NETWORK_BINARY="$SOURCE_DIR/target/release/noland-network-agent"
+fi
+install -o root -g root -m 0755 "$NETWORK_BINARY" "$BINARY_PATH"
 install -d -o root -g root -m 0755 /usr/local/libexec
 cat >"$WRAPPER_PATH" <<'NOLAND_NETWORK_AGENT_WRAPPER'
 __NOLAND_NETWORK_AGENT_WRAPPER__
