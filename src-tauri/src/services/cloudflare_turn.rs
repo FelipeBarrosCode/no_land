@@ -1,19 +1,15 @@
-use std::{
-    net::IpAddr,
-    sync::{Mutex, OnceLock},
-};
+use std::net::IpAddr;
 
 use chrono::{Duration, Utc};
-use keyring::Entry;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
+use super::secure_store;
 use crate::errors::{AppError, AppResult};
 
 const KEYRING_SERVICE: &str = "com.noland.connect.cloudflare-turn";
 const KEYRING_ACCOUNT: &str = "default";
 const CREDENTIAL_REF: &str = "secure-store://cloudflare-turn/default";
-static CACHED_SECRET: OnceLock<Mutex<Option<Option<(String, String)>>>> = OnceLock::new();
 const CLOUDFLARE_TURN_API_BASE: &str = "https://rtc.live.cloudflare.com";
 const MAX_TTL_SECONDS: u32 = 48 * 60 * 60;
 const VALIDATION_TTL_SECONDS: u32 = 60 * 60;
@@ -110,17 +106,8 @@ pub fn credential_ref() -> &'static str {
 }
 
 pub fn load_secret() -> AppResult<Option<(String, String)>> {
-    let cache = CACHED_SECRET.get_or_init(|| Mutex::new(None));
-    if let Some(cached) = cache
-        .lock()
-        .map_err(|_| AppError::State("Cloudflare TURN credential cache is poisoned".to_string()))?
-        .clone()
-    {
-        return Ok(cached);
-    }
-    let entry = keyring_entry()?;
-    let result = match entry.get_password() {
-        Ok(serialized) => {
+    match secure_store::get(KEYRING_SERVICE, KEYRING_ACCOUNT)? {
+        Some(serialized) => {
             let secret: StoredTurnSecret = serde_json::from_str(&serialized).map_err(|error| {
                 AppError::State(format!(
                     "Stored Cloudflare TURN credentials are invalid: {error}"
@@ -128,19 +115,7 @@ pub fn load_secret() -> AppResult<Option<(String, String)>> {
             })?;
             Ok(Some((secret.key_id, secret.api_token)))
         }
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(AppError::State(format!(
-            "Could not read Cloudflare TURN credentials from secure storage: {error}"
-        ))),
-    };
-    match result {
-        Ok(value) => {
-            if let Ok(mut guard) = cache.lock() {
-                *guard = Some(value.clone());
-            }
-            Ok(value)
-        }
-        Err(error) => Err(error),
+        None => Ok(None),
     }
 }
 
@@ -150,23 +125,8 @@ pub fn store_secret(key_id: &str, api_token: &str) -> AppResult<()> {
         api_token: api_token.to_string(),
     };
     let serialized = serde_json::to_string(&secret)?;
-    keyring_entry()?
-        .set_password(&serialized)
-        .map_err(|error| {
-            AppError::State(format!(
-                "Could not save Cloudflare TURN credentials in secure storage: {error}"
-            ))
-        })?;
-
-    // Force the read-back to consult the keychain after replacing credentials.
-    if let Ok(mut guard) = CACHED_SECRET.get_or_init(|| Mutex::new(None)).lock() {
-        *guard = None;
-    }
-
-    // Do not report success based only on the write call. In development
-    // builds macOS Keychain permissions can allow the provider validation but
-    // reject or redirect the persistence operation. Read the value back using
-    // the exact same keyring entry before the command reports success.
+    // The vault verifies OS persistence before updating its shared cache.
+    secure_store::put(KEYRING_SERVICE, KEYRING_ACCOUNT, &serialized)?;
     let stored = load_secret()?.ok_or_else(|| {
         AppError::State(
             "Cloudflare TURN credentials were accepted but could not be read back from secure storage"
@@ -179,32 +139,11 @@ pub fn store_secret(key_id: &str, api_token: &str) -> AppResult<()> {
                 .to_string(),
         ));
     }
-    if let Ok(mut guard) = CACHED_SECRET.get_or_init(|| Mutex::new(None)).lock() {
-        *guard = Some(Some((key_id.to_string(), api_token.to_string())));
-    }
     Ok(())
 }
 
 pub fn delete_secret() -> AppResult<()> {
-    let entry = keyring_entry()?;
-    match entry.delete_credential() {
-        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(error) => Err(AppError::State(format!(
-            "Could not remove Cloudflare TURN credentials from secure storage: {error}"
-        ))),
-    }?;
-    if let Ok(mut guard) = CACHED_SECRET.get_or_init(|| Mutex::new(None)).lock() {
-        *guard = Some(None);
-    }
-    Ok(())
-}
-
-fn keyring_entry() -> AppResult<Entry> {
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(|error| {
-        AppError::State(format!(
-            "Could not access secure storage for Cloudflare TURN credentials: {error}"
-        ))
-    })
+    secure_store::delete(KEYRING_SERVICE, KEYRING_ACCOUNT)
 }
 
 pub async fn generate_credentials(
