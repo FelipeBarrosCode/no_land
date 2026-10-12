@@ -11,7 +11,6 @@ use std::{
 };
 
 use flate2::{write::GzEncoder, Compression};
-use keyring::Entry;
 use rand::{rngs::OsRng, RngCore};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -183,33 +182,19 @@ fn load_or_create_control_secret(instance_id: u64) -> AppResult<String> {
         return Ok(hex::encode(secret));
     }
     let account = format!("instance-{instance_id}");
-    let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
-        AppError::State(format!(
-            "Could not access secure storage for the instance control credential: {error}"
-        ))
-    })?;
-    match entry.get_password() {
-        Ok(value) => {
+    match super::secure_store::get(CONTROL_SECRET_KEYRING_SERVICE, &account)? {
+        Some(value) => {
             let secret = decode_control_secret(&value)?;
             cache_control_secret(instance_id, secret)?;
             return Ok(hex::encode(secret));
         }
-        Err(keyring::Error::NoEntry) => {}
-        Err(error) => {
-            return Err(AppError::State(format!(
-                "Could not read the instance control credential from secure storage: {error}"
-            )))
-        }
+        None => {}
     }
 
     let mut secret = [0_u8; 32];
     OsRng.fill_bytes(&mut secret);
     let encoded = hex::encode(secret);
-    entry.set_password(&encoded).map_err(|error| {
-        AppError::State(format!(
-            "Could not save the instance control credential in secure storage: {error}"
-        ))
-    })?;
+    super::secure_store::put(CONTROL_SECRET_KEYRING_SERVICE, &account, &encoded)?;
     cache_control_secret(instance_id, secret)?;
     Ok(encoded)
 }
@@ -219,19 +204,12 @@ pub fn load_instance_control_secret(instance_id: u64) -> AppResult<[u8; 32]> {
         return Ok(secret);
     }
     let account = format!("instance-{instance_id}");
-    let entry = Entry::new(CONTROL_SECRET_KEYRING_SERVICE, &account).map_err(|error| {
-        AppError::State(format!(
-            "Could not access secure storage for the instance control credential: {error}"
-        ))
-    })?;
-    let value = entry.get_password().map_err(|error| match error {
-        keyring::Error::NoEntry => AppError::State(format!(
-            "No control credential is installed for instance {instance_id}"
-        )),
-        other => AppError::State(format!(
-            "Could not read the instance control credential from secure storage: {other}"
-        )),
-    })?;
+    let value =
+        super::secure_store::get(CONTROL_SECRET_KEYRING_SERVICE, &account)?.ok_or_else(|| {
+            AppError::State(format!(
+                "No control credential is installed for instance {instance_id}"
+            ))
+        })?;
     let secret = decode_control_secret(&value)?;
     cache_control_secret(instance_id, secret)?;
     Ok(secret)
