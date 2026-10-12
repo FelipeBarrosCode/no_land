@@ -45,7 +45,9 @@ jobs:
       - name: Install agent build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y clang llvm libelf-dev zlib1g-dev pkg-config libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+          # Explicitly select Ubuntu's libunwind-dev instead of the conflicting
+          # LLVM development variant preinstalled on Ubuntu 22.04 runners.
+          sudo apt-get install -y clang llvm libelf-dev zlib1g-dev pkg-config libunwind-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
       - name: Build and verify native remote agents
         run: bash scripts/ci/build-remote-agents.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
