@@ -75,6 +75,14 @@ export async function getSpendSummary(): Promise<SpendSummary> {
   return invokeSafe<SpendSummary>("get_spend_summary");
 }
 
+export async function getPendingSpendAlerts(): Promise<SpendAlert[]> {
+  return invokeSafe<SpendAlert[]>("get_pending_spend_alerts");
+}
+
+export async function acknowledgeSpendAlert(id: string): Promise<void> {
+  return invokeSafe<void>("acknowledge_spend_alert", { id });
+}
+
 export async function updateBudgetSettings(settings: BudgetSettings): Promise<SpendSummary> {
   return invokeSafe<SpendSummary>("update_budget_settings", { settings });
 }
