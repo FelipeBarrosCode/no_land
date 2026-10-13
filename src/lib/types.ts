@@ -1235,6 +1235,7 @@ export interface SpendSummary {
 }
 
 export interface SpendAlert {
+  id: string;
   kind: "warning" | "exceeded" | "auto_stopped" | "auto_stop_failed";
   monthToDateUsd: number;
   budgetUsd: number;

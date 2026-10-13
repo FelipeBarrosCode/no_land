@@ -595,6 +595,8 @@ fn main() {
             save_auto_shutdown_settings,
             get_spend_summary,
             update_budget_settings,
+            get_pending_spend_alerts,
+            acknowledge_spend_alert,
             complete_onboarding,
             refresh_state_agent_index,
             refresh_ip_location,

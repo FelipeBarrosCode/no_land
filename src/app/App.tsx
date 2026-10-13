@@ -17,11 +17,12 @@ import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
-import { moonlightGetSessionState, refreshStateAgentIndex, subscribeSpendAlerts } from "../lib/backend";
+import { moonlightGetSessionState, refreshStateAgentIndex, subscribeSpendAlerts, getPendingSpendAlerts, acknowledgeSpendAlert } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
 import { isRunningInTauri } from "../lib/tauri";
 import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
 import { notifySpendAlert } from "../lib/spendNotifications";
+import { createSpendAlertQueue } from "../lib/spendAlertQueue";
 
 import {
   checkForAppUpdate,
@@ -653,17 +654,24 @@ export function App() {
     }
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    void subscribeSpendAlerts((alert) => {
-      void notifySpendAlert(alert);
-      if (alert.kind === "auto_stopped") {
-        void useAppStore.getState().loadRentedInstances();
-      }
-    }).then((stop) => {
+    const queue = createSpendAlertQueue({
+      loadPending: getPendingSpendAlerts,
+      notify: notifySpendAlert,
+      acknowledge: acknowledgeSpendAlert,
+      onStopped: () => { void useAppStore.getState().loadRentedInstances(); },
+      disposed: () => disposed,
+      reportError: (error) => console.warn("[spend] could not deliver queued alert", error),
+    });
+    void subscribeSpendAlerts(() => { void queue.wake(); }).then(async (stop) => {
       if (disposed) {
         stop();
       } else {
         unlisten = stop;
+        // Subscribe first, then replay; ID deduplication handles races with live events.
+        await queue.wake();
       }
+    }).catch((error) => {
+      console.warn("[spend] could not subscribe or replay alerts", error);
     });
     return () => {
       disposed = true;

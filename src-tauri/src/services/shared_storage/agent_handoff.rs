@@ -178,6 +178,33 @@ impl SharedStorageManager {
         .await
     }
 
+    pub async fn seal_before_stop(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+    ) -> AppResult<serde_json::Value> {
+        let queued =
+            Self::start_agent_seal(context, remote, target_user, "personal_state", None).await?;
+        let operation_id = queued
+            .get("operation_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| AppError::State("state-agent seal returned no operation_id".into()))?;
+        let completed = wait_for_agent_operation(
+            context,
+            remote,
+            instance_id,
+            operation_id,
+            "seal",
+            None,
+            None,
+            Duration::from_secs(2 * 60 * 60),
+        )
+        .await?;
+        require_successful_seal(&completed)?;
+        Ok(completed)
+    }
+
     pub async fn list_agent_catalog(
         context: &AppContext,
         remote: &RemoteExec,
@@ -375,6 +402,15 @@ async fn find_interrupted_operation(
         }
     }
     Ok(None)
+}
+
+fn require_successful_seal(status: &serde_json::Value) -> AppResult<()> {
+    match status.get("state").and_then(serde_json::Value::as_str) {
+        Some("SEALED" | "COMPLETED") => Ok(()),
+        _ => Err(AppError::Provisioning(
+            "Pre-stop backup has not completed successfully; refusing to stop the instance.".into(),
+        )),
+    }
 }
 
 async fn wait_for_agent_operation(
@@ -910,8 +946,26 @@ fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEnt
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_agent_apps, parse_agent_catalog};
+    use super::{parse_agent_apps, parse_agent_catalog, require_successful_seal};
     use serde_json::json;
+
+    #[test]
+    fn queued_failed_or_rolled_back_seals_never_authorize_a_stop() {
+        for state in [
+            "QUEUED",
+            "REQUESTED",
+            "FAILED",
+            "CANCELLED",
+            "ROLLED_BACK",
+            "UNKNOWN",
+        ] {
+            assert!(require_successful_seal(&json!({"state": state})).is_err());
+        }
+        assert!(require_successful_seal(&json!({})).is_err());
+        for state in ["SEALED", "COMPLETED"] {
+            assert!(require_successful_seal(&json!({"state": state})).is_ok());
+        }
+    }
 
     #[test]
     fn parses_agent_apps_with_launch_metadata() {

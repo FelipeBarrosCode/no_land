@@ -20,11 +20,11 @@ export function spendAlertTitle(alert: SpendAlert): string {
   }
 }
 
-export async function notifySpendAlert(alert: SpendAlert): Promise<void> {
+export async function notifySpendAlert(alert: SpendAlert): Promise<boolean> {
   // A failed auto-stop means an instance keeps billing past the budget, so
   // it is shown even when budget notifications are turned off.
   if (alert.kind !== "auto_stop_failed" && !isNotificationEnabled("budget")) {
-    return;
+    return true;
   }
   try {
     let granted = await isPermissionGranted();
@@ -32,7 +32,7 @@ export async function notifySpendAlert(alert: SpendAlert): Promise<void> {
       granted = (await requestPermission()) === "granted";
     }
     if (!granted) {
-      return;
+      return true;
     }
     await sendNotification({
       title: spendAlertTitle(alert),
@@ -40,7 +40,9 @@ export async function notifySpendAlert(alert: SpendAlert): Promise<void> {
       icon: "icons/icon.png",
       silent: false,
     });
+    return true;
   } catch (error) {
     console.warn("[spend] native notification failed", error);
+    return false;
   }
 }
