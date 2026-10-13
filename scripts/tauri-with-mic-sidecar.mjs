@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, w
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { prepareRemoteAgentResources } from './remote-agent-artifacts.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -13,6 +14,10 @@ const [mode = 'build', ...tauriArgs] = process.argv.slice(2);
 
 const requestedTarget = readTarget(tauriArgs);
 const target = requestedTarget ?? defaultHostTarget();
+if (mode === 'build' && (process.env.CI || process.env.NOLAND_REQUIRE_SIGNED_RELEASE === '1'
+  || ['x86_64', 'aarch64'].some((arch) => existsSync(join(repoRoot, 'state-agent', 'prebuilt', arch, 'SHA256SUMS'))))) {
+  prepareRemoteAgentResources(join(repoRoot, 'state-agent'));
+}
 if (mode === 'build' && target?.includes('linux')) {
   prepareLinuxDebMetadata();
 }
