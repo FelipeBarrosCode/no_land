@@ -16,6 +16,14 @@ The UI uses wrappers in `src/lib/backend.ts`, which map to Tauri commands in `sr
 - `select_offer`
 - `get_rented_instances`
 
+## Spend and budget
+
+- `get_spend_summary`
+- `update_budget_settings`
+- `get_pending_spend_alerts` (main window only)
+- `acknowledge_spend_alert` (main window only; UUID `id`)
+- events: `spend:updated` (`SpendSummary`), `spend:alert` (`SpendAlert`)
+
 ## Provisioning start and pairing
 
 - `start_play_flow`

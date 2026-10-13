@@ -2,6 +2,7 @@ pub mod auto_shutdown;
 pub mod connection;
 pub mod launch_library;
 pub mod shared_storage;
+pub mod spend;
 
 pub use self::auto_shutdown::{
     get_auto_shutdown_settings, get_instance_auto_shutdown_status, save_auto_shutdown_settings,
@@ -20,6 +21,9 @@ pub use self::shared_storage::{
     disconnect_shared_storage_profile, get_shared_storage_profiles, list_storage_providers,
     save_static_provider_credentials, set_active_shared_storage_profile,
     test_shared_storage_connection,
+};
+pub use self::spend::{
+    acknowledge_spend_alert, get_pending_spend_alerts, get_spend_summary, update_budget_settings,
 };
 
 use std::{
@@ -1825,7 +1829,10 @@ pub async fn complete_onboarding(
             state.onboarding_completed = true;
             state.credentials.app_username = payload.app_username.clone();
             state.credentials.app_password = payload.app_password.clone();
-            state.credentials.vast_api_key = payload.vast_api_key.clone();
+            crate::services::spend_tracker::replace_vast_api_key(
+                state,
+                payload.vast_api_key.clone(),
+            );
             state.ssh.key_name = "nolandConnectSSH".to_string();
             state.ssh.private_key_path = key_paths.private_key_path.display().to_string();
             state.ssh.public_key_path = key_paths.public_key_path.display().to_string();
@@ -2885,7 +2892,7 @@ pub async fn update_vast_api_key(
 
     let next_state = context
         .update_state(|state| {
-            state.credentials.vast_api_key = trimmed;
+            crate::services::spend_tracker::replace_vast_api_key(state, trimmed);
             state.last_error = None;
         })
         .await?;

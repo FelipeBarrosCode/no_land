@@ -79,6 +79,11 @@ find_bpf_object() {
 mkdir -p "$NOLAND_STATE_ROOT" "$NOLAND_RUN_ROOT"
 
 PREBUILT="$SRC/prebuilt/$(uname -m)"
+if [[ -f "$PREBUILT/agents.tar.gz" ]]; then
+  # Client packages carry opaque archives to protect ELF bytes from linuxdeploy.
+  # Expand only on the remote machine, then verify before installing anything.
+  tar -xzf "$PREBUILT/agents.tar.gz" -C "$PREBUILT"
+fi
 if [[ -f "$PREBUILT/SHA256SUMS" ]]; then
   (cd "$PREBUILT" && sha256sum -c SHA256SUMS)
   install -m 0755 "$PREBUILT/noland-state-agent" "$BIN"

@@ -23,6 +23,15 @@ agents on native Ubuntu 22.04 runners for **both x86_64 and ARM64**. It also
 includes the matching eBPF object. Every desktop package includes both sets.
 Installers select by the **remote VM's** `uname -m`, never the client's CPU.
 
+Client packages ship each architecture in `prebuilt/<arch>/agents.tar.gz`, along
+with its `SHA256SUMS`. Raw remote ELF binaries must not be bundled: linuxdeploy
+rewrites ELF RPATHs recursively under `usr/lib`, including application resources,
+which both invalidates checksums and makes remote binaries depend on client paths.
+The remote bootstrap extracts the archive before checking every original file.
+Package validation extracts both archives and checks their original checksums and
+architectures. Both Windows config overlays explicitly include these resources
+because their resource lists replace the base configuration's list.
+
 Artifacts inherit the client package's distribution trust. SHA-256 manifests
 detect transfer corruption; they are not a substitute for package signing.
 Package validation rejects missing artifacts, checksum mismatches, and a binary

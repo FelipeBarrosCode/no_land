@@ -58,7 +58,8 @@
       "../state-agent/Cargo.lock",
       "../state-agent/rust-toolchain.toml",
       "../state-agent/crates/**/*",
-      "../state-agent/prebuilt/**/*",
+      "../state-agent/prebuilt/*/agents.tar.gz",
+      "../state-agent/prebuilt/*/SHA256SUMS",
       "../state-agent/scripts/**/*",
       "../state-agent/systemd/**/*"
     ],

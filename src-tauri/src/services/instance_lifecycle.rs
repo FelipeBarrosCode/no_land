@@ -341,32 +341,78 @@ impl InstanceLifecycleService {
 
     /// Pause a provisioned instance. Runs backup first if available.
     pub async fn pause_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
+        Self::pause_instance_inner(context, instance_id, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn pause_instance_for_budget(
+        context: &AppContext,
+        instance_id: u64,
+        policy: &super::spend_tracker::BudgetStopPolicy,
+    ) -> AppResult<bool> {
+        Self::pause_instance_inner(context, instance_id, Some(policy)).await
+    }
+
+    async fn pause_instance_inner(
+        context: &AppContext,
+        instance_id: u64,
+        policy: Option<&super::spend_tracker::BudgetStopPolicy>,
+    ) -> AppResult<bool> {
         Self::acquire_lock(instance_id, "pause").await?;
 
         let result = async {
+            let api_key = {
+                let state = context.state.read().await;
+                if policy.is_some_and(|policy| !policy.authorized(&state, instance_id)) {
+                    return Ok(false);
+                }
+                state.credentials.vast_api_key.clone()
+            };
+            if api_key.trim().is_empty() {
+                return Err(AppError::InvalidInput("Vast API key is missing.".into()));
+            }
             // Run backup first if shared storage is configured
             Self::maybe_run_backup_first(context, instance_id).await?;
 
-            let api_key = {
+            {
                 let state = context.state.read().await;
-                state.credentials.vast_api_key.clone()
-            };
-
-            if api_key.trim().is_empty() {
-                return Err(AppError::InvalidInput(
-                    "Vast API key is missing.".to_string(),
-                ));
+                // Backup may take minutes. Recheck authorization immediately
+                // before the destructive request and never retarget credentials.
+                if policy.is_some_and(|policy| !policy.authorized(&state, instance_id)) {
+                    return Ok(false);
+                }
+                if state.credentials.vast_api_key.trim() != api_key.trim() {
+                    return Err(AppError::Cancelled);
+                }
             }
 
             let vast = VastApiClient::new(
                 context.http_client.clone(),
                 context.config.vast_base_url.clone(),
-                api_key,
+                api_key.clone(),
             );
 
             vast.pause_instance(instance_id).await?;
+            context
+                .update_state(|state| {
+                    if state.credentials.vast_api_key.trim() != api_key.trim() {
+                        return;
+                    }
+                    let now = chrono::Utc::now();
+                    state
+                        .spend
+                        .record_instance_transition(instance_id, false, now);
+                    if policy.is_some_and(|policy| {
+                        crate::models::spend::month_key(now) == policy.month()
+                    }) {
+                        // Only a confirmed successful pause earns the restart override.
+                        state.spend.mark_auto_stopped(instance_id);
+                    }
+                })
+                .await?;
             info!(instance_id = instance_id, "Instance paused successfully");
-            Ok(())
+            Ok(true)
         }
         .await;
 
@@ -414,10 +460,14 @@ impl InstanceLifecycleService {
             let vast = VastApiClient::new(
                 context.http_client.clone(),
                 context.config.vast_base_url.clone(),
-                api_key,
+                api_key.clone(),
             );
 
             vast.destroy_instance(instance_id).await?;
+            context.update_state(|state| {
+                if state.credentials.vast_api_key.trim() != api_key.trim() { return; }
+                state.spend.record_instance_destroyed(instance_id, chrono::Utc::now());
+            }).await?;
 
             if !wireguard_config_path.trim().is_empty() {
                 let config_path = Path::new(&wireguard_config_path);
@@ -548,14 +598,7 @@ impl InstanceLifecycleService {
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
 
-        SharedStorageManager::start_agent_seal(
-            context,
-            &remote,
-            &target_user,
-            "personal_state",
-            None,
-        )
-        .await?;
+        SharedStorageManager::seal_before_stop(context, &remote, instance_id, &target_user).await?;
 
         info!(
             instance_id = instance_id,

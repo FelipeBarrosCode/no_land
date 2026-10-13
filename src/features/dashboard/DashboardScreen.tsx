@@ -49,6 +49,8 @@ import { InstanceTerminalModal } from "./InstanceTerminalModal";
 import { InstanceUploadModal } from "./InstanceUploadModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
+import { SpendPanel } from "../spend/SpendPanel";
+import { useSpendSummary } from "../spend/useSpendSummary";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
 
 function healthStatusClass(status: "ok" | "warning" | "failed") {
@@ -287,6 +289,7 @@ export function DashboardScreen({
   }, [appState]);
 
   const walletAmountLabel = vastWalletSummary?.displayAmount || "--";
+  const { summary: spendSummary } = useSpendSummary();
 
   async function openExternalUrl(url: string) {
     try {
@@ -641,6 +644,10 @@ export function DashboardScreen({
             </ModalBody>
           </ModalFrame>
         )}
+
+        <section>
+          <SpendPanel summary={spendSummary} />
+        </section>
 
         <section>
           <Card className="pixel-frame">

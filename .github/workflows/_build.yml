@@ -172,6 +172,9 @@ jobs:
           name: remote-agents-aarch64
           path: state-agent/prebuilt/aarch64
 
+      - name: Prepare and verify immutable Linux remote-agent resources
+        run: node scripts/prepare-remote-agent-resources.mjs
+
       - name: Build signed/notarized Tauri application
         shell: bash
         timeout-minutes: 60
@@ -308,6 +311,9 @@ jobs:
         with:
           name: remote-agents-aarch64
           path: state-agent/prebuilt/aarch64
+
+      - name: Prepare and verify immutable Linux remote-agent resources
+        run: node scripts/prepare-remote-agent-resources.mjs
 
       - name: Require Artifact Signing credentials
         shell: pwsh

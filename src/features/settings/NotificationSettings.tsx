@@ -28,6 +28,11 @@ const SETTINGS: Array<{ kind: NotificationKind; title: string; description: stri
     title: "notifications.provisioning.title",
     description: "notifications.provisioning.description",
   },
+  {
+    kind: "budget",
+    title: "notifications.budget.title",
+    description: "notifications.budget.description",
+  },
 ];
 
 export function NotificationSettings() {

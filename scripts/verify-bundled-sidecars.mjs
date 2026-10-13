@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { verifyRemoteAgentArtifacts } from './remote-agent-artifacts.mjs';
+import { verifyPackagedRemoteAgents } from './remote-agent-artifacts.mjs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -599,7 +599,7 @@ function verifyBundledNetworkAgentSource(root, label) {
 function verifyBundledRemoteAgents(root, label) {
   const source = findFirstPath(root, (path) => basename(path) === 'state-agent' && existsSync(join(path, 'prebuilt')));
   if (!source) fail(`Missing prebuilt remote agents in ${label}`);
-  verifyRemoteAgentArtifacts(source);
+  verifyPackagedRemoteAgents(source);
 }
 
 function verifyWindowsNsisInstallation(targetTriple, nsisInstallerPath) {

@@ -44,6 +44,8 @@ pub struct AppContext {
     pub shared_storage_restore_completed:
         tokio::sync::broadcast::Sender<SharedStorageRestoreCompletedEvent>,
     pub active_agent_operation: Arc<RwLock<Option<ActiveAgentOperation>>>,
+    pub(crate) spend_stop_jobs: Arc<std::sync::Mutex<super::spend_tracker::BudgetStopJobs>>,
+    pub(crate) spend_stop_slots: Arc<tokio::sync::Semaphore>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +114,8 @@ impl AppContext {
             shared_storage_progress: tokio::sync::broadcast::channel(64).0,
             shared_storage_restore_completed: tokio::sync::broadcast::channel(16).0,
             active_agent_operation: Arc::new(RwLock::new(None)),
+            spend_stop_jobs: Arc::new(std::sync::Mutex::new(Default::default())),
+            spend_stop_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
     }
 

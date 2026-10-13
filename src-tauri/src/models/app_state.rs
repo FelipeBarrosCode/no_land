@@ -38,6 +38,8 @@ pub struct PersistedAppState {
     pub orchestration_state: OrchestrationState,
     #[serde(default)]
     pub connection_provider: ConnectionProvider,
+    #[serde(default)]
+    pub spend: crate::models::spend::SpendState,
     pub last_error: Option<String>,
 }
 
@@ -66,6 +68,7 @@ impl Default for PersistedAppState {
             post_wireguard_setup: PostWireGuardSetupState::default(),
             orchestration_state: OrchestrationState::Idle,
             connection_provider: ConnectionProvider::default(),
+            spend: crate::models::spend::SpendState::default(),
             last_error: None,
         }
     }
