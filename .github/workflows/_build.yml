@@ -300,7 +300,10 @@ jobs:
         shell: pwsh
         run: |
           npm ci
+          node --test scripts/windows-openssh.test.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/set-release-version.mjs "${{ inputs.version }}"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093

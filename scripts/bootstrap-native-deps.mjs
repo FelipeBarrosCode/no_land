@@ -16,6 +16,7 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveOpenSshRoot, stageOpenSshRuntime } from './windows-openssh.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -534,60 +535,11 @@ function ensureWindowsLibclangRoot(targetTriple) {
 }
 
 function ensureWindowsOpenSshRoot(targetTriple) {
-  const explicitRoot = process.env.NOLAND_OPENSSH_ROOT?.trim();
-  if (explicitRoot && hasWindowsOpenSshRoot(explicitRoot)) {
-    return explicitRoot;
-  }
-
   const cacheRoot = join(nativeDepsRoot, 'cache', `openssh-${targetTriple}`);
   const stagedRoot = join(cacheRoot, 'root');
-  if (hasWindowsOpenSshRoot(stagedRoot)) {
-    return stagedRoot;
-  }
-
-  const systemRoot = process.env.SystemRoot?.trim() || 'C:\\Windows';
-  const sourceRoot = join(systemRoot, 'System32', 'OpenSSH');
-  if (!hasWindowsOpenSshRoot(sourceRoot)) {
-    throw new Error(
-      `Project-managed Windows OpenSSH sidecars are missing and no bootstrap source was found at ${sourceRoot}. Set NOLAND_OPENSSH_ROOT to a directory containing ssh.exe, scp.exe, and ssh-keygen.exe.`
-    );
-  }
-
-  rmSync(stagedRoot, { recursive: true, force: true });
-  mkdirSync(stagedRoot, { recursive: true });
-
-  const requiredFiles = [
-    'ssh.exe',
-    'scp.exe',
-    'ssh-keygen.exe',
-    'sftp.exe',
-    'ssh-agent.exe',
-    'ssh-add.exe',
-    'ssh-keyscan.exe',
-    'ssh-pkcs11-helper.exe',
-    'ssh-sk-helper.exe',
-    'LICENSE.txt',
-    'NOTICE.txt',
-  ];
-  for (const name of requiredFiles) {
-    const source = join(sourceRoot, name);
-    if (!existsSync(source)) {
-      if (['LICENSE.txt', 'NOTICE.txt', 'ssh-pkcs11-helper.exe', 'ssh-sk-helper.exe'].includes(name)) {
-        continue;
-      }
-      throw new Error(`Windows OpenSSH bootstrap source is missing required file ${source}`);
-    }
-    copyFileSync(source, join(stagedRoot, name));
-  }
-
+  const sourceRoot = resolveOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
+  stageOpenSshRuntime(sourceRoot, stagedRoot, targetTriple);
   return stagedRoot;
-}
-
-function hasWindowsOpenSshRoot(root) {
-  return Boolean(root)
-    && existsSync(join(root, 'ssh.exe'))
-    && existsSync(join(root, 'scp.exe'))
-    && existsSync(join(root, 'ssh-keygen.exe'));
 }
 
 function ensureOpenSsl(prefix, targetTriple) {
