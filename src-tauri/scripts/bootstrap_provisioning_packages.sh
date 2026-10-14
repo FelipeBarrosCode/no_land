@@ -3,7 +3,7 @@
 # their standalone fallbacks but find their prerequisites already installed.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l NEEDRESTART_SUSPEND=1
-packages=(ca-certificates curl python3 x11-utils x11-xserver-utils alsa-utils
+packages=(ca-certificates curl python3 x11-utils x11-xserver-utils xclip alsa-utils
   pipewire pipewire-pulse wireplumber rtkit pulseaudio-utils wireguard-tools
   iproute2 ufw libelf1 zlib1g gstreamer1.0-tools gstreamer1.0-pipewire
   gstreamer1.0-plugins-base gstreamer1.0-plugins-good)

@@ -24,3 +24,8 @@ test('source fallback includes the BPF and microphone build prerequisites', () =
   }
   assert.equal(plan.length, new Set(plan).size);
 });
+test('both provisioning paths install xclip for clipboard sync', () => {
+  for (const prebuilt of [0, 1]) {
+    assert.ok(packages(prebuilt).includes('xclip'));
+  }
+});

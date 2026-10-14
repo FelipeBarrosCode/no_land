@@ -53,8 +53,10 @@ for trusted_path in /opt /opt/noland "$SOURCE_ROOT"; do
     exit 1
   fi
 done
-if [[ -n "$(find "$SOURCE_ROOT" -xdev \( ! -user root -o -perm /022 \) -print -quit)" ]]; then
-  echo "state-agent workspace contains untrusted ownership or writable content" >&2
+untrusted_path="$(find "$SOURCE_ROOT" -xdev \( ! -user root -o -perm /022 \) -print -quit)"
+if [[ -n "$untrusted_path" ]]; then
+  echo "state-agent workspace contains untrusted ownership or writable content: $untrusted_path" >&2
+  stat -c 'owner=%u:%g mode=%a path=%n' "$untrusted_path" >&2
   exit 1
 fi
 if [[ ! -f "$SOURCE_ROOT/Cargo.toml" || ! -f "$SOURCE_ROOT/Cargo.lock" ]]; then

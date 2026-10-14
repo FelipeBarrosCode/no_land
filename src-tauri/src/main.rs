@@ -465,6 +465,11 @@ fn main() {
                 .runtime
                 .start_event_bridge(app.handle().clone());
             let mut stream_state = moonlight_manager.runtime.subscribe_state();
+            tauri::async_runtime::spawn(services::clipboard::run_local_clipboard_sync(
+                context.clone(),
+                moonlight_manager.runtime.subscribe_state(),
+                moonlight_manager.active_stream_instance_id.clone(),
+            ));
             let stream_network_context = context.clone();
             tauri::async_runtime::spawn(async move {
                 while stream_state.changed().await.is_ok() {

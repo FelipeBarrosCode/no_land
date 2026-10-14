@@ -13,6 +13,24 @@ use crate::services::remote_exec::RemoteExec;
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
 const REQUIRED_AGENT_API_VERSION: u64 = 18;
 
+// Keep this aligned with install-lifecycle-agent.sh. A healthy running agent
+// does not imply its shared installation workspace is safe to reuse as root.
+const TRUSTED_WORKSPACE_PROBE: &str = r#"set -eu
+link=/opt/noland/state-agent
+test -L "$link"
+test "$(stat -c '%u' "$link")" = 0
+src=$(readlink -f "$link")
+case "$src" in /opt/noland/state-agent-*) ;; *) exit 1 ;; esac
+stamp=${src#/opt/noland/state-agent-}
+case "$stamp" in ''|*[!0-9]*) exit 1 ;; esac
+for path in /opt /opt/noland "$src"; do
+  test "$(stat -c '%u' "$path")" = 0
+  test -z "$(find "$path" -maxdepth 0 -perm /022 -print)"
+done
+untrusted=$(find "$src" -xdev \( ! -user root -o -perm /022 \) -print -quit)
+test -z "$untrusted"
+"#;
+
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
     if probe_agent(remote).await.ok().and_then(|health| {
         health
@@ -73,7 +91,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         worker = shell_escape(&worker),
     );
     let setup = format!(
-        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
+        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && {sudo}find {src} -xdev \\( -type f -o -type d \\) -exec chmod go-w {{}} + && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
         sudo = sudo,
         src = shell_escape(&remote_src),
         tar = shell_escape(&remote_tar),
@@ -94,21 +112,34 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
 
 /// API compatibility alone is insufficient: an updated application may ship
 /// new agents without changing the RPC schema. Refresh the managed workspace
-/// when its architecture-specific build manifest differs from the app bundle.
+/// when its architecture-specific build manifest differs from the app bundle
+/// or its ownership/permissions fail the lifecycle installer's trust checks.
 async fn prebuilt_deployment_matches(remote: &RemoteExec) -> AppResult<bool> {
     let source = find_state_agent_source_dir()?;
     let mut cases = String::new();
+    let mut has_prebuilt_manifests = true;
     for arch in ["x86_64", "aarch64"] {
         let path = source.join("prebuilt").join(arch).join("SHA256SUMS");
         if !path.is_file() {
-            // Development/source-only installs retain the existing API probe.
-            return Ok(true);
+            // Source-only installs still need a trusted workspace, even though
+            // there is no bundled binary manifest to compare.
+            has_prebuilt_manifests = false;
+            break;
         }
         let hash = format!("{:x}", Sha256::digest(fs::read(path)?));
         cases.push_str(&format!("{arch}) expected={hash} ;;\n"));
     }
+    let manifest_probe = if has_prebuilt_manifests {
+        format!(
+            "arch=$(uname -m); case \"$arch\" in\n{cases}*) exit 1 ;; esac\nactual=$(sha256sum /opt/noland/state-agent/prebuilt/$arch/SHA256SUMS 2>/dev/null | cut -d' ' -f1); test \"$actual\" = \"$expected\""
+        )
+    } else {
+        String::new()
+    };
     let command = format!(
-        "arch=$(uname -m); case \"$arch\" in\n{cases}*) exit 1 ;; esac\nactual=$(sha256sum /opt/noland/state-agent/prebuilt/$arch/SHA256SUMS 2>/dev/null | cut -d' ' -f1); test \"$actual\" = \"$expected\""
+        "{}sh -c {}",
+        remote.sudo_prefix(),
+        shell_escape(&format!("{TRUSTED_WORKSPACE_PROBE}\n{manifest_probe}"))
     );
     Ok(ssh_command(remote, command, Duration::from_secs(20))
         .await?
