@@ -178,21 +178,21 @@ the AppImage compatible with GLIBC 2.35 rather than accidentally requiring the b
 newer GLIBC 2.39. The release pipeline also repacks and verifies the AppImage so both the
 outer image and its internal `AppRun` entry point are executable.
 
-The AppImage carries its portable runtime. Native `.deb` and `.rpm` packages instead keep
+The AppImage is not fully dependency-free: SSH wrappers and the media/desktop stack
+still rely on supported host components. Native `.deb` and `.rpm` packages keep
 the distro's GTK/WebKit/GIO stack as one compatible set, avoiding mixed host/bundled
 GLib/GIO/libcurl symbol lookups on Ubuntu/Zorin LTS.
 
 ## Linux .deb dependency model
 
-The rule for Linux native packages: **bundled, sanitized GStreamer runtime + system desktop
-stack + explicit distro dependencies for every library left system-side.**
+The rule for Linux native packages: **system GStreamer and desktop stack + explicit
+distro dependencies for every library left system-side.**
 
 What ships inside the package:
 
 - The application binary and static-linked native code (moonlight core, SDL2, Opus).
-- A sanitized GStreamer closure under `/usr/lib/Noland Connect/binaries/gstreamer/<triple>/`
-  (core libs, plugins, `gst-plugin-scanner`, libcrypto, ffmpeg closure). Resolved through the
-  binary's inherited `DT_RPATH`.
+- GStreamer is supplied by the distro, not a bundled closure; preparation removes
+  managed Linux runtime artifacts from older builds.
 - `noland-mic-sender`, `noland-net-helper` sidecars.
 - `ssh`/`scp`/`ssh-keygen` wrappers that `exec /usr/bin/...` (no bundled OpenSSH closure).
 - `state-agent` and `vm-cloud-mic-agent` sources for remote bootstrapping.
@@ -200,7 +200,7 @@ What ships inside the package:
 What must stay on the distro (declared in `deb.depends` in `tauri.conf.json`):
 
 - WebKitGTK/GTK/AppIndicator/librsvg desktop stack.
-- GLib family (`libglib2.0-0`: glib/gobject/gio/gmodule) for the bundled GStreamer libs.
+- GLib family (`libglib2.0-0`: glib/gobject/gio/gmodule) for the system media/desktop stack.
 - ALSA for SDL audio output and the mic sidecar's cpal capture (`libasound2`).
 - PipeWire client lib for `libgstpipewire.so` (`libpipewire-0.3-0`).
 - udev/gudev for the V4L2 plugin family (`libudev1`, `libgudev-1.0-0`).
@@ -208,9 +208,10 @@ What must stay on the distro (declared in `deb.depends` in `tauri.conf.json`):
 - X11/XCB/xkbcommon/Wayland/decor libraries SDL and the desktop stack dlopen at runtime.
 - `openssh-client`, `xdg-utils`, `procps` for tools the app and net-helper shell out to.
 
-The GStreamer staging step (`bootstrap-native-deps.mjs`) excludes all of the above from the
-bundled closure, and `verify-bundled-sidecars.mjs` fails the build if any distro-owned
-library shows up inside the packaged runtime. Keep those two lists in sync.
+`verify-bundled-sidecars.mjs` checks declared media dependencies and rejects accidental
+distro-owned libraries in bundled runtime locations. See
+[the dependency isolation audit](dependency-isolation-audit.md) for Windows packaging
+fixes, optional Linux utilities, and remaining clean-machine validation work.
 
 Minimum supported distro level is determined by WebKitGTK 4.1: Ubuntu 22.04+, Debian 12+,
 Zorin 17+.

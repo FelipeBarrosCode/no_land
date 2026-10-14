@@ -121,11 +121,25 @@ pub fn locate_bundled_binary(
         return Some(path);
     }
 
+    // Windows loads dependencies beside the launched executable. Never use
+    // the legacy flat SSH copies, whose matching DLLs live elsewhere.
+    let names = managed_runtime_binary_names(stem, uses_exe_suffix, target_triple);
     locate_bundled_binary_in_layout(
-        &bundled_binary_names(stem, uses_exe_suffix, target_triple),
+        &names,
         env::current_exe().ok().as_deref(),
         env::current_dir().ok().as_deref(),
     )
+}
+
+fn managed_runtime_binary_names(
+    stem: &str,
+    uses_exe_suffix: bool,
+    target_triple: &str,
+) -> Vec<String> {
+    if target_triple.contains("windows") && matches!(stem, "ssh" | "scp" | "ssh-keygen") {
+        return vec![format!("ssh-runtime/{target_triple}/{stem}.exe")];
+    }
+    bundled_binary_names(stem, uses_exe_suffix, target_triple)
 }
 
 /// Resolve a helper that will be launched with elevated privileges. Unlike
@@ -448,7 +462,7 @@ fn find_binary_recursively(root: &Path, names: &[String], max_depth: usize) -> O
 mod tests {
     use super::{
         bundled_binary_candidate_paths, bundled_binary_names, helper_matches_expected_sha256,
-        locate_bundled_binary_in_layout,
+        locate_bundled_binary_in_layout, managed_runtime_binary_names,
     };
     use std::{fs, path::PathBuf};
 
@@ -463,6 +477,41 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn windows_ssh_names_only_use_private_runtime() {
+        for stem in ["ssh", "scp", "ssh-keygen"] {
+            assert_eq!(
+                managed_runtime_binary_names(stem, true, "x86_64-pc-windows-msvc"),
+                vec![format!("ssh-runtime/x86_64-pc-windows-msvc/{stem}.exe")]
+            );
+        }
+        assert_eq!(
+            managed_runtime_binary_names("ssh", false, "x86_64-unknown-linux-gnu"),
+            bundled_binary_names("ssh", false, "x86_64-unknown-linux-gnu")
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn prefers_private_windows_ssh_and_rejects_legacy_flat_copy() {
+        let root = temp_root("private-ssh");
+        let app = root.join("noland-connect.exe");
+        let flat = root.join("binaries/ssh-keygen-x86_64-pc-windows-msvc.exe");
+        let private = root.join("binaries/ssh-runtime/x86_64-pc-windows-msvc/ssh-keygen.exe");
+        write_executable(&flat);
+        let names = managed_runtime_binary_names("ssh-keygen", true, "x86_64-pc-windows-msvc");
+        assert_eq!(
+            locate_bundled_binary_in_layout(&names, Some(&app), None),
+            None
+        );
+        write_executable(&private);
+        assert_eq!(
+            locate_bundled_binary_in_layout(&names, Some(&app), None),
+            Some(private)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

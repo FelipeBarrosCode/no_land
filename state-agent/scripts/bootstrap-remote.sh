@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build, enable, and start noland-state-agent on a disposable Linux instance.
 set -euo pipefail
+umask 022
 
 SRC="${1:-/opt/noland/state-agent}"
 BIN="${2:-/usr/local/bin/noland-state-agent}"
@@ -82,7 +83,9 @@ PREBUILT="$SRC/prebuilt/$(uname -m)"
 if [[ -f "$PREBUILT/agents.tar.gz" ]]; then
   # Client packages carry opaque archives to protect ELF bytes from linuxdeploy.
   # Expand only on the remote machine, then verify before installing anything.
-  tar -xzf "$PREBUILT/agents.tar.gz" -C "$PREBUILT"
+  # Never restore the build machine's uid/gid or group/world write bits: the
+  # lifecycle installer requires this shared workspace to remain root-trusted.
+  tar --no-same-owner --no-same-permissions -xzf "$PREBUILT/agents.tar.gz" -C "$PREBUILT"
 fi
 if [[ -f "$PREBUILT/SHA256SUMS" ]]; then
   (cd "$PREBUILT" && sha256sum -c SHA256SUMS)

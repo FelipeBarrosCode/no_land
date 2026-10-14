@@ -5,6 +5,7 @@ import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
+import { cleanWindowsEnvironment, smokeTestOpenSsh, verifyOpenSshRuntime } from './windows-openssh.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -521,6 +522,12 @@ function launchAndRequireAlive(command, args, env, label, durationMs) {
 }
 
 function verifyRequiredRuntimeFiles(root, targetTriple, label) {
+  if (targetTriple.includes('windows')) {
+    const runtime = findFirstPath(root, (path) => basename(path) === targetTriple
+      && basename(dirname(path)) === 'ssh-runtime');
+    if (!runtime) fail(`Missing private OpenSSH distribution in ${label}`);
+    verifyOpenSshRuntime(runtime, targetTriple);
+  }
   for (const candidates of requiredRuntimeFileCandidates(targetTriple)) {
     const found = findFirstPath(root, (path) => candidates.includes(basename(path)));
     if (!found) {
@@ -616,15 +623,10 @@ function verifyWindowsNsisInstallation(targetTriple, nsisInstallerPath) {
 }
 
 function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
-  const sshNames = [
-    `ssh-${targetTriple}.exe`,
-    'ssh.exe',
-  ];
-  const ssh = findFirstPath(root, (path) => sshNames.includes(basename(path)));
-  if (!ssh) {
-    fail(`Could not locate bundled ssh.exe for smoke testing in ${label}`);
-  }
-  run(ssh, ['-V']);
+  const runtime = findFirstPath(root, (path) => basename(path) === targetTriple
+    && basename(dirname(path)) === 'ssh-runtime');
+  if (!runtime) fail(`Missing private OpenSSH distribution in ${label}`);
+  withExtractedTemp('noland windows ssh ', (tempRoot) => smokeTestOpenSsh(runtime, tempRoot));
 
   const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
   withExtractedTemp('noland windows helper ', (tempRoot) => {
@@ -642,7 +644,7 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
       'PersistentKeepalive = 25',
       '',
     ].join('\n'));
-    run(helper, ['check', '--config', configPath]);
+    run(helper, ['check', '--config', configPath], { env: cleanWindowsEnvironment() });
   });
 
   const expectedAppExecutableNames = new Set([
@@ -659,6 +661,35 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
 
   const appDirectory = normalize(resolve(dirname(appExecutable))).toLocaleLowerCase();
   const micSender = findRequiredSidecar(root, targetTriple, 'noland-mic-sender');
+  if (!targetTriple.includes('aarch64')) {
+    const gstRoot = findFirstPath(root, (path) => basename(path) === targetTriple
+      && basename(dirname(path)) === 'gstreamer');
+    if (!gstRoot) fail(`Missing private GStreamer runtime in ${label}`);
+    withExtractedTemp('noland windows mic ', (tempRoot) => {
+      const env = cleanWindowsEnvironment();
+      env.PATH = `${join(gstRoot, 'bin')};${env.PATH}`;
+      env.GST_PLUGIN_SYSTEM_PATH_1_0 = join(gstRoot, 'lib', 'gstreamer-1.0');
+      env.GST_PLUGIN_PATH_1_0 = env.GST_PLUGIN_SYSTEM_PATH_1_0;
+      env.GST_REGISTRY_FORK = 'no';
+      env.GST_REGISTRY_1_0 = join(tempRoot, 'registry.bin');
+      const requests = [
+        { id: 'start', command: 'startSession', config: {
+          sessionId: 'package-test', host: '127.0.0.1', rtpPort: 49152, source: 'sine',
+        } },
+        { id: 'stop', command: 'stopSession' },
+        { id: 'shutdown', command: 'shutdown' },
+      ];
+      const result = spawnSync(micSender, ['daemon'], {
+        cwd: tempRoot, env, encoding: 'utf8', timeout: 30_000, windowsHide: true,
+        input: `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
+      });
+      const responses = (result.stdout || '').split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+      if (result.error || result.status !== 0 || requests.some((request) =>
+        !responses.some((response) => response.type === 'response' && response.id === request.id && response.ok))) {
+        fail(`Packaged microphone pipeline failed in ${label}: ${result.error?.message || ''}\n${result.stdout || ''}\n${result.stderr || ''}`);
+      }
+    });
+  }
   for (const [name, sidecar] of [
     ['noland-net-helper', helper],
     ['noland-mic-sender', micSender],
@@ -679,7 +710,8 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
     'if ($process.HasExited) { Write-Error "Noland exited during the Windows installer smoke test with code $($process.ExitCode)"; exit 1 }',
     'Stop-Process -Id $process.Id -Force',
   ].join('; ');
-  run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+  run(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    ['-NoProfile', '-NonInteractive', '-Command', script], { env: cleanWindowsEnvironment() });
 }
 
 function verifyRequiredSidecars(root, targetTriple, label) {
@@ -730,10 +762,12 @@ function requiredRuntimeFileCandidates(targetTriple) {
       ['gstreamer-1.0-0.dll'],
       ['gst-plugin-scanner.exe'],
       ['gstwasapi.dll', 'libgstwasapi.dll', 'gstwasapi2.dll', 'libgstwasapi2.dll'],
+      ['gstapp.dll', 'libgstapp.dll'],
       ['gstaudioconvert.dll', 'libgstaudioconvert.dll'],
       ['gstaudioresample.dll', 'libgstaudioresample.dll'],
       ['gstopus.dll', 'libgstopus.dll'],
-      ['gstrtp.dll', 'libgstrtp.dll', 'gstrtpmanager.dll', 'libgstrtpmanager.dll'],
+      ['gstrtp.dll', 'libgstrtp.dll'],
+      ['gstrtpmanager.dll', 'libgstrtpmanager.dll'],
       ['gstudp.dll', 'libgstudp.dll'],
     ];
   }

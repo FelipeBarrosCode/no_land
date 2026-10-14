@@ -3,6 +3,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, rmSync,
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveOpenSshRoot } from './windows-openssh.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -66,23 +67,13 @@ function stageWindowsTools(targetTriple) {
     fail(`Windows CI managed-tool staging for ${targetTriple} must run on a Windows host.`);
   }
 
+  const root = resolveOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
   const envAssignments = {
     NOLAND_WINTUN_DLL: stageWintun(targetTriple),
-    NOLAND_SSH_BIN: locateFirstExisting([
-      process.env.NOLAND_SSH_BIN,
-      ...where('ssh.exe'),
-      join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh.exe'),
-    ], 'Unable to locate ssh.exe on the Windows runner'),
-    NOLAND_SCP_BIN: locateFirstExisting([
-      process.env.NOLAND_SCP_BIN,
-      ...where('scp.exe'),
-      join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'scp.exe'),
-    ], 'Unable to locate scp.exe on the Windows runner'),
-    NOLAND_SSH_KEYGEN_BIN: locateFirstExisting([
-      process.env.NOLAND_SSH_KEYGEN_BIN,
-      ...where('ssh-keygen.exe'),
-      join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'OpenSSH', 'ssh-keygen.exe'),
-    ], 'Unable to locate ssh-keygen.exe on the Windows runner'),
+    NOLAND_OPENSSH_ROOT: root,
+    NOLAND_SSH_BIN: join(root, 'ssh.exe'),
+    NOLAND_SCP_BIN: join(root, 'scp.exe'),
+    NOLAND_SSH_KEYGEN_BIN: join(root, 'ssh-keygen.exe'),
   };
 
   writeGitHubEnv(envAssignments);

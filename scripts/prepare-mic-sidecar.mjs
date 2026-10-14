@@ -3,6 +3,7 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, r
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { resolveOpenSshRoot, stageOpenSshRuntime } from './windows-openssh.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -47,6 +48,15 @@ const binariesDir = join(srcTauriDir, 'binaries');
 mkdirSync(binariesDir, { recursive: true });
 
 if (managedTarget) {
+  if (isWindowsTarget(managedTarget)) {
+    const root = resolveOpenSshRoot(managedTarget, srcTauriDir);
+    stageOpenSshRuntime(root, join(binariesDir, 'ssh-runtime', managedTarget), managedTarget);
+    // Flat copies remain build-time compatibility inputs only. Runtime lookup
+    // uses the private distribution containing both executables and DLLs.
+    for (const tool of managedToolSpecs(managedTarget)) {
+      process.env[tool.envVarName] = join(root, tool.lookupName);
+    }
+  }
   for (const tool of managedToolSpecs(managedTarget)) {
     stageBundledTool(tool, managedTarget, binariesDir);
   }
@@ -219,8 +229,6 @@ function stageBundledTool(tool, targetTriple, binariesDir) {
   }
   if (!isWindowsTarget(targetTriple)) {
     chmodSync(stagedBinary, 0o755);
-  } else {
-    stageWindowsManagedToolRuntime(sourcePath, binariesDir, targetTriple);
   }
   console.log(`Staged ${tool.lookupName} sidecar for packaging: ${stagedBinary}`);
 }
@@ -249,27 +257,6 @@ function stageManagedBinaryCopy(sourcePath, destinationPath, options = {}) {
 
   if (!isWindowsTarget(targetTriple)) {
     chmodSync(destinationPath, 0o755);
-  }
-}
-
-function stageWindowsManagedToolRuntime(sourcePath, binariesDir, targetTriple) {
-  const root = dirname(sourcePath);
-  if (!hasWindowsManagedOpenSshRoot(root)) {
-    return;
-  }
-
-  const runtimeDir = join(binariesDir, 'ssh-runtime', targetTriple);
-  rmSync(runtimeDir, { recursive: true, force: true });
-  mkdirSync(runtimeDir, { recursive: true });
-
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    if (!entry.isFile()) {
-      continue;
-    }
-    if (!entry.name.toLowerCase().endsWith('.dll')) {
-      continue;
-    }
-    copyFileSync(join(root, entry.name), join(runtimeDir, entry.name));
   }
 }
 

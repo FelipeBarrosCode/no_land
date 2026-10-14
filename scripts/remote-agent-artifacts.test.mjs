@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, chmodSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -103,8 +103,57 @@ test('all desktop configuration overlays ship archives and manifests, not raw EL
 
 test('remote bootstrap expands resources before checking or installing agents', () => {
   const script = readFileSync(new URL('../state-agent/scripts/bootstrap-remote.sh', import.meta.url), 'utf8');
-  const unpack = script.indexOf('tar -xzf "$PREBUILT/agents.tar.gz"');
+  const unpack = script.indexOf('tar --no-same-owner --no-same-permissions -xzf "$PREBUILT/agents.tar.gz"');
   const verify = script.indexOf('sha256sum -c SHA256SUMS');
   const install = script.indexOf('install -m 0755 "$PREBUILT/noland-state-agent"');
   assert.ok(unpack >= 0 && verify > unpack && install > verify);
+});
+
+test('remote archive extraction strips writable build-machine permissions', (t) => {
+  const source = fixture(t);
+  const dir = join(source, 'prebuilt', 'x86_64');
+  chmodSync(join(dir, 'noland-lifecycle-agent'), 0o777);
+  execFileSync('tar', ['-czf', 'agents.tar.gz', ...REMOTE_AGENT_FILES, 'SHA256SUMS'], { cwd: dir });
+  const dest = join(source, 'extracted');
+  mkdirSync(dest);
+  cpSync(join(dir, 'agents.tar.gz'), join(dest, 'agents.tar.gz'));
+  const bootstrap = readFileSync(new URL('../state-agent/scripts/bootstrap-remote.sh', import.meta.url), 'utf8');
+  const umask = bootstrap.match(/^umask \d+$/m)?.[0];
+  const unpack = bootstrap.match(/^  tar .*agents\.tar\.gz.*$/m)?.[0];
+  assert.ok(umask && unpack);
+  assert.ok(unpack.includes('--no-same-owner'));
+  execFileSync('bash', ['-c', `${umask}\n${unpack}`], { env: { ...process.env, PREBUILT: dest } });
+  const metadata = statSync(join(dest, 'noland-lifecycle-agent'));
+  assert.equal(metadata.mode & 0o022, 0);
+  assert.equal(metadata.mode & 0o111, 0o111);
+  if (process.getuid) assert.equal(metadata.uid, process.getuid());
+});
+
+test('cached deployment reuse rejects untrusted ownership and writable content', (t) => {
+  const runtime = readFileSync(new URL('../src-tauri/src/services/shared_storage/agent_runtime.rs', import.meta.url), 'utf8');
+  const probe = runtime.match(/const TRUSTED_WORKSPACE_PROBE: &str = r#"([\s\S]*?)"#;/)?.[1];
+  assert.ok(probe);
+  const root = mkdtempSync(join(tmpdir(), 'noland-workspace-probe-'));
+  t.after(() => rmSync(root, { recursive: true }));
+  const link = join(root, 'state-agent');
+  execFileSync('ln', ['-s', join(root, 'state-agent-123'), link]);
+  // Stub Linux-specific metadata commands so the actual probe's control flow
+  // can be exercised on macOS too. The symlink check uses the real filesystem.
+  const script = `
+stat() { printf '%s\\n' "\${PROBE_OWNER:-0}"; }
+readlink() { printf '%s\\n' /opt/noland/state-agent-123; }
+find() {
+  case "$*" in
+    *-maxdepth*) printf '%s' "\${PROBE_WRITABLE_PARENT:-}" ;;
+    *) printf '%s' "\${PROBE_UNTRUSTED:-}" ;;
+  esac
+}
+${probe.replace('link=/opt/noland/state-agent', `link="${link}"`)}
+`;
+  const run = (extra = {}) => execFileSync('sh', ['-c', script], { env: { ...process.env, ...extra } });
+  run();
+  assert.throws(() => run({ PROBE_OWNER: '501' }));
+  assert.throws(() => run({ PROBE_UNTRUSTED: '/opt/noland/state-agent-123/prebuilt/x86_64/noland-lifecycle-agent' }));
+  assert.throws(() => run({ PROBE_WRITABLE_PARENT: '/opt/noland' }));
+  assert.ok(runtime.includes('shell_escape(&format!("{TRUSTED_WORKSPACE_PROBE}\\n{manifest_probe}"))'));
 });
