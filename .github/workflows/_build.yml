@@ -175,6 +175,10 @@ jobs:
       - name: Prepare and verify immutable Linux remote-agent resources
         run: node scripts/prepare-remote-agent-resources.mjs
 
+      - name: Run platform-native desktop logic tests
+        timeout-minutes: 30
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets --target "${{ matrix.target }}"
+
       - name: Build signed/notarized Tauri application
         shell: bash
         timeout-minutes: 60
@@ -228,7 +232,7 @@ jobs:
           spctl -a -vvv -t exec "$updater_dir/${product_name}.app"
           rm -rf "$extract_dir" "$updater_dir"
 
-      - name: Verify bundled sidecars and runtime
+      - name: Verify all packaged runtimes and app UX
         run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
 
       - name: Validate Debian package
@@ -318,6 +322,10 @@ jobs:
       - name: Prepare and verify immutable Linux remote-agent resources
         run: node scripts/prepare-remote-agent-resources.mjs
 
+      - name: Run platform-native desktop logic tests
+        timeout-minutes: 30
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets --target "${{ matrix.target }}"
+
       - name: Require Artifact Signing credentials
         shell: pwsh
         env:
@@ -399,7 +407,7 @@ jobs:
           }
           if ($count -eq 0) { throw 'No Windows updater signature was regenerated.' }
 
-      - name: Verify bundled sidecars and runtime
+      - name: Verify all packaged runtimes and app UX
         run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
 
       - name: Generate local artifact checksums

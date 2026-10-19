@@ -231,6 +231,7 @@ pub struct InstallProbeSessionRequest {
 #[serde(rename_all = "snake_case")]
 pub enum HelperMethod {
     GetRuntime,
+    Stop,
     SetPeerEndpoint,
     SetInterfaceMtu,
     ForceHandshake,

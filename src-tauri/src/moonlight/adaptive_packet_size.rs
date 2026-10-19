@@ -23,7 +23,6 @@ const EVALUATION_INTERVAL: Duration = Duration::from_millis(500);
 const VALIDATION_COOLDOWN: Duration = Duration::from_secs(5);
 const STABLE_SESSION_DURATION: Duration = Duration::from_secs(30);
 const MAX_WINDOW_COUNTER: u64 = 1_000_000_000;
-const STATUS_MAX_AGE_SECS: u64 = 10;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PacketSizeObservation {
@@ -1018,28 +1017,7 @@ struct ManagedTunnelInfo {
     mtu: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ManagedTunnelStatus {
-    #[serde(default)]
-    engine: String,
-    #[serde(default)]
-    active: bool,
-    #[serde(default)]
-    config_path: String,
-    #[serde(default)]
-    peer_public_key: String,
-    #[serde(default)]
-    allowed_ips: Vec<String>,
-    #[serde(default)]
-    endpoint: String,
-    #[serde(default)]
-    config_fingerprint: String,
-    #[serde(default)]
-    updated_at_unix: u64,
-    #[serde(default)]
-    error: Option<String>,
-}
+use noland_network_contracts::managed_tunnel::RuntimeStatus as ManagedTunnelStatus;
 
 fn detect_managed_tunnel(app_data_dir: &Path, destination_ip: IpAddr) -> Option<ManagedTunnelInfo> {
     detect_managed_tunnel_in_root(
@@ -1054,14 +1032,9 @@ fn detect_managed_tunnel_in_root(
     destination_ip: IpAddr,
     now_unix: u64,
 ) -> Option<ManagedTunnelInfo> {
-    let mut status_paths = vec![root.join("gotatun-runtime").join("status.json")];
-    if let Ok(entries) = fs::read_dir(root) {
-        for entry in entries.flatten().take(256) {
-            if entry.path().is_dir() {
-                status_paths.push(entry.path().join("gotatun-runtime").join("status.json"));
-            }
-        }
-    }
+    let status_paths = noland_network_contracts::managed_tunnel::runtime_directories(root)
+        .into_iter()
+        .map(|runtime| runtime.join("status.json"));
 
     let canonical_root = root.canonicalize().ok();
     let mut matching = Vec::new();
@@ -1072,10 +1045,8 @@ fn detect_managed_tunnel_in_root(
         let Ok(status) = serde_json::from_slice::<ManagedTunnelStatus>(&contents) else {
             continue;
         };
-        if !status.active
+        if !status.reports_healthy(now_unix)
             || !status.engine.starts_with("gotatun-embedded-")
-            || status.error.is_some()
-            || now_unix.saturating_sub(status.updated_at_unix) > STATUS_MAX_AGE_SECS
             || status.endpoint.is_empty()
             || status.peer_public_key.is_empty()
             || status.config_fingerprint.is_empty()

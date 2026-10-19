@@ -594,6 +594,7 @@ fn main() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            report_frontend_ready,
             get_app_state,
             get_auto_shutdown_settings,
             get_instance_auto_shutdown_status,

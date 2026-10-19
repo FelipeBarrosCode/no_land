@@ -19,7 +19,7 @@ import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { moonlightGetSessionState, refreshStateAgentIndex, subscribeSpendAlerts, getPendingSpendAlerts, acknowledgeSpendAlert } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
-import { isRunningInTauri } from "../lib/tauri";
+import { isRunningInTauri, reportFrontendReady } from "../lib/tauri";
 import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
 import { notifySpendAlert } from "../lib/spendNotifications";
 import { createSpendAlertQueue } from "../lib/spendAlertQueue";
@@ -627,6 +627,37 @@ export function App() {
     void initialize();
     void bindEvents();
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (
+      !windowLabelResolved ||
+      windowLabel !== "main" ||
+      loading ||
+      error ||
+      !appState ||
+      !isRunningInTauri()
+    ) {
+      return;
+    }
+
+    // Wait for two paint opportunities so the CI marker means more than just
+    // "React ran": the onboarding/dashboard tree has been committed for display.
+    let secondFrame = 0;
+    const firstFrame = window.requestAnimationFrame(() => {
+      secondFrame = window.requestAnimationFrame(() => {
+        void reportFrontendReady(window.location.hash || "#/").catch((readyError) => {
+          console.warn("[startup] could not report frontend readiness", readyError);
+        });
+      });
+    });
+
+    return () => {
+      window.cancelAnimationFrame(firstFrame);
+      if (secondFrame) {
+        window.cancelAnimationFrame(secondFrame);
+      }
+    };
+  }, [appState, error, loading, windowLabel, windowLabelResolved]);
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel !== "main" || loading) {

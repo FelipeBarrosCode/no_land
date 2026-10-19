@@ -28,7 +28,9 @@ use noland_network_contracts::control::{
     HelperError, HelperMethod, HelperRequest, HelperResponse, SetInterfaceMtuParams,
     SetPeerEndpointParams,
 };
-use serde::{Deserialize, Serialize};
+use noland_network_contracts::managed_tunnel::{
+    self, BoundedCommand, LaunchAuthorization, OwnerRecord, ProcessIdentity, RuntimeStatus,
+};
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
@@ -55,6 +57,7 @@ enum HelperCommand {
     Run,
     Check,
     Stop,
+    ProbeWintun,
 }
 
 #[derive(Debug)]
@@ -82,87 +85,36 @@ struct TunnelConfig {
     keepalive: Option<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeStatus {
-    engine: String,
-    active: bool,
-    pid: u32,
-    #[serde(default)]
-    process_start_ticks: u64,
-    #[serde(default)]
-    boot_id: String,
-    interface_name: String,
-    config_path: String,
-    #[serde(default)]
-    launch_id: String,
-    peer_public_key: String,
-    allowed_ips: Vec<String>,
-    endpoint: String,
-    #[serde(default)]
-    control_endpoint: String,
-    #[serde(default)]
-    config_fingerprint: String,
-    #[serde(default)]
-    listen_port: u16,
-    #[serde(default)]
-    mtu: u16,
-    latest_handshake_age_secs: Option<u64>,
-    rx_bytes: u64,
-    tx_bytes: u64,
-    updated_at_unix: u64,
-    error: Option<String>,
-}
-
-impl RuntimeStatus {
-    fn starting(args: &Args, config_fingerprint: String) -> Self {
-        let identity = current_process_identity();
-        Self {
-            engine: "gotatun-embedded-0.7.1".to_string(),
-            active: false,
-            pid: identity.pid,
-            process_start_ticks: identity.process_start_ticks,
-            boot_id: identity.boot_id,
-            interface_name: String::new(),
-            config_path: args.config_path.display().to_string(),
-            launch_id: args.launch_id.clone(),
-            peer_public_key: String::new(),
-            allowed_ips: Vec::new(),
-            endpoint: String::new(),
-            control_endpoint: control_endpoint(args),
-            config_fingerprint,
-            listen_port: 0,
-            mtu: 0,
-            latest_handshake_age_secs: None,
-            rx_bytes: 0,
-            tx_bytes: 0,
-            updated_at_unix: unix_timestamp(),
-            error: None,
-        }
+fn starting_status(args: &Args, config_fingerprint: String) -> RuntimeStatus {
+    let identity = current_process_identity();
+    RuntimeStatus {
+        engine: "gotatun-embedded-0.7.1".to_string(),
+        active: false,
+        pid: identity.pid,
+        process_start_ticks: identity.process_start_ticks,
+        boot_id: identity.boot_id,
+        process_start_id: identity.process_start_id,
+        interface_name: String::new(),
+        config_path: args.config_path.display().to_string(),
+        launch_id: args.launch_id.clone(),
+        peer_public_key: String::new(),
+        allowed_ips: Vec::new(),
+        endpoint: String::new(),
+        control_endpoint: control_endpoint(args),
+        config_fingerprint,
+        listen_port: 0,
+        mtu: 0,
+        latest_handshake_age_secs: None,
+        rx_bytes: 0,
+        tx_bytes: 0,
+        updated_at_unix: unix_timestamp(),
+        error: None,
     }
 }
 
 struct ControlCall {
     request: HelperRequest,
     response: oneshot::Sender<HelperResponse>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProcessIdentity {
-    pid: u32,
-    #[serde(default)]
-    process_start_ticks: u64,
-    #[serde(default)]
-    boot_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct OwnerRecord {
-    identity: ProcessIdentity,
-    launch_id: String,
-    state_dir: String,
 }
 
 /// Probe whether a UDP port can be bound on both wildcard IPv4 and IPv6 the way
@@ -267,7 +219,7 @@ fn ensure_windows_gotatun_firewall_rule(listen_port: u16) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 
     let mut add = Command::new("netsh.exe");
     configure_hidden_windows_command(&mut add);
@@ -280,7 +232,7 @@ fn ensure_windows_gotatun_firewall_rule(listen_port: u16) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .output()
+        .bounded_output(Duration::from_secs(5))
         .context("failed launching netsh to configure the Noland GotaTun firewall rule")?;
 
     if !output.status.success() {
@@ -307,7 +259,7 @@ fn remove_windows_adapter_address(interface_name: &str, address: Ipv4Addr) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 }
 
 #[cfg(target_os = "windows")]
@@ -318,7 +270,7 @@ fn windows_adapter_has_address(interface_name: &str, address: Ipv4Addr) -> bool 
         .args(["interface", "ipv4", "show", "addresses"])
         .arg(format!("name={interface_name}"))
         .stdin(Stdio::null())
-        .output()
+        .bounded_output(Duration::from_secs(5))
         .ok()
         .is_some_and(|output| {
             output.status.success()
@@ -337,7 +289,7 @@ fn windows_interfaces_with_address(address: Ipv4Addr) -> Vec<String> {
     command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
-        .output()
+        .bounded_output(Duration::from_secs(5))
         .ok()
         .map(|output| {
             String::from_utf8_lossy(&output.stdout)
@@ -361,7 +313,7 @@ fn stop_and_disable_legacy_wireguard_service(interface_name: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 
     let mut disable = Command::new("sc.exe");
     configure_hidden_windows_command(&mut disable);
@@ -370,7 +322,7 @@ fn stop_and_disable_legacy_wireguard_service(interface_name: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 }
 
 #[cfg(target_os = "windows")]
@@ -408,7 +360,7 @@ fn reset_windows_adapter_address(interface_name: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 }
 
 #[cfg(target_os = "windows")]
@@ -441,7 +393,7 @@ fn configure_windows_adapter_address(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .bounded_output(Duration::from_secs(5))
             .context("failed launching netsh to configure the Windows tunnel address")?;
 
         last_stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -490,7 +442,7 @@ fn remove_windows_route(interface_name: &str, route: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
+        .bounded_output(Duration::from_secs(5));
 }
 
 #[cfg(target_os = "windows")]
@@ -500,7 +452,7 @@ fn windows_adapter_has_route(interface_name: &str, route: &str) -> bool {
     command
         .args(["interface", "ipv4", "show", "route"])
         .stdin(Stdio::null())
-        .output()
+        .bounded_output(Duration::from_secs(5))
         .ok()
         .is_some_and(|output| {
             let output = String::from_utf8_lossy(&output.stdout);
@@ -533,7 +485,7 @@ fn install_windows_allowed_ip_routes(
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
+            .bounded_output(Duration::from_secs(5))
             .with_context(|| format!("failed launching netsh for route {route}"))?;
 
         if !output.status.success() && !windows_adapter_has_route(interface_name, &route) {
@@ -557,6 +509,49 @@ fn install_windows_allowed_ip_routes(
         interface_name: interface_name.to_string(),
         routes: installed,
     })
+}
+
+#[cfg(target_os = "windows")]
+fn probe_wintun_library(path: &Path) -> Result<()> {
+    use std::{ffi::c_void, os::windows::ffi::OsStrExt};
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn LoadLibraryW(file_name: *const u16) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, proc_name: *const u8) -> *mut c_void;
+        fn FreeLibrary(module: *mut c_void) -> i32;
+    }
+
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let module = unsafe { LoadLibraryW(wide_path.as_ptr()) };
+    if module.is_null() {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed loading {}", path.display()));
+    }
+
+    let result = (|| {
+        for export in [
+            b"WintunCreateAdapter\0".as_slice(),
+            b"WintunOpenAdapter\0".as_slice(),
+            b"WintunCloseAdapter\0".as_slice(),
+            b"WintunStartSession\0".as_slice(),
+            b"WintunEndSession\0".as_slice(),
+        ] {
+            if unsafe { GetProcAddress(module, export.as_ptr()) }.is_null() {
+                let name = String::from_utf8_lossy(&export[..export.len() - 1]);
+                bail!("{} is missing required export {name}", path.display());
+            }
+        }
+        Ok(())
+    })();
+    unsafe {
+        FreeLibrary(module);
+    }
+    result
 }
 
 #[tokio::main]
@@ -586,15 +581,53 @@ async fn main() {
         }
     }
 
-    if let Err(error) = fs::create_dir_all(&args.state_dir) {
-        eprintln!(
-            "noland-net-helper: failed creating state directory {}: {error}",
-            args.state_dir.display()
-        );
-        process::exit(1);
+    if args.command == HelperCommand::ProbeWintun {
+        #[cfg(target_os = "windows")]
+        {
+            let Some(path) = args.wintun_path.as_deref() else {
+                eprintln!("noland-net-helper: probe-wintun requires --wintun <path>");
+                process::exit(2);
+            };
+            if let Err(error) = probe_wintun_library(path) {
+                eprintln!("noland-net-helper: Wintun probe failed: {error:#}");
+                process::exit(1);
+            }
+            println!("noland-net-helper: Wintun library and required exports loaded successfully");
+            return;
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            eprintln!("noland-net-helper: probe-wintun is only available on Windows");
+            process::exit(2);
+        }
+    }
+
+    // The desktop prepares and owns this directory. A delayed elevated launch
+    // must not recreate it as root after cancellation or application cleanup.
+    match fs::symlink_metadata(&args.state_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                && args.command == HelperCommand::Stop =>
+        {
+            return
+        }
+        _ => {
+            eprintln!(
+                "noland-net-helper: runtime directory is missing or is not a real directory: {}",
+                args.state_dir.display()
+            );
+            process::exit(1);
+        }
     }
 
     if args.command == HelperCommand::Stop {
+        if args.launch_id != "stop" {
+            if let Err(error) = require_launch_authorization(&args, true) {
+                eprintln!("noland-net-helper: {error:#}");
+                process::exit(1);
+            }
+        }
         let _transition_lock = match acquire_transition_lock(&args.state_dir) {
             Ok(lock) => lock,
             Err(error) => {
@@ -602,6 +635,12 @@ async fn main() {
                 process::exit(1);
             }
         };
+        if args.launch_id != "stop" {
+            if let Err(error) = require_launch_authorization(&args, true) {
+                eprintln!("noland-net-helper: {error:#}");
+                process::exit(1);
+            }
+        }
         if let Err(error) = cleanup_stale_runtime_owners(&args.state_dir).await {
             eprintln!("noland-net-helper: {error:#}");
             process::exit(1);
@@ -617,6 +656,7 @@ async fn main() {
 
 async fn run(args: Args) -> Result<()> {
     let transition_lock = acquire_transition_lock(&args.state_dir)?;
+    require_launch_authorization(&args, true)?;
     let mut owner_lock = acquire_owner_lock(&args.state_dir)?;
     write_owner_record(&mut owner_lock, &args)?;
     cleanup_platform_network_state(&args)?;
@@ -624,7 +664,7 @@ async fn run(args: Args) -> Result<()> {
     let _ = fs::remove_file(&stop_request_path);
     let status_path = args.state_dir.join(STATUS_FILE_NAME);
     let config_fingerprint = config_fingerprint(&args.config_path)?;
-    let mut initial_status = RuntimeStatus::starting(&args, config_fingerprint.clone());
+    let mut initial_status = starting_status(&args, config_fingerprint.clone());
     write_status(&status_path, &initial_status)?;
     drop(transition_lock);
 
@@ -637,6 +677,20 @@ async fn run(args: Args) -> Result<()> {
     let _ = clear_owner_record(&mut owner_lock);
     drop(owner_lock);
     result
+}
+
+fn require_launch_authorization(args: &Args, starting: bool) -> Result<()> {
+    let permit = LaunchAuthorization::load(&args.state_dir)
+        .context("tunnel launch was cancelled or its authorization is unavailable")?;
+    let authorized = if starting {
+        permit.authorizes_start(&args.launch_id, &args.config_path, unix_timestamp())
+    } else {
+        permit.authorizes(&args.launch_id, &args.config_path)
+    };
+    if !authorized {
+        bail!("tunnel launch was cancelled, superseded, or expired");
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -683,8 +737,17 @@ async fn run_control_listener(
         let (stream, _) = listener.accept().await?;
         let sender = sender.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_control_stream(stream, sender).await {
-                eprintln!("noland-net-helper: control connection failed: {error}");
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                serve_control_stream(stream, sender),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    eprintln!("noland-net-helper: control connection failed: {error:#}")
+                }
+                Err(error) => eprintln!("noland-net-helper: control connection timed out: {error}"),
             }
         });
     }
@@ -703,8 +766,17 @@ async fn run_control_listener(
         server.connect().await?;
         let sender = sender.clone();
         tokio::spawn(async move {
-            if let Err(error) = serve_control_stream(server, sender).await {
-                eprintln!("noland-net-helper: control connection failed: {error}");
+            match tokio::time::timeout(
+                Duration::from_secs(15),
+                serve_control_stream(server, sender),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    eprintln!("noland-net-helper: control connection failed: {error:#}")
+                }
+                Err(error) => eprintln!("noland-net-helper: control connection timed out: {error}"),
             }
         });
     }
@@ -717,7 +789,15 @@ where
     let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut bytes = Vec::new();
-    let read = reader.read_until(b'\n', &mut bytes).await?;
+    use tokio::io::AsyncReadExt;
+    let read = tokio::time::timeout(
+        Duration::from_secs(5),
+        (&mut reader)
+            .take(MAX_CONTROL_REQUEST_BYTES as u64 + 1)
+            .read_until(b'\n', &mut bytes),
+    )
+    .await
+    .context("control request timed out")??;
     if read == 0 {
         return Ok(());
     }
@@ -768,15 +848,19 @@ where
         return Ok(());
     }
 
-    let response = response_rx.await.unwrap_or_else(|_| {
-        helper_error_response(
-            request_id,
-            None,
-            "helper_unavailable",
-            "tunnel runtime did not answer the control request",
-            true,
-        )
-    });
+    let response = tokio::time::timeout(Duration::from_secs(10), response_rx)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_else(|| {
+            helper_error_response(
+                request_id,
+                None,
+                "helper_unavailable",
+                "tunnel runtime did not answer the control request",
+                true,
+            )
+        });
     writer.write_all(&serde_json::to_vec(&response)?).await?;
     writer.write_all(b"\n").await?;
     writer.shutdown().await?;
@@ -892,6 +976,13 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         .await
         .context("failed starting embedded GotaTun device")?;
 
+    // An elevation dialog may have been approved after the desktop timed out.
+    // Check again *after* initialization, before publishing an active tunnel.
+    if let Err(error) = require_launch_authorization(args, true) {
+        let _ = tokio::time::timeout(DEVICE_STOP_TIMEOUT, device.stop()).await;
+        return Err(error);
+    }
+
     let (control_tx, mut control_rx) = mpsc::channel::<ControlCall>(16);
     let control_endpoint = control_endpoint(args);
     let mut control_task = tokio::spawn(run_control_listener(
@@ -907,6 +998,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
         pid: identity.pid,
         process_start_ticks: identity.process_start_ticks,
         boot_id: identity.boot_id,
+        process_start_id: identity.process_start_id,
         interface_name,
         config_path: args.config_path.display().to_string(),
         launch_id: args.launch_id.clone(),
@@ -967,7 +1059,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                         status.error = Some("local control channel closed unexpectedly".to_string());
                         break;
                     };
-                    handle_control_call(
+                    if tokio::time::timeout(Duration::from_secs(5), handle_control_call(
                         call,
                         args,
                         config_fingerprint,
@@ -975,10 +1067,14 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                         &mut device,
                         &mut status,
                         status_path,
-                    ).await;
+                    )).await.is_err() {
+                        status.error = Some("managed tunnel control operation timed out".into());
+                        break;
+                    }
+                    if !status.active || status.error.is_some() { break; }
                 }
                 _ = status_heartbeat.tick() => {
-                    if stop_request_path.exists() {
+                    if stop_request_path.exists() || require_launch_authorization(args, false).is_err() {
                         break;
                     }
                     refresh_status_from_device(&device, &mut status).await;
@@ -1015,7 +1111,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                     status.error = Some("local control channel closed unexpectedly".to_string());
                     break;
                 };
-                handle_control_call(
+                if tokio::time::timeout(Duration::from_secs(5), handle_control_call(
                     call,
                     args,
                     config_fingerprint,
@@ -1023,10 +1119,14 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
                     &mut device,
                     &mut status,
                     status_path,
-                ).await;
+                )).await.is_err() {
+                    status.error = Some("managed tunnel control operation timed out".into());
+                    break;
+                }
+                if !status.active || status.error.is_some() { break; }
             }
             _ = status_heartbeat.tick() => {
-                if stop_request_path.exists() {
+                if stop_request_path.exists() || require_launch_authorization(args, false).is_err() {
                     break;
                 }
                 refresh_status_from_device(&device, &mut status).await;
@@ -1063,7 +1163,7 @@ async fn run_tunnel(args: &Args, status_path: &Path, config_fingerprint: &str) -
 async fn handle_control_call(
     call: ControlCall,
     args: &Args,
-    config_fingerprint: &str,
+    _config_fingerprint: &str,
     tunnel_config: &TunnelConfig,
     device: &mut Device<DefaultDeviceTransports>,
     status: &mut RuntimeStatus,
@@ -1071,7 +1171,17 @@ async fn handle_control_call(
 ) {
     let request_id = call.request.request_id;
     let launch_id = args.launch_id.parse::<uuid::Uuid>().ok();
-    let response = if call.request.expected_launch_id.to_string() != args.launch_id {
+    let response = if call.request.method != HelperMethod::Stop
+        && require_launch_authorization(args, false).is_err()
+    {
+        helper_error_response(
+            request_id,
+            launch_id,
+            "helper_unavailable",
+            "this tunnel launch has been revoked",
+            false,
+        )
+    } else if call.request.expected_launch_id.to_string() != args.launch_id {
         helper_error_response(
             request_id,
             launch_id,
@@ -1079,7 +1189,7 @@ async fn handle_control_call(
             "the expected helper launch ID is stale",
             false,
         )
-    } else if call.request.expected_config_fingerprint != config_fingerprint {
+    } else if call.request.expected_config_fingerprint != status.config_fingerprint {
         helper_error_response(
             request_id,
             launch_id,
@@ -1089,6 +1199,10 @@ async fn handle_control_call(
         )
     } else {
         match call.request.method {
+            HelperMethod::Stop => {
+                status.active = false;
+                HelperResponse { request_id, launch_id, result: Some(serde_json::json!({"stopping": true})), error: None }
+            }
             HelperMethod::GetRuntime => {
                 // Runtime validation needs a read-through snapshot. Returning
                 // the last heartbeat can falsely report no traffic immediately
@@ -1108,6 +1222,7 @@ async fn handle_control_call(
                             request_id,
                             launch_id,
                             params,
+                            &args.config_path,
                             tunnel_config,
                             device,
                             status,
@@ -1129,9 +1244,32 @@ async fn handle_control_call(
                     Ok(params) if (576..=9000).contains(&params.mtu) => {
                         match apply_interface_mtu(&status.interface_name, params.mtu) {
                             Ok(()) => {
+                                let fingerprint = match managed_tunnel::update_config(
+                                    &args.config_path, &status.config_fingerprint,
+                                    "Interface", "MTU", &params.mtu.to_string(),
+                                ) {
+                                    Ok(fingerprint) => fingerprint,
+                                    Err(error) => {
+                                        let rollback = apply_interface_mtu(&status.interface_name, status.mtu);
+                                        if rollback.is_err() {
+                                            status.error = Some("MTU persistence and rollback both failed; stopping inconsistent tunnel".into());
+                                        }
+                                        let response = helper_error_response(request_id, launch_id,
+                                            "state_persistence_failed",
+                                            &format!("MTU could not be persisted: {error}; rollback: {rollback:?}"), false);
+                                        let _ = call.response.send(response);
+                                        return;
+                                    }
+                                };
                                 status.mtu = params.mtu;
+                                status.config_fingerprint = fingerprint;
                                 status.updated_at_unix = unix_timestamp();
-                                let _ = write_status_with_retry(status_path, status, 5);
+                                if let Err(error) = write_status_with_retry(status_path, status, 5) {
+                                    let response = helper_error_response(request_id, launch_id, "state_persistence_failed",
+                                        &format!("MTU changed and config was saved but runtime status publication failed: {error}"), true);
+                                    let _ = call.response.send(response);
+                                    return;
+                                }
                                 HelperResponse {
                                     request_id,
                                     launch_id,
@@ -1184,6 +1322,7 @@ async fn apply_peer_endpoint(
     request_id: uuid::Uuid,
     launch_id: Option<uuid::Uuid>,
     params: SetPeerEndpointParams,
+    config_path: &Path,
     tunnel_config: &TunnelConfig,
     device: &mut Device<DefaultDeviceTransports>,
     status: &mut RuntimeStatus,
@@ -1232,7 +1371,43 @@ async fn apply_peer_endpoint(
         .await
     {
         Ok(true) => {
+            let persisted_endpoint = if params.endpoint.host.contains(':') {
+                format!("[{}]:{}", params.endpoint.host, params.endpoint.port)
+            } else {
+                format!("{}:{}", params.endpoint.host, params.endpoint.port)
+            };
+            let fingerprint = match managed_tunnel::update_config(
+                config_path,
+                &status.config_fingerprint,
+                "Peer",
+                "Endpoint",
+                &persisted_endpoint,
+            ) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let rollback = match previous_endpoint.parse::<SocketAddr>() {
+                        Ok(previous) => device
+                            .modify_peer(&peer_key, |peer| peer.set_endpoint(Some(previous)))
+                            .await
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if !matches!(&rollback, Ok(true)) {
+                        status.error = Some("endpoint persistence and rollback both failed; stopping inconsistent tunnel".into());
+                    }
+                    return helper_error_response(
+                        request_id,
+                        launch_id,
+                        "state_persistence_failed",
+                        &format!(
+                            "endpoint could not be persisted: {error}; rollback: {rollback:?}"
+                        ),
+                        false,
+                    );
+                }
+            };
             status.endpoint = endpoint.to_string();
+            status.config_fingerprint = fingerprint;
             status.updated_at_unix = unix_timestamp();
             if let Err(error) = write_status_with_retry(status_path, status, 5) {
                 return helper_error_response(
@@ -1292,7 +1467,7 @@ fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
             "mtu",
             &mtu.to_string(),
         ])
-        .output()
+        .bounded_output(Duration::from_secs(3))
         .context("failed launching ip to update tunnel MTU")?;
     if !output.status.success() {
         bail!(
@@ -1307,7 +1482,7 @@ fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
 fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
     let output = Command::new("ifconfig")
         .args([interface_name, "mtu", &mtu.to_string()])
-        .output()
+        .bounded_output(Duration::from_secs(3))
         .context("failed launching ifconfig to update tunnel MTU")?;
     if !output.status.success() {
         bail!(
@@ -1327,7 +1502,7 @@ fn apply_interface_mtu(interface_name: &str, mtu: u16) -> Result<()> {
         .arg(interface_name)
         .arg(format!("mtu={mtu}"))
         .arg("store=active")
-        .output()
+        .bounded_output(Duration::from_secs(3))
         .context("failed launching netsh to update tunnel MTU")?;
     if !output.status.success() {
         bail!(
@@ -1357,8 +1532,9 @@ fn parse_args() -> Result<Args> {
         "run" => HelperCommand::Run,
         "check" => HelperCommand::Check,
         "stop" => HelperCommand::Stop,
+        "probe-wintun" => HelperCommand::ProbeWintun,
         _ => bail!(
-            "usage: noland-net-helper <run|check|stop> [--config <path>] [--state-dir <path>] [--wintun <path>]"
+            "usage: noland-net-helper <run|check|stop|probe-wintun> [--config <path>] [--state-dir <path>] [--wintun <path>]"
         ),
     };
 
@@ -1380,7 +1556,7 @@ fn parse_args() -> Result<Args> {
         HelperCommand::Run | HelperCommand::Stop => {
             state_dir.ok_or_else(|| anyhow!("missing --state-dir path"))?
         }
-        HelperCommand::Check => state_dir.unwrap_or_default(),
+        HelperCommand::Check | HelperCommand::ProbeWintun => state_dir.unwrap_or_default(),
     };
 
     Ok(Args {
@@ -1389,13 +1565,14 @@ fn parse_args() -> Result<Args> {
             HelperCommand::Run | HelperCommand::Check => {
                 config_path.ok_or_else(|| anyhow!("missing --config path"))?
             }
-            HelperCommand::Stop => config_path.unwrap_or_default(),
+            HelperCommand::Stop | HelperCommand::ProbeWintun => config_path.unwrap_or_default(),
         },
         state_dir,
         launch_id: match command {
             HelperCommand::Run => launch_id.ok_or_else(|| anyhow!("missing --launch-id value"))?,
             HelperCommand::Check => launch_id.unwrap_or_else(|| "check".to_string()),
             HelperCommand::Stop => launch_id.unwrap_or_else(|| "stop".to_string()),
+            HelperCommand::ProbeWintun => launch_id.unwrap_or_else(|| "probe-wintun".to_string()),
         },
         wintun_path,
     })
@@ -1528,6 +1705,9 @@ fn prefix_to_netmask(prefix: u8) -> Ipv4Addr {
 }
 
 fn runtime_root(state_dir: &Path) -> PathBuf {
+    if managed_tunnel::is_short_runtime(state_dir) {
+        return state_dir.to_path_buf();
+    }
     let runtime_parent = state_dir.parent().unwrap_or(state_dir);
     if runtime_parent
         .file_name()
@@ -1544,25 +1724,27 @@ fn runtime_root(state_dir: &Path) -> PathBuf {
 }
 
 fn owner_lock_path(state_dir: &Path) -> PathBuf {
-    runtime_root(state_dir).join(OWNER_LOCK_FILE_NAME)
+    managed_runtime_dir(state_dir).join(OWNER_LOCK_FILE_NAME)
 }
 
 fn transition_lock_path(state_dir: &Path) -> PathBuf {
-    runtime_root(state_dir).join(TRANSITION_LOCK_FILE_NAME)
+    managed_runtime_dir(state_dir).join(TRANSITION_LOCK_FILE_NAME)
+}
+
+fn managed_runtime_dir(state_dir: &Path) -> PathBuf {
+    if managed_tunnel::is_short_runtime(state_dir) {
+        state_dir.to_path_buf()
+    } else {
+        managed_tunnel::runtime_dir(&runtime_root(state_dir))
+    }
 }
 
 fn runtime_directories(state_dir: &Path) -> Vec<PathBuf> {
-    let root = runtime_root(state_dir);
-    let mut runtimes = vec![root.join("gotatun-runtime")];
-    if let Ok(entries) = fs::read_dir(&root) {
-        for entry in entries.flatten() {
-            let candidate = entry.path().join("gotatun-runtime");
-            if candidate.is_dir() && !runtimes.contains(&candidate) {
-                runtimes.push(candidate);
-            }
-        }
+    if managed_tunnel::is_short_runtime(state_dir) {
+        vec![state_dir.to_path_buf()]
+    } else {
+        managed_tunnel::runtime_directories(&runtime_root(state_dir))
     }
-    runtimes
 }
 
 fn load_runtime_status(path: &Path) -> Option<RuntimeStatus> {
@@ -1581,7 +1763,16 @@ fn push_unique_identity(owners: &mut Vec<ProcessIdentity>, identity: ProcessIden
     }
     if let Some(index) = owners.iter().position(|owner| owner.pid == identity.pid) {
         let existing = &owners[index];
-        if existing.process_start_ticks == identity.process_start_ticks {
+        if existing.process_start_ticks == identity.process_start_ticks
+            && existing.process_start_id == identity.process_start_id
+        {
+            return;
+        }
+        if existing.process_start_id.is_empty() && !identity.process_start_id.is_empty() {
+            owners[index] = identity;
+            return;
+        }
+        if !existing.process_start_id.is_empty() && identity.process_start_id.is_empty() {
             return;
         }
         // Prefer an exact /proc start-time identity from owner.lock over a
@@ -1635,12 +1826,14 @@ fn current_process_identity() -> ProcessIdentity {
             pid,
             process_start_ticks,
             boot_id: linux_boot_id(),
+            process_start_id: String::new(),
         };
     }
 
     #[cfg(not(target_os = "linux"))]
     ProcessIdentity {
         pid: process::id(),
+        process_start_id: managed_tunnel::process_start_id(process::id()).unwrap_or_default(),
         ..ProcessIdentity::default()
     }
 }
@@ -1672,6 +1865,11 @@ fn process_exists(pid: u32) -> bool {
 fn process_matches_identity(identity: &ProcessIdentity) -> bool {
     if identity.pid == 0 || identity.pid == process::id() {
         return false;
+    }
+    #[cfg(any(target_os = "macos", windows))]
+    if !identity.process_start_id.is_empty() {
+        return managed_tunnel::process_start_id(identity.pid).as_deref()
+            == Some(identity.process_start_id.as_str());
     }
 
     #[cfg(target_os = "linux")]
@@ -1726,6 +1924,7 @@ fn discover_scoped_legacy_helpers(state_dir: &Path) -> Vec<ProcessIdentity> {
                     pid,
                     process_start_ticks,
                     boot_id: linux_boot_id(),
+                    process_start_id: String::new(),
                 }
             })
         })
@@ -1739,7 +1938,7 @@ fn process_exists(pid: u32) -> bool {
     }
     Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "comm="])
-        .output()
+        .bounded_output(Duration::from_secs(2))
         .ok()
         .is_some_and(|output| {
             output.status.success()
@@ -1754,7 +1953,7 @@ fn process_exists(pid: u32) -> bool {
     command
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .stdin(Stdio::null())
-        .output()
+        .bounded_output(Duration::from_secs(2))
         .ok()
         .is_some_and(|output| {
             let output = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
@@ -1795,9 +1994,9 @@ fn signal_stale_helper(identity: &ProcessIdentity, _signal: i32) -> Result<()> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
+        .bounded_output(Duration::from_secs(5))
         .context("failed launching taskkill for stale Noland helper")?;
-    if !status.success() && process_matches_identity(identity) {
+    if !status.status.success() && process_matches_identity(identity) {
         bail!(
             "taskkill could not terminate stale Noland helper PID {}",
             identity.pid
@@ -1817,6 +2016,7 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
                     pid: status.pid,
                     process_start_ticks: status.process_start_ticks,
                     boot_id: status.boot_id,
+                    process_start_id: status.process_start_id,
                 },
             );
         }
@@ -1830,7 +2030,19 @@ async fn cleanup_stale_runtime_owners(state_dir: &Path) -> Result<()> {
         }
     }
     if let Some(owner) = load_owner_record(state_dir) {
-        push_unique_identity(&mut owners, owner.identity);
+        if runtimes.contains(&PathBuf::from(&owner.state_dir)) {
+            push_unique_identity(&mut owners, owner.identity);
+        }
+    }
+    // An old generic lock is only a hint when its record names this exact scope.
+    for path in managed_tunnel::owner_record_paths(state_dir) {
+        if let Ok(bytes) = fs::read(path) {
+            if let Ok(owner) = serde_json::from_slice::<OwnerRecord>(&bytes) {
+                if runtimes.contains(&PathBuf::from(&owner.state_dir)) {
+                    push_unique_identity(&mut owners, owner.identity);
+                }
+            }
+        }
     }
     #[cfg(target_os = "linux")]
     for owner in discover_scoped_legacy_helpers(state_dir) {
@@ -1961,12 +2173,26 @@ fn acquire_transition_lock(state_dir: &Path) -> Result<File> {
                 lock_path.display()
             )
         })?;
-    lock_file.lock_exclusive().with_context(|| {
-        format!(
-            "failed acquiring tunnel transition lock {}",
-            lock_path.display()
-        )
-    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match lock_file.try_lock_exclusive() {
+            Ok(()) => break,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed acquiring tunnel transition lock {}",
+                        lock_path.display()
+                    )
+                })
+            }
+        }
+    }
     Ok(lock_file)
 }
 
@@ -1975,6 +2201,7 @@ fn write_owner_record(lock_file: &mut File, args: &Args) -> Result<()> {
         identity: current_process_identity(),
         launch_id: args.launch_id.clone(),
         state_dir: args.state_dir.display().to_string(),
+        config_path: args.config_path.display().to_string(),
     };
     lock_file.set_len(0)?;
     lock_file.seek(SeekFrom::Start(0))?;
@@ -2014,7 +2241,7 @@ fn cleanup_orphaned_linux_interface() -> Result<()> {
     let output = Command::new(ip)
         .args(["link", "delete", INTERFACE_NAME])
         .stdin(Stdio::null())
-        .output()
+        .bounded_output(Duration::from_secs(5))
         .context("failed launching iproute2 for orphaned tunnel cleanup")?;
     if !output.status.success() && Path::new("/sys/class/net").join(INTERFACE_NAME).exists() {
         bail!(
@@ -2061,9 +2288,6 @@ fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
     // The helper runs elevated on macOS, while this directory belongs to the desktop user.
     // Recreating a removed parent hierarchy here would make the app data directory root-owned
     // and prevent the desktop app from loading or saving its state on the next launch.
-    #[cfg(not(target_os = "macos"))]
-    fs::create_dir_all(parent)?;
-    #[cfg(target_os = "macos")]
     if !parent.is_dir() {
         bail!(
             "status directory disappeared while the elevated helper was running: {}",
@@ -2071,27 +2295,8 @@ fn write_status(path: &Path, status: &RuntimeStatus) -> Result<()> {
         );
     }
 
-    let serialized = serde_json::to_vec_pretty(status)?;
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(path)?;
-        file.write_all(&serialized)?;
-        file.sync_data()?;
-        return Ok(());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let temporary = parent.join(format!(".{STATUS_FILE_NAME}.tmp"));
-        fs::write(&temporary, serialized)?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    }
+    managed_tunnel::atomic_write(path, &serde_json::to_vec_pretty(status)?)?;
+    Ok(())
 }
 
 fn unix_timestamp() -> u64 {
@@ -2110,7 +2315,68 @@ mod tests {
     #[cfg(target_os = "windows")]
     use super::{resolve_effective_listen_port, udp_port_probe_ok};
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use noland_network_contracts::managed_tunnel;
     use std::{fs, net::Ipv4Addr};
+
+    #[tokio::test]
+    async fn revoked_or_expired_launch_never_creates_an_owner_or_status() {
+        let root =
+            std::env::temp_dir().join(format!("noland-launch-test-{}", uuid::Uuid::new_v4()));
+        let state_dir = managed_tunnel::runtime_dir(&root);
+        fs::create_dir_all(&state_dir).unwrap();
+        let args = super::Args {
+            command: super::HelperCommand::Run,
+            config_path: root.join("123/nolandwg0.conf"),
+            state_dir: state_dir.clone(),
+            launch_id: uuid::Uuid::new_v4().to_string(),
+            wintun_path: None,
+        };
+        assert!(super::run(super::Args {
+            command: args.command,
+            config_path: args.config_path.clone(),
+            state_dir: state_dir.clone(),
+            launch_id: args.launch_id.clone(),
+            wintun_path: None
+        })
+        .await
+        .is_err());
+        let permit = managed_tunnel::LaunchAuthorization {
+            launch_id: args.launch_id.clone(),
+            config_path: args.config_path.display().to_string(),
+            expires_at_unix: 1,
+        };
+        managed_tunnel::atomic_write(
+            &state_dir.join(managed_tunnel::LAUNCH_FILE),
+            &serde_json::to_vec(&permit).unwrap(),
+        )
+        .unwrap();
+        assert!(super::run(args).await.is_err());
+        assert!(!state_dir.join("status.json").exists());
+        assert!(!state_dir.join("owner.lock").exists());
+        fs::remove_dir_all(state_dir).unwrap();
+        if root.exists() {
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn short_runtime_does_not_use_global_tmp_locks_or_scan_tmp() {
+        let state_dir = std::path::Path::new("/tmp/noland-g-scope-test");
+        if cfg!(unix) {
+            assert_eq!(
+                super::owner_lock_path(state_dir),
+                state_dir.join("owner.lock")
+            );
+            assert_eq!(
+                super::transition_lock_path(state_dir),
+                state_dir.join("transition.lock")
+            );
+            assert_eq!(
+                super::runtime_directories(state_dir),
+                vec![state_dir.to_path_buf()]
+            );
+        }
+    }
 
     #[test]
     fn parses_linux_process_state_after_complex_command_name() {
@@ -2137,6 +2403,7 @@ mod tests {
             pid: 8604,
             process_start_ticks: 0,
             boot_id: String::new(),
+            process_start_id: String::new(),
         }];
         push_unique_identity(
             &mut owners,
@@ -2144,6 +2411,7 @@ mod tests {
                 pid: 8604,
                 process_start_ticks: 4242,
                 boot_id: "boot-a".to_string(),
+                process_start_id: String::new(),
             },
         );
         assert_eq!(owners.len(), 1);
@@ -2204,8 +2472,9 @@ mod tests {
         ));
         let global_runtime = root.join("gotatun-runtime");
         let legacy_runtime = root.join("47458589").join("gotatun-runtime");
-        assert_eq!(owner_lock_path(&global_runtime), root.join("owner.lock"));
-        assert_eq!(owner_lock_path(&legacy_runtime), root.join("owner.lock"));
+        let expected = managed_tunnel::runtime_dir(&root).join("owner.lock");
+        assert_eq!(owner_lock_path(&global_runtime), expected);
+        assert_eq!(owner_lock_path(&legacy_runtime), expected);
     }
 
     #[test]

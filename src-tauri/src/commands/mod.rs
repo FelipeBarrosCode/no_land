@@ -125,6 +125,25 @@ use crate::{
 };
 use tracing::{info, warn};
 
+/// CI sets `NOLAND_UI_READY_FILE` when exercising an installed application.
+/// Writing the marker through a Tauri command proves that the WebView loaded,
+/// React rendered usable application state, and frontend/backend IPC works.
+#[tauri::command]
+pub fn report_frontend_ready(route: String) -> Result<(), String> {
+    let Some(marker_path) = std::env::var_os("NOLAND_UI_READY_FILE") else {
+        return Ok(());
+    };
+
+    let marker = serde_json::json!({
+        "pid": std::process::id(),
+        "route": route,
+        "ready": true,
+    });
+    let encoded = serde_json::to_vec(&marker).map_err(|error| error.to_string())?;
+    std::fs::write(PathBuf::from(marker_path), encoded).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCheck {

@@ -199,6 +199,9 @@ impl InstanceLifecycleService {
                     "Failed to stop local WireGuard tunnel during owned-instance reconciliation cleanup: {}",
                     error
                 );
+                // Keep the config available for recovery while an elevated
+                // helper may still own it, even if the remote instance is gone.
+                continue;
             }
 
             remove_local_wireguard_config(config_path)?;
@@ -494,16 +497,15 @@ impl InstanceLifecycleService {
 
                     if !wireguard_config_path.trim().is_empty() {
                         let config_path = Path::new(&wireguard_config_path);
-                        if let Err(error) = teardown_local_wireguard_client(config_path) {
-                            warn!(
+                        match teardown_local_wireguard_client(config_path) {
+                            Ok(_) => remove_local_wireguard_config(config_path)?,
+                            Err(error) => warn!(
                                 instance_id = instance_id,
                                 config_path = %config_path.display(),
                                 "Failed to stop local WireGuard tunnel during destroy cleanup: {}",
                                 error
-                            );
+                            ),
                         }
-
-                        remove_local_wireguard_config(config_path)?;
                     }
 
                     let _ = context

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-import { accessSync, constants, existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { verifyPackagedRemoteAgents } from './remote-agent-artifacts.mjs';
 import { basename, dirname, join, normalize, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
-import { cleanWindowsEnvironment, smokeTestOpenSsh, verifyOpenSshRuntime } from './windows-openssh.mjs';
+import { cleanWindowsEnvironment, readPeRuntime, smokeTestOpenSsh, verifyOpenSshRuntime } from './windows-openssh.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -175,20 +175,22 @@ function verifyMacExecutableSmokeTests(appBundle, targetTriple, label) {
     fail(`Could not locate the primary macOS executable in ${label}`);
   }
 
-  const ssh = findRequiredSidecar(appBundle, targetTriple, 'ssh');
-  run(ssh, ['-V']);
-
-  const linkageSeeds = [
-    executable,
-    ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
-      .map((stem) => findRequiredSidecar(appBundle, targetTriple, stem)),
-    findFirstPath(appBundle, (path) => basename(path) === 'libgstreamer-1.0.dylib'),
-  ].filter(Boolean);
-  for (const path of linkageSeeds) {
-    verifyMacLinkage(path, label);
-  }
-
-  launchAndRequireAlive(executable, [], {}, `${label} GUI`, 8_000);
+  const cleanEnv = cleanUnixRuntimeEnv();
+  const framework = findFirstPath(appBundle, (path) => basename(path) === 'GStreamer.framework');
+  if (!framework) fail(`Could not locate bundled GStreamer.framework in ${label}`);
+  const frameworkCurrent = join(framework, 'Versions', 'Current');
+  const frameworkLib = join(frameworkCurrent, 'lib');
+  cleanEnv.DYLD_FRAMEWORK_PATH = dirname(framework);
+  cleanEnv.DYLD_FALLBACK_LIBRARY_PATH = frameworkLib;
+  cleanEnv.GST_PLUGIN_SYSTEM_PATH_1_0 = join(frameworkLib, 'gstreamer-1.0');
+  cleanEnv.GST_PLUGIN_PATH_1_0 = cleanEnv.GST_PLUGIN_SYSTEM_PATH_1_0;
+  const pluginScanner = join(frameworkCurrent, 'libexec', 'gstreamer-1.0', 'gst-plugin-scanner');
+  if (existsSync(pluginScanner)) cleanEnv.GST_PLUGIN_SCANNER_1_0 = pluginScanner;
+  smokeTestUnixOpenSsh(appBundle, targetTriple, label, cleanEnv);
+  smokeTestNetHelper(appBundle, targetTriple, label, cleanEnv);
+  smokeTestMicSender(appBundle, targetTriple, label, cleanEnv);
+  verifyAllMacNativeFiles(appBundle, label);
+  launchAndRequireFrontendReady(executable, [], cleanEnv, `${label} GUI`);
 }
 
 function findMacAppExecutable(appBundle) {
@@ -214,6 +216,19 @@ function verifyMacLinkage(path, label) {
   }
 }
 
+function verifyAllMacNativeFiles(root, label) {
+  let checked = 0;
+  for (const path of collectFiles(root).filter(isPotentialUnixNativeFile)) {
+    const kind = runCapture('file', ['-b', path], { allowFailure: true });
+    if (kind.status !== 0 || !kind.stdout.includes('Mach-O')) continue;
+    verifyMacLinkage(path, label);
+    run('codesign', ['--verify', '--strict', '--verbose=2', path]);
+    checked += 1;
+  }
+  if (checked === 0) fail(`No Mach-O files were dependency-checked in ${label}`);
+  console.log(`Verified linkage and signatures for ${checked} Mach-O files in ${label}`);
+}
+
 function parseOtoolDependencyLine(line) {
   const trimmed = line.trim();
   const metadataIndex = trimmed.lastIndexOf(' (compatibility version ');
@@ -223,40 +238,20 @@ function parseOtoolDependencyLine(line) {
 function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
   verifyLinuxLinkage(root, targetTriple, label);
   const cleanEnv = cleanLinuxRuntimeEnv();
-  const ssh = findRequiredSidecar(root, targetTriple, 'ssh');
-  verifyLinuxSystemToolWrapper(ssh, 'ssh', label);
-  run(ssh, ['-V'], { env: cleanEnv });
-
-  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
-  withExtractedTemp('noland-helper-check-', (tempRoot) => {
-    const configPath = join(tempRoot, 'wg.conf');
-    writeFileSync(configPath, [
-      '[Interface]',
-      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'Address = 10.66.66.2/32',
-      'MTU = 1280',
-      '',
-      '[Peer]',
-      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
-      'AllowedIPs = 10.66.66.1/32',
-      'Endpoint = 127.0.0.1:51820',
-      'PersistentKeepalive = 25',
-      '',
-    ].join('\n'));
-    run(helper, ['check', '--config', configPath], { env: cleanEnv });
-  });
+  smokeTestUnixOpenSsh(root, targetTriple, label, cleanEnv);
+  smokeTestNetHelper(root, targetTriple, label, cleanEnv);
+  smokeTestMicSender(root, targetTriple, label, cleanEnv);
 
   const appRun = join(root, 'AppRun');
   const executable = isExecutableFile(appRun) ? appRun : findLinuxAppExecutable(root);
   if (!executable) {
     fail(`Could not locate the Linux application executable in ${label}`);
   }
-  launchAndRequireAlive(
+  launchAndRequireFrontendReady(
     'dbus-run-session',
     ['--', 'xvfb-run', '-a', executable],
     cleanEnv,
     `${label} GUI`,
-    8_000,
   );
 }
 
@@ -266,14 +261,9 @@ function verifyLinuxLinkage(root, targetTriple, label) {
   const isPortableAppImageTree = basename(root).endsWith('.AppDir')
     || existsSync(join(root, 'AppRun'))
     || existsSync(join(root, '.DirIcon'));
-  const seeds = [
-    appExecutable,
-    ...['noland-net-helper', 'noland-mic-sender', 'ssh', 'scp', 'ssh-keygen']
-      .map((stem) => findRequiredSidecar(root, targetTriple, stem)),
-  ].filter(Boolean);
-
-  for (const path of seeds) {
-    const kind = runCapture('file', ['-b', path]);
+  let checked = 0;
+  for (const path of collectFiles(root).filter(isPotentialUnixNativeFile)) {
+    const kind = runCapture('file', ['-b', path], { allowFailure: true });
     if (!kind.stdout.includes('ELF')) continue;
     const name = basename(path);
     const wrappedTool = linuxWrappedToolNameForSidecar(name);
@@ -285,7 +275,10 @@ function verifyLinuxLinkage(root, targetTriple, label) {
     if (linkage.status !== 0 || /not found/u.test(linkage.stdout) || /not found/u.test(linkage.stderr)) {
       fail(`Unresolved Linux runtime dependencies in ${label}: ${path}\n${linkage.stdout}\n${linkage.stderr}`);
     }
+    checked += 1;
   }
+  if (checked === 0 || !appExecutable) fail(`No packaged Linux ELF files were dependency-checked in ${label}`);
+  console.log(`Verified runtime linkage for ${checked} ELF files in ${label}`);
 
   // AppImage deliberately carries its desktop runtime and launches through
   // AppRun. Native deb/rpm packages must continue using one coherent distro
@@ -444,11 +437,101 @@ function linuxDistroOwnedRuntimeLibraryPatterns() {
 }
 
 function cleanLinuxRuntimeEnv() {
+  const env = cleanUnixRuntimeEnv();
+  return env;
+}
+
+function cleanUnixRuntimeEnv() {
   const env = { ...process.env };
-  for (const name of ['LD_LIBRARY_PATH', 'NOLAND_GSTREAMER_ROOT', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SYSTEM_PATH_1_0', 'GST_PLUGIN_SCANNER_1_0']) {
+  for (const name of [
+    'LD_LIBRARY_PATH', 'DYLD_LIBRARY_PATH', 'DYLD_FALLBACK_LIBRARY_PATH', 'DYLD_FRAMEWORK_PATH',
+    'NOLAND_GSTREAMER_ROOT', 'GST_PLUGIN_PATH_1_0', 'GST_PLUGIN_SYSTEM_PATH_1_0',
+    'GST_PLUGIN_SCANNER_1_0', 'GST_REGISTRY_1_0', 'GI_TYPELIB_PATH',
+  ]) {
     delete env[name];
   }
   return env;
+}
+
+function smokeTestUnixOpenSsh(root, targetTriple, label, env) {
+  withExtractedTemp('noland-openssh-check-', (tempRoot) => {
+    const ssh = findRequiredSidecar(root, targetTriple, 'ssh');
+    const scp = findRequiredSidecar(root, targetTriple, 'scp');
+    const keygen = findRequiredSidecar(root, targetTriple, 'ssh-keygen');
+    if (targetTriple.includes('linux')) {
+      verifyLinuxSystemToolWrapper(ssh, 'ssh', label);
+      verifyLinuxSystemToolWrapper(scp, 'scp', label);
+      verifyLinuxSystemToolWrapper(keygen, 'ssh-keygen', label);
+    }
+    run(ssh, ['-V'], { cwd: tempRoot, env });
+    const scpUsage = runCapture(scp, [], { cwd: tempRoot, env, allowFailure: true });
+    if (scpUsage.status !== 1 || !/usage:/iu.test(`${scpUsage.stdout}\n${scpUsage.stderr}`)) {
+      fail(`Packaged scp did not execute its usage path in ${label}\n${scpUsage.stdout}\n${scpUsage.stderr}`);
+    }
+    const key = join(tempRoot, 'test key');
+    run(keygen, ['-t', 'ed25519', '-f', key, '-N', '', '-C', 'package-test'], { cwd: tempRoot, env });
+    const derived = runCapture(keygen, ['-y', '-f', key], { cwd: tempRoot, env }).stdout.trim();
+    const stored = readFileSync(`${key}.pub`, 'utf8').trim().split(/\s+/u).slice(0, 2).join(' ');
+    if (derived !== stored) fail(`Packaged ssh-keygen public-key round trip failed in ${label}`);
+  });
+}
+
+function smokeTestNetHelper(root, targetTriple, label, env) {
+  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
+  withExtractedTemp('noland-helper-check-', (tempRoot) => {
+    const configPath = join(tempRoot, 'wg.conf');
+    writeFileSync(configPath, [
+      '[Interface]',
+      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'Address = 10.66.66.2/32',
+      'MTU = 1280',
+      '',
+      '[Peer]',
+      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+      'AllowedIPs = 10.66.66.1/32',
+      'Endpoint = 127.0.0.1:51820',
+      'PersistentKeepalive = 25',
+      '',
+    ].join('\n'));
+    run(helper, ['check', '--config', configPath], { cwd: tempRoot, env });
+  });
+}
+
+function smokeTestMicSender(root, targetTriple, label, env, { exercisePipeline = true } = {}) {
+  const micSender = findRequiredSidecar(root, targetTriple, 'noland-mic-sender');
+  withExtractedTemp('noland-mic-check-', (tempRoot) => {
+    const runtimeEnv = { ...env, GST_REGISTRY_FORK: 'no', GST_REGISTRY_1_0: join(tempRoot, 'registry.bin') };
+    const requests = exercisePipeline ? [
+      { id: 'status-before', command: 'getStatus' },
+      { id: 'start', command: 'startSession', config: {
+        sessionId: 'package-test', host: '127.0.0.1', rtpPort: 49152, source: 'sine',
+      } },
+      { id: 'metrics', command: 'getMetrics' },
+      { id: 'stop', command: 'stopSession' },
+      { id: 'shutdown', command: 'shutdown' },
+    ] : [
+      { id: 'status', command: 'getStatus' },
+      { id: 'shutdown', command: 'shutdown' },
+    ];
+    const result = spawnSync(micSender, ['daemon'], {
+      cwd: tempRoot,
+      env: runtimeEnv,
+      encoding: 'utf8',
+      timeout: 30_000,
+      windowsHide: true,
+      input: `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
+    });
+    let responses = [];
+    try {
+      responses = (result.stdout || '').split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
+    } catch (error) {
+      fail(`Packaged microphone sidecar emitted invalid JSON in ${label}: ${error}\n${result.stdout || ''}`);
+    }
+    if (result.error || result.status !== 0 || requests.some((request) =>
+      !responses.some((response) => response.type === 'response' && response.id === request.id && response.ok))) {
+      fail(`Packaged microphone pipeline failed in ${label}: ${result.error?.message || ''}\n${result.stdout || ''}\n${result.stderr || ''}`);
+    }
+  });
 }
 
 function linuxWrappedToolNameForSidecar(name) {
@@ -494,30 +577,84 @@ function isExecutableFile(path) {
   }
 }
 
-function launchAndRequireAlive(command, args, env, label, durationMs) {
-  const child = spawn(command, args, {
-    cwd: repoRoot,
-    env: { ...process.env, ...env },
-    stdio: 'ignore',
-  });
-  if (!child.pid) {
-    fail(`Failed to launch ${label}: ${command}`);
-  }
+function launchAndRequireFrontendReady(command, args, env, label) {
+  withExtractedTemp('noland-app-smoke-', (tempRoot) => {
+    const home = join(tempRoot, 'home');
+    const dataHome = join(tempRoot, 'data');
+    const configHome = join(tempRoot, 'config');
+    const cacheHome = join(tempRoot, 'cache');
+    for (const path of [home, dataHome, configHome, cacheHome]) mkdirSync(path, { recursive: true });
 
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs);
-  let alive = true;
+    for (const attempt of ['first-run', 'relaunch']) {
+      const readyFile = join(tempRoot, `frontend-ready-${attempt}.json`);
+      const runtimeEnv = {
+        ...process.env,
+        ...env,
+        HOME: home,
+        XDG_DATA_HOME: dataHome,
+        XDG_CONFIG_HOME: configHome,
+        XDG_CACHE_HOME: cacheHome,
+        NOLAND_UI_READY_FILE: readyFile,
+      };
+      const child = spawn(command, args, { cwd: repoRoot, env: runtimeEnv, stdio: 'ignore' });
+      if (!child.pid) fail(`Failed to launch ${label} during ${attempt}: ${command}`);
+
+      let marker = null;
+      const deadline = Date.now() + 40_000;
+      while (Date.now() < deadline) {
+        if (!processIsAlive(child.pid)) {
+          fail(`${label} exited before frontend readiness during ${attempt}`);
+        }
+        if (existsSync(readyFile)) {
+          try {
+            marker = JSON.parse(readFileSync(readyFile, 'utf8'));
+          } catch {
+            marker = null;
+          }
+          if (marker?.ready === true && Number.isInteger(marker.pid) && marker.pid > 0 && marker.route) break;
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      }
+
+      if (!marker?.ready || !marker.route || !processIsAlive(marker.pid)) {
+        const startupLog = join(tmpdir(), 'noland-connect-startup.log');
+        const diagnostics = existsSync(startupLog) ? readFileSync(startupLog, 'utf8') : 'No startup diagnostic log was produced.';
+        terminateProcess(child.pid, marker?.pid);
+        fail(`${label} did not render a working frontend during ${attempt}\n${diagnostics}`);
+      }
+
+      // Keep the rendered app alive briefly to catch post-initialization crashes.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2_000);
+      if (!processIsAlive(marker.pid)) {
+        terminateProcess(child.pid, marker.pid);
+        fail(`${label} crashed immediately after frontend readiness during ${attempt}`);
+      }
+      terminateProcess(child.pid, marker.pid);
+    }
+  });
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    process.kill(child.pid, 0);
+    process.kill(pid, 0);
+    return true;
   } catch {
-    alive = false;
+    return false;
   }
-  if (alive) {
-    child.kill('SIGTERM');
-    spawnSync('pkill', ['-TERM', '-P', String(child.pid)], { stdio: 'ignore' });
-    spawnSync('kill', ['-KILL', String(child.pid)], { stdio: 'ignore' });
+}
+
+function terminateProcess(launcherPid, appPid) {
+  for (const pid of new Set([appPid, launcherPid].filter((value) => Number.isInteger(value) && value > 0))) {
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already exited */ }
   }
-  if (!alive) {
-    fail(`${label} exited before the ${durationMs / 1000}-second package smoke test completed`);
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1_000);
+  if (process.platform !== 'win32') {
+    spawnSync('pkill', ['-TERM', '-P', String(launcherPid)], { stdio: 'ignore' });
+  }
+  for (const pid of new Set([appPid, launcherPid].filter((value) => Number.isInteger(value) && value > 0))) {
+    if (!processIsAlive(pid)) continue;
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ }
   }
 }
 
@@ -623,29 +760,17 @@ function verifyWindowsNsisInstallation(targetTriple, nsisInstallerPath) {
 }
 
 function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
+  verifyAllWindowsPeDependencies(root, targetTriple, label);
   const runtime = findFirstPath(root, (path) => basename(path) === targetTriple
     && basename(dirname(path)) === 'ssh-runtime');
   if (!runtime) fail(`Missing private OpenSSH distribution in ${label}`);
   withExtractedTemp('noland windows ssh ', (tempRoot) => smokeTestOpenSsh(runtime, tempRoot));
 
   const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
-  withExtractedTemp('noland windows helper ', (tempRoot) => {
-    const configPath = join(tempRoot, 'tunnel config.conf');
-    writeFileSync(configPath, [
-      '[Interface]',
-      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'Address = 10.66.66.2/32',
-      'MTU = 1280',
-      '',
-      '[Peer]',
-      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
-      'AllowedIPs = 10.66.66.1/32',
-      'Endpoint = 127.0.0.1:51820',
-      'PersistentKeepalive = 25',
-      '',
-    ].join('\n'));
-    run(helper, ['check', '--config', configPath], { env: cleanWindowsEnvironment() });
-  });
+  smokeTestNetHelper(root, targetTriple, label, cleanWindowsEnvironment());
+  const wintun = findFirstPath(root, (path) => /^wintun(?:-.+)?\.dll$/iu.test(basename(path)));
+  if (!wintun) fail(`Could not locate packaged Wintun DLL for executable probing in ${label}`);
+  run(helper, ['probe-wintun', '--wintun', wintun], { env: cleanWindowsEnvironment() });
 
   const expectedAppExecutableNames = new Set([
     'noland-connect.exe',
@@ -661,35 +786,16 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
 
   const appDirectory = normalize(resolve(dirname(appExecutable))).toLocaleLowerCase();
   const micSender = findRequiredSidecar(root, targetTriple, 'noland-mic-sender');
+  const micEnv = cleanWindowsEnvironment();
   if (!targetTriple.includes('aarch64')) {
     const gstRoot = findFirstPath(root, (path) => basename(path) === targetTriple
       && basename(dirname(path)) === 'gstreamer');
     if (!gstRoot) fail(`Missing private GStreamer runtime in ${label}`);
-    withExtractedTemp('noland windows mic ', (tempRoot) => {
-      const env = cleanWindowsEnvironment();
-      env.PATH = `${join(gstRoot, 'bin')};${env.PATH}`;
-      env.GST_PLUGIN_SYSTEM_PATH_1_0 = join(gstRoot, 'lib', 'gstreamer-1.0');
-      env.GST_PLUGIN_PATH_1_0 = env.GST_PLUGIN_SYSTEM_PATH_1_0;
-      env.GST_REGISTRY_FORK = 'no';
-      env.GST_REGISTRY_1_0 = join(tempRoot, 'registry.bin');
-      const requests = [
-        { id: 'start', command: 'startSession', config: {
-          sessionId: 'package-test', host: '127.0.0.1', rtpPort: 49152, source: 'sine',
-        } },
-        { id: 'stop', command: 'stopSession' },
-        { id: 'shutdown', command: 'shutdown' },
-      ];
-      const result = spawnSync(micSender, ['daemon'], {
-        cwd: tempRoot, env, encoding: 'utf8', timeout: 30_000, windowsHide: true,
-        input: `${requests.map((request) => JSON.stringify(request)).join('\n')}\n`,
-      });
-      const responses = (result.stdout || '').split(/\r?\n/u).filter(Boolean).map((line) => JSON.parse(line));
-      if (result.error || result.status !== 0 || requests.some((request) =>
-        !responses.some((response) => response.type === 'response' && response.id === request.id && response.ok))) {
-        fail(`Packaged microphone pipeline failed in ${label}: ${result.error?.message || ''}\n${result.stdout || ''}\n${result.stderr || ''}`);
-      }
-    });
+    micEnv.PATH = `${join(gstRoot, 'bin')};${micEnv.PATH}`;
+    micEnv.GST_PLUGIN_SYSTEM_PATH_1_0 = join(gstRoot, 'lib', 'gstreamer-1.0');
+    micEnv.GST_PLUGIN_PATH_1_0 = micEnv.GST_PLUGIN_SYSTEM_PATH_1_0;
   }
+  smokeTestMicSender(root, targetTriple, label, micEnv, { exercisePipeline: !targetTriple.includes('aarch64') });
   for (const [name, sidecar] of [
     ['noland-net-helper', helper],
     ['noland-mic-sender', micSender],
@@ -702,16 +808,85 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
     }
   }
 
-  const quotePowerShell = (value) => `'${String(value).replaceAll("'", "''")}'`;
-  const script = [
-    `$process = Start-Process -FilePath ${quotePowerShell(appExecutable)} -PassThru`,
-    'Start-Sleep -Seconds 8',
-    '$process.Refresh()',
-    'if ($process.HasExited) { Write-Error "Noland exited during the Windows installer smoke test with code $($process.ExitCode)"; exit 1 }',
-    'Stop-Process -Id $process.Id -Force',
-  ].join('; ');
-  run(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
-    ['-NoProfile', '-NonInteractive', '-Command', script], { env: cleanWindowsEnvironment() });
+  withExtractedTemp('noland windows app ', (tempRoot) => {
+    const quotePowerShell = (value) => `'${String(value).replaceAll("'", "''")}'`;
+    const readyFile = join(tempRoot, 'frontend-ready.json');
+    const startupLog = join(tmpdir(), 'noland-connect-startup.log');
+    const appData = join(tempRoot, 'appdata');
+    const localAppData = join(tempRoot, 'localappdata');
+    const script = [
+      '$ErrorActionPreference = "Stop"',
+      `New-Item -ItemType Directory -Force -Path ${quotePowerShell(appData)}, ${quotePowerShell(localAppData)} | Out-Null`,
+      'function Invoke-NolandLaunchSmoke([string]$Attempt) {',
+      `  Remove-Item -LiteralPath ${quotePowerShell(readyFile)} -Force -ErrorAction SilentlyContinue`,
+      `  $process = Start-Process -FilePath ${quotePowerShell(appExecutable)} -PassThru`,
+      '  try {',
+      '    $deadline = [DateTime]::UtcNow.AddSeconds(40)',
+      '    $windowReady = $false',
+      '    $frontendReady = $false',
+      '    while ([DateTime]::UtcNow -lt $deadline) {',
+      '      Start-Sleep -Milliseconds 250',
+      '      $process.Refresh()',
+      '      if ($process.HasExited) { throw "Noland exited during $Attempt launch with code $($process.ExitCode)" }',
+      '      $windowReady = $process.MainWindowHandle -ne 0 -and $process.MainWindowTitle -eq "Noland Connect"',
+      `      $frontendReady = Test-Path -LiteralPath ${quotePowerShell(readyFile)} -PathType Leaf`,
+      '      if ($windowReady -and $frontendReady) { break }',
+      '    }',
+      '    if (-not $windowReady) { throw "Noland did not create its visible main window during $Attempt launch (title: $($process.MainWindowTitle))" }',
+      '    if (-not $frontendReady) { throw "Noland frontend did not finish rendering during $Attempt launch" }',
+      `    $ready = Get-Content -LiteralPath ${quotePowerShell(readyFile)} -Raw | ConvertFrom-Json`,
+      '    if ($ready.ready -ne $true -or $ready.pid -ne $process.Id -or [string]::IsNullOrWhiteSpace($ready.route)) { throw "Invalid frontend readiness marker during $Attempt launch" }',
+      '    if (-not $process.CloseMainWindow()) { throw "Noland main window rejected a normal close during $Attempt launch" }',
+      '    if (-not $process.WaitForExit(10000)) { throw "Noland did not exit cleanly after $Attempt launch" }',
+      '  } finally {',
+      '    $process.Refresh()',
+      '    if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }',
+      '  }',
+      '}',
+      'try {',
+      '  Invoke-NolandLaunchSmoke "first-run"',
+      '  Invoke-NolandLaunchSmoke "relaunch"',
+      '} catch {',
+      `  if (Test-Path -LiteralPath ${quotePowerShell(startupLog)}) { Write-Host '--- Noland startup diagnostics ---'; Get-Content -LiteralPath ${quotePowerShell(startupLog)} -Tail 200 }`,
+      '  throw',
+      '}',
+    ].join('\n');
+    const env = cleanWindowsEnvironment();
+    env.NOLAND_UI_READY_FILE = readyFile;
+    env.APPDATA = appData;
+    env.LOCALAPPDATA = localAppData;
+    run(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      ['-NoProfile', '-NonInteractive', '-Command', script], { env });
+  });
+}
+
+function verifyAllWindowsPeDependencies(root, targetTriple, label) {
+  const expectedMachine = targetTriple.startsWith('aarch64-') ? 0xaa64 : 0x8664;
+  const nativeFiles = collectFiles(root).filter((path) => /\.(?:exe|dll)$/iu.test(path));
+  const packagedNames = new Set(nativeFiles.map((path) => basename(path).toLocaleLowerCase()));
+  const system32 = join(process.env.SystemRoot || 'C:\\Windows', 'System32');
+  let checked = 0;
+  for (const path of nativeFiles) {
+    const info = readPeRuntime(path);
+    const normalizedPath = normalize(path).split('\\').join('/').toLocaleLowerCase();
+    const name = basename(path).toLocaleLowerCase();
+    const mustMatchTarget = name.includes('noland')
+      || name.startsWith('wintun')
+      || normalizedPath.includes('/gstreamer/')
+      || normalizedPath.includes('/ssh-runtime/');
+    if (mustMatchTarget && info.machine !== expectedMachine) {
+      fail(`Wrong PE architecture in ${label}: ${path} (machine 0x${info.machine.toString(16)}, expected ${targetTriple})`);
+    }
+    for (const imported of info.imports) {
+      const importName = imported.toLocaleLowerCase();
+      if (!packagedNames.has(importName) && !existsSync(join(system32, imported))) {
+        fail(`Unresolved Windows import in ${label}: ${path} requires ${imported}`);
+      }
+    }
+    checked += 1;
+  }
+  if (checked === 0) fail(`No Windows PE files were dependency-checked in ${label}`);
+  console.log(`Verified architecture and direct/delay imports for ${checked} PE files in ${label}`);
 }
 
 function verifyRequiredSidecars(root, targetTriple, label) {
@@ -828,6 +1003,36 @@ function findFirstPath(root, predicate) {
     }
   }
   return null;
+}
+
+function collectFiles(root) {
+  if (!existsSync(root)) return [];
+  const files = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(current, entry.name);
+      if (entry.isDirectory()) stack.push(path);
+      else if (entry.isFile()) files.push(path);
+    }
+  }
+  return files;
+}
+
+function isPotentialUnixNativeFile(path) {
+  if (/\.(?:dylib|bundle|so(?:\.[0-9.]+)?)$/iu.test(path)) return true;
+  try {
+    return (statSync(path).mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }
 
 function run(command, args, options = {}) {

@@ -4,6 +4,7 @@ pub mod control;
 pub mod errors;
 pub mod evaluation;
 pub mod events;
+pub mod managed_tunnel;
 pub mod probe;
 pub mod state;
 
