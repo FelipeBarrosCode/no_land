@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 import { ModalFrame } from "./ModalFrame";
 import { translateSource, useLocalization, translate } from "../../lib/i18n";
+import { getProvisioningModalEstimate } from "../../lib/provisioningEstimates";
 
 export type BlockingLoaderMode = "indeterminate" | "determinate";
 
@@ -71,6 +72,7 @@ export function BlockingLoaderOverlay({
   }, [action.stage]);
 
   const showStopControl = action.key === "provisioning.flow";
+  const provisioningEstimate = getProvisioningModalEstimate(action);
   const showInstanceInactiveWarning =
     showStopControl &&
     action.stage === "WaitingForInstance" &&
@@ -112,6 +114,11 @@ export function BlockingLoaderOverlay({
             {translate("generated.1d45424d88d8b8d5")}
           </p>
           <h2 className="mt-1 font-display text-base text-white md:text-lg">{translateSource(action.label)}</h2>
+          {provisioningEstimate && (
+            <p className="mt-2 text-[1.15rem] leading-snug text-[#91b7d8]">
+              {provisioningEstimate}
+            </p>
+          )}
           {action.detail && <p className="mt-2 text-[1.25rem] leading-[1.08] text-[#c6dbf4]">{translateSource(action.detail)}</p>}
 
           {showInstanceInactiveWarning && (
