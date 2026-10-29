@@ -23,6 +23,8 @@ jobs:
             network-contracts
             network-agent
       - run: npm ci
+      - name: No-build Sunshine and workflow regression tests
+        run: node --test scripts/sunshine-auth.test.mjs scripts/ci/*.test.mjs
       - name: Existing unit-test entry point
         run: npm run test:unit
       - name: Verify provisioning package plans and dual-architecture artifacts
@@ -49,6 +51,9 @@ jobs:
       - name: Prepare required desktop sidecars
         run: node scripts/prepare-mic-sidecar.mjs dev
       - name: Run desktop workspace tests
+        env:
+          # Unit tests do not package release-only agent archives.
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets
 
   state-agent-tests:
