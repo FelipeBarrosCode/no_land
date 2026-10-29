@@ -101,19 +101,19 @@ jobs:
       - name: Cargo check
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[],"resources":[]}}'
         run: cargo check --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
       - name: Clippy strict baseline
         if: matrix.strict
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[],"resources":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets -- -D warnings
       - name: Clippy existing-warning baseline
         if: matrix.strict == false
         env:
           NOLAND_SKIP_NATIVE_BUILD: ${{ matrix.skip_native_build && '1' || '' }}
-          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[]}}'
+          TAURI_CONFIG: '{"build":{"frontendDist":"ci-dist"},"bundle":{"externalBin":[],"resources":[]}}'
         run: cargo clippy --locked --manifest-path "${{ matrix.manifest }}" --workspace --all-targets
 
   unit-tests:
@@ -132,6 +132,8 @@ jobs:
             network-contracts
             network-agent
       - run: npm ci
+      - name: No-build Sunshine and CI regression tests
+        run: node --test scripts/sunshine-auth.test.mjs scripts/ci/*.test.mjs
       - run: npm run test:unit
 
   security:

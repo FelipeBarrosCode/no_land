@@ -1048,6 +1048,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         key: "provisioning.flow",
         label: translate("generated.83fae8da085af6f1"),
         detail,
+        stage: state.appState?.orchestrationState ?? "CreatingInstance",
         progress:
           getProvisioningProgress(
             state.appState?.orchestrationState ?? "CreatingInstance",

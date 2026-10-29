@@ -1,4 +1,5 @@
 import { translate, translateSource } from "../../lib/i18n";
+import { getProvisioningEstimate } from "../../lib/provisioningEstimates";
 import { useMemo } from "react";
 import { Button } from "../../components/ui/Button";
 
@@ -117,6 +118,7 @@ export function PostWireguardModal({
       zIndexClassName="z-40"
     >
         <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#3e4270] px-6 py-4">
+          <div className="min-w-0">
           <h3
             className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
             data-text={
@@ -129,6 +131,10 @@ export function PostWireguardModal({
               ? translate("generated.4b4703dd718bd7bd")
               : translate("generated.5d5de3cdf5086b8a")}
           </h3>
+          <p className="mt-2 text-[1.15rem] leading-snug text-[#98adc9]">
+            {getProvisioningEstimate(appState.orchestrationState)}
+          </p>
+          </div>
           <div className="flex items-center gap-2">
             <AIPromptHelper
               topic={

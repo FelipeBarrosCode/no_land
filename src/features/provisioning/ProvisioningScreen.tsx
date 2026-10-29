@@ -5,6 +5,7 @@ import type { BlockingActionState } from "../../components/ui/BlockingLoaderOver
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { PROVISIONING_ORDER } from "../../lib/constants";
+import { getProvisioningEstimate } from "../../lib/provisioningEstimates";
 import type {
   PersistedAppState,
   ProvisioningEvent,
@@ -155,6 +156,9 @@ export function ProvisioningScreen({
                     {blockingAction.detail}
                   </p>
                 )}
+                <p className="mt-2 text-[1.05rem] leading-snug text-[#8fb5d4]">
+                  {getProvisioningEstimate(blockingAction.stage)}
+                </p>
               </div>
             )}
               <h2 className="font-display text-sm uppercase tracking-[0.12em] text-neon-lime">
@@ -179,6 +183,9 @@ export function ProvisioningScreen({
                     <span className="font-display text-[16px] uppercase tracking-[0.1em] text-slate-100">
                       {step}
                     </span>
+                    <p className="mt-2 text-[1.05rem] leading-snug text-[#98adc9]">
+                      {getProvisioningEstimate(step)}
+                    </p>
                   </li>
                 );
               })}
