@@ -125,10 +125,8 @@ test("the observed public 403 with readable revisions and zero manifests warns a
   assert.deepEqual(f.calls, ["review", "metadata", "revisions", "graph"]);
   assert.deepEqual(f.outputs, [["supported", "false"]]);
   assert.equal(f.warnings.length, 1);
-  assert.match(f.warnings[0], /Enable the free Dependency graph/u);
-  assert.ok(f.warnings[0].includes("https://github.com/base-owner/base-repo/settings/security_analysis"));
-  assert.match(f.warnings[0], /full npm and Rust dependency-security audits passed and remain required/u);
-  assert.match(f.warnings[0], /PR dependency-diff review was not performed/u);
+  assert.equal(f.warnings[0],
+    "Dependency review is unavailable for this public repository (403 and no indexed dependency graph). Enable the free Dependency graph at https://github.com/base-owner/base-repo/settings/security_analysis. The full npm and Rust dependency-security audits passed and remain required; PR dependency-diff review was not performed.");
   assert.deepEqual(f.summary, [
     ["heading", "Dependency review fallback"], ["message", f.warnings[0]], ["write"],
   ]);
