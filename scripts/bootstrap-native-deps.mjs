@@ -16,7 +16,7 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { resolveOpenSshRoot, stageOpenSshRuntime } from './windows-openssh.mjs';
+import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -204,7 +204,7 @@ function bootstrapWindowsTarget(targetTriple) {
     ? ensureWindowsGstreamerRoot(prefix, targetTriple)
     : null;
   const libclangRoot = ensureWindowsLibclangRoot(targetTriple);
-  const openSshRoot = ensureWindowsOpenSshRoot(targetTriple);
+  const openSshRoot = ensureWindowsOpenSshRoot(targetTriple, srcTauriDir);
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
   console.log(`  prefix: ${prefix}`);
@@ -534,13 +534,6 @@ function ensureWindowsLibclangRoot(targetTriple) {
   throw new Error(`Downloaded LLVM archive did not contain libclang.dll for ${targetTriple}`);
 }
 
-function ensureWindowsOpenSshRoot(targetTriple) {
-  const cacheRoot = join(nativeDepsRoot, 'cache', `openssh-${targetTriple}`);
-  const stagedRoot = join(cacheRoot, 'root');
-  const sourceRoot = resolveOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
-  stageOpenSshRuntime(sourceRoot, stagedRoot, targetTriple);
-  return stagedRoot;
-}
 
 function ensureOpenSsl(prefix, targetTriple) {
   const cryptoLib = join(prefix, 'lib', 'libcrypto.3.dylib');

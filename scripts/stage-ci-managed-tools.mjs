@@ -3,7 +3,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, rmSync,
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { resolveOpenSshRoot } from './windows-openssh.mjs';
+import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -67,7 +67,7 @@ function stageWindowsTools(targetTriple) {
     fail(`Windows CI managed-tool staging for ${targetTriple} must run on a Windows host.`);
   }
 
-  const root = resolveOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
+  const root = ensureWindowsOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
   const envAssignments = {
     NOLAND_WINTUN_DLL: stageWintun(targetTriple),
     NOLAND_OPENSSH_ROOT: root,

@@ -41,10 +41,9 @@
       "binaries/noland-mic-sender"
     ],
     "resources": [
-      "binaries/ssh-*",
+      "binaries/ssh-[ax]*",
       "binaries/scp-*",
       "binaries/ssh-keygen-*",
-      "binaries/ssh-runtime/**/*",
       "../vm-cloud-mic-agent/Cargo.toml",
       "../vm-cloud-mic-agent/Cargo.lock",
       "../vm-cloud-mic-agent/src/**/*",
