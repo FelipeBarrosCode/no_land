@@ -483,6 +483,7 @@ fn main() {
             });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
+            services::feedback::FeedbackProgramService::start(app.handle().clone(), context.clone());
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
             let spend_app = app.handle().clone();
@@ -508,6 +509,10 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Focused(true)) {
+                let context = window.state::<AppContext>().inner().clone();
+                tauri::async_runtime::spawn(async move { context.feedback.foreground(&context).await; });
+            }
             if window.label() != moonlight::platform::STREAM_WINDOW_LABEL {
                 return;
             }
@@ -551,6 +556,7 @@ fn main() {
                 return;
             };
 
+
             let close_state = window.state::<moonlight::platform::StreamWindowCloseState>();
             if close_state.allow_close() {
                 return;
@@ -571,6 +577,7 @@ fn main() {
             let network_monitor = app.state::<network_monitor::NetworkMonitor>().inner().clone();
 
             tauri::async_runtime::spawn(async move {
+                services::feedback::before_teardown(&app, &mic_context).await;
                 network_monitor.stop().await;
                 mic_context.set_stream_network_active(false);
                 let _ = runtime.stop().await;
@@ -595,6 +602,18 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            provider_creation_clear_unconfirmed,
+            feedback_program_status,
+            feedback_program_notices,
+            feedback_program_enroll,
+            feedback_program_consent,
+            feedback_program_delete,
+            feedback_machine_summaries,
+            feedback_machine_reviews,
+            feedback_review_report,
+            feedback_review_block_author,
+            feedback_review_eligibility,
+            feedback_stage_review,
             get_auto_shutdown_settings,
             get_instance_auto_shutdown_status,
             save_auto_shutdown_settings,
@@ -736,12 +755,20 @@ fn main() {
             moonlight_get_session_state,
             network_monitor_get_state
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|error| {
             let message = format!("error while running tauri application: {error}");
             write_startup_diagnostic("tauri-run", &message);
             error!("{message}");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+                if let Some(context) = app.try_state::<AppContext>() {
+                    // Bounded best effort, no feedback HTTP on application shutdown.
+                    tauri::async_runtime::block_on(services::feedback::before_teardown(app, context.inner()));
+                }
+            }
         });
 }
 

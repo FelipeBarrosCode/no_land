@@ -20,17 +20,29 @@ impl InstanceManager {
     pub async fn create_instance(
         &self,
         api: &VastApiClient,
+        context: &super::app_context::AppContext,
+        pending_feedback: Option<&str>,
+        label: &str,
         offer_id: u64,
         template_hash: &str,
         storage_gb: u32,
         env_vars: Option<serde_json::Value>,
     ) -> AppResult<VastInstance> {
+        let pending_feedback = pending_feedback.map(str::to_string);
         api.create_instance(
             offer_id,
             template_hash,
             storage_gb,
-            "Noland Connect Session",
+            label,
             env_vars,
+            |instance_id| async move {
+                super::provider_creation::ProviderCreationService::accepted(
+                    context,
+                    pending_feedback,
+                    instance_id,
+                )
+                .await;
+            },
         )
         .await
     }

@@ -46,6 +46,27 @@ impl JsonStateStore {
         let mut baseline = serde_json::to_value(PersistedAppState::default())?;
         reconcile_json(&mut baseline, &raw_value);
 
+        // Consent is not a preferences object: never merge malformed fields with defaults.
+        // A future root schema also cannot authorize collection in this client.
+        let feedback = if raw_value
+            .get("version")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            <= u64::from(self.current_version)
+        {
+            raw_value
+                .get("feedbackProgram")
+                .cloned()
+                .and_then(|value| {
+                    serde_json::from_value::<crate::models::feedback::FeedbackProgramState>(value)
+                        .ok()
+                })
+                .map(crate::models::feedback::FeedbackProgramState::validated)
+                .unwrap_or_default()
+        } else {
+            Default::default()
+        };
+        baseline["feedbackProgram"] = serde_json::to_value(feedback)?;
         let mut migrated: PersistedAppState = serde_json::from_value(baseline)?;
         let current_instance_id = migrated.instance.instance_id;
         let direct_endpoint = (!migrated.wireguard.endpoint_host.trim().is_empty()
@@ -265,6 +286,28 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         base.join("state.json")
+    }
+
+    #[test]
+    fn feedback_consent_is_never_repaired_by_preferences_reconciliation() {
+        let store = JsonStateStore::new(PathBuf::from("state.json"), 5);
+        let malformed = json!({"version":4,"onboardingCompleted":true,"credentials":{"appUsername":"preserved"},
+            "feedbackProgram":{"schemaVersion":1,"enabled":true,"optionalContextEnabled":true}});
+        let migrated = store.migrate_value(malformed).unwrap();
+        assert!(migrated.onboarding_completed);
+        assert_eq!(migrated.credentials.app_username, "preserved");
+        assert!(!migrated.feedback_program.enabled);
+        assert!(migrated.feedback_program.installation_id.is_none());
+        let mut future = serde_json::to_value(PersistedAppState::default()).unwrap();
+        future["version"] = json!(999);
+        future["feedbackProgram"]["enabled"] = json!(true);
+        assert!(
+            !store
+                .migrate_value(future)
+                .unwrap()
+                .feedback_program
+                .enabled
+        );
     }
 
     #[test]

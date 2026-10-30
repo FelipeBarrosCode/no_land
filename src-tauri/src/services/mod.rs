@@ -6,6 +6,7 @@ pub mod cloudflare_turn;
 pub mod connection_manager;
 pub mod diagnostics;
 pub mod display_profile;
+pub mod feedback;
 pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
@@ -24,6 +25,7 @@ pub mod os_detection;
 mod package_manager;
 
 pub mod post_wireguard_setup;
+pub mod provider_creation;
 mod provisioning;
 pub mod reboot_helper;
 pub mod remote_display;

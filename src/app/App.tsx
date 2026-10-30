@@ -11,6 +11,7 @@ import { Card } from "../components/ui/Card";
 import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
+import { FeedbackProgramEntry } from "../features/feedback/FeedbackProgramEntry";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
@@ -976,6 +977,7 @@ export function App() {
         </div>
       )}
 
+      <FeedbackProgramEntry />
       <HashRouter>
         <Routes>
           <Route path="/" element={<RootRoute />} />

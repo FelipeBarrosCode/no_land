@@ -96,6 +96,7 @@ import {
   clearCloudflareTurnSettings as clearCloudflareTurnSettingsCommand,
 } from "../lib/backend";
 import { PROVISIONING_ORDER } from "../lib/constants";
+import { useFeedbackStore } from "../features/feedback/feedbackStore";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
 import type {
   AutoShutdownSettings,
@@ -2501,6 +2502,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
 
     destroyInstance: async (instanceId) => {
+      let providerDestroyed = false;
       await runInstanceTask(
         {
           key: "instance.destroy",
@@ -2511,6 +2513,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         async () => {
           await destroyInstance(instanceId);
+          providerDestroyed = true;
           const appState = await getAppState();
           set((state) => ({
             appState,
@@ -2523,6 +2526,8 @@ export const useAppStore = create<AppStore>((set, get) => {
         },
         undefined,
       );
+      useFeedbackStore.getState().invalidate();
+      if (!providerDestroyed) throw new Error("Rental destruction was not confirmed.");
     },
 
 

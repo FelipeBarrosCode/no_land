@@ -173,14 +173,19 @@ impl VastApiClient {
         Ok(offers)
     }
 
-    pub async fn create_instance(
+    pub async fn create_instance<F, Fut>(
         &self,
         offer_id: u64,
         template_hash: &str,
         storage_gb: u32,
         label: &str,
         env_vars: Option<serde_json::Value>,
-    ) -> AppResult<VastInstance> {
+        on_confirmed: F,
+    ) -> AppResult<VastInstance>
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
         let url = format!(
             "{}/api/v0/asks/{offer_id}/",
             self.base_url.trim_end_matches('/')
@@ -215,7 +220,23 @@ impl VastApiClient {
             .await
             .map_err(|error| map_send_error("PUT", &url, error))?;
 
-        let body = parse_response(response, "PUT", &url, started).await?;
+        let status = response.status();
+        let definite_rejection =
+            status.is_client_error() && status != reqwest::StatusCode::REQUEST_TIMEOUT;
+        let parsed = parse_response(response, "PUT", &url, started).await;
+        let body = match parsed {
+            Ok(body) => body,
+            Err(error) if definite_rejection => {
+                return Err(AppError::ProviderCreationRejected(error.to_string()))
+            }
+            Err(error) => return Err(error),
+        };
+        if body.get("success").and_then(Value::as_bool) == Some(false) {
+            return Err(AppError::ProviderCreationRejected(format!(
+                "Vast explicitly declined creation: {}",
+                abbreviate_text(&body.to_string())
+            )));
+        }
         info!(
             "Vast create_instance raw response offer_id={} body={}",
             offer_id,
@@ -224,7 +245,8 @@ impl VastApiClient {
         let contract_id = body
             .get("new_contract")
             .or_else(|| body.get("instance_id"))
-            .and_then(Value::as_u64)
+            .and_then(noland_network_contracts::feedback::provider_id)
+            .and_then(|id| id.parse::<u64>().ok())
             .ok_or_else(|| {
                 AppError::Api(format!(
                     "Vast create instance response did not include contract id: {}",
@@ -237,16 +259,20 @@ impl VastApiClient {
             offer_id, contract_id
         );
 
-        let instance = self.get_instance(contract_id).await.map_err(|error| {
-            warn!(
-                "Vast create_instance contract_id={} accepted but get_instance failed: {}",
-                contract_id, error
-            );
-            AppError::Api(format!(
-                "Vast created contract {} for offer {} but fetching instance details failed: {}",
-                contract_id, offer_id, error
-            ))
-        })?;
+        on_confirmed(contract_id).await;
+        let instance = self
+            .get_instance(contract_id)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    "Vast create_instance contract_id={} accepted but get_instance failed: {}",
+                    contract_id, error
+                );
+                // The paid reservation already exists. Preserve its confirmed ID and let
+                // the normal readiness poll hydrate it, rather than encouraging a second rental.
+                VastInstance::from_value_with_fallback_id(&body, Some(contract_id))
+                    .expect("a provider-confirmed contract ID can form a pending instance")
+            });
 
         info!(
             "Vast create_instance hydrated contract_id={} status={} ssh={}:{}",
@@ -315,13 +341,7 @@ impl VastApiClient {
             .map_err(|error| map_send_error("GET", &url, error))?;
         let body = parse_response(response, "GET", &url, started).await?;
 
-        let values = extract_instance_values(&body);
-        let instances = values
-            .into_iter()
-            .filter_map(|value| VastInstance::from_value(&value))
-            .collect::<Vec<_>>();
-
-        Ok(instances)
+        parse_owned_instances(&body)
     }
 
     pub async fn list_ssh_keys(&self) -> AppResult<Vec<VastSshKey>> {
@@ -487,7 +507,11 @@ impl VastApiClient {
             .await
             .map_err(|error| map_send_error("DELETE", &url, error))?;
 
-        let _ = parse_response(response, "DELETE", &url, started).await?;
+        let status = response.status();
+        let body = parse_response(response, "DELETE", &url, started).await?;
+        if !provider_delete_confirmed(status, &body) {
+            return Err(AppError::Api("Vast did not confirm deletion".into()));
+        }
         info!(
             "Vast destroy_instance instance_id={} succeeded",
             instance_id
@@ -611,6 +635,46 @@ fn extract_instance_values(body: &Value) -> Vec<Value> {
     Vec::new()
 }
 
+fn provider_delete_confirmed(status: reqwest::StatusCode, body: &Value) -> bool {
+    status == reqwest::StatusCode::NO_CONTENT
+        || (status == reqwest::StatusCode::OK
+            && body.get("success").and_then(Value::as_bool) == Some(true))
+}
+
+fn parse_owned_instances(body: &Value) -> AppResult<Vec<VastInstance>> {
+    // Unknown/error-shaped HTTP 200 responses must never look like an authoritative empty account.
+    let recognized = body.is_array()
+        || body
+            .get("instances")
+            .is_some_and(|v| v.is_array() || v.is_object())
+        || body.get("id").is_some();
+    if !recognized || body.get("success").and_then(Value::as_bool) == Some(false) {
+        return Err(AppError::Api(
+            "Vast owned-instance list was incomplete or unrecognized".into(),
+        ));
+    }
+    if body
+        .get("instances")
+        .and_then(Value::as_object)
+        .is_some_and(|object| object.is_empty())
+    {
+        return Ok(Vec::new());
+    }
+    let mut seen = std::collections::HashSet::new();
+    extract_instance_values(body)
+        .iter()
+        .map(|value| {
+            VastInstance::from_value(value)
+                .filter(|instance| instance.id > 0 && seen.insert(instance.id))
+                .ok_or_else(|| {
+                    AppError::Api(
+                        "Vast owned-instance list contained an invalid or duplicate rental".into(),
+                    )
+                })
+        })
+        .collect()
+}
+
 fn looks_like_instance_object(object: &serde_json::Map<String, Value>) -> bool {
     object.contains_key("actual_status")
         || object.contains_key("status")
@@ -674,6 +738,54 @@ async fn parse_response(
     );
 
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod feedback_provider_tests {
+    use super::*;
+    #[test]
+    fn destruction_requires_a_positive_terminal_provider_acknowledgement() {
+        assert!(provider_delete_confirmed(
+            reqwest::StatusCode::OK,
+            &json!({"success":true})
+        ));
+        assert!(provider_delete_confirmed(
+            reqwest::StatusCode::NO_CONTENT,
+            &Value::Null
+        ));
+        assert!(!provider_delete_confirmed(
+            reqwest::StatusCode::OK,
+            &json!({"success":false})
+        ));
+        assert!(!provider_delete_confirmed(
+            reqwest::StatusCode::OK,
+            &json!({})
+        ));
+        assert!(!provider_delete_confirmed(
+            reqwest::StatusCode::ACCEPTED,
+            &json!({"success":true})
+        ));
+    }
+    #[test]
+    fn only_an_authoritative_complete_list_can_reconcile_removal() {
+        for value in [
+            json!({}),
+            json!({"success": false}),
+            json!({"instances": [{"error":"offline"}]}),
+            json!({"instances": [{"id": 1}, {"id": 1}]}),
+        ] {
+            assert!(parse_owned_instances(&value).is_err());
+        }
+        assert!(parse_owned_instances(&json!({"instances": []}))
+            .unwrap()
+            .is_empty());
+        assert!(parse_owned_instances(&json!({"instances": {}}))
+            .unwrap()
+            .is_empty());
+        let rentals = parse_owned_instances(&json!({"instances": [{"id": "9007199254740993", "machine_id": "9007199254740995", "status": "running"}]})).unwrap();
+        assert_eq!(rentals[0].id, 9_007_199_254_740_993);
+        assert_eq!(rentals[0].machine_id.as_deref(), Some("9007199254740995"));
+    }
 }
 
 fn map_send_error(method: &str, url: &str, error: reqwest::Error) -> AppError {
