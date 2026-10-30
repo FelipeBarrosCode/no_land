@@ -11,6 +11,8 @@ pub enum AppError {
     Serialization(String),
     #[error("API request failed: {0}")]
     Api(String),
+    #[error("Provider creation rejected: {0}")]
+    ProviderCreationRejected(String),
     #[error("Authentication failed")]
     Authentication,
     #[error("Invalid input: {0}")]

@@ -651,7 +651,7 @@ export function SettingsScreen({
       </h2>
       <div className="mt-4 grid gap-3 md:grid-cols-3">
         <InputField
-          label={translate("generated.7e04950e0f3e2234")}
+          label="Minimum Vast reliability (0–1)"
           value={serverForm.minReliability}
           onChange={(event) =>
             setServerForm((prev) => ({

@@ -6,6 +6,8 @@ use std::net::IpAddr;
 #[serde(rename_all = "camelCase")]
 pub struct VastOffer {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub host_id: Option<u64>,
     pub host_label: String,
     pub city: String,
@@ -36,7 +38,7 @@ pub struct VastOffer {
 
 impl VastOffer {
     pub fn from_value(value: &Value) -> Option<Self> {
-        let id = value.get("id")?.as_u64()?;
+        let id = field_as_u64(value, &["id", "ask_contract_id"]).filter(|id| *id > 0)?;
 
         let geolocation = value
             .get("geolocation")
@@ -66,6 +68,9 @@ impl VastOffer {
 
         Some(Self {
             id,
+            machine_id: value
+                .get("machine_id")
+                .and_then(noland_network_contracts::feedback::provider_id),
             host_id: value.get("host_id").and_then(Value::as_u64),
             host_label,
             city,
@@ -191,6 +196,8 @@ fn parse_offer_type(value: &Value) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct VastInstance {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub label: String,
     pub status: String,
     pub ssh_host: String,
@@ -290,6 +297,9 @@ impl VastInstance {
 
         Some(Self {
             id,
+            machine_id: value
+                .get("machine_id")
+                .and_then(noland_network_contracts::feedback::provider_id),
             label: value
                 .get("label")
                 .or_else(|| value.get("hostname"))
@@ -1001,6 +1011,31 @@ pub fn region_to_code(full_name: &str) -> String {
 mod tests {
     use super::{VastInstance, VastOffer};
     use serde_json::json;
+
+    #[test]
+    fn physical_machine_identity_is_lossless_and_never_an_offer_host_or_hosting_alias() {
+        let offer = VastOffer::from_value(
+            &serde_json::json!({"id":12,"machine_id":9_007_199_254_740_993_u64,"host_id":99}),
+        )
+        .unwrap();
+        assert_eq!(offer.machine_id.as_deref(), Some("9007199254740993"));
+        assert_eq!(offer.id, 12);
+        assert_eq!(offer.host_id, Some(99));
+        let other_offer =
+            VastOffer::from_value(&serde_json::json!({"id":13,"machine_id":"9007199254740993"}))
+                .unwrap();
+        assert_eq!(offer.machine_id, other_offer.machine_id);
+        let missing =
+            VastInstance::from_value(&serde_json::json!({"id":14,"host_id":99,"hosting_id":88}))
+                .unwrap();
+        assert!(missing.machine_id.is_none());
+        let rental = VastInstance::from_value(
+            &serde_json::json!({"id":"9007199254740995","machine_id":"9007199254740993"}),
+        )
+        .unwrap();
+        assert_eq!(rental.id, 9_007_199_254_740_995);
+        assert_eq!(rental.machine_id.as_deref(), Some("9007199254740993"));
+    }
 
     #[test]
     fn offer_prefers_effective_discounted_search_total() {

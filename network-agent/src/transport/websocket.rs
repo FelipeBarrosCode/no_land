@@ -50,6 +50,8 @@ enum ClientMessage {
         #[serde(rename = "sessionId")]
         session_id: Uuid,
         samples: Vec<MeasurementSample>,
+        #[serde(default, rename = "batchId")]
+        batch_id: Option<Uuid>,
     },
     GetState,
 }
@@ -71,6 +73,7 @@ struct StatsUpdate {
     generated_at_ms: u64,
     runtime_seconds: u64,
     metrics: MetricsSnapshot,
+    measurement_evidence: Option<noland_network_contracts::feedback::MeasurementEvidence>,
     classification: Classification,
     state: StateView,
 }
@@ -234,7 +237,7 @@ async fn handle_connection(
                         let evaluation = evaluate(&shared, session_id, &token, &thresholds).await?;
                         send_evaluation(&mut websocket, evaluation).await?;
                     }
-                    ClientMessage::MeasurementReport { session_id: report_session, samples } => {
+                    ClientMessage::MeasurementReport { session_id: report_session, samples, batch_id } => {
                         if report_session != session_id {
                             send_error(&mut websocket, "WRONG_SESSION", "report sessionId does not match authenticated session").await?;
                             continue;
@@ -257,7 +260,9 @@ async fn handle_connection(
                                 send_error(&mut websocket, "SESSION_REPLACED", "session is no longer registered with this connection").await?;
                                 return Ok(());
                             }
-                            session.window.extend(samples, Instant::now());
+                            if session.window.record_batch(batch_id) {
+                                session.window.extend(samples, Instant::now());
+                            }
                         }
                         let evaluation = evaluate(&shared, session_id, &token, &thresholds).await?;
                         send_evaluation(&mut websocket, evaluation).await?;
@@ -316,6 +321,7 @@ async fn evaluate(
             session_id,
             generated_at_ms,
             runtime_seconds,
+            measurement_evidence: session.window.feedback_evidence(now),
             metrics,
             classification,
             state,

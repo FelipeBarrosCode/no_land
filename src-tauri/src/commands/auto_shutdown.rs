@@ -110,8 +110,12 @@ pub async fn save_auto_shutdown_settings(
                 "Could not refresh Vast.ai instances before saving automatic backup settings: {error}"
             ))
         })?;
-        InstanceLifecycleService::reconcile_owned_instances(context.inner(), &owned_instances)
-            .await?;
+        InstanceLifecycleService::reconcile_owned_instances(
+            context.inner(),
+            &owned_instances,
+            &initial_state.credentials.vast_api_key,
+        )
+        .await?;
     }
 
     let current_state = context.load_state().await;

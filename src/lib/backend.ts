@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invokeSafe } from "./tauri";
+import { normalizeFeedbackProgram } from "./feedbackModel";
 import { getActiveLocale, translate } from "./i18n";
 import type {
   BudgetSettings,
@@ -68,7 +69,8 @@ import type {
 } from "./types";
 
 export async function getAppState(): Promise<PersistedAppState> {
-  return invokeSafe<PersistedAppState>("get_app_state");
+  const state = await invokeSafe<PersistedAppState>("get_app_state");
+  return { ...state, feedbackProgram: normalizeFeedbackProgram(state.feedbackProgram) };
 }
 
 export async function getSpendSummary(): Promise<SpendSummary> {

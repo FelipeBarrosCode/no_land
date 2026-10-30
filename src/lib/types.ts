@@ -1,3 +1,5 @@
+import type { FeedbackProgramState } from "./feedbackTypes";
+
 export type LocationSource = "os" | "ip" | "manual";
 
 export type OrchestrationState =
@@ -328,6 +330,7 @@ export interface OfferCountryAvailability {
 
 export interface OfferCandidate {
   id: number;
+  machineId: string | null;
   hostId: number | null;
   hostLabel: string;
   locationLabel: string;
@@ -360,6 +363,9 @@ export interface OfferCandidate {
 
 export interface InstanceState {
   instanceId: number | null;
+  machineId: string | null;
+  feedbackSessionId?: string | null;
+  feedbackJournalRef?: string | null;
   offerId: number | null;
   status: string;
   sshHost: string;
@@ -458,6 +464,9 @@ export interface ApplyDisplayModeResult {
 
 export interface ProvisionedServerState {
   instanceId: number;
+  machineId: string | null;
+  feedbackSessionId?: string | null;
+  feedbackJournalRef?: string | null;
   offerId: number | null;
   sshHost: string;
   sshPort: number;
@@ -678,6 +687,7 @@ export interface AutoShutdownState {
 }
 
 export interface PersistedAppState {
+  feedbackProgram: FeedbackProgramState;
   version: number;
   onboardingCompleted: boolean;
   hasCompletedGuidedSetup: boolean;

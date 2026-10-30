@@ -72,6 +72,7 @@ impl NetworkMonitor {
         &self,
         app: AppHandle,
         target_host: String,
+        instance_id: Option<u64>,
     ) -> Result<NetworkMonitorSession, String> {
         let _lifecycle = self.lifecycle.lock().await;
         self.stop_current().await;
@@ -88,7 +89,15 @@ impl NetworkMonitor {
         let task_session = session.clone();
         let latest_stats = self.latest_stats.clone();
         let task = tokio::spawn(async move {
-            run_monitor(app, task_session, token, latest_stats, cancel_rx).await;
+            run_monitor(
+                app,
+                task_session,
+                token,
+                latest_stats,
+                instance_id,
+                cancel_rx,
+            )
+            .await;
         });
 
         let mut state = self.inner.lock().await;
@@ -149,6 +158,8 @@ struct MeasurementSample {
     sequence: u64,
     rtt_ms: Option<f64>,
     lost: bool,
+    #[serde(skip)]
+    measured_at: Instant,
 }
 
 #[derive(Debug)]
@@ -162,11 +173,14 @@ async fn run_monitor(
     session: NetworkMonitorSession,
     token: [u8; 32],
     latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
+    instance_id: Option<u64>,
     mut cancel: watch::Receiver<bool>,
 ) {
-    let reporter = Reporter::new(app, session.session_id, latest_stats);
+    let reporter = Reporter::new(app, session.session_id, latest_stats, instance_id);
     let ws_url = websocket_url(&session.target_host);
     let mut fail_safe = FailSafeState::new(Instant::now());
+    // Keep the received-sample watermark monotonic across internal WebSocket reconnects.
+    let mut sequence = 0_u64;
 
     loop {
         if *cancel.borrow() {
@@ -230,6 +244,7 @@ async fn run_monitor(
             &session,
             &token,
             &reporter,
+            &mut sequence,
             &mut fail_safe,
             &mut cancel,
         )
@@ -253,11 +268,12 @@ async fn run_connected(
     session: &NetworkMonitorSession,
     token: &[u8; 32],
     reporter: &Reporter,
+    sequence: &mut u64,
     fail_safe: &mut FailSafeState,
     cancel: &mut watch::Receiver<bool>,
 ) -> ConnectedResult {
+    reporter.new_connection().await;
     let (mut sink, mut stream) = websocket.split();
-    let mut sequence = 0_u64;
     let mut pending = BTreeMap::<u64, Instant>::new();
     let mut samples = VecDeque::<MeasurementSample>::new();
     let mut receive_buffer = [0_u8; PACKET_LEN];
@@ -285,8 +301,8 @@ async fn run_connected(
                     continue;
                 };
 
-                let current_sequence = sequence;
-                sequence = sequence.wrapping_add(1);
+                let current_sequence = *sequence;
+                *sequence = sequence.wrapping_add(1);
                 let packet = encode_probe(current_sequence, session.session_id, token);
                 let send_result = tokio::select! {
                     _ = cancelled(cancel) => return ConnectedResult::Cancelled,
@@ -325,6 +341,7 @@ async fn run_connected(
                             sequence: ack_sequence,
                             rtt_ms: Some(now.saturating_duration_since(sent_at).as_secs_f64() * 1_000.0),
                             lost: false,
+                            measured_at: now,
                         });
                         if let Some(transition) = fail_safe.observe_valid_ack(now) {
                             reporter.fail_safe(transition);
@@ -354,7 +371,11 @@ async fn run_connected(
 
                 let count = samples.len().min(MAX_REPORT_SAMPLES);
                 let report_samples: Vec<_> = samples.drain(..count).collect();
+                let received = report_samples.iter().filter(|sample| !sample.lost && sample.rtt_ms.is_some())
+                    .max_by_key(|sample| sample.sequence).map(|sample| (sample.sequence, sample.measured_at));
+                let batch_id = reporter.feedback_batch_id().await;
                 let report = match serde_json::to_string(&json!({
+                    "batchId": batch_id,
                     "type": "measurement_report",
                     "sessionId": session.session_id,
                     "samples": report_samples
@@ -372,7 +393,7 @@ async fn run_connected(
                 if let Err(error) = send_result {
                     return ConnectedResult::Disconnected(format!("WebSocket send failed: {error}"));
                 }
-                reporter.measurements_reported().await;
+                reporter.measurements_reported(batch_id, received).await;
             }
             _ = health_tick.tick() => {
                 check_fail_safe(fail_safe, reporter, Instant::now());
@@ -432,6 +453,7 @@ fn expire_pending(
             sequence,
             rtt_ms: None,
             lost: true,
+            measured_at: now,
         });
     }
 }

@@ -27,6 +27,7 @@ pub struct AppContext {
     pub state_store: Arc<dyn StateStore>,
     pub state: Arc<RwLock<PersistedAppState>>,
     pub http_client: reqwest::Client,
+    pub feedback: Arc<super::feedback::FeedbackProgramService>,
     pub provisioning_logs: Arc<RwLock<Vec<ProvisioningEvent>>>,
     pub offer_cache: Arc<RwLock<Vec<OfferCandidate>>>,
 
@@ -96,9 +97,13 @@ impl AppContext {
         state_store: Arc<dyn StateStore>,
         initial_state: PersistedAppState,
     ) -> Self {
+        let feedback = Arc::new(super::feedback::FeedbackProgramService::new(
+            state_store.path(),
+        ));
         Self {
             config,
             state_store,
+            feedback,
             state: Arc::new(RwLock::new(initial_state)),
             http_client: reqwest::Client::new(),
             provisioning_logs: Arc::new(RwLock::new(Vec::new())),
@@ -154,6 +159,12 @@ impl AppContext {
         update(&mut next_state);
         self.state_store.save_state(&next_state).await?;
         *state = next_state.clone();
+        // This observer never changes app state or blocks the rental on feedback errors.
+        // Keep state-lock ordering consistent: publish first, release, then checkpoint feedback.
+        self.feedback
+            .publish_local_permission(&next_state.feedback_program);
+        drop(state);
+        super::feedback::observe_persisted_state(self.clone(), next_state.clone()).await;
         Ok(next_state)
     }
 

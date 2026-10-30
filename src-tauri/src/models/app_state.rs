@@ -18,6 +18,8 @@ pub struct PersistedAppState {
     pub location: LocationState,
     pub server_preferences: ServerPreferences,
     pub selected_offer: Option<OfferCandidate>,
+    #[serde(default)]
+    pub pending_provider_creation: Option<ProviderCreationAttempt>,
     pub instance: InstanceState,
     pub wireguard: WireGuardState,
     pub sunshine: SunshineState,
@@ -41,12 +43,17 @@ pub struct PersistedAppState {
     #[serde(default)]
     pub spend: crate::models::spend::SpendState,
     pub last_error: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::feedback::deserialize_program"
+    )]
+    pub feedback_program: crate::models::feedback::FeedbackProgramState,
 }
 
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
-            version: 4,
+            version: 5,
             onboarding_completed: false,
             has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
@@ -54,6 +61,7 @@ impl Default for PersistedAppState {
             location: LocationState::default(),
             server_preferences: ServerPreferences::default(),
             selected_offer: None,
+            pending_provider_creation: None,
             instance: InstanceState::default(),
             wireguard: WireGuardState::default(),
             sunshine: SunshineState::default(),
@@ -69,6 +77,7 @@ impl Default for PersistedAppState {
             orchestration_state: OrchestrationState::Idle,
             connection_provider: ConnectionProvider::default(),
             spend: crate::models::spend::SpendState::default(),
+            feedback_program: crate::models::feedback::FeedbackProgramState::default(),
             last_error: None,
         }
     }
@@ -256,6 +265,8 @@ fn default_mic_device_name() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct OfferCandidate {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub host_id: Option<u64>,
     pub host_label: String,
     pub location_label: String,
@@ -307,10 +318,31 @@ pub struct OfferCountryAvailability {
     pub offer_count: usize,
 }
 
+/// Paid-request safety, not feedback state. Never upload this object.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProviderCreationAttempt {
+    pub request_id: String,
+    #[serde(default)]
+    pub credential_fingerprint: String,
+    pub offer_id: u64,
+    pub machine_id: Option<String>,
+    pub provider_label: String,
+    pub requested_at: String,
+    pub confirmed_instance_id: Option<u64>,
+    pub feedback_session_id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InstanceState {
     pub instance_id: Option<u64>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub feedback_session_id: Option<String>,
+    #[serde(default)]
+    pub feedback_journal_ref: Option<String>,
     pub offer_id: Option<u64>,
     pub status: String,
     pub ssh_host: String,
@@ -330,6 +362,9 @@ impl Default for InstanceState {
     fn default() -> Self {
         Self {
             instance_id: None,
+            machine_id: None,
+            feedback_session_id: None,
+            feedback_journal_ref: None,
             offer_id: None,
             status: "idle".to_string(),
             ssh_host: String::new(),
@@ -624,6 +659,9 @@ pub struct ServerPreferencesUpdate {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RentedInstanceSummary {
+    /// Feedback identity never takes the legacy JavaScript Number round trip.
+    pub provider_instance_id: String,
+    pub machine_id: Option<String>,
     #[serde(default)]
     pub performance_overlay_enabled: bool,
     pub instance_id: u64,
@@ -684,6 +722,12 @@ pub struct RemoteDisplayState {
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionedServerState {
     pub instance_id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub feedback_session_id: Option<String>,
+    #[serde(default)]
+    pub feedback_journal_ref: Option<String>,
     pub offer_id: Option<u64>,
     pub ssh_host: String,
     pub ssh_port: u16,
@@ -762,6 +806,9 @@ impl ProvisionedServerState {
     pub fn new(instance_id: u64) -> Self {
         Self {
             instance_id,
+            machine_id: None,
+            feedback_session_id: None,
+            feedback_journal_ref: None,
             offer_id: None,
             ssh_host: String::new(),
             ssh_port: 22,
