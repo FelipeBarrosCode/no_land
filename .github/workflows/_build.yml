@@ -300,7 +300,7 @@ jobs:
         shell: pwsh
         run: |
           npm ci
-          node --test scripts/windows-openssh.test.mjs
+          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
