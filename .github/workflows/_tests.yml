@@ -24,7 +24,7 @@ jobs:
             network-agent
       - run: npm ci
       - name: No-build Sunshine and workflow regression tests
-        run: node --test scripts/sunshine-auth.test.mjs scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/ci/*.test.mjs
+        run: node --test scripts/sunshine-auth.test.mjs scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/appimage-metadata.test.mjs scripts/ci/*.test.mjs
       - name: Existing unit-test entry point
         run: npm run test:unit
       - name: Verify provisioning package plans and dual-architecture artifacts

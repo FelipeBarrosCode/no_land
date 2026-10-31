@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { createHash } from 'node:crypto';
 import { ensureWindowsOpenSshRoot, openSshDistribution, verifyOpenSshArchive } from './windows-openssh-install.mjs';
-import { cleanWindowsEnvironment, readPeRuntime, resolveOpenSshRoot, sshTools, stageOpenSshRuntime, verifyOpenSshRuntime } from './windows-openssh.mjs';
+import { cleanWindowsEnvironment, readPeRuntime, resolveOpenSshRoot, sshTools, stageOpenSshRuntime, verifyOpenSshKeyRoundTrip, verifyOpenSshRuntime } from './windows-openssh.mjs';
 
 function pe(machine = 0x8664, imports = [], delay = false) {
   const b = Buffer.alloc(2048);
@@ -45,6 +45,25 @@ function fixture(fn) {
 function tools(root, machine = 0x8664, imports = []) {
   for (const tool of sshTools) writeFileSync(join(root, `${tool}.exe`), pe(machine, imports));
 }
+
+test('key round trips ignore optional comments on either side, including CRLF output', () => {
+  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample';
+  for (const derived of [key, `${key} package-test`, `${key}\tother comment`, `  ${key} package-test\r\n`]) {
+    for (const stored of [key, `${key} package-test\n`, `${key} different comment\r\n`]) {
+      assert.doesNotThrow(() => verifyOpenSshKeyRoundTrip(derived, stored));
+    }
+  }
+});
+
+test('key round trips still reject different keys, algorithms, empty and malformed output', () => {
+  const key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample';
+  for (const invalid of ['', 'package-test', 'ssh-ed25519', 'ssh-ed25519 invalid!base64',
+    'ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIExample', `${key}Changed package-test`, `${key}\n${key}`]) {
+    assert.throws(() => verifyOpenSshKeyRoundTrip(invalid, key), /round trip failed/);
+    assert.throws(() => verifyOpenSshKeyRoundTrip(key, invalid), /round trip failed/);
+  }
+  assert.throws(() => verifyOpenSshKeyRoundTrip('', ''), /round trip failed/);
+});
 
 test('checks normal and delay imports', () => fixture((root) => {
   for (const delay of [false, true]) {
