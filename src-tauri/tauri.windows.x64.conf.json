@@ -3,7 +3,7 @@
     "resources": [
       "binaries/wintun-*-pc-windows-msvc.dll",
       "binaries/wintun-LICENSE.txt",
-      "binaries/ssh-*-pc-windows-msvc.exe",
+      "binaries/ssh-[ax]*-pc-windows-msvc.exe",
       "binaries/scp-*-pc-windows-msvc.exe",
       "binaries/ssh-keygen-*-pc-windows-msvc.exe",
       "binaries/ssh-runtime/**/*",
@@ -34,9 +34,6 @@
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstrtp*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstudp*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstaudiorate*.dll",
-      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstopus*.dll",
-      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstrtp*.dll",
-      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstudp*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gsttypefindfunctions*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstvolume*.dll",
       "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstwasapi*.dll"
