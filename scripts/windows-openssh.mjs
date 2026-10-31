@@ -121,6 +121,16 @@ export function cleanWindowsEnvironment(env = process.env) {
   return clean;
 }
 
+export function verifyOpenSshKeyRoundTrip(derived, stored) {
+  // Newer ssh-keygen versions preserve the optional comment with -y. Compare
+  // only the algorithm and key blob, while rejecting malformed/multiline output.
+  const identity = (text) => text.trim().match(/^(ssh-ed25519)[ \t]+([A-Za-z0-9+/]+={0,2})(?:[ \t]+[^\r\n]*)?$/u)?.slice(1).join(' ');
+  const derivedIdentity = identity(derived);
+  if (!derivedIdentity || derivedIdentity !== identity(stored)) {
+    throw new Error('Packaged ssh-keygen public-key round trip failed');
+  }
+}
+
 export function smokeTestOpenSsh(root, tempRoot) {
   const env = cleanWindowsEnvironment();
   const run = (tool, args, expected = 0) => {
@@ -134,7 +144,6 @@ export function smokeTestOpenSsh(root, tempRoot) {
   run('scp', [], 1); // Usage must execute successfully, without connecting anywhere.
   const key = join(tempRoot, 'test key');
   run('ssh-keygen', ['-t', 'ed25519', '-f', key, '-N', '', '-C', 'package-test']);
-  const derived = run('ssh-keygen', ['-y', '-f', key]).trim();
-  const stored = readFileSync(`${key}.pub`, 'utf8').trim().split(/\s+/u).slice(0, 2).join(' ');
-  if (derived !== stored) throw new Error('Packaged ssh-keygen public-key round trip failed');
+  const derived = run('ssh-keygen', ['-y', '-f', key]);
+  verifyOpenSshKeyRoundTrip(derived, readFileSync(`${key}.pub`, 'utf8'));
 }
