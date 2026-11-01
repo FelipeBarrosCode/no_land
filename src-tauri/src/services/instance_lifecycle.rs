@@ -117,8 +117,73 @@ impl InstanceLifecycleService {
     pub async fn reconcile_owned_instances(
         context: &AppContext,
         owned_instances: &[VastInstance],
+        provider_key: &str,
     ) -> AppResult<()> {
-        let owned_instance_ids = owned_instances.iter().map(|instance| instance.id).collect();
+        if context.load_state().await.credentials.vast_api_key != provider_key {
+            return Err(AppError::Cancelled);
+        }
+        let owned_instance_ids: HashSet<u64> =
+            owned_instances.iter().map(|instance| instance.id).collect();
+        let feedback_context = context.clone();
+        let feedback_owned = owned_instance_ids.clone();
+        let explicitly_destroyed: Vec<u64> = owned_instances
+            .iter()
+            .filter(|instance| {
+                matches!(
+                    instance.status.to_ascii_lowercase().as_str(),
+                    "destroyed" | "deleted"
+                )
+            })
+            .map(|instance| instance.id)
+            .collect();
+        let feedback_key = provider_key.to_string();
+        let _ = super::feedback::native_task(async move {
+            if !feedback_context.feedback.locally_running() {
+                return;
+            }
+            let Some(_reconciliation) = feedback_context.feedback.try_reconciliation() else {
+                return;
+            };
+            if feedback_context.load_state().await.credentials.vast_api_key != feedback_key {
+                return;
+            }
+            feedback_context
+                .feedback
+                .reconcile_missing(&feedback_context, &feedback_owned)
+                .await;
+            let api = VastApiClient::new(
+                feedback_context.http_client.clone(),
+                feedback_context.config.vast_base_url.clone(),
+                feedback_key.clone(),
+            );
+            for id in feedback_context
+                .feedback
+                .tracked_instances(&feedback_context)
+                .await
+            {
+                let confirmed = if explicitly_destroyed.contains(&id) {
+                    true
+                } else if !feedback_owned.contains(&id) {
+                    // A complete successful list plus a targeted authenticated 404 is
+                    // positive removal evidence. Timeouts and malformed lists are not.
+                    matches!(
+                        tokio::time::timeout(Duration::from_secs(5), api.get_instance(id)).await,
+                        Ok(Err(AppError::NotFound(_)))
+                    )
+                } else {
+                    false
+                };
+                if confirmed
+                    && feedback_context.load_state().await.credentials.vast_api_key == feedback_key
+                {
+                    feedback_context
+                        .feedback
+                        .confirmed_external_destroy(&feedback_context, id)
+                        .await;
+                }
+            }
+        })
+        .await;
         Self::remove_local_instances_missing_from_owned_set(context, &owned_instance_ids).await?;
 
         context
@@ -136,9 +201,17 @@ impl InstanceLifecycleService {
                         });
 
                     let record = &mut state.provisioned_servers[index];
-                    record.offer_id = state.selected_offer.as_ref().and_then(|offer| {
-                        (state.instance.instance_id == Some(instance.id)).then_some(offer.id)
-                    });
+                    if state.instance.instance_id == Some(instance.id) {
+                        record.offer_id = state.instance.offer_id.or(record.offer_id);
+                    }
+                    if instance.machine_id.is_some() {
+                        record.machine_id = instance.machine_id.clone();
+                    }
+                    if state.instance.instance_id == Some(instance.id)
+                        && instance.machine_id.is_some()
+                    {
+                        state.instance.machine_id = instance.machine_id.clone();
+                    }
                     record.status = instance.status.clone();
                     record.ssh_host = instance.ssh_host.clone();
                     record.ssh_port = instance.ssh_port;
@@ -423,6 +496,11 @@ impl InstanceLifecycleService {
     /// Destroy a provisioned instance. Runs backup first if available.
     pub async fn destroy_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
         Self::acquire_lock(instance_id, "destroy").await?;
+        let feedback_context = context.clone();
+        let _ = super::feedback::native_task(async move {
+            feedback_context.feedback.checkpoint(false).await;
+        })
+        .await;
 
         let result = async {
             // Run backup first if shared storage is configured
@@ -464,6 +542,10 @@ impl InstanceLifecycleService {
             );
 
             vast.destroy_instance(instance_id).await?;
+            let feedback_context = context.clone();
+            let _ = super::feedback::native_task(async move {
+                feedback_context.feedback.confirmed_destroy(&feedback_context, instance_id).await;
+            }).await;
             context.update_state(|state| {
                 if state.credentials.vast_api_key.trim() != api_key.trim() { return; }
                 state.spend.record_instance_destroyed(instance_id, chrono::Utc::now());
@@ -483,7 +565,7 @@ impl InstanceLifecycleService {
 
             match vast.list_instances().await {
                 Ok(owned_instances) => {
-                    Self::reconcile_owned_instances(context, &owned_instances).await?;
+                    Self::reconcile_owned_instances(context, &owned_instances, &api_key).await?;
                 }
                 Err(error) => {
                     info!(

@@ -1,3 +1,0 @@
-#!/bin/sh
-echo 'noland-mic-sender debug placeholder. Run npm run tauri:dev or npm run prepare:mic-sidecar before launching the app.' >&2
-exit 1

@@ -529,6 +529,17 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         api_key,
     );
 
+    if let Some(instance) =
+        super::provider_creation::ProviderCreationService::recover(&context, &vast).await?
+    {
+        return Box::pin(run_existing_instance_orchestration(
+            app,
+            context,
+            instance.id,
+        ))
+        .await;
+    }
+
     match vast.list_instances().await {
         Ok(existing_instances) => {
             let existing_count = existing_instances
@@ -643,9 +654,21 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         "-e PASS": env_pass
     });
 
+    // Optional feedback journal is durable before the paid request, but cannot
+    // become an eligible session until Vast returns a real contract ID.
+    let creation = super::provider_creation::ProviderCreationService::prepare(
+        &context,
+        &offer,
+        &initial_state.credentials.vast_api_key,
+    )
+    .await?;
+    let pending_feedback = creation.feedback_session_id.clone();
     let mut instance = match instance_manager
         .create_instance(
             &vast,
+            &context,
+            pending_feedback.as_deref(),
+            &creation.provider_label,
             offer.id,
             &initial_state.server_preferences.template_hash,
             initial_state.server_preferences.storage_gb,
@@ -661,6 +684,10 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             instance
         }
         Err(error) => {
+            if matches!(&error, AppError::ProviderCreationRejected(_)) {
+                super::provider_creation::ProviderCreationService::rejected(&context, &creation)
+                    .await;
+            }
             warn!(
                 "Provisioning create_instance failed offer_id={} error={}",
                 offer.id, error
@@ -693,6 +720,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     context
                         .update_state(|state| {
                             state.instance.instance_id = Some(existing.id);
+                            state.instance.machine_id = existing.machine_id.clone();
+                            state.instance.feedback_session_id = None;
+                            state.instance.feedback_journal_ref = None;
                             state.instance.status = existing.status.clone();
                             state.instance.ssh_host = existing.ssh_host.clone();
                             state.instance.ssh_port = existing.ssh_port;
@@ -723,6 +753,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             return Err(error);
         }
     };
+    if instance.machine_id.is_none() {
+        instance.machine_id = offer.machine_id.clone();
+    }
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -741,6 +774,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance.id);
+            state.instance.machine_id = instance.machine_id.clone();
+            state.instance.feedback_session_id = None;
+            state.instance.feedback_journal_ref = None;
             state.instance.offer_id = Some(offer.id);
             state.instance.status = instance.status.clone();
             state.instance.ssh_host = instance.ssh_host.clone();
@@ -763,6 +799,16 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         OrchestrationState::CreatingInstance,
     )
     .await?;
+    super::provider_creation::ProviderCreationService::complete(&context, instance.id).await?;
+    let feedback_context = context.clone();
+    let feedback_instance = instance.id;
+    let _ = super::feedback::native_task(async move {
+        feedback_context
+            .feedback
+            .attach_references(&feedback_context, feedback_instance)
+            .await;
+    })
+    .await;
     mark_server_step_completed(
         &context,
         instance.id,
@@ -1641,6 +1687,9 @@ async fn run_existing_instance_orchestration(
 
     context
         .update_state(|state| {
+            if state.instance.instance_id != Some(instance_id) {
+                state.instance = Default::default();
+            }
             state.instance.instance_id = Some(instance_id);
             state.last_error = None;
         })
@@ -1701,10 +1750,7 @@ async fn run_existing_instance_orchestration(
         api_key,
     );
 
-    let offer_id = initial_state
-        .instance
-        .offer_id
-        .or(initial_state.selected_offer.as_ref().map(|offer| offer.id));
+    let offer_id = initial_state.instance.offer_id;
 
     emit_transition(
         &app,
@@ -1761,6 +1807,20 @@ async fn run_existing_instance_orchestration(
     };
 
     let mut instance = vast.get_instance(instance_id).await?;
+    context
+        .update_state(|state| {
+            if let Some(machine) = &instance.machine_id {
+                state.instance.machine_id = Some(machine.clone());
+                if let Some(server) = state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|s| s.instance_id == instance_id)
+                {
+                    server.machine_id = Some(machine.clone());
+                }
+            }
+        })
+        .await?;
     ensure_not_cancelled(&context)?;
 
     ensure_server_record(
@@ -3678,7 +3738,10 @@ async fn hydrate_state_from_server_record(
         .update_state(move |state| {
             state.instance.instance_id = Some(instance_id);
             if include_instance_metadata {
-                state.instance.offer_id = offer_id.or(state.instance.offer_id);
+                state.instance.offer_id = offer_id;
+                state.instance.machine_id = record.machine_id.clone();
+                state.instance.feedback_session_id = record.feedback_session_id.clone();
+                state.instance.feedback_journal_ref = record.feedback_journal_ref.clone();
                 if !status.is_empty() {
                     state.instance.status = status.clone();
                 }
@@ -3829,6 +3892,13 @@ async fn ensure_server_record(
             let record = &mut app_state.provisioned_servers[index];
 
             record.offer_id = offer_id.or(record.offer_id);
+            if app_state.instance.instance_id == Some(instance_id) {
+                if app_state.instance.machine_id.is_some() {
+                    record.machine_id = app_state.instance.machine_id.clone();
+                }
+                record.feedback_session_id = app_state.instance.feedback_session_id.clone();
+                record.feedback_journal_ref = app_state.instance.feedback_journal_ref.clone();
+            }
             if !ssh_host.is_empty() {
                 record.ssh_host = ssh_host.clone();
             }

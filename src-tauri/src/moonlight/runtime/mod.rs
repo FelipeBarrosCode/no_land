@@ -22,6 +22,8 @@ use crate::moonlight::{
 
 #[derive(Debug, Clone)]
 pub struct NativeStartRequest {
+    /// Set only by the native permission service for a tracked rental; never by frontend input.
+    pub feedback_frames_allowed: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub host_id: String,
     pub app_id: u32,
     pub host_address: String,
@@ -116,8 +118,14 @@ pub enum RuntimeCommand {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatistics {
+    /// Bound by the runtime actor to the request that owns these counters.
+    #[serde(skip)]
+    pub active_host_id: Option<String>,
     #[serde(skip)]
     pub sampled_at: std::time::Instant,
+    /// Received decode units for this generation, not process-lifetime native counters.
+    #[serde(skip)]
+    pub feedback_video_frame_count: u64,
     pub performance: crate::moonlight::performance::PerformanceStatistics,
     pub state: String,
     pub start_count: u64,
@@ -541,9 +549,30 @@ impl MoonlightRuntimeHandle {
     }
 }
 
+fn feedback_received_frames(baseline: Option<(u64, u64)>, generation: u64, total: u64) -> u64 {
+    baseline
+        .filter(|(owner, _)| *owner == generation)
+        .map(|(_, before)| total.saturating_sub(before))
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod feedback_frame_tests {
+    use super::feedback_received_frames;
+    #[test]
+    fn prior_host_lifetime_frames_are_not_new_rental_evidence() {
+        assert_eq!(feedback_received_frames(Some((2, 100)), 2, 100), 0);
+        assert_eq!(feedback_received_frames(Some((2, 100)), 2, 107), 7);
+        assert_eq!(feedback_received_frames(Some((1, 100)), 2, 107), 0);
+        assert_eq!(feedback_received_frames(None, 2, 107), 0);
+        assert_eq!(feedback_received_frames(Some((2, 100)), 2, 0), 0);
+    }
+}
+
 #[derive(Debug)]
 struct NativeRuntime {
     raw: *mut native::nl_runtime_t,
+    feedback_frame_baseline: Option<(u64, u64)>,
 }
 
 unsafe impl Send for NativeRuntime {}
@@ -558,7 +587,10 @@ impl NativeRuntime {
                 "nl_runtime_create returned a null runtime".to_string(),
             ));
         }
-        Ok(Self { raw })
+        Ok(Self {
+            raw,
+            feedback_frame_baseline: None,
+        })
     }
 
     fn version_string() -> String {
@@ -572,6 +604,19 @@ impl NativeRuntime {
     }
 
     fn start(&mut self, request: &NativeStartRequest) -> Result<(), MoonlightError> {
+        // The C receive counter is lifetime-cumulative. Snapshot before start so
+        // a previous host's frames cannot make a new rental review-eligible.
+        self.feedback_frame_baseline = if request
+            .feedback_frames_allowed
+            .as_ref()
+            .is_some_and(|allowed| allowed.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            self.read_stats()
+                .ok()
+                .map(|stats| (request.session_generation, stats.video_frame_count))
+        } else {
+            None
+        };
         let audio_configuration =
             audio_configuration_native(request.preferences.audio.configuration);
         let resolved_remote = resolve_remote_stream_config(&request.preferences);
@@ -883,6 +928,11 @@ impl NativeRuntime {
         let result = unsafe { native::nl_runtime_read_stats(self.raw, &mut output) };
         map_native_result(result, "nl_runtime_read_stats")?;
         Ok(NativeStats {
+            feedback_video_frame_count: feedback_received_frames(
+                self.feedback_frame_baseline,
+                output.session_generation,
+                output.video_frame_count,
+            ),
             performance: unsafe { crate::moonlight::performance::read(self.raw) },
             state: output.state,
             start_count: output.start_count,
@@ -1027,6 +1077,7 @@ impl Drop for NativeRuntime {
 
 #[derive(Debug, Clone)]
 struct NativeStats {
+    feedback_video_frame_count: u64,
     performance: crate::moonlight::performance::PerformanceStatistics,
     state: native::nl_stream_state_t,
     start_count: u64,
@@ -1363,11 +1414,16 @@ fn runtime_statistics_from_native(
     stats: &NativeStats,
     packet_size_controller: Option<&AdaptivePacketSizeController>,
     adaptive_packet_reconnect_count: u64,
+    active_request: Option<&NativeStartRequest>,
 ) -> RuntimeStatistics {
     let _ = stats.state;
     let controller_snapshot = packet_size_controller.map(AdaptivePacketSizeController::snapshot);
     RuntimeStatistics {
+        active_host_id: active_request
+            .filter(|request| request.session_generation == stats.session_generation)
+            .map(|request| request.host_id.clone()),
         sampled_at: std::time::Instant::now(),
+        feedback_video_frame_count: stats.feedback_video_frame_count,
         performance: stats.performance.clone(),
         state: session_state_label(state),
         start_count: stats.start_count,
@@ -1637,7 +1693,9 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
     let (command_tx, mut command_rx) = mpsc::channel::<RuntimeCommand>(32);
     let (state_tx, state_rx) = watch::channel(SessionState::Idle);
     let (stats_tx, stats_rx) = watch::channel(RuntimeStatistics {
+        active_host_id: None,
         sampled_at: std::time::Instant::now(),
+        feedback_video_frame_count: 0,
         performance: Default::default(),
         state: session_state_label(&SessionState::Idle),
         start_count: 0,
@@ -1984,6 +2042,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             &stats,
                             packet_size_controller.as_ref(),
                             adaptive_packet_reconnect_count,
+                            active_request.as_ref(),
                         ));
                     }
                 }
@@ -2031,6 +2090,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                             &stats,
                                             packet_size_controller.as_ref(),
                                             adaptive_packet_reconnect_count,
+                                            active_request.as_ref(),
                                         );
                                         let _ = stats_tx.send(runtime_stats.clone());
                                         runtime_stats
@@ -2067,6 +2127,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                         &stats,
                                         packet_size_controller.as_ref(),
                                         adaptive_packet_reconnect_count,
+                                        active_request.as_ref(),
                                     ));
                                 }
                                 Ok(())
@@ -2105,6 +2166,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                         &stats,
                                         packet_size_controller.as_ref(),
                                         adaptive_packet_reconnect_count,
+                                        active_request.as_ref(),
                                     ));
                                 }
                                 Ok(())
@@ -2304,6 +2366,7 @@ mod tests {
 
     fn sample_start_request() -> NativeStartRequest {
         NativeStartRequest {
+            feedback_frames_allowed: None,
             host_id: "host".to_string(),
             app_id: 1,
             host_address: "10.77.0.1".to_string(),

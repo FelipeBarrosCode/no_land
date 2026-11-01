@@ -4,6 +4,7 @@ pub mod control;
 pub mod errors;
 pub mod evaluation;
 pub mod events;
+pub mod feedback;
 pub mod probe;
 pub mod state;
 
