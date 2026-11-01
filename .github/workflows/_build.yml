@@ -217,14 +217,14 @@ jobs:
           extract_dir=$(mktemp -d)
           ditto -x -k "$zip_path" "$extract_dir"
           codesign --verify --deep --strict --verbose=2 "$extract_dir/${product_name}.app"
-          xcrun stapler validate -v "$extract_dir/${product_name}.app"
+          node scripts/apple-stapler-retry.mjs validate "$extract_dir/${product_name}.app"
           spctl -a -vvv -t exec "$extract_dir/${product_name}.app"
           updater="src-tauri/target/${{ matrix.target }}/release/bundle/macos/${product_name}.app.tar.gz"
           test -s "$updater" && test -s "$updater.sig"
           updater_dir=$(mktemp -d)
           tar -xzf "$updater" -C "$updater_dir"
           codesign --verify --deep --strict --verbose=2 "$updater_dir/${product_name}.app"
-          xcrun stapler validate -v "$updater_dir/${product_name}.app"
+          node scripts/apple-stapler-retry.mjs validate "$updater_dir/${product_name}.app"
           spctl -a -vvv -t exec "$updater_dir/${product_name}.app"
           rm -rf "$extract_dir" "$updater_dir"
 
@@ -342,6 +342,8 @@ jobs:
       - name: Sign Windows installers with Azure Artifact Signing
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
+          # A cache hit can skip installation even when Invoke-ArtifactSigning is unavailable.
+          cache-dependencies: false
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
