@@ -129,6 +129,6 @@ test('shared credential guard rejects empty or whitespace-only fields and preser
   assert.match(guard, /set_setup_failure\(/);
   assert.match(guard, /"missing_platform_credentials"/);
   assert.match(guard, /return Err\(AppError::InvalidInput\(/);
-  assert.match(guard, /Ok\(\(\)\)\s*\}$/);
+  assert.match(guard, /validate_platform_credentials\(username, password\)/);
   assert.match(setupFunction('verify_sunshine_api'), /ensure_sunshine_credentials\(context, &username, &password\)\.await\?;/);
 });
