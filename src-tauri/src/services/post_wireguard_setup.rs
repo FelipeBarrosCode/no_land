@@ -501,6 +501,20 @@ async fn ensure_sunshine_credentials(
         ));
     }
 
+    if let Err(message) = super::platform_credentials::validate_platform_credentials(username, password) {
+        set_setup_failure(
+            context,
+            SetupStage::SunshineCredentialsConfiguring,
+            OrchestrationState::SunshineCredentialsConfiguring,
+            "invalid_platform_credentials",
+            &message,
+            Some("Update platform credentials in Settings, then retry.".to_string()),
+            true,
+        )
+        .await?;
+        return Err(AppError::InvalidInput(message));
+    }
+
     Ok(())
 }
 
@@ -1497,7 +1511,7 @@ async fn bootstrap_sunshine_credentials_over_ssh(
     let escaped_username = shell_single_quote_escape(sunshine_username);
     let escaped_password = shell_single_quote_escape(sunshine_password);
     let command = format!(
-        "sudo -u {sunshine_user} bash -lc 'sunshine --creds '\''{username}'\'' '\''{password}'\'''",
+        r"sudo -u {sunshine_user} bash -lc 'sunshine --creds '\''{username}'\'' '\''{password}'\'''",
         sunshine_user = sunshine_user,
         username = escaped_username,
         password = escaped_password,

@@ -1158,8 +1158,8 @@ async fn fetch_embedded_apps_via_sunshine_api(
     host_address: &str,
 ) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
     let state = context.load_state().await;
-    let username = state.credentials.app_username.trim().to_string();
-    let password = state.credentials.app_password.trim().to_string();
+    let username = state.credentials.app_username.clone();
+    let password = state.credentials.app_password.clone();
     if username.is_empty() || password.is_empty() {
         return Err(FrontendError {
             code: "moonlight_invalid_input".to_string(),
@@ -2967,18 +2967,13 @@ pub async fn update_platform_credentials(
     payload: PlatformCredentialsUpdate,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
-    if payload.app_username.trim().len() < 3 {
-        return Err(
-            AppError::InvalidInput("Username must have at least 3 characters".to_string()).into(),
-        );
-    }
-    if payload.app_password.len() < 6 {
-        return Err(
-            AppError::InvalidInput("Password must have at least 6 characters".to_string()).into(),
-        );
-    }
+    crate::services::platform_credentials::validate_platform_credentials(
+        &payload.app_username,
+        &payload.app_password,
+    )
+    .map_err(AppError::InvalidInput)?;
 
-    let app_username = payload.app_username.trim().to_string();
+    let app_username = payload.app_username;
     let app_password = payload.app_password;
 
     let next_state = context
@@ -3521,16 +3516,11 @@ pub async fn update_ssh_credentials(
 }
 
 fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), FrontendError> {
-    if payload.app_username.trim().len() < 3 {
-        return Err(
-            AppError::InvalidInput("Username must have at least 3 characters".to_string()).into(),
-        );
-    }
-    if payload.app_password.len() < 6 {
-        return Err(
-            AppError::InvalidInput("Password must have at least 6 characters".to_string()).into(),
-        );
-    }
+    crate::services::platform_credentials::validate_platform_credentials(
+        &payload.app_username,
+        &payload.app_password,
+    )
+    .map_err(AppError::InvalidInput)?;
     if payload.vast_api_key.trim().len() < 16 {
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }

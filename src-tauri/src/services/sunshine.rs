@@ -531,11 +531,8 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<()> {
-        if sunshine_username.trim().is_empty() || sunshine_password.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Sunshine username and password are required before WireGuard handoff.".to_string(),
-            ));
-        }
+        super::platform_credentials::validate_platform_credentials(sunshine_username, sunshine_password)
+            .map_err(AppError::InvalidInput)?;
         if headless_edid_base64.trim().is_empty() {
             return Err(AppError::InvalidInput(
                 "Headless EDID is missing. Regenerate EDID from Settings before provisioning."
@@ -1566,7 +1563,7 @@ echo "=== Setup Complete ==="
         let escaped_username = shell_single_quote_escape(sunshine_username);
         let escaped_password = shell_single_quote_escape(sunshine_password);
         let set_creds_command = format!(
-            "sudo -u {target_user} bash -lc 'sunshine --creds '\''{escaped_username}'\'' '\''{escaped_password}'\'''",
+            r"sudo -u {target_user} bash -lc 'sunshine --creds '\''{escaped_username}'\'' '\''{escaped_password}'\'''",
             target_user = target_user,
             escaped_username = escaped_username,
             escaped_password = escaped_password,
