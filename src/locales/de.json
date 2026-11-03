@@ -1,4 +1,5 @@
 {
+  "storage.allocation.range": "Verfügbarer Bereich für diese Instanz: {min}–{max} GB (ganze Zahlen).",
   "app.settings": "Einstellungen",
   "app.preferences": "Präferenzen",
   "settings.profile": "Profil",

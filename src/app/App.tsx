@@ -504,6 +504,7 @@ export function App() {
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
   const [deletingBeforeClose, setDeletingBeforeClose] = useState(false);
   const [closeGuardError, setCloseGuardError] = useState<string | null>(null);
+  const closeActionRunningRef = useRef(false);
   const attentionNotificationAtRef = useRef<number | null>(null);
   const [autoGithubIssuesEnabled, setAutoGithubIssuesEnabled] = useState(() => {
     try {
@@ -630,16 +631,19 @@ export function App() {
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
 
   useEffect(() => {
-    if (!windowLabelResolved || windowLabel !== "main" || loading) {
+    if (!windowLabelResolved || windowLabel !== "main" || !isRunningInTauri()) {
       return;
     }
 
     const currentWindow = getCurrentWindow();
     const unlistenPromise = currentWindow.onCloseRequested((event) => {
-      if (rentedInstances.length === 0) {
+      // Read live state without re-registering the native listener on each refresh.
+      const current = useAppStore.getState();
+      if (!current.loading && current.rentedInstances.length === 0 && !closeActionRunningRef.current) {
         return;
       }
       event.preventDefault();
+      if (closeActionRunningRef.current) return;
       setCloseGuardError(null);
       setCloseGuardOpen(true);
     });
@@ -647,7 +651,7 @@ export function App() {
     return () => {
       void unlistenPromise.then((unlisten) => unlisten());
     };
-  }, [loading, rentedInstances.length, windowLabel, windowLabelResolved]);
+  }, [windowLabel, windowLabelResolved]);
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel !== "main" || !isRunningInTauri()) {
@@ -750,19 +754,26 @@ export function App() {
     } catch (error) {
       setCloseGuardError(error instanceof Error ? error.message : String(error));
       setCloseGuardOpen(true);
+    } finally {
+      closeActionRunningRef.current = false;
+      setDeletingBeforeClose(false);
     }
   }
 
   async function deleteAllAndQuit() {
+    if (closeActionRunningRef.current) return;
+    closeActionRunningRef.current = true;
     setDeletingBeforeClose(true);
     setCloseGuardError(null);
     try {
-      for (const instance of rentedInstances) {
+      for (const instance of useAppStore.getState().rentedInstances) {
         await destroyInstance(instance.instanceId);
       }
       await quitWindow();
     } catch (error) {
       setCloseGuardError(error instanceof Error ? error.message : String(error));
+    } finally {
+      closeActionRunningRef.current = false;
       setDeletingBeforeClose(false);
     }
   }
