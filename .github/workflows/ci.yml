@@ -22,6 +22,8 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - name: Verify feedback API build configuration
+        run: node --test scripts/feedback-build-env.test.mjs
       - name: TypeScript and Vite production build
         run: npm run build
 

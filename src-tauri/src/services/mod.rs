@@ -24,8 +24,8 @@ pub mod orchestration;
 pub mod os_detection;
 mod package_manager;
 
-pub mod post_wireguard_setup;
 pub mod platform_credentials;
+pub mod post_wireguard_setup;
 pub mod provider_creation;
 mod provisioning;
 pub mod reboot_helper;
