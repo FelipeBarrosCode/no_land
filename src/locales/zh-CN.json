@@ -1,4 +1,5 @@
 {
+  "storage.allocation.range": "此实例的可用范围：{min}–{max} GB（整数）。",
   "app.settings": "设置",
   "app.preferences": "首选项",
   "settings.profile": "简介",

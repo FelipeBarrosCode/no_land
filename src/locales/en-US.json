@@ -1,4 +1,5 @@
 {
+  "storage.allocation.range": "Available range for this instance: {min}–{max} GB (whole numbers).",
   "app.settings": "Settings",
   "app.preferences": "Preferences",
   "settings.profile": "Profile",

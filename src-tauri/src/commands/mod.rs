@@ -2168,6 +2168,14 @@ pub async fn select_offer(
         )
     })?;
 
+    if storage_gb > selected.available_storage_gb.min(10000) {
+        return Err(AppError::InvalidInput(format!(
+            "Storage must be between 30GB and {}GB for this offer",
+            selected.available_storage_gb.min(10000)
+        ))
+        .into());
+    }
+
     let next_state = context
         .update_state(|state| {
             state.selected_offer = Some(selected);

@@ -15,6 +15,7 @@ import { MachineFeedback } from "../feedback/MachineFeedback";
 import { MachineReviewsModal } from "../feedback/MachineReviewsModal";
 import { useFeedbackSummaries } from "../feedback/useFeedbackSummaries";
 import { useFeedbackStore } from "../feedback/feedbackStore";
+import { MIN_STORAGE_GB, storageAllocationLimit, isValidStorageAllocation } from "../../lib/storageAllocation";
 
 interface Props {
   open: boolean;
@@ -58,7 +59,6 @@ type SortMode =
   | "reliabilityAsc";
 
 const GLOBAL_COUNTRY_CODE = "GLOBAL";
-const MIN_STORAGE_GB = 30;
 
 /* Fallback shown while Vast availability is loading (or when it fails). */
 const FALLBACK_COUNTRIES: CountryOption[] = [
@@ -244,7 +244,9 @@ export function ServerPickerModal({
   }, [serverPreferences.geolocationCountryCode]);
 
   useEffect(() => {
-    setStorageInput(String(serverPreferences.storageGb || ""));
+    const nextStorage = String(serverPreferences.storageGb || "");
+    setStorageInput(nextStorage);
+    storageInputRef.current = nextStorage;
   }, [serverPreferences.storageGb]);
 
   const activeFilterCount = useMemo(
@@ -316,34 +318,27 @@ export function ServerPickerModal({
   // Enrichment never participates in the provider-based filter/sort above.
   const feedback = useFeedbackSummaries(displayedOffers.map((offer) => offer.machineId), open);
 
-  const commitStorageInput = async () => {
-    const parsed = Number(storageInputRef.current);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      return;
-    }
-    const clamped = Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)));
-    await onUpdateServerPreferences({ storageGb: clamped });
-  };
+  const pendingOffer = offers.find((offer) => offer.id === pendingOfferId);
+  const maxStorageGb = storageAllocationLimit(pendingOffer?.availableStorageGb ?? 0);
+  const storageValid = !!pendingOffer && isValidStorageAllocation(storageInput, maxStorageGb);
 
   async function confirmProvisioning() {
-    if (pendingOfferId === null) {
+    if (busy || pendingOfferId === null || !pendingOffer ||
+      !isValidStorageAllocation(storageInputRef.current, maxStorageGb)) {
       return;
     }
 
-    const parsed = Number(storageInputRef.current);
-    const effectiveStorage =
-      Number.isFinite(parsed) && parsed > 0
-        ? Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)))
-        : storageGb;
-
-    await commitStorageInput();
+    const effectiveStorage = Number(storageInputRef.current);
     const offerId = pendingOfferId;
     setPendingOfferId(null);
     await onSelectOffer(offerId, effectiveStorage);
   }
 
   useEffect(() => {
-    if (!open) setReviewOffer(null);
+    if (!open) {
+      setReviewOffer(null);
+      setPendingOfferId(null);
+    }
   }, [open]);
 
   useEffect(() => {
@@ -830,9 +825,11 @@ export function ServerPickerModal({
                   autoFocus
                   type="number"
                   min={MIN_STORAGE_GB}
-                  max={10000}
+                  max={maxStorageGb}
                   step={1}
-                  title={translate("generated.2de87204285ed008")}
+                  aria-invalid={!storageValid}
+                  aria-describedby="storage-allocation-range"
+                  title={translate("storage.allocation.range", { min: MIN_STORAGE_GB, max: maxStorageGb })}
                   className="min-h-11 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
                   value={storageInput}
                   onChange={(event) => {
@@ -846,8 +843,8 @@ export function ServerPickerModal({
                     }
                   }}
                 />
-                <span className="text-[0.95rem] text-[#7fa8cc]">
-                  {translate("generated.0ed1817861efb77d")}
+                <span id="storage-allocation-range" className={`text-[0.95rem] ${storageValid ? "text-[#7fa8cc]" : "text-[#ff8ca2]"}`}>
+                  {translate("storage.allocation.range", { min: MIN_STORAGE_GB, max: maxStorageGb })}
                 </span>
               </label>
               <div className="mt-5 flex justify-end gap-2">
@@ -857,6 +854,7 @@ export function ServerPickerModal({
                 <Button
                   variant="secondary"
                   loading={busy}
+                  disabled={!storageValid}
                   loadingText={translate("generated.091881c9b995c77e")}
                   onClick={() => void confirmProvisioning()}
                 >
