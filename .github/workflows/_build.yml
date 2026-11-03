@@ -17,6 +17,8 @@ permissions:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # Public endpoint embedded by Rust option_env! at compile time.
+  NOLAND_FEEDBACK_API_URL: ${{ secrets.NOLAND_FEEDBACK_API_URL }}
   GSTREAMER_VERSION: 1.24.13
   NOLAND_GSTREAMER_VERSION: 1.24.13
   MACOSX_DEPLOYMENT_TARGET: "12.0"
