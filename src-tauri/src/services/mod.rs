@@ -4,6 +4,7 @@ pub mod audio_latency;
 pub mod clipboard;
 pub mod cloudflare_turn;
 pub mod connection_manager;
+pub mod desktop_password;
 pub mod diagnostics;
 pub mod display_profile;
 pub mod feedback;

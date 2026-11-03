@@ -14,6 +14,10 @@ pub fn validate_platform_credentials(username: &str, password: &str) -> Result<(
     {
         return Err("Username must have at least 3 characters, start with a letter or number, and use only A-Z, a-z, 0-9, dot, underscore or hyphen.".into());
     }
+    validate_platform_password(password)
+}
+
+pub fn validate_platform_password(password: &str) -> Result<(), String> {
     if password.len() < 6
         || password.starts_with('-')
         || !password

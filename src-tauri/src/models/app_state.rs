@@ -787,6 +787,8 @@ pub struct ProvisionedServerSteps {
     pub instance_created: bool,
     pub instance_ready: bool,
     pub ssh_connected: bool,
+    #[serde(default)]
+    pub desktop_password_configured: bool,
     pub nvidia_headless_configured: bool,
     #[serde(default)]
     pub post_nvidia_reboot_completed: bool,

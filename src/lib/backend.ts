@@ -73,6 +73,10 @@ export async function getAppState(): Promise<PersistedAppState> {
   return { ...state, feedbackProgram: normalizeFeedbackProgram(state.feedbackProgram) };
 }
 
+export async function applyInstanceDesktopPassword(instanceId: number): Promise<void> {
+  return invokeSafe<void>("apply_instance_desktop_password", { instanceId });
+}
+
 export async function getSpendSummary(): Promise<SpendSummary> {
   return invokeSafe<SpendSummary>("get_spend_summary");
 }
