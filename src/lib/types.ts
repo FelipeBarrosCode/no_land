@@ -412,6 +412,7 @@ export interface ProvisionedServerSteps {
   instanceCreated: boolean;
   instanceReady: boolean;
   sshConnected: boolean;
+  desktopPasswordConfigured?: boolean;
   nvidiaHeadlessConfigured: boolean;
   sunshineConfigured: boolean;
   lowLatencyAudioConfigured: boolean;

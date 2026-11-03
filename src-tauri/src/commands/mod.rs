@@ -2988,6 +2988,29 @@ pub async fn update_platform_credentials(
 }
 
 #[tauri::command]
+pub async fn apply_instance_desktop_password(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    let guard = context.orchestration_guard.lock().await;
+    if *guard {
+        return Err(AppError::InvalidInput(
+            "Wait for provisioning to finish before changing a desktop password".into(),
+        )
+        .into());
+    }
+    InstanceLifecycleService::acquire_lock(instance_id, "desktop password update").await?;
+    let result = async {
+        let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+        crate::services::desktop_password::apply(context.inner(), &remote, instance_id).await
+    }
+    .await;
+    InstanceLifecycleService::release_lock(instance_id).await;
+    drop(guard);
+    result.map_err(Into::into)
+}
+
+#[tauri::command]
 pub async fn update_server_preferences(
     payload: ServerPreferencesUpdate,
     context: State<'_, AppContext>,

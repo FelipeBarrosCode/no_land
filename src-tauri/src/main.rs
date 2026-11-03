@@ -657,6 +657,7 @@ fn main() {
             get_vast_wallet_summary,
             update_vast_api_key,
             update_platform_credentials,
+            apply_instance_desktop_password,
             get_cloudflare_turn_settings,
             save_cloudflare_turn_settings,
             test_cloudflare_turn_settings,

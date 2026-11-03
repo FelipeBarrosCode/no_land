@@ -26,6 +26,9 @@ jobs:
         run: node --test scripts/feedback-build-env.test.mjs
       - name: TypeScript and Vite production build
         run: npm run build
+      - name: Verify remote desktop password setup
+        # Mock-only Linux account tests never alter a real user's password.
+        run: node --test scripts/desktop-password.test.mjs
 
   rust-format:
     name: rust-format
