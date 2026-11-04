@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "L’état des locations est en cours de chargement. Des instances peuvent encore fonctionner et être facturées. Vous pouvez garder l’application ouverte ou quitter sans supprimer les locations.",
   "feedback.program": "Programme de retours",
   "feedback.pending": "En attente",
   "feedback.on": "Activé",

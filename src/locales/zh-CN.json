@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "租用状态仍在加载。实例可能仍在运行并产生费用。你可以保持应用打开，或退出而不删除租用。",
   "feedback.program": "反馈计划",
   "feedback.pending": "待处理",
   "feedback.on": "开启",

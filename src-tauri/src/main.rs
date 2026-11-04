@@ -17,6 +17,7 @@ use commands::*;
 use services::{
     app_config::AppConfig,
     app_context::AppContext,
+    app_exit::{confirm_app_exit, take_app_quit_request, AppExitState, QUIT_REQUESTED_EVENT},
     mic_passthrough::MicPassthroughService,
     moonlight::detect_client_display_for_provisioning,
     orchestration::OrchestrationService,
@@ -92,6 +93,7 @@ fn main() {
     init_logging();
 
     tauri::Builder::default()
+        .manage(AppExitState::default())
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("navigation-policy")
                 .on_navigation(|_, url| is_trusted_webview_navigation(url))
@@ -601,6 +603,8 @@ fn main() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            confirm_app_exit,
+            take_app_quit_request,
             get_app_state,
             provider_creation_clear_unconfirmed,
             feedback_program_status,
@@ -764,7 +768,24 @@ fn main() {
             std::process::exit(1);
         })
         .run(|app, event| {
-            if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                if app.state::<AppExitState>().needs_confirmation(code) {
+                    if let Some(window) = app.get_webview_window("main") {
+                        // OS/menu Quit does not produce a window close event.
+                        // Keep the event loop alive while React presents the same guard.
+                        api.prevent_exit();
+                        app.state::<AppExitState>().request();
+                        if let Err(error) = window.emit(QUIT_REQUESTED_EVENT, ()) {
+                            warn!(%error, "Could not deliver application quit request");
+                        }
+                        #[cfg(target_os = "macos")]
+                        let _ = app.show();
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                        return;
+                    }
+                }
                 if let Some(context) = app.try_state::<AppContext>() {
                     // Bounded best effort, no feedback HTTP on application shutdown.
                     tauri::async_runtime::block_on(services::feedback::before_teardown(app, context.inner()));

@@ -68,6 +68,14 @@ import type {
   InstanceConnectionStatusResponse,
 } from "./types";
 
+export async function confirmAppExit(): Promise<void> {
+  return invokeSafe<void>("confirm_app_exit");
+}
+
+export async function takeAppQuitRequest(): Promise<boolean> {
+  return invokeSafe<boolean>("take_app_quit_request");
+}
+
 export async function getAppState(): Promise<PersistedAppState> {
   const state = await invokeSafe<PersistedAppState>("get_app_state");
   return { ...state, feedbackProgram: normalizeFeedbackProgram(state.feedbackProgram) };

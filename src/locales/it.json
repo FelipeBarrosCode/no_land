@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "Lo stato dei noleggi è ancora in caricamento. Le istanze potrebbero essere attive e generare costi. Puoi tenere aperta l’app o uscire senza eliminare i noleggi.",
   "feedback.program": "Programma di feedback",
   "feedback.pending": "In attesa",
   "feedback.on": "Attivo",
