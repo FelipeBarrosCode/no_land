@@ -124,7 +124,7 @@ impl Reporter {
         else {
             return;
         };
-        let batch = take_batch(&mut self.feedback_batches.write().await, &evidence);
+        let batch = take_batch(&mut *self.feedback_batches.write().await, &evidence);
         let Some(batch) = batch.filter(|batch| {
             Some(batch.received_sequence) == evidence.received_sequence
                 && batch.measured_at.elapsed() <= Duration::from_secs(3)
