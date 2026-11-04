@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "../../components/ui/Button";
+import { translate } from "../../lib/i18n";
 import { FeedbackProgramModal } from "./FeedbackProgramModal";
 import { useFeedbackStore } from "./feedbackStore";
 
@@ -38,11 +39,11 @@ export function FeedbackProgramEntry() {
   return (
     <div className="bg-[#080b19] px-4 pb-2 pt-3 md:px-8">
       <div className="mx-auto max-w-7xl">
-        <Button variant="ghost" className="max-w-full text-xs" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>Feedback program
-          <span className="ml-2 text-xs normal-case">{status.pendingControlAction ? "Pending" : status.enabled ? "On" : "Off"}</span>
+        <Button variant="ghost" className="max-w-full text-xs" aria-haspopup="dialog" aria-expanded={open} onClick={() => setOpen(true)}>{translate("feedback.program")}
+          <span className="ml-2 text-xs normal-case">{status.pendingControlAction ? translate("feedback.pending") : status.enabled ? translate("feedback.on") : translate("feedback.off")}</span>
         </Button>
         {warning && <div role="status" className="mt-2 flex flex-wrap items-start gap-3 border border-[#ffd78a] p-2 text-[#ffd78a]">
-          <p className="min-w-0 break-words">{warning}</p><Button variant="ghost" onClick={() => setWarning(null)}>Dismiss</Button>
+          <p className="min-w-0 break-words">{warning}</p><Button variant="ghost" onClick={() => setWarning(null)}>{translate("generated.48845bff334a50a5")}</Button>
         </div>}
       </div>
       {open && <FeedbackProgramModal onClose={() => setOpen(false)} />}
