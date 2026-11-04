@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -20,16 +20,20 @@ function loader(mocks = {}, globals = {}) {
     const filename = path.resolve(root, relative);
     if (mocks[relative]) return mocks[relative];
     if (modules.has(filename)) return modules.get(filename).exports;
+    // Use the actual locale bundles/formatter so component assertions continue
+    // checking rendered English copy rather than untranslated message keys.
+    if (filename.endsWith('.json')) return { default: JSON.parse(readFileSync(filename, 'utf8')) };
     const source = readFileSync(filename, 'utf8');
     const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
       target: ts.ScriptTarget.ES2020, jsx: ts.JsxEmit.ReactJSX } }).outputText;
     const module = { exports: {} };
     modules.set(filename, module);
     const localRequire = (name) => {
+      if (name === 'react') return { ...React, ...mocks.react };
       if (mocks[name]) return mocks[name];
       if (!name.startsWith('.')) return require(name);
       const base = path.resolve(path.dirname(filename), name);
-      const resolved = ['.ts', '.tsx', '.js'].map((ext) => base + ext).find(existsSync);
+      const resolved = ['', '.ts', '.tsx', '.js'].map((ext) => base + ext).find((file) => existsSync(file) && statSync(file).isFile());
       assert.ok(resolved, `Cannot resolve ${name}`);
       return load(path.relative(root, resolved));
     };
@@ -488,7 +492,7 @@ test('feedback JSX/TS parses and privacy-sensitive UI integration guards stay pr
     }
   }
   const card = readFileSync(path.join(root, 'src/features/feedback/MachineFeedback.tsx'), 'utf8');
-  assert.match(card, /aria-label=\{`View machine reviews/);
+  assert.match(card, /aria-label=\{translate\("feedback\.machine\.reviewsFor"/);
   assert.match(card, /event\.stopPropagation\(\)/);
   const destroy = readFileSync(path.join(root, 'src/features/feedback/DestroyFeedbackConfirmation.tsx'), 'utf8');
   assert.doesNotMatch(destroy, /embeddedMoonlightPaired|RuntimeConnected|SessionState/);
@@ -550,7 +554,7 @@ test('actual card feedback renders 0%, measured zero jitter, count/source, and a
   card.render();
   assert.match(card.text(), /Reliability 0\.0% · No Land/);
   assert.match(card.text(), /2 No Land sessions · Small sample/);
-  assert.match(card.text(), /Original Vast: 99\.0%/);
+  assert.match(card.text(), /Original Vast reliability: 99\.0%/);
   assert.match(card.text(), /Jitter 0\.0 ms/);
   assert.match(card.text(), /N\/A · 0 comments/);
   const icon = card.nodes().find((node) => node.props['aria-label']?.startsWith('View machine reviews'));
@@ -642,7 +646,6 @@ test('actual server picker keeps Vast sort/filter and selection separate from co
     offersPage: 1, offersHasNextPage: false, busy: false, onSearchOffers: async () => {}, onNextPage: async () => {}, onPreviousPage: async () => {},
     onManualLocationSave: async () => {}, onSelectOffer: async (id) => selected.push(id), onUpdateServerPreferences: async () => {} };
   const picker = componentHarness('src/features/servers/ServerPickerModal.tsx', 'ServerPickerModal', props, {
-    'src/lib/i18n.tsx': { translate: (key) => key, translateSource: (text) => text },
     'src/components/ui/AIPromptHelper.tsx': { AIPromptHelper: () => null },
     'src/prompts/appPrompts.ts': { APP_PROMPTS: {} },
     'src/features/feedback/MachineReviewsModal.tsx': { MachineReviewsModal: () => null },

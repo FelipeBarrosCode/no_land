@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, type PropsWithChildren } from "react";
 import { Button } from "../../components/ui/Button";
+import { translate } from "../../lib/i18n";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 
 interface Props extends PropsWithChildren {
@@ -43,7 +44,7 @@ export function FeedbackDialog({ title, onClose, busy = false, children }: Props
       <ModalFrame labelledBy={titleId} panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[80]">
         <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b-2 border-[#3e4270] p-4">
           <h2 id={titleId} className="min-w-0 break-words font-display text-sm text-white">{title}</h2>
-          <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>Close</Button>
+          <Button type="button" variant="ghost" disabled={busy} onClick={onClose}>{translate("common.close")}</Button>
         </div>
         <ModalBody className="min-w-0 space-y-4 break-words p-4 text-[1.12rem] leading-snug text-[#c6dbf4] [overflow-wrap:anywhere]">{children}</ModalBody>
       </ModalFrame>

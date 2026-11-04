@@ -138,9 +138,9 @@ function sortModeLabel(sortMode: SortMode): string {
     case "priceDesc":
       return translate("generated.62bb459519624447");
     case "reliabilityDesc":
-      return "Vast reliability: highest first";
+      return translate("feedback.vast.highest");
     case "reliabilityAsc":
-      return "Vast reliability: lowest first";
+      return translate("feedback.vast.lowest");
     case "recommended":
     default:
       return translate("generated.b72924fa4d04fdea");
@@ -504,20 +504,20 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability sorting
+                {translate("feedback.vast.sorting")}
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
                   variant={sortMode === "reliabilityDesc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityDesc")}
                 >
-                  Highest Vast reliability
+                  {translate("feedback.vast.highest")}
                 </Button>
                 <Button
                   variant={sortMode === "reliabilityAsc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityAsc")}
                 >
-                  Lowest Vast reliability
+                  {translate("feedback.vast.lowest")}
                 </Button>
               </div>
             </div>
@@ -590,7 +590,7 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability range (%)
+                {translate("feedback.vast.range")}
               </p>
               {reliabilityRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -662,10 +662,10 @@ export function ServerPickerModal({
           {translate("generated.d604310a789a1848")} {displayedOffers.length} {translate("generated.28391d3bc64ec15c")} {offers.length} {translate("generated.80078650c6d04361")} {offersPage}
         </p>
 
-        <p className="mb-3 text-sm text-[#9ec4df]">Filtering, sorting, recommendations, and automatic selection use Vast reliability. Community feedback changes only the displayed value, never the offer order.</p>
-        {feedback.enabled && feedback.loading && <p role="status" className="mb-2 text-[#9ec4df]">Loading community feedback; rental actions remain available…</p>}
+        <p className="mb-3 text-sm text-[#9ec4df]">{translate("feedback.vast.order")}</p>
+        {feedback.enabled && feedback.loading && <p role="status" className="mb-2 text-[#9ec4df]">{translate("feedback.loading")}</p>}
         {feedback.enabled && feedback.error && <div role="status" className="mb-3 flex flex-wrap items-center gap-2 text-[#ffd78a]">
-          <p>{feedback.error}</p><Button variant="ghost" onClick={retryFeedbackReads}>Retry community data</Button>
+          <p>{feedback.error}</p><Button variant="ghost" onClick={retryFeedbackReads}>{translate("feedback.retry")}</Button>
         </div>}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {displayedOffers.length === 0 ? (
