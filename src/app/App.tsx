@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { exit as exitApp } from "@tauri-apps/plugin-process";
+import { confirmAppExit as exitApp, takeAppQuitRequest } from "../lib/backend";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
@@ -451,6 +451,7 @@ const AUTO_GITHUB_ISSUES_STORAGE_KEY = "noland.autoGithubIssues";
 
 function CloseWithInstancesModal({
   instances,
+  instancesLoading,
   deleting,
   error,
   onContinue,
@@ -459,6 +460,7 @@ function CloseWithInstancesModal({
   onSetupStorage,
 }: {
   instances: number;
+  instancesLoading: boolean;
   deleting: boolean;
   error: string | null;
   onContinue: () => void;
@@ -473,7 +475,7 @@ function CloseWithInstancesModal({
           {translate("generated.7a9be85b62a5b21e")}
         </h2>
         <p className="mt-2 text-[1.15rem] leading-snug text-[#d7e6f7]">
-          {translate("generated.af3f12e161fdb1cb")} {instances} {translate("generated.16c237378e5229bd")}{instances === 1 ? "" : translate("generated.043a718774c572bd")}{translate("generated.c46da1442255e3e3")}
+          {instancesLoading ? translate("quit.instancesLoading") : <>{translate("generated.af3f12e161fdb1cb")} {instances} {translate("generated.16c237378e5229bd")}{instances === 1 ? "" : translate("generated.043a718774c572bd")}{translate("generated.c46da1442255e3e3")}</>}
         </p>
       </div>
       <ModalBody className="space-y-4 px-5 py-5">
@@ -484,7 +486,7 @@ function CloseWithInstancesModal({
         <div className="grid gap-2 sm:grid-cols-2">
           <Button variant="primary" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
           <Button variant="danger" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
-          <Button variant="secondary" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
+          <Button variant="secondary" onClick={onDeleteAll} disabled={instancesLoading} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
             {translate("generated.d83cd3e78affba6d")}
           </Button>
           <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>{translate("generated.5539df1fa82ec53e")}</Button>
@@ -636,20 +638,48 @@ export function App() {
     }
 
     const currentWindow = getCurrentWindow();
+    let disposed = false;
+    const listenerError = (error: unknown) => {
+      if (!disposed) {
+        setCloseGuardError(error instanceof Error ? error.message : String(error));
+        setCloseGuardOpen(true);
+      }
+      return () => {};
+    };
     const unlistenPromise = currentWindow.onCloseRequested((event) => {
+      if (disposed) {
+        event.preventDefault();
+        return;
+      }
       // Read live state without re-registering the native listener on each refresh.
       const current = useAppStore.getState();
       if (!current.loading && current.rentedInstances.length === 0 && !closeActionRunningRef.current) {
         return;
       }
       event.preventDefault();
-      if (closeActionRunningRef.current) return;
-      setCloseGuardError(null);
-      setCloseGuardOpen(true);
-    });
+      requestQuit();
+    }).catch(listenerError);
+    const unlistenQuitPromise = currentWindow.listen("app:quit-requested", () => {
+      if (!disposed) {
+        requestQuit();
+        void takeAppQuitRequest().catch(listenerError);
+      }
+    }).then((unlisten) => {
+      if (disposed) {
+        unlisten();
+        return () => {};
+      }
+      // Subscribe first, then replay Quit received before the webview was ready.
+      void takeAppQuitRequest().then((pending) => {
+        if (pending && !disposed) requestQuit();
+      }).catch(listenerError);
+      return unlisten;
+    }).catch(listenerError);
 
     return () => {
+      disposed = true;
       void unlistenPromise.then((unlisten) => unlisten());
+      void unlistenQuitPromise.then((unlisten) => unlisten());
     };
   }, [windowLabel, windowLabelResolved]);
 
@@ -746,11 +776,23 @@ export function App() {
     windowLabelResolved,
   ]);
 
+  function requestQuit() {
+    if (closeActionRunningRef.current) return;
+    const current = useAppStore.getState();
+    if (!current.loading && current.rentedInstances.length === 0) {
+      void quitWindow();
+      return;
+    }
+    setCloseGuardError(null);
+    setCloseGuardOpen(true);
+  }
+
   async function quitWindow() {
+    closeActionRunningRef.current = true;
     setCloseGuardError(null);
     setCloseGuardOpen(false);
     try {
-      await exitApp(0);
+      await exitApp();
     } catch (error) {
       setCloseGuardError(error instanceof Error ? error.message : String(error));
       setCloseGuardOpen(true);
@@ -761,7 +803,7 @@ export function App() {
   }
 
   async function deleteAllAndQuit() {
-    if (closeActionRunningRef.current) return;
+    if (closeActionRunningRef.current || useAppStore.getState().loading) return;
     closeActionRunningRef.current = true;
     setDeletingBeforeClose(true);
     setCloseGuardError(null);
@@ -889,8 +931,21 @@ export function App() {
     return <StreamWindowScreen />;
   }
 
+  const closeGuard = closeGuardOpen ? (
+    <CloseWithInstancesModal
+      instances={rentedInstances.length}
+      instancesLoading={loading}
+      deleting={deletingBeforeClose}
+      error={closeGuardError}
+      onContinue={() => setCloseGuardOpen(false)}
+      onQuit={() => void quitWindow()}
+      onDeleteAll={() => void deleteAllAndQuit()}
+      onSetupStorage={openSharedStorageFromCloseGuard}
+    />
+  ) : null;
+
   if (loading) {
-    return <BootScreen />;
+    return <><BootScreen />{closeGuard}</>;
   }
 
   return (
@@ -939,17 +994,7 @@ export function App() {
         />
       )}
 
-      {closeGuardOpen && (
-        <CloseWithInstancesModal
-          instances={rentedInstances.length}
-          deleting={deletingBeforeClose}
-          error={closeGuardError}
-          onContinue={() => setCloseGuardOpen(false)}
-          onQuit={() => void quitWindow()}
-          onDeleteAll={() => void deleteAllAndQuit()}
-          onSetupStorage={openSharedStorageFromCloseGuard}
-        />
-      )}
+      {closeGuard}
 
       {isBlocking && blockingAction && (
         <BlockingLoaderOverlay

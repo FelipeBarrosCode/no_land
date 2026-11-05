@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "Der Mietstatus wird noch geladen. Instanzen könnten weiterlaufen und Kosten verursachen. Sie können die App geöffnet lassen oder ohne Löschen der Mieten beenden.",
   "feedback.program": "Feedback-Programm",
   "feedback.pending": "Ausstehend",
   "feedback.on": "An",

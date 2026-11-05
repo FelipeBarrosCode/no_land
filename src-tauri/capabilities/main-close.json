@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-close",
+  "description": "Allow the main window's close-request listener to complete an approved window close.",
+  "windows": ["main"],
+  "permissions": ["core:window:allow-destroy"]
+}

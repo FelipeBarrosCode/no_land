@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "Rental status is still loading. Instances may still be running and charging. You can keep the app open or quit without deleting rentals.",
   "feedback.program": "Feedback program",
   "feedback.pending": "Pending",
   "feedback.on": "On",

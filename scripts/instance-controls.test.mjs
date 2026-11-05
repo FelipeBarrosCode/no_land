@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { Window as TauriWindow } from '@tauri-apps/api/window';
 
 const require = createRequire(import.meta.url);
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
@@ -147,22 +148,27 @@ test('closing while SSH is opening closes the late session and removes listeners
 const appSource = ts.createSourceFile('App.tsx', read('src/app/App.tsx'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const app = appSource.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'App');
 const closeFunctions = app.body.statements.filter((node) => ts.isFunctionDeclaration(node)
-  && ['quitWindow', 'deleteAllAndQuit'].includes(node.name?.text)).map((node) => node.getText(appSource)).join('\n');
+  && ['requestQuit', 'quitWindow', 'deleteAllAndQuit'].includes(node.name?.text)).map((node) => node.getText(appSource)).join('\n');
 
 test('close listener reads current rental state without needing re-registration', async () => {
   const effect = app.body.statements.find((node) => ts.isExpressionStatement(node)
     && ts.isCallExpression(node.expression) && node.expression.expression.getText(appSource) === 'useEffect'
     && node.getText(appSource).includes('currentWindow.onCloseRequested'));
   const callback = effect.expression.arguments[0].getText(appSource);
-  let listener; let opened = false; let prevented = 0; let removed = false;
+  let listener; let quitListener; let opened = false; let prevented = 0; let removed = 0; let exits = 0;
   const current = { loading: false, rentedInstances: [] };
-  const { register } = compile(`exports.register = ${callback};`, {}, {
+  const { register } = compile(`${closeFunctions}\nexports.register = ${callback};`, {}, {
     windowLabelResolved: true, windowLabel: 'main', isRunningInTauri: () => true,
     getCurrentWindow: () => ({ onCloseRequested: async (handler) => {
-      listener = handler; return () => { removed = true; };
+      listener = handler; return () => { removed++; };
+    }, listen: async (event, handler) => {
+      assert.equal(event, 'app:quit-requested');
+      quitListener = handler; return () => { removed++; };
     } }),
     useAppStore: { getState: () => current }, closeActionRunningRef: { current: false },
     setCloseGuardError() {}, setCloseGuardOpen: (value) => { opened = value; },
+    setDeletingBeforeClose() {}, exitApp: async () => { exits++; },
+    takeAppQuitRequest: async () => false,
   });
   const cleanup = register();
   const event = { preventDefault: () => { prevented++; } };
@@ -172,9 +178,60 @@ test('close listener reads current rental state without needing re-registration'
   listener(event);
   assert.equal(opened, true);
   assert.equal(prevented, 1);
-  cleanup();
+  opened = false;
+  quitListener();
+  assert.equal(opened, true, 'OS/menu Quit shares the rental confirmation');
+  current.rentedInstances = [];
+  current.loading = true;
+  opened = false;
+  listener(event);
+  assert.equal(opened, true, 'loading must show the guard, not silently swallow close');
+  current.loading = false;
+  quitListener();
   await Promise.resolve();
-  assert.equal(removed, true);
+  assert.equal(exits, 1, 'Quit with known empty rentals uses approved native exit');
+  cleanup();
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.equal(removed, 2);
+});
+
+test('real Tauri close listener can destroy only the authorized main window', async () => {
+  const capability = JSON.parse(read('src-tauri/capabilities/main-close.json'));
+  assert.deepEqual(capability.windows, ['main']);
+  assert.ok(capability.permissions.includes('core:window:allow-destroy'));
+  let callback; let destroyed = 0; let guard = false;
+  const window = {
+    listen: async (_event, listener) => { callback = listener; return () => {}; },
+    destroy: async () => {
+      assert.ok(capability.permissions.includes('core:window:allow-destroy'));
+      destroyed++;
+    },
+  };
+  // Execute the installed SDK wrapper, including its implicit destroy() call.
+  await TauriWindow.prototype.onCloseRequested.call(window, (event) => {
+    if (guard) event.preventDefault();
+  });
+  await callback({ event: 'tauri://close-requested', id: 1, payload: null });
+  assert.equal(destroyed, 1);
+  guard = true;
+  await callback({ event: 'tauri://close-requested', id: 2, payload: null });
+  assert.equal(destroyed, 1, 'pending confirmation must keep the window open');
+});
+
+test('loading screen still renders the quit confirmation', () => {
+  const guard = app.body.statements.find((node) => ts.isVariableStatement(node)
+    && node.declarationList.declarations.some((item) => item.name.getText(appSource) === 'closeGuard'));
+  const loadingBranch = app.body.statements.find((node) => ts.isIfStatement(node)
+    && node.expression.getText(appSource) === 'loading');
+  const { render } = compile(`exports.render = () => { ${guard.getText(appSource)} ${loadingBranch.getText(appSource)} return closeGuard; };`, {}, {
+    closeGuardOpen: true, loading: true, rentedInstances: [], deletingBeforeClose: false, closeGuardError: null,
+    CloseWithInstancesModal: 'quit-dialog', BootScreen: 'boot-screen',
+    setCloseGuardOpen() {}, quitWindow() {}, deleteAllAndQuit() {}, openSharedStorageFromCloseGuard() {},
+  });
+  const children = render().props.children;
+  assert.equal(children[0].type, 'boot-screen');
+  assert.equal(children[1].type, 'quit-dialog');
+  assert.equal(children[1].props.instancesLoading, true);
 });
 
 test('failed quit after deletion resets popup state so the user can retry', async () => {

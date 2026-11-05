@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "O status dos aluguéis ainda está carregando. Instâncias podem continuar ativas e gerando cobranças. Você pode manter o aplicativo aberto ou sair sem excluir aluguéis.",
   "feedback.program": "Programa de feedback",
   "feedback.pending": "Pendente",
   "feedback.on": "Ativado",

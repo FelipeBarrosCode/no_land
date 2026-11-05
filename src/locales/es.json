@@ -1,4 +1,5 @@
 {
+  "quit.instancesLoading": "El estado de los alquileres sigue cargando. Las instancias pueden seguir activas y generando cargos. Puedes mantener la aplicación abierta o salir sin eliminar alquileres.",
   "feedback.program": "Programa de comentarios",
   "feedback.pending": "Pendiente",
   "feedback.on": "Activado",
