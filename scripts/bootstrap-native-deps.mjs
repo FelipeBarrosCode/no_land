@@ -17,6 +17,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
+import { downloadWithResume } from './native-download.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -1344,15 +1345,7 @@ function downloadFile(url, destination, options = {}) {
     rmSync(tempDestination, { force: true });
     try {
       console.log(`[bootstrap-native-deps] Downloading ${url}`);
-      run('curl', [
-        '-fL',
-        '--connect-timeout', '30',
-        '--max-time', '300',
-        '--retry', '3',
-        '--retry-all-errors',
-        '-o', tempDestination,
-        url,
-      ]);
+      downloadWithResume(url, tempDestination);
     } catch (error) {
       failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
       continue;

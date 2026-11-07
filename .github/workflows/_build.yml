@@ -110,6 +110,15 @@ jobs:
           HOMEBREW_NO_AUTO_UPDATE: "1"
         run: brew install pkg-config openssl@3
 
+      # Cache only completed upstream packages, never partial downloads,
+      # extracted build trees, distributables, or signing material.
+      - name: Cache macOS GStreamer downloads
+        if: matrix.platform == 'macos'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: src-tauri/.native-deps/cache/gstreamer-*-macos-universal/*.pkg
+          key: native-download-v1-${{ runner.os }}-${{ matrix.target }}-gstreamer-${{ env.GSTREAMER_VERSION }}
+
       - name: Install Linux build and package dependencies
         if: matrix.platform == 'linux'
         run: |
@@ -297,6 +306,12 @@ jobs:
           workspaces: |
             src-tauri
             mic-sidecar
+
+      - name: Cache Windows GStreamer downloads
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: src-tauri/.native-deps/cache/gstreamer-*/*.msi
+          key: native-download-v1-${{ runner.os }}-${{ matrix.target }}-gstreamer-${{ env.GSTREAMER_VERSION }}
 
       - name: Install dependencies and stage managed tools
         shell: pwsh
