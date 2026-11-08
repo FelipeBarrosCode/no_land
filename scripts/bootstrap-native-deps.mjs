@@ -593,7 +593,12 @@ function ensureOpus(prefix, targetTriple) {
   }
 
   ensureExtractedSourceTarball(
-    'https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz',
+    [
+      // Use the upstream release asset first: downloads.xiph.org sometimes
+      // terminates TLS handshakes from GitHub-hosted runners.
+      'https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz',
+      'https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz',
+    ],
     'opus-1.5.2.tar.gz',
     'opus-1.5.2',
   );
