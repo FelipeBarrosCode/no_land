@@ -13,6 +13,8 @@ docker build --platform linux/amd64 --build-arg "UBUNTU_IMAGE=$UBUNTU_IMAGE" --b
 # Dereference links INSIDE the container. The installer never needs unsafe
 # absolute/parent-traversing archive links, special devices or ownership restores.
 # Export explicit trees, not /proc, /sys, /dev, live /run or Docker credentials.
-docker run --rm --platform linux/amd64 -v "$PWD/scripts/runtime/export.py:/export.py:ro" "noland-runtime:$RUNTIME_ID" \
+# Only the fixed, offline image exporter needs to read root-owned metadata.
+# The built image defaults to the unprivileged runtime user.
+docker run --rm --user 0 --platform linux/amd64 -v "$PWD/scripts/runtime/export.py:/export.py:ro" "noland-runtime:$RUNTIME_ID" \
   python3 /export.py > dist/runtime/ubuntu24-x86_64.tar.gz
 python3 scripts/runtime/manifest.py

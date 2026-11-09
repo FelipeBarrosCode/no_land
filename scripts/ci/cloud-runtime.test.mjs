@@ -4,6 +4,11 @@ import { test } from 'node:test';
 
 const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
 
+test('runtime image defaults to a non-root user; only the fixed exporter overrides it', () => {
+  assert.match(read('runtime-images/ubuntu24/Dockerfile'), /^USER 1000:1000$/m);
+  assert.match(read('scripts/runtime/build-image.sh'), /docker run --rm --user 0 .*export\.py:\/export\.py:ro/);
+});
+
 test('both new and resumed provisioning install the cloud desktop runtime', () => {
   const source = read('src-tauri/src/services/orchestration.rs');
   assert.equal((source.match(/provision_desktop_runtime\(&app, &context, &remote, &target_user\)/g) || []).length, 2);

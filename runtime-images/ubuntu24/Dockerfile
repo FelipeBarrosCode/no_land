@@ -24,5 +24,7 @@ RUN test -n "$APT_SNAPSHOT" \
     && cp -a /usr/share/doc/. /usr/share/noland-runtime/licenses/ \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
     && printf 'noland:x:1000:1000:Runtime:/home/runtime:/bin/sh\n' >> /etc/passwd \
-    && printf 'noland:x:1000:\n' >> /etc/group
+    && printf 'noland:x:1000:\n' >> /etc/group \
+    && chown 1000:1000 /home/runtime
+USER 1000:1000
 # No systemd PID 1, Xorg, Sunshine, audio server, DKMS, Steam or 32-bit profile.
