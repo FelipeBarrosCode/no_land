@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "crates/noland-net-helper"]
+members = [".", "crates/noland-net-helper", "crates/noland-mcp"]
 resolver = "2"
 
 [profile.release]
@@ -22,6 +22,8 @@ sha2 = "0.10.9"
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
+noland-runtime-contracts = { path = "../runtime-contracts" }
+noland-mcp = { path = "crates/noland-mcp" }
 noland-network-contracts = { path = "../network-contracts" }
 noland-rclone-adapter = { path = "../state-agent/crates/noland-rclone-adapter" }
 arboard = { version = "3.4", default-features = false }

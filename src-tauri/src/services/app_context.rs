@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::{
     collections::HashMap,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -32,6 +32,7 @@ pub struct AppContext {
     pub offer_cache: Arc<RwLock<Vec<OfferCandidate>>>,
 
     pub orchestration_guard: Arc<Mutex<bool>>,
+    pub provisioning_epoch: Arc<AtomicU64>,
     pub cancel_requested: Arc<AtomicBool>,
     pub pending_start: Arc<Mutex<Option<OrchestrationStartRequest>>>,
     pub wireguard_mutation_in_progress: Arc<AtomicBool>,
@@ -85,10 +86,26 @@ impl Drop for WireGuardMutationGuard {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum OrchestrationStartRequest {
     SelectedOffer,
     ExistingInstance(u64),
+    ApprovedRental(ApprovedRental),
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovedRental {
+    pub offer: OfferCandidate,
+    pub storage_gb: u32,
+    pub max_hourly_price: f64,
+    pub fingerprint: String,
+}
+
+pub fn rental_fingerprint(offer: &OfferCandidate, state: &PersistedAppState) -> String {
+    noland_mcp::policy::fingerprint(&serde_json::json!({
+        "offer":offer,"storageGb":state.server_preferences.storage_gb,"template":state.server_preferences.template_hash,
+        "account":noland_mcp::policy::fingerprint(&state.credentials.vast_api_key),
+    }).to_string())
 }
 
 impl AppContext {
@@ -110,6 +127,7 @@ impl AppContext {
             offer_cache: Arc::new(RwLock::new(Vec::new())),
 
             orchestration_guard: Arc::new(Mutex::new(false)),
+            provisioning_epoch: Arc::new(AtomicU64::new(0)),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             pending_start: Arc::new(Mutex::new(None)),
             wireguard_mutation_in_progress: Arc::new(AtomicBool::new(false)),

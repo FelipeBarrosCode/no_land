@@ -58,6 +58,48 @@ async fn provision_microphone_receiver(
     MicReceiverProvisioner::install(remote, target_user).await
 }
 
+async fn provision_desktop_runtime(
+    app: &AppHandle,
+    context: &AppContext,
+    remote: &RemoteExec,
+    target_user: &str,
+) {
+    emit_transition(
+        app, context, OrchestrationState::ConfiguringRemote,
+        "Installing No Land Runtime on the cloud desktop",
+        Some("Downloading and preparing the Ubuntu app runtime. Its desktop icon will open a drag-and-drop launcher; no separate activation or signed runtime release is required.".into()),
+        false,
+    ).await;
+    match measure(
+        "desktop_runtime",
+        super::runtime_manager::enable(remote, target_user),
+    )
+    .await
+    {
+        Ok(()) => {
+            emit_transition(app, context, OrchestrationState::ConfiguringRemote,
+                "No Land Runtime desktop launcher ready",
+                Some("Open No Land Runtime on the cloud PC desktop and drop a trusted Linux executable or AppImage.".into()), false).await;
+        }
+        Err(error) => {
+            // Runtime/namespace support must not take down a working streamed PC.
+            // Every resume retries this idempotent step; never claim it installed.
+            warn!(%error, "Cloud runtime unavailable; preserving normal desktop provisioning");
+            emit_transition(
+                app,
+                context,
+                OrchestrationState::ConfiguringRemote,
+                "No Land Runtime setup failed; normal desktop remains available",
+                Some(format!(
+                    "Resume Provisioning to retry runtime installation: {error}"
+                )),
+                false,
+            )
+            .await;
+        }
+    }
+}
+
 async fn provision_lifecycle_agent(
     context: &AppContext,
     remote: &RemoteExec,
@@ -220,6 +262,19 @@ impl OrchestrationService {
         Self::request_start(app, context, OrchestrationStartRequest::SelectedOffer).await
     }
 
+    pub async fn start_approved_rental(
+        app: AppHandle,
+        context: AppContext,
+        rental: super::app_context::ApprovedRental,
+    ) -> AppResult<()> {
+        Self::request_start(
+            app,
+            context,
+            OrchestrationStartRequest::ApprovedRental(rental),
+        )
+        .await
+    }
+
     pub async fn start_play_for_existing_instance(
         app: AppHandle,
         context: AppContext,
@@ -240,6 +295,9 @@ impl OrchestrationService {
     ) -> AppResult<()> {
         let mut guard = context.orchestration_guard.lock().await;
         if *guard {
+            if matches!(&request, OrchestrationStartRequest::ApprovedRental(_)) {
+                return Err(AppError::Command("A provisioning flow is already running. Paid MCP requests are never queued to replace it.".into()));
+            }
             {
                 let mut pending = context.pending_start.lock().await;
                 *pending = Some(request);
@@ -261,6 +319,12 @@ impl OrchestrationService {
         }
 
         *guard = true;
+        if let Err(error) =
+            super::instance_lifecycle::InstanceLifecycleService::ensure_actions_idle()
+        {
+            *guard = false;
+            return Err(error);
+        }
         drop(guard);
 
         let health = run_system_health_report(&app, &context).await;
@@ -287,6 +351,7 @@ impl OrchestrationService {
         }
 
         context.cancel_requested.store(false, Ordering::SeqCst);
+        context.provisioning_epoch.fetch_add(1, Ordering::SeqCst);
         Self::spawn_run(app, context, request);
         Ok(())
     }
@@ -297,7 +362,7 @@ impl OrchestrationService {
                 OrchestrationStartRequest::SelectedOffer => {
                     measure(
                         "new_instance_total",
-                        Box::pin(run_orchestration(app.clone(), context.clone())),
+                        Box::pin(run_orchestration(app.clone(), context.clone(), None)),
                     )
                     .await
                 }
@@ -308,6 +373,17 @@ impl OrchestrationService {
                             app.clone(),
                             context.clone(),
                             instance_id,
+                        )),
+                    )
+                    .await
+                }
+                OrchestrationStartRequest::ApprovedRental(rental) => {
+                    measure(
+                        "approved_new_instance_total",
+                        Box::pin(run_orchestration(
+                            app.clone(),
+                            context.clone(),
+                            Some(rental),
                         )),
                     )
                     .await
@@ -505,8 +581,39 @@ impl OrchestrationService {
     }
 }
 
-async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()> {
-    let initial_state = context.state.read().await.clone();
+async fn run_orchestration(
+    app: AppHandle,
+    context: AppContext,
+    approved: Option<super::app_context::ApprovedRental>,
+) -> AppResult<()> {
+    let mut initial_state = context.state.read().await.clone();
+    if let Some(rental) = approved {
+        let estimate = rental
+            .offer
+            .hourly_price
+            .max(rental.offer.compute_hourly_price + rental.offer.storage_hourly_price);
+        if super::app_context::rental_fingerprint(&rental.offer, &initial_state)
+            != rental.fingerprint
+            || rental.storage_gb != initial_state.server_preferences.storage_gb
+            || rental.storage_gb < 30
+            || rental.storage_gb > rental.offer.available_storage_gb.min(10000)
+            || !estimate.is_finite()
+            || estimate <= 0.0
+            || estimate > rental.max_hourly_price
+        {
+            return Err(AppError::InvalidInput("The approved offer/account/template/storage/price estimate changed. Search again and request a fresh approval.".into()));
+        }
+        // Capture the approved selection before any awaits. Later UI selections
+        // cannot retarget this paid operation to another offer or disk size.
+        initial_state.selected_offer = Some(rental.offer.clone());
+        initial_state.server_preferences.max_hourly_price = rental.max_hourly_price;
+        context
+            .update_state(|s| {
+                s.selected_offer = Some(rental.offer);
+                s.last_error = None;
+            })
+            .await?;
+    }
 
     let offer = initial_state.selected_offer.clone().ok_or_else(|| {
         AppError::InvalidInput("Select a server before clicking Play".to_string())
@@ -1650,6 +1757,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
+    provision_desktop_runtime(&app, &context, &remote, &target_user).await;
+    ensure_not_cancelled(&context)?;
+
     if !wireguard_step_completed {
         emit_transition(
             &app,
@@ -2678,6 +2788,9 @@ async fn run_existing_instance_orchestration(
             .await;
         }
     }
+    ensure_not_cancelled(&context)?;
+
+    provision_desktop_runtime(&app, &context, &remote, &target_user).await;
     ensure_not_cancelled(&context)?;
 
     if !wireguard_step_completed {

@@ -45,6 +45,15 @@ pub fn classify_observed_path(path: &Path) -> PathPolicyDecision {
     }
 
     let normalized = normalized_path(path);
+    // Optional runtime images/caches/driver bindings and private X11 credentials
+    // are machine infrastructure, never application state for portable backups.
+    if normalized.contains("/.local/state/noland-runtime/")
+        || normalized.contains("/noland-runtime/images/")
+        || normalized.contains("/noland-runtime/cache/")
+        || normalized.contains("/run/user/") && normalized.contains("/noland-runtime/")
+    {
+        return PathPolicyDecision::new(PathDisposition::RuntimeDependency);
+    }
     if normalized.contains("/steamapps/compatdata/") {
         return PathPolicyDecision::new(if looks_like_user_state(path) {
             PathDisposition::UserStateFile
@@ -128,6 +137,28 @@ fn normalized_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_infrastructure_and_credentials_are_not_portable_app_state() {
+        for path in [
+            "/home/user/.local/share/noland-runtime/images/v1/usr/lib/libc.so.6",
+            "/home/user/.local/share/noland-runtime/cache/appimage-123/AppRun",
+            "/home/user/.local/state/noland-runtime/sessions/123/Xauthority",
+            "/run/user/1000/noland-runtime/123/driver/libGLX_nvidia.so.0",
+        ] {
+            assert_eq!(
+                classify_observed_path(Path::new(path)).disposition,
+                PathDisposition::RuntimeDependency
+            );
+        }
+        assert_ne!(
+            classify_observed_path(Path::new(
+                "/home/user/.local/share/noland-runtime/app-data/123/save.dat"
+            ))
+            .disposition,
+            PathDisposition::RuntimeDependency
+        );
+    }
 
     #[test]
     fn steam_download_content_is_staging_with_an_app_identity() {

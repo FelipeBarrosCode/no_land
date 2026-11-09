@@ -53,9 +53,16 @@ pub async fn launch_instance_software(
     app: AppHandle,
     instance_id: u64,
     app_id: String,
+    allow_restore: Option<bool>,
     context: State<'_, AppContext>,
     moonlight: State<'_, MoonlightManager>,
 ) -> Result<LaunchSoftwareJob, FrontendError> {
+    let _action = crate::services::instance_lifecycle::InstanceLifecycleService::begin_action(
+        context.inner(),
+        instance_id,
+        "library launch",
+    )
+    .await?;
     let app_id = app_id.trim().to_string();
     let mut job = LaunchSoftwareJob {
         job_id: Uuid::new_v4().to_string(),
@@ -78,6 +85,7 @@ pub async fn launch_instance_software(
         &app,
         instance_id,
         &app_id,
+        allow_restore.unwrap_or(true),
         context.inner(),
         moonlight.inner(),
         &mut job,
@@ -168,6 +176,7 @@ async fn run_launch(
     app: &AppHandle,
     instance_id: u64,
     app_id: &str,
+    allow_restore: bool,
     context: &AppContext,
     moonlight: &MoonlightManager,
     job: &mut LaunchSoftwareJob,
@@ -191,6 +200,9 @@ async fn run_launch(
     let mut entry = find_entry(entries, app_id)?;
 
     if !entry.item.installed {
+        if !allow_restore {
+            return Err("This library entry needs a restore. Request storage_restore with human approval before launching it through MCP.".into());
+        }
         let bundle_id = entry.item.latest_bundle_id.clone().ok_or_else(|| {
             format!(
                 "{} is only in shared storage, but it has no restorable bundle.",

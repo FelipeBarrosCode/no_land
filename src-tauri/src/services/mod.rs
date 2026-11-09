@@ -33,6 +33,7 @@ mod provisioning;
 pub mod reboot_helper;
 pub mod remote_display;
 pub mod remote_exec;
+pub mod runtime_manager;
 pub mod secure_store;
 pub mod shared_storage;
 pub mod sleep_inhibit;

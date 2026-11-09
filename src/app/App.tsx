@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from "react";
 
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { confirmAppExit as exitApp, takeAppQuitRequest } from "../lib/backend";
+import { appQuitDialogReady, cancelAppQuit, confirmAppExit as exitApp, takeAppQuitRequest } from "../lib/backend";
+import { mcpStatus } from "../lib/mcp";
 import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
 import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Button } from "../components/ui/Button";
@@ -16,6 +17,8 @@ import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
+import { McpApprovals } from "../features/settings/McpApprovals";
+import { useMcpUiBridge } from "../lib/useMcpUiBridge";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { moonlightGetSessionState, refreshStateAgentIndex, subscribeSpendAlerts, getPendingSpendAlerts, acknowledgeSpendAlert } from "../lib/backend";
@@ -452,44 +455,44 @@ const AUTO_GITHUB_ISSUES_STORAGE_KEY = "noland.autoGithubIssues";
 function CloseWithInstancesModal({
   instances,
   instancesLoading,
+  instancesUnavailable,
+  activeJobs,
   deleting,
   error,
   onContinue,
   onQuit,
-  onDeleteAll,
-  onSetupStorage,
+  onManageInstances,
 }: {
   instances: number;
   instancesLoading: boolean;
+  instancesUnavailable: boolean;
+  activeJobs: number | null;
   deleting: boolean;
   error: string | null;
   onContinue: () => void;
   onQuit: () => void;
-  onDeleteAll: () => void;
-  onSetupStorage: () => void;
+  onManageInstances: () => void;
 }) {
   return (
-    <ModalFrame panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[140]">
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[140]" labelledBy="app-quit-title">
       <div className="border-b-2 border-[#9a6536] px-5 py-4">
-        <h2 className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text={translate("generated.7a9be85b62a5b21e")}>
-          {translate("generated.7a9be85b62a5b21e")}
+        <h2 id="app-quit-title" className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text={translate("quit.title")}>
+          {translate("quit.title")}
         </h2>
         <p className="mt-2 text-[1.15rem] leading-snug text-[#d7e6f7]">
-          {instancesLoading ? translate("quit.instancesLoading") : <>{translate("generated.af3f12e161fdb1cb")} {instances} {translate("generated.16c237378e5229bd")}{instances === 1 ? "" : translate("generated.043a718774c572bd")}{translate("generated.c46da1442255e3e3")}</>}
+          {instancesUnavailable ? translate("quit.instancesUnavailable") : instancesLoading ? translate("quit.instancesLoading") : translate("quit.instancesCount", { count: instances })}
         </p>
       </div>
       <ModalBody className="space-y-4 px-5 py-5">
         <Card className="border border-[#9a6536] bg-[#3a2518]/60 text-[1.1rem] text-[#ffd3a3]">
-          {translate("generated.e05b165fa8ba1860")}
+          {translate("quit.billingWarning")}
         </Card>
+        <p>{activeJobs == null ? translate("quit.jobsUnknown") : translate("quit.activeJobs", { count: activeJobs })}</p>
         {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{translateSource(error)}</p>}
         <div className="grid gap-2 sm:grid-cols-2">
-          <Button variant="primary" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
-          <Button variant="danger" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
-          <Button variant="secondary" onClick={onDeleteAll} disabled={instancesLoading} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
-            {translate("generated.d83cd3e78affba6d")}
-          </Button>
-          <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>{translate("generated.5539df1fa82ec53e")}</Button>
+          <Button variant="primary" data-mcp-allow="true" onClick={onContinue} disabled={deleting}>{translate("quit.keepOpen")}</Button>
+          <Button variant="danger" onClick={onQuit} disabled={deleting}>{translate("quit.leaveRunning")}</Button>
+          <Button variant="ghost" data-mcp-allow="true" onClick={onManageInstances} disabled={deleting}>{translate("quit.manageInstances")}</Button>
         </div>
       </ModalBody>
     </ModalFrame>
@@ -502,8 +505,11 @@ export function App() {
   useLocalization();
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [windowLabelResolved, setWindowLabelResolved] = useState(false);
+  useMcpUiBridge(windowLabelResolved && windowLabel === "main");
   const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const [quitActiveJobs, setQuitActiveJobs] = useState<number | null>(null);
+  const instancesStatus = useAppStore((state) => state.instancesStatus);
   const [deletingBeforeClose, setDeletingBeforeClose] = useState(false);
   const [closeGuardError, setCloseGuardError] = useState<string | null>(null);
   const closeActionRunningRef = useRef(false);
@@ -534,7 +540,6 @@ export function App() {
   const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
   const rentedInstances = useAppStore((state) => state.rentedInstances);
   const embeddedMoonlightStatus = useAppStore((state) => state.embeddedMoonlightStatus);
-  const destroyInstance = useAppStore((state) => state.destroyInstance);
 
   const savePlatformCredentials = useAppStore(
     (state) => state.savePlatformCredentials,
@@ -646,23 +651,9 @@ export function App() {
       }
       return () => {};
     };
-    const unlistenPromise = currentWindow.onCloseRequested((event) => {
-      if (disposed) {
-        event.preventDefault();
-        return;
-      }
-      // Read live state without re-registering the native listener on each refresh.
-      const current = useAppStore.getState();
-      if (!current.loading && current.rentedInstances.length === 0 && !closeActionRunningRef.current) {
-        return;
-      }
-      event.preventDefault();
-      requestQuit();
-    }).catch(listenerError);
     const unlistenQuitPromise = currentWindow.listen("app:quit-requested", () => {
       if (!disposed) {
-        requestQuit();
-        void takeAppQuitRequest().catch(listenerError);
+        void takeAppQuitRequest().then((pending) => { if (pending && !disposed) requestQuit(); }).catch(listenerError);
       }
     }).then((unlisten) => {
       if (disposed) {
@@ -675,13 +666,29 @@ export function App() {
       }).catch(listenerError);
       return unlisten;
     }).catch(listenerError);
+    const unlistenDismiss = currentWindow.listen("app:quit-dismissed", () => {
+      if (!disposed) setCloseGuardOpen(false);
+    }).catch(listenerError);
 
     return () => {
       disposed = true;
-      void unlistenPromise.then((unlisten) => unlisten());
       void unlistenQuitPromise.then((unlisten) => unlisten());
+      void unlistenDismiss.then((unlisten) => unlisten());
     };
   }, [windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!closeGuardOpen || !isRunningInTauri()) return;
+    let disposed = false;
+    // Acknowledge only after React has committed the modal. If it never renders,
+    // the native coordinator can take over instead of losing the close request.
+    void appQuitDialogReady().then((ready) => { if (!ready && !disposed) setCloseGuardOpen(false); }).catch(() => undefined);
+    setQuitActiveJobs(null);
+    const refresh = () => { void mcpStatus().then((s) => { if (!disposed) setQuitActiveJobs(s.activeJobs); }).catch(() => undefined); };
+    refresh();
+    const timer = window.setInterval(refresh, 1500);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [closeGuardOpen]);
 
   useEffect(() => {
     if (!windowLabelResolved || windowLabel !== "main" || !isRunningInTauri()) {
@@ -778,17 +785,13 @@ export function App() {
 
   function requestQuit() {
     if (closeActionRunningRef.current) return;
-    const current = useAppStore.getState();
-    if (!current.loading && current.rentedInstances.length === 0) {
-      void quitWindow();
-      return;
-    }
     setCloseGuardError(null);
     setCloseGuardOpen(true);
   }
 
   async function quitWindow() {
     closeActionRunningRef.current = true;
+    setDeletingBeforeClose(true);
     setCloseGuardError(null);
     setCloseGuardOpen(false);
     try {
@@ -802,27 +805,19 @@ export function App() {
     }
   }
 
-  async function deleteAllAndQuit() {
-    if (closeActionRunningRef.current || useAppStore.getState().loading) return;
-    closeActionRunningRef.current = true;
-    setDeletingBeforeClose(true);
-    setCloseGuardError(null);
+  async function cancelQuit(manageInstances = false) {
     try {
-      for (const instance of useAppStore.getState().rentedInstances) {
-        await destroyInstance(instance.instanceId);
-      }
-      await quitWindow();
+      await cancelAppQuit();
+      setCloseGuardOpen(false);
+      if (manageInstances) window.location.hash = "#/";
     } catch (error) {
       setCloseGuardError(error instanceof Error ? error.message : String(error));
-    } finally {
-      closeActionRunningRef.current = false;
-      setDeletingBeforeClose(false);
+      setCloseGuardOpen(true);
     }
   }
 
-  function openSharedStorageFromCloseGuard() {
-    setCloseGuardOpen(false);
-    window.location.hash = "#/settings?section=storage";
+  async function manageInstancesFromCloseGuard() {
+    await cancelQuit(true);
   }
 
 
@@ -934,13 +929,14 @@ export function App() {
   const closeGuard = closeGuardOpen ? (
     <CloseWithInstancesModal
       instances={rentedInstances.length}
-      instancesLoading={loading}
+      instancesLoading={loading || instancesStatus === "loading"}
+      instancesUnavailable={instancesStatus === "unavailable"}
+      activeJobs={quitActiveJobs}
       deleting={deletingBeforeClose}
       error={closeGuardError}
-      onContinue={() => setCloseGuardOpen(false)}
+      onContinue={() => { void cancelQuit(); }}
       onQuit={() => void quitWindow()}
-      onDeleteAll={() => void deleteAllAndQuit()}
-      onSetupStorage={openSharedStorageFromCloseGuard}
+      onManageInstances={manageInstancesFromCloseGuard}
     />
   ) : null;
 
@@ -1034,6 +1030,7 @@ export function App() {
       )}
 
       <FeedbackProgramEntry />
+      <McpApprovals />
       <HashRouter>
         <Routes>
           <Route path="/" element={<RootRoute />} />

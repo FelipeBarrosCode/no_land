@@ -6,7 +6,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::{
@@ -29,11 +28,24 @@ use super::{
 };
 
 /// In-memory tracking of lifecycle actions per instance to prevent overlap.
-static LIFECYCLE_ACTIONS: std::sync::OnceLock<RwLock<HashMap<u64, String>>> =
+static LIFECYCLE_ACTIONS: std::sync::OnceLock<std::sync::Mutex<HashMap<u64, String>>> =
     std::sync::OnceLock::new();
 
-fn get_lifecycle_actions() -> &'static RwLock<HashMap<u64, String>> {
-    LIFECYCLE_ACTIONS.get_or_init(|| RwLock::new(HashMap::new()))
+fn get_lifecycle_actions() -> &'static std::sync::Mutex<HashMap<u64, String>> {
+    LIFECYCLE_ACTIONS.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Shared by UI, MCP, and scheduled lifecycle actions. RAII also releases a
+/// reservation if a caller is cancelled or fails before its final await.
+pub struct InstanceActionGuard {
+    instance_id: u64,
+}
+impl Drop for InstanceActionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut actions) = get_lifecycle_actions().lock() {
+            actions.remove(&self.instance_id);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,8 +407,18 @@ impl InstanceLifecycleService {
     }
 
     /// Acquire a lifecycle action lock for an instance.
-    pub(crate) async fn acquire_lock(instance_id: u64, action: &str) -> AppResult<()> {
-        let mut actions = get_lifecycle_actions().write().await;
+    pub(crate) async fn begin_action(
+        context: &AppContext,
+        instance_id: u64,
+        action: &str,
+    ) -> AppResult<InstanceActionGuard> {
+        let provisioning = context.orchestration_guard.lock().await;
+        if *provisioning {
+            return Err(AppError::Command("Provisioning is running; wait for its current stage before another machine mutation".into()));
+        }
+        let mut actions = get_lifecycle_actions()
+            .lock()
+            .map_err(|_| AppError::State("Instance action lock is unavailable".into()))?;
         if let Some(running) = actions.get(&instance_id) {
             return Err(AppError::Provisioning(format!(
                 "Instance {} is already running action: {}. Please wait.",
@@ -404,12 +426,20 @@ impl InstanceLifecycleService {
             )));
         }
         actions.insert(instance_id, action.to_string());
-        Ok(())
+        Ok(InstanceActionGuard { instance_id })
     }
 
-    pub(crate) async fn release_lock(instance_id: u64) {
-        let mut actions = get_lifecycle_actions().write().await;
-        actions.remove(&instance_id);
+    pub(crate) fn ensure_actions_idle() -> AppResult<()> {
+        let actions = get_lifecycle_actions()
+            .lock()
+            .map_err(|_| AppError::State("Instance action lock is unavailable".into()))?;
+        if actions.is_empty() {
+            Ok(())
+        } else {
+            Err(AppError::Command(
+                "A cloud-PC action is running. Wait for it before starting provisioning.".into(),
+            ))
+        }
     }
 
     /// Pause a provisioned instance. Runs backup first if available.
@@ -432,7 +462,7 @@ impl InstanceLifecycleService {
         instance_id: u64,
         policy: Option<&super::spend_tracker::BudgetStopPolicy>,
     ) -> AppResult<bool> {
-        Self::acquire_lock(instance_id, "pause").await?;
+        let _action = Self::begin_action(context, instance_id, "pause").await?;
 
         let result = async {
             let api_key = {
@@ -489,13 +519,12 @@ impl InstanceLifecycleService {
         }
         .await;
 
-        Self::release_lock(instance_id).await;
         result
     }
 
     /// Destroy a provisioned instance. Runs backup first if available.
     pub async fn destroy_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
-        Self::acquire_lock(instance_id, "destroy").await?;
+        let _action = Self::begin_action(context, instance_id, "destroy").await?;
         let feedback_context = context.clone();
         let _ = super::feedback::native_task(async move {
             feedback_context.feedback.checkpoint(false).await;
@@ -608,7 +637,6 @@ impl InstanceLifecycleService {
         }
         .await;
 
-        Self::release_lock(instance_id).await;
         result
     }
 
@@ -802,7 +830,7 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<crate::models::app_state::BackupStatusResponse> {
-        let _ = (context, instance_id);
+        let _action = Self::begin_action(context, instance_id, "storage backup").await?;
         let api_key = {
             let state = context.state.read().await;
             state.credentials.vast_api_key.clone()
@@ -885,6 +913,7 @@ impl InstanceLifecycleService {
         instance_id: u64,
         selected_paths: Vec<String>,
     ) -> AppResult<String> {
+        let _action = Self::begin_action(context, instance_id, "storage restore").await?;
         info!(
             instance_id = instance_id,
             selected_count = selected_paths.len(),
@@ -957,6 +986,7 @@ impl InstanceLifecycleService {
         selected_paths: Vec<String>,
         performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
+        let _action = Self::begin_action(context, instance_id, "storage backup").await?;
         let api_key = {
             let state = context.state.read().await;
             state.credentials.vast_api_key.clone()

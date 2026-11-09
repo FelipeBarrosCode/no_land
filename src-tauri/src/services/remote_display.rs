@@ -11,7 +11,7 @@ use super::{
     remote_exec::RemoteExec,
 };
 
-const SHARED_XAUTHORITY: &str = "/etc/X11/.Xauthority-noland";
+use noland_runtime_contracts::XAUTHORITY as SHARED_XAUTHORITY;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

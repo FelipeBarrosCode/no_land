@@ -28,6 +28,7 @@ interface ModalFrameProps extends PropsWithChildren {
   overlayClassName?: string;
   labelledBy?: string;
   zIndexClassName?: string;
+  mcpInstanceId?: number;
 }
 
 export function ModalFrame({
@@ -36,6 +37,7 @@ export function ModalFrame({
   overlayClassName,
   labelledBy,
   zIndexClassName = "z-50",
+  mcpInstanceId,
 }: ModalFrameProps) {
   useEffect(() => {
     lockDocumentScroll();
@@ -53,6 +55,7 @@ export function ModalFrame({
       <div className="flex min-h-full items-start justify-center sm:items-center">
         <div
           role="dialog"
+          data-mcp-instance-id={mcpInstanceId}
           aria-modal="true"
           aria-labelledby={labelledBy}
           className={clsx(

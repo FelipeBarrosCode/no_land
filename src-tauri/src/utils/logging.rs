@@ -74,9 +74,13 @@ pub fn recent_log_excerpt(max_lines: usize) -> io::Result<String> {
 }
 
 pub fn init_logging() {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("noland_connect=info,tauri=info,reqwest=warn,hyper=warn")
-    });
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            EnvFilter::new("noland_connect=info,tauri=info,reqwest=warn,hyper=warn")
+        })
+        // rmcp debug/trace events contain raw JSON-RPC arguments. Keep them out of
+        // desktop logs even when a user enables broad application debugging.
+        .add_directive("rmcp=warn".parse().expect("fixed MCP logging directive"));
 
     if let Some(path) = default_log_path() {
         if let Some(parent) = path.parent() {

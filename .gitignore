@@ -81,3 +81,8 @@ src-tauri/platform/*
 /skills-lock.json
 state-agent/prebuilt/*
 !state-agent/prebuilt/.gitkeep
+runtime-agent/target/
+runtime-contracts/target/
+scripts/runtime/__pycache__/
+src-tauri/src/mcp/__pycache__/
+scripts/ci/__pycache__/

@@ -55,6 +55,7 @@ import type {
   InstanceDisplayStatus,
   ApplyDisplayModeResult,
   LaunchLibraryResponse,
+  RuntimeStatus,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
@@ -70,6 +71,14 @@ import type {
 
 export async function confirmAppExit(): Promise<void> {
   return invokeSafe<void>("confirm_app_exit");
+}
+
+export async function cancelAppQuit(): Promise<void> {
+  return invokeSafe<void>("cancel_app_quit");
+}
+
+export async function appQuitDialogReady(): Promise<boolean> {
+  return invokeSafe<boolean>("app_quit_dialog_ready");
 }
 
 export async function takeAppQuitRequest(): Promise<boolean> {
@@ -262,6 +271,14 @@ export async function subscribeDirectUploadProgress(
   return listen<DirectUploadProgressEvent>("direct-upload:progress", ({ payload }) => {
     callback(payload);
   });
+}
+
+export async function getInstanceRuntimeStatus(instanceId: number): Promise<RuntimeStatus> {
+  return invokeSafe<RuntimeStatus>("get_instance_runtime_status", { instanceId });
+}
+
+export async function instanceRuntimeAction(instanceId: number, action: string, file?: string, appId?: string, artifactSha256?: string): Promise<unknown> {
+  return invokeSafe<unknown>("instance_runtime_action", { instanceId, action, file, appId, artifactSha256 });
 }
 
 export async function getInstanceLaunchLibrary(

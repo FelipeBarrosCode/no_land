@@ -12,7 +12,7 @@
 
 **GPU orchestration · automated provisioning · low-latency streaming · networking · remote storage**
 
-[Website](https://no-land.net) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Configuration](docs/configuration.md) · [Discord](https://discord.gg/yafxvA6EBR)
+[Website](https://no-land.net) · [Architecture](docs/architecture.md) · [Flows](docs/flows.md) · [Configuration](docs/configuration.md) · [MCP](docs/mcp.md) · [Discord](https://discord.gg/yafxvA6EBR)
 
 </div>
 
@@ -226,3 +226,9 @@ The project is actively evolving around:
 **Cloud gaming without giving up the freedom of a real PC.**
 
 </div>
+# Cloud desktop runtime
+
+Provisioning installs **No Land Runtime** on the cloud PC desktop. Open its icon
+and drop a trusted Linux executable or AppImage into the small launcher window.
+There is no separate client-side enable or runtime-signing setup.
+See [docs/runtime.md](docs/runtime.md) for requirements and current limitations.

@@ -52,6 +52,38 @@ for (const status of [33, 36]) {
   });
 }
 
+for (const status of [16, 92]) {
+  test(`HTTP/2 failure ${status} resumes over HTTP/1.1 without discarding bytes`, t => {
+    const destination = fixture(t);
+    let calls = 0;
+    downloadWithResume('https://example.test/sdk', destination, {
+      http1: false,
+      run(_command, args) {
+        calls += 1;
+        assert.equal(args.includes('--http1.1'), calls > 1);
+        assert.ok(!args.includes('--insecure'));
+        if (calls === 1) {
+          writeFileSync(destination, 'partial HTTP/2 bytes');
+          return { status };
+        }
+        assert.equal(readFileSync(destination, 'utf8'), 'partial HTTP/2 bytes');
+        return { status: 0 };
+      },
+    });
+    assert.equal(calls, 2);
+  });
+}
+
+test('HTTP/1.1 can be selected before the first attempt', t => {
+  downloadWithResume('https://example.test/sdk', fixture(t), {
+    http1: true,
+    run(_command, args) {
+      assert.ok(args.includes('--http1.1'));
+      return { status: 0 };
+    },
+  });
+});
+
 test('repeated failures stop after four attempts', t => {
   let calls = 0;
   assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
