@@ -25,10 +25,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install package extraction tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y squashfs-tools zstd
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
@@ -108,6 +104,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install package extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd
       - name: Download all six signed build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

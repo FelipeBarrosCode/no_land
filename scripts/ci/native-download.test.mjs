@@ -6,7 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { downloadWithResume } from '../native-download.mjs';
+import { downloadWithResume as download } from '../native-download.mjs';
+
+const downloadWithResume = (url, destination, options) => download(url, destination, { sleep() {}, ...options });
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'noland-download-test-'));
@@ -52,8 +54,8 @@ for (const status of [33, 36]) {
   });
 }
 
-for (const status of [16, 92]) {
-  test(`HTTP/2 failure ${status} resumes over HTTP/1.1 without discarding bytes`, t => {
+for (const status of [16, 18, 92]) {
+  test(`protocol/truncation failure ${status} resumes over HTTP/1.1 without discarding bytes`, t => {
     const destination = fixture(t);
     let calls = 0;
     downloadWithResume('https://example.test/sdk', destination, {
@@ -84,12 +86,52 @@ test('HTTP/1.1 can be selected before the first attempt', t => {
   });
 });
 
-test('repeated failures stop after four attempts', t => {
+test('repeated failures stop after twelve attempts with bounded exponential backoff', t => {
   let calls = 0;
+  const delays = [];
   assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
     run() { calls += 1; return { status: 28 }; },
-  }), /after 4 attempts \(exit 28\)/);
-  assert.equal(calls, 4);
+    sleep(ms) { delays.push(ms); },
+  }), /after 12 attempts \(exit 28\)/);
+  assert.equal(calls, 12);
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000, 30000]);
+});
+
+test('more than four interrupted responses retain progress until the download succeeds', t => {
+  const destination = fixture(t);
+  let calls = 0;
+  downloadWithResume('https://example.test/sdk', destination, {
+    run() {
+      assert.equal(existsSync(destination) ? readFileSync(destination, 'utf8').length : 0, calls);
+      writeFileSync(destination, 'x'.repeat(++calls));
+      return { status: calls < 7 ? 18 : 0 };
+    },
+  });
+  assert.equal(calls, 7);
+});
+
+test('retry time is capped and curl uses the remaining budget', t => {
+  let clock = 0;
+  let calls = 0;
+  assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
+    now: () => clock,
+    sleep(ms) { clock += ms; },
+    run(_command, args) {
+      assert.equal(args[args.indexOf('--max-time') + 1], calls === 0 ? '900' : '899');
+      calls += 1;
+      clock += 900_000;
+      return { status: 28 };
+    },
+  }), /30-minute retry budget/);
+  assert.equal(calls, 2);
+});
+
+test('interrupted curl is not silently retried', t => {
+  let calls = 0;
+  assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
+    run() { calls += 1; return { status: null, signal: 'SIGTERM' }; },
+  }), /interrupted \(SIGTERM\)/);
+  assert.equal(calls, 1);
 });
 
 test('missing curl fails immediately', t => {
