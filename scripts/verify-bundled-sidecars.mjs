@@ -661,6 +661,11 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
 
   const appDirectory = normalize(resolve(dirname(appExecutable))).toLocaleLowerCase();
   const micSender = findRequiredSidecar(root, targetTriple, 'noland-mic-sender');
+  // Verify the installed payload too, not just the outer installer certificate.
+  for (const executable of [appExecutable, helper, micSender]) {
+    run('pwsh', ['-NoProfile', '-NonInteractive', '-File',
+      join(repoRoot, 'scripts', 'verify-windows-signatures.ps1'), '-FilePath', executable]);
+  }
   if (!targetTriple.includes('aarch64')) {
     const gstRoot = findFirstPath(root, (path) => basename(path) === targetTriple
       && basename(dirname(path)) === 'gstreamer');
