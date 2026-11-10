@@ -31,17 +31,20 @@ if [[ ${#appimages[@]} -ne 1 ]]; then
 fi
 
 appimage=$(realpath "${appimages[0]}")
+script_dir=$(cd "$(dirname "$0")" && pwd)
+if ! command -v unsquashfs >/dev/null 2>&1; then
+  echo "AppImage metadata repair requires unsquashfs (install squashfs-tools)." >&2
+  exit 1
+fi
 # Stage on the artifact's filesystem, so the final, verified replacement is a rename.
 work_dir=$(mktemp -d "$(dirname "$appimage")/.appimage-metadata.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 
 extract_dir="$work_dir/appimage"
-mkdir -p "$extract_dir"
-(
-  cd "$extract_dir"
-  chmod +x "$appimage"
-  "$appimage" --appimage-extract >/dev/null
-)
+# type2-runtime's --appimage-extract creates directories as 0700 without
+# restoring their stored modes. Read SquashFS directly so repacking preserves
+# every directory's permissions rather than serializing the extractor's modes.
+bash "$script_dir/extract-appimage.sh" "$appimage" "$extract_dir" >/dev/null
 appdir="$extract_dir/squashfs-root"
 
 verify_public_entrypoint() {
@@ -134,10 +137,10 @@ test -s "$repacked"
 chmod 0755 "$repacked"
 
 verify_dir="$work_dir/verify"
-mkdir -p "$verify_dir"
+bash "$script_dir/extract-appimage.sh" "$repacked" "$verify_dir" >/dev/null
 (
   cd "$verify_dir"
-  "$repacked" --appimage-extract >/dev/null
+  # These are the serialized filesystem modes; do not chmod the verification copy.
   verify_public_entrypoint squashfs-root
   test -x squashfs-root/AppRun
   test -s squashfs-root/.DirIcon

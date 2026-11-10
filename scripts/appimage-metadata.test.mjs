@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  appendFileSync, chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +22,16 @@ const continuousHashes = {
 
 function executable(path, source) {
   writeFileSync(path, `#!${process.execPath}\n${source}\n`, { mode: 0o755 });
+}
+
+function appendSquashfsHeader(path) {
+  // Keep the mock runtime executable while exercising the real offset scanner.
+  const header = Buffer.alloc(96);
+  header.write('hsqs');
+  header.writeUInt32LE(131072, 12);
+  header.writeUInt16LE(6, 20);
+  header.writeUInt16LE(4, 28);
+  appendFileSync(path, Buffer.concat([Buffer.from('\n/* '), header, Buffer.from(' */\n')]));
 }
 
 function fixture(t) {
@@ -51,19 +61,46 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = process.env.FIXTURE_ROOT;
 function event(value) { fs.appendFileSync(path.join(root, 'events'), value + '\\n'); }
+function runtimeDirectoryModes(directory) {
+  // type2-runtime's mkdir_p uses 0700 without restoring directory inode modes.
+  fs.chmodSync(directory, 0o700);
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (entry.isDirectory()) runtimeDirectoryModes(path.join(directory, entry.name));
+  }
+}
 `;
   const appimage = join(bundle, 'No Land.AppImage');
   executable(appimage, `${prelude}
 if (process.argv[2] !== '--appimage-extract') process.exit(2);
 event('extract-input');
 fs.cpSync(path.join(root, 'input AppDir'), path.join(process.cwd(), 'squashfs-root'), { recursive: true, verbatimSymlinks: true });
-fs.chmodSync(path.join(process.cwd(), 'squashfs-root'), fs.statSync(path.join(root, 'input AppDir')).mode & 0o7777);
+runtimeDirectoryModes(path.join(process.cwd(), 'squashfs-root'));
 `);
+  appendSquashfsHeader(appimage);
   executable(join(root, 'output-runtime'), `${prelude}
 if (process.argv[2] !== '--appimage-extract') process.exit(2);
 event('extract-output');
 fs.cpSync(path.join(root, 'repacked'), path.join(process.cwd(), 'squashfs-root'), { recursive: true, verbatimSymlinks: true });
-fs.chmodSync(path.join(process.cwd(), 'squashfs-root'), fs.statSync(path.join(root, 'repacked')).mode & 0o7777);
+runtimeDirectoryModes(path.join(process.cwd(), 'squashfs-root'));
+`);
+  appendSquashfsHeader(join(root, 'output-runtime'));
+  executable(join(bin, 'unsquashfs'), `${prelude}
+const args = process.argv.slice(2);
+const source = args[args.length - 1];
+const offset = Number(args[args.indexOf('-o') + 1]);
+const destination = args[args.indexOf('-d') + 1];
+const payload = fs.readFileSync(source);
+if (!args.includes('-no-progress') || !args.includes('-o') || !args.includes('-d') ||
+    payload.indexOf('hsqs') !== offset || payload.readUInt16LE(offset + 28) !== 4) process.exit(2);
+const input = fs.realpathSync(source) === fs.realpathSync(path.join(root, 'bundle with spaces/No Land.AppImage'));
+event(input ? 'extract-input-filesystem' : 'extract-output-filesystem');
+if (process.env.BAD_FILESYSTEM_EXTRACT === (input ? 'input' : 'output')) {
+  console.error('SquashFS extraction failed');
+  process.exit(1);
+}
+const original = path.join(root, input ? 'input AppDir' : 'repacked');
+fs.cpSync(original, destination, { recursive: true, verbatimSymlinks: true });
+fs.chmodSync(destination, fs.statSync(original).mode & 0o7777);
 `);
   executable(join(root, 'repacker'), `${prelude}
 event('repack ' + process.env.ARCH + ' ' + process.env.SOURCE_DATE_EPOCH);
@@ -127,8 +164,9 @@ if ! type mapfile >/dev/null 2>&1; then
     done
     return 0
   }
+  export -f mapfile
 fi
-source "$1" "$2" "$3"
+exec bash "$1" "$2" "$3"
 `;
       return spawnSync('bash', ['-c', harness, 'fixture', script, bundle, arch], {
         encoding: 'utf8', timeout: 10_000,
@@ -146,9 +184,15 @@ for (const [arch, outputArch] of [['x64', 'x86_64'], ['arm64', 'aarch64']]) {
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Repacked and verified AppImage metadata:/);
     assert.match(f.events(), new RegExp(`/download/1\\.9\\.1/appimagetool-${outputArch}\\.AppImage`));
-    assert.match(f.events(), new RegExp(`checksum ${outputArch}\\nextract-tool\\nrepack ${outputArch} 1793440000\\nextract-output`));
+    assert.match(f.events(), /extract-input-filesystem/);
+    assert.match(f.events(), new RegExp(`checksum ${outputArch}\\nextract-tool\\nrepack ${outputArch} 1793440000\\nextract-output-filesystem`));
+    assert.doesNotMatch(f.events(), /extract-(?:input|output)\n/);
     const repaired = join(f.root, 'repacked');
     assert.equal(lstatSync(repaired).mode & 0o7777, 0o755);
+    for (const directory of ['usr', 'usr/bin', 'usr/share', 'usr/share/applications']) {
+      assert.equal(lstatSync(join(repaired, directory)).mode & 0o7777,
+        lstatSync(join(f.input, directory)).mode & 0o7777, directory);
+    }
     assert.equal(lstatSync(join(repaired, 'AppRun')).mode & 0o777, 0o755);
     const args = JSON.parse(readFileSync(join(f.root, 'repack-args.json'), 'utf8'));
     assert.ok(args.includes('--mksquashfs-opt=-root-mode'));
@@ -197,12 +241,12 @@ test('rejects non-PNG metadata before downloading the tool', (t) => {
   assert.doesNotMatch(f.events(), /download/);
 });
 
-test('re-extracts and rejects metadata corrupted by repacking', (t) => {
+test('extracts the filesystem and rejects metadata corrupted by repacking', (t) => {
   const f = fixture(t);
   const original = readFileSync(f.appimage);
   const result = f.run('x64', { BAD_REPACK: '1' });
   assert.notEqual(result.status, 0);
-  assert.match(f.events(), /extract-output/);
+  assert.match(f.events(), /extract-output-filesystem/);
   assert.doesNotMatch(result.stdout, /Repacked and verified/);
   assert.deepEqual(readFileSync(f.appimage), original);
 });
@@ -215,6 +259,34 @@ test('an executable AppRun does not hide a root directory inaccessible to other 
   assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   assert.equal(lstatSync(join(f.root, 'repacked')).mode & 0o7777, 0o755);
 });
+
+test('runtime extraction permissions do not stand in for packaged directory modes', (t) => {
+  const f = fixture(t);
+  chmodSync(f.input, 0o755);
+  const extracted = spawnSync(f.appimage, ['--appimage-extract'], {
+    cwd: f.root, encoding: 'utf8', env: { ...process.env, FIXTURE_ROOT: f.root },
+  });
+  assert.equal(extracted.status, 0, extracted.stderr);
+  assert.equal(lstatSync(join(f.root, 'squashfs-root')).mode & 0o7777, 0o700);
+  assert.equal(lstatSync(join(f.root, 'squashfs-root/usr')).mode & 0o7777, 0o700);
+  const result = f.run();
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(lstatSync(join(f.root, 'repacked')).mode & 0o7777, 0o755);
+  assert.equal(lstatSync(join(f.root, 'repacked/usr')).mode & 0o7777, 0o755);
+});
+
+for (const phase of ['input', 'output']) {
+  test(`${phase} filesystem extraction failure preserves the original artifact`, (t) => {
+    const f = fixture(t);
+    const original = readFileSync(f.appimage);
+    const result = f.run('x64', { BAD_FILESYSTEM_EXTRACT: phase });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /SquashFS extraction failed/);
+    assert.deepEqual(readFileSync(f.appimage), original);
+    assert.doesNotMatch(result.stdout, /Repacked and verified/);
+    if (phase === 'input') assert.doesNotMatch(f.events(), /download/);
+  });
+}
 
 for (const [setting, diagnostic] of [
   ['BAD_ROOT_REPACK', /AppDir root must have mode 0755/],
