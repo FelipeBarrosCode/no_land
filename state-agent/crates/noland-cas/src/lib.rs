@@ -3,7 +3,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -410,9 +410,20 @@ static CACHE_MUTATION: RwLock<()> = RwLock::new(());
 pub struct CasLease {
     cas: LocalCas,
     root: PathBuf,
+    retained: AtomicBool,
 }
 
 impl CasLease {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Used only after an authenticated capture checkpoint durably references
+    /// this lease. Its owner releases it after the corresponding packs are sealed.
+    pub fn retain_for_retry(&self) {
+        self.retained.store(true, Ordering::Release);
+    }
+
     pub fn cache_path(&self, hash: &str) -> Result<PathBuf> {
         self.cas.path_for_hash(hash)
     }
@@ -435,6 +446,9 @@ impl CasLease {
 
 impl Drop for CasLease {
     fn drop(&mut self) {
+        if self.retained.load(Ordering::Acquire) {
+            return;
+        }
         let _ = std::fs::remove_dir_all(&self.root);
         let max = std::env::var("NOLAND_CAS_CACHE_BYTES")
             .ok()
@@ -462,7 +476,21 @@ impl LocalCas {
         Ok(CasLease {
             cas: self.clone(),
             root,
+            retained: AtomicBool::new(false),
         })
+    }
+
+    pub fn release_lease(&self, root: &Path) -> Result<()> {
+        if root.parent() != Some(self.root.join(".leases").as_path())
+            || std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(StateError::UnsafePath("invalid CAS lease directory".into()));
+        }
+        match std::fs::remove_dir_all(root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
     }
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();

@@ -28,6 +28,8 @@ use crate::reconcile::{
 };
 use crate::StateAgent;
 
+mod packing;
+
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
 }
@@ -231,6 +233,7 @@ fn plan_pack_chunks(
     Ok(plans)
 }
 
+#[cfg(test)]
 fn build_packs_parallel(
     dest_dir: &Path,
     master: &MasterKey,
@@ -713,10 +716,14 @@ pub async fn run_backup(
     metrics.num_dirty_roots = agent.db.list_dirty_roots(Some(app_id))?.len() as u64;
 
     let parent = load_parent(provider, master, agent, app_id).await;
+    let parent_scope = parent
+        .as_ref()
+        .map(|(manifest, _)| (manifest.mode, manifest.files.len()));
     if parent.is_some()
         && dirty_state.is_none()
         && pending_mutations.is_empty()
         && mode == BackupMode::PersonalState
+        && performance != BackupPerformanceMode::Full
     {
         let (parent_manifest, _) = parent.expect("checked parent");
         metrics.num_candidate_paths = 0;
@@ -1042,7 +1049,10 @@ pub async fn run_backup(
     progress.unit = Some("files".into());
     agent.db.set_operation_progress(op_id, Some(&progress))?;
 
-    if include_paths.is_empty() && manifest.tombstones.is_empty() {
+    if include_paths.is_empty()
+        && manifest.tombstones.is_empty()
+        && parent_scope == Some((mode, manifest.files.len()))
+    {
         if let Some(parent_bundle_id) = manifest.parent_bundle_id {
             if let Ok(parent_manifest) =
                 read_committed_manifest(provider, master, app_id, parent_bundle_id).await
@@ -1200,11 +1210,6 @@ pub async fn run_backup(
     progress.phase = "packing".into();
     agent.db.set_operation_progress(op_id, Some(&progress))?;
     let packing_started = Instant::now();
-    let pack_dir = agent
-        .config
-        .paths
-        .packs
-        .join(manifest.bundle_id.to_string());
     let mut small_chunks = Vec::new();
     let mut regular_chunks = Vec::new();
     let mut ordered_files = manifest.files.iter().collect::<Vec<_>>();
@@ -1230,36 +1235,7 @@ pub async fn run_backup(
     }
     // Small state files are deliberately grouped into compact packs so launch-critical
     // restore does not need to fetch a mostly unrelated 512 MiB pack.
-    let mut packs = build_packs_parallel(
-        &pack_dir,
-        master,
-        small_chunks,
-        16 * 1024 * 1024,
-        32 * 1024 * 1024,
-        pack_worker_count(performance),
-        Arc::clone(&cancelled),
-    )?;
-    packs.extend(build_packs_parallel(
-        &pack_dir,
-        master,
-        regular_chunks,
-        noland_state_core::constants::PACK_TARGET,
-        noland_state_core::constants::PACK_MAX,
-        pack_worker_count(performance),
-        Arc::clone(&cancelled),
-    )?);
-    // All new chunks now have immutable encrypted pack representations.
-    drop(cas_lease);
-    let mut incremental = 0u64;
-    let mut pack_files = Vec::new();
-    let mut new_pack_entries = Vec::<PackIndexEntry>::new();
-    for pack in &packs {
-        incremental = incremental.saturating_add(pack.bytes);
-        metrics.bytes_packed = metrics.bytes_packed.saturating_add(pack.bytes);
-        pack_files.push((pack.pack_id.clone(), pack.path.clone()));
-        new_pack_entries.extend(pack.entries.iter().cloned());
-    }
-    pack_index.extend(new_pack_entries.iter().cloned());
+    let plans = packing::plans(small_chunks, regular_chunks)?;
     pack_index.sort_by(|left, right| left.chunk_hash.cmp(&right.chunk_hash));
     pack_index.dedup_by(|left, right| left.chunk_hash == right.chunk_hash);
     manifest.files.sort_by(|left, right| {
@@ -1291,22 +1267,33 @@ pub async fn run_backup(
             .map(|identity| identity.cache_key()),
         manifest,
         pack_index,
-        pack_files,
-        new_pack_entries,
+        pack_files: Vec::new(),
+        new_pack_entries: Vec::new(),
         cas_observations,
         trusted_states,
         pending_mutations,
         captured_generation,
-        incremental,
+        incremental: 0,
         metrics,
-        checksums: packs
-            .iter()
-            .map(|pack| (pack.pack_id.clone(), pack.checksum.clone()))
-            .collect(),
+        checksums: BTreeMap::new(),
+        packing: Some(packing::PackingState {
+            plans,
+            lease: cas_lease.root().to_path_buf(),
+            workers: pack_worker_count(performance),
+        }),
     };
     // Preserve immutable IDs and ciphertext across retries. Upload journal rows
     // now remain meaningful; a retry resumes this captured revision, not new data.
+    agent.db.delete_sync_journal_entries_for_kind_direction(
+        op_id,
+        ContentObjectKind::Pack,
+        SyncDirection::Upload,
+    )?;
     write_prepared_backup(agent, master, op_id, &prepared)?;
+    if prepared.storage_id.is_some() {
+        cas_lease.retain_for_retry();
+    }
+    drop(_disk_budget);
     finish_prepared_backup(agent, provider, master, op, prepared, total_started, false).await
 }
 
@@ -1325,6 +1312,7 @@ struct PreparedBackup {
     incremental: u64,
     metrics: OperationMetrics,
     checksums: BTreeMap<String, String>,
+    packing: Option<packing::PackingState>,
 }
 
 fn prepared_backup_path(agent: &StateAgent, operation_id: Uuid) -> PathBuf {
@@ -1355,6 +1343,7 @@ fn write_prepared_backup(
         &serde_json::to_vec(prepared)?,
     )?;
     let temp = path.with_extension("partial");
+    disk::ensure_space(parent, encrypted.len() as u64)?;
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(&encrypted)?;
     file.sync_all()?;
@@ -1426,10 +1415,20 @@ async fn finish_prepared_backup(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
     mut op: OperationRecord,
-    prepared: PreparedBackup,
+    mut prepared: PreparedBackup,
     total_started: Instant,
     resumed: bool,
 ) -> Result<BundleManifest> {
+    let storage_before = provider.operation_metrics();
+    packing::pack_and_upload(
+        agent,
+        provider,
+        master,
+        op.operation_id,
+        &mut prepared,
+        resumed,
+    )
+    .await?;
     let PreparedBackup {
         manifest,
         pack_index,
@@ -1474,16 +1473,8 @@ async fn finish_prepared_backup(
         "total_transfer_bytes": transfer_bytes,
     });
     progress.updated_at = Utc::now();
-    if !resumed {
-        agent.db.delete_sync_journal_entries_for_kind_direction(
-            op_id,
-            ContentObjectKind::Pack,
-            SyncDirection::Upload,
-        )?;
-    }
     progress.detail_json["resumed"] = serde_json::json!(resumed);
     agent.db.set_operation_progress(op_id, Some(&progress))?;
-    let storage_before = provider.operation_metrics();
     let upload_started = Instant::now();
     agent.db.record_commit(
         manifest.commit_id,
@@ -1494,17 +1485,53 @@ async fn finish_prepared_backup(
         CommitVisibility::Uploading,
     )?;
     let index_json = serde_json::to_vec(&pack_index)?;
-    commit_bundle_with_index_for_operation(
-        provider,
-        master,
-        &manifest,
-        &pack_files,
-        Some(&index_json),
-        Some(&agent.db),
-        Some(op_id),
-    )
-    .await?;
-    metrics.upload_duration_ms = elapsed_ms(upload_started);
+    let committed_key = noland_storage::RemoteKey::new(format!(
+        "{}/{}",
+        bundle_dir(app_id, manifest.bundle_id),
+        COMMITTED_MARKER
+    ));
+    let already_committed = if resumed && provider.stat(&committed_key).await?.is_some() {
+        let existing =
+            read_committed_manifest(provider, master, app_id, manifest.bundle_id).await?;
+        let existing_index = read_pack_index(provider, master, app_id, manifest.bundle_id).await?;
+        if serde_json::to_vec(&existing)? != serde_json::to_vec(&manifest)?
+            || serde_json::to_vec(&existing_index)? != index_json
+        {
+            return Err(StateError::Integrity(
+                "committed revision differs from retry checkpoint".into(),
+            ));
+        }
+        let hash = format!(
+            "blake3:{}",
+            blake3::hash(&serde_json::to_vec(&manifest)?).to_hex()
+        );
+        agent.db.record_commit(
+            manifest.commit_id,
+            app_id,
+            manifest.bundle_id,
+            &hash,
+            Some(&bundle_dir(app_id, manifest.bundle_id)),
+            CommitVisibility::Committed,
+        )?;
+        true
+    } else {
+        false
+    };
+    if !already_committed {
+        commit_bundle_with_index_for_operation(
+            provider,
+            master,
+            &manifest,
+            &pack_files,
+            Some(&index_json),
+            Some(&agent.db),
+            Some(op_id),
+        )
+        .await?;
+    }
+    metrics.upload_duration_ms = metrics
+        .upload_duration_ms
+        .saturating_add(elapsed_ms(upload_started));
     metrics.num_manifest_writes = 1;
 
     persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
@@ -2217,6 +2244,8 @@ mod tests {
     struct InterruptedUpload {
         inner: LocalStorage,
         fail: std::sync::atomic::AtomicBool,
+        fail_pack: std::sync::atomic::AtomicBool,
+        fail_catalog: std::sync::atomic::AtomicBool,
         uploads: std::sync::atomic::AtomicUsize,
     }
 
@@ -2241,7 +2270,16 @@ mod tests {
         ) -> Result<noland_storage::RemoteMeta> {
             self.uploads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            self.inner.upload_immutable(local, key).await
+            let meta = self.inner.upload_immutable(local, key).await?;
+            if self
+                .fail_pack
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StateError::Storage(
+                    "injected lost pack acknowledgement".into(),
+                ));
+            }
+            Ok(meta)
         }
         async fn download(&self, key: &noland_storage::RemoteKey, dest: &Path) -> Result<()> {
             self.inner.download(key, dest).await
@@ -2257,6 +2295,13 @@ mod tests {
             bytes: bytes::Bytes,
             key: &noland_storage::RemoteKey,
         ) -> Result<noland_storage::RemoteMeta> {
+            if key.as_str().starts_with("catalog/")
+                && self
+                    .fail_catalog
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(StateError::Storage("injected catalog interruption".into()));
+            }
             if key.as_str().ends_with("manifest.enc")
                 && self.fail.swap(false, std::sync::atomic::Ordering::SeqCst)
             {
@@ -2285,6 +2330,8 @@ mod tests {
         let storage = InterruptedUpload {
             inner: LocalStorage::new(root.join("cloud")),
             fail: true.into(),
+            fail_pack: false.into(),
+            fail_catalog: false.into(),
             uploads: 0.into(),
         };
         let operation_id = Uuid::new_v4();
@@ -2344,6 +2391,97 @@ mod tests {
             .any(|dirty| dirty.app_id == app_id));
         assert!(!prepared_backup_path(&agent, operation_id).exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_resume_pack_receipts_and_preserve_already_committed_ciphertext() {
+        for fail_pack in [true, false] {
+            let root = test_root("retry-pipeline");
+            let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+            let app_id = AppId::desktop("pipeline-game");
+            agent
+                .db
+                .upsert_app(&AppIdentity::new(app_id.clone(), "Pipeline Fixture"))
+                .unwrap();
+            for index in 0..32 {
+                tracked_save(
+                    &agent,
+                    &app_id,
+                    &format!("slot-{index}.sav"),
+                    format!("captured-{index}").as_bytes(),
+                );
+            }
+            let storage = InterruptedUpload {
+                inner: LocalStorage::new(root.join("cloud")),
+                fail: false.into(),
+                fail_pack: fail_pack.into(),
+                fail_catalog: (!fail_pack).into(),
+                uploads: 0.into(),
+            };
+            let master = MasterKey::generate();
+            let operation = Uuid::new_v4();
+            assert!(run_backup(
+                &agent,
+                &app_id,
+                BackupMode::PersonalState,
+                BackupPerformanceMode::Balanced,
+                &storage,
+                &master,
+                Some(operation)
+            )
+            .await
+            .is_err());
+            let prepared = read_prepared_backup(
+                &agent,
+                &storage,
+                &master,
+                operation,
+                &app_id,
+                BackupMode::PersonalState,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(prepared.packing.is_some(), fail_pack);
+            let remote = root.join("cloud");
+            let packs_before = std::fs::read_dir(remote.join("packs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<BTreeSet<_>>();
+            let manifest_path = remote
+                .join(bundle_dir(&app_id, prepared.manifest.bundle_id))
+                .join("manifest.enc");
+            let previous_ciphertext = std::fs::read(&manifest_path).ok();
+            let resumed = run_backup(
+                &agent,
+                &app_id,
+                BackupMode::PersonalState,
+                BackupPerformanceMode::Balanced,
+                &storage,
+                &master,
+                Some(operation),
+            )
+            .await
+            .unwrap();
+            assert_eq!(resumed.bundle_id, prepared.manifest.bundle_id);
+            let packs_after = std::fs::read_dir(remote.join("packs"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                packs_after, packs_before,
+                "retry must keep immutable pack IDs"
+            );
+            if let Some(before) = previous_ciphertext {
+                assert_eq!(std::fs::read(manifest_path).unwrap(), before);
+            }
+            assert!(
+                std::fs::read_dir(agent.config.paths.cache.join("cas/chunks/.leases"))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     fn test_root(label: &str) -> PathBuf {

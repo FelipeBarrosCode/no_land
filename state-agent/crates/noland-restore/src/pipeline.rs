@@ -679,25 +679,25 @@ impl DownloadStreamConsumer for StreamConsumer<'_> {
             PackStreamDecoder::new(&self.job.id, self.job.entries.clone())?;
         Ok(())
     }
-    async fn write(&self, bytes: &[u8]) -> Result<()> {
-        let mut records = Vec::new();
-        self.decoder
-            .lock()
-            .map_err(|_| poisoned())?
-            .push(bytes, self.master, |entry, plain| {
-                if plain.len() as u64 > noland_state_core::constants::FASTCDC_MAX {
-                    return Err(StateError::Integrity(
-                        "streamed chunk exceeds memory budget".into(),
-                    ));
-                }
-                records.push((entry.chunk_hash.clone(), plain.to_vec()));
-                Ok(())
-            })?;
-        for (hash, plain) in records {
-            self.sender
-                .send(AssemblyMessage::Chunk(hash, plain))
-                .await
-                .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
+    async fn write(&self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            let (consumed, record) = {
+                let mut decoder = self.decoder.lock().map_err(|_| poisoned())?;
+                let count = bytes.len().min(decoder.next_record_input_limit());
+                let mut record = None;
+                decoder.push(&bytes[..count], self.master, |entry, plain| {
+                    record = Some((entry.chunk_hash.clone(), plain.to_vec()));
+                    Ok(())
+                })?;
+                (count, record)
+            };
+            bytes = &bytes[consumed..];
+            if let Some((hash, plain)) = record {
+                self.sender
+                    .send(AssemblyMessage::Chunk(hash, plain))
+                    .await
+                    .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
+            }
         }
         Ok(())
     }
@@ -985,7 +985,7 @@ pub async fn restore_pipelined(
                 let size = if provider.supports_streaming_downloads() {
                     // A pipe never retains a whole pack. Bound actual active records;
                     // the assembly channel separately bounds queued plaintext.
-                    2 * noland_state_core::constants::FASTCDC_MAX
+                    3 * noland_state_core::constants::FASTCDC_MAX + 1024
                 } else {
                     PACK_MAX
                 };

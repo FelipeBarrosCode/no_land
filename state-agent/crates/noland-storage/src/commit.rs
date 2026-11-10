@@ -250,19 +250,13 @@ pub async fn commit_bundle_with_index(
     .await
 }
 
-pub async fn commit_bundle_with_index_for_operation(
+pub async fn upload_packs_for_operation(
     provider: &dyn SharedStorageProvider,
-    master: &MasterKey,
-    manifest: &BundleManifest,
     pack_files: &[(String, std::path::PathBuf)],
-    pack_index_json: Option<&[u8]>,
     db: Option<&noland_state_db::StateDb>,
     operation_id: Option<Uuid>,
 ) -> Result<()> {
     provider.ensure_root().await?;
-    let keys = derive_keys(master);
-    let bundle_prefix = bundle_dir(&manifest.app.app_id, manifest.bundle_id);
-
     let all_pack_uploads: Vec<_> = pack_files
         .iter()
         .map(|(pack_id, path)| {
@@ -323,11 +317,26 @@ pub async fn commit_bundle_with_index_for_operation(
         }
         return Err(error);
     }
+    Ok(())
+}
+
+pub async fn commit_bundle_with_index_for_operation(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    manifest: &BundleManifest,
+    pack_files: &[(String, std::path::PathBuf)],
+    pack_index_json: Option<&[u8]>,
+    db: Option<&noland_state_db::StateDb>,
+    operation_id: Option<Uuid>,
+) -> Result<()> {
+    upload_packs_for_operation(provider, pack_files, db, operation_id).await?;
+    let keys = derive_keys(master);
+    let bundle_prefix = bundle_dir(&manifest.app.app_id, manifest.bundle_id);
     if let Some(db) = db {
-        for upload in &all_pack_uploads {
+        for (pack_id, _) in pack_files {
             db.journal_put(
                 &manifest.commit_id.to_string(),
-                upload.key.as_str(),
+                &pack_key(pack_id),
                 "upload",
                 "ok",
                 None,

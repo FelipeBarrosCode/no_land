@@ -10,7 +10,8 @@ pub use adaptive::AdaptiveConcurrency;
 pub use commit::{
     commit_bundle, commit_bundle_with_index, commit_bundle_with_index_for_operation,
     commit_checkpoint, commit_seal, load_catalog, read_committed_manifest, read_pack_index,
-    read_pack_index_for_operation, update_catalog_with_bundle, CatalogStore,
+    read_pack_index_for_operation, update_catalog_with_bundle, upload_packs_for_operation,
+    CatalogStore,
 };
 pub use local::LocalStorage;
 pub use noland_rclone_adapter::{
