@@ -98,7 +98,7 @@ test('real OpenPGP signing and public-only verification fail closed without touc
 });
 
 test('protected release steps require GPG verification before attestation and publication', () => {
-  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/gu, '\n');
   const packaging = workflow.split('\n  package-validation:\n')[1].split('\n  release:\n')[0];
   assert.match(packaging, /environment: Secrets/u);
   assert.match(packaging, /LINUX_GPG_PRIVATE_KEY: \$\{\{ secrets\.LINUX_GPG_PRIVATE_KEY \}\}/u);
