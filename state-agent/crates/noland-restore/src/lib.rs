@@ -9,13 +9,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use noland_cas::blake3_file;
 use noland_crypto::MasterKey;
 use noland_pack::PackIndexEntry;
-use noland_snapshot::{create_view, SnapshotView};
+use noland_snapshot::SnapshotView;
 use noland_state_core::*;
 use noland_state_db::{RestoredPathAssociationInput, StateDb};
 use noland_storage::{read_committed_manifest, SharedStorageProvider};
@@ -628,6 +628,15 @@ impl<'a> RestoreTransaction<'a> {
         planned: &[PlannedDestination],
         tombstones: &[PlannedTombstone],
     ) -> Result<()> {
+        self.prepare_rollback_observed(planned, tombstones, |_| Ok(()))
+    }
+
+    fn prepare_rollback_observed(
+        &mut self,
+        planned: &[PlannedDestination],
+        tombstones: &[PlannedTombstone],
+        on_file: impl FnMut(u64) -> Result<()>,
+    ) -> Result<()> {
         self.allowed_roots
             .extend(planned.iter().map(|planned| planned.root.clone()));
         self.allowed_roots
@@ -646,10 +655,11 @@ impl<'a> RestoreTransaction<'a> {
                             .unwrap_or(&entry.root)
                             .to_path_buf(),
                     )
-                    .or_default() += file.size;
+                    .or_default() += file.size.saturating_add(4096);
             }
         }
         let mut rollback_bytes = 0u64;
+        let mut recovery_peaks = BTreeMap::<u64, (PathBuf, u64)>::new();
         for destination in planned
             .iter()
             .filter(|planned| !planned.identical)
@@ -665,9 +675,20 @@ impl<'a> RestoreTransaction<'a> {
                     target: fs::read_link(destination)?,
                 });
             } else if metadata.is_file() {
-                rollback_bytes = rollback_bytes.saturating_add(metadata.len());
+                rollback_bytes = rollback_bytes
+                    .saturating_add(metadata.len())
+                    .saturating_add(4096);
+                let peak = recovery_peaks
+                    .entry(metadata.dev())
+                    .or_insert((destination.clone(), 0));
+                peak.1 = peak.1.max(metadata.len());
                 regular_files.push(destination.clone());
             }
+        }
+        // Recovery atomically replaces one old file at a time. Reserve that
+        // largest temporary too, even when the rollback snapshot used CoW.
+        for (path, bytes) in recovery_peaks.into_values() {
+            *requests.entry(path).or_default() += bytes;
         }
         *requests.entry(self.plan.staging.clone()).or_default() += rollback_bytes;
         self.disk_reservations.push(disk::DiskReservation::reserve(
@@ -675,7 +696,12 @@ impl<'a> RestoreTransaction<'a> {
         )?);
         if !regular_files.is_empty() {
             let rollback_root = self.plan.staging.join("pre_restore");
-            let view = create_view(&rollback_root, &regular_files, false)?;
+            let view = noland_snapshot::create_view_observed(
+                &rollback_root,
+                &regular_files,
+                false,
+                on_file,
+            )?;
             if view.mappings.len() != regular_files.len() {
                 return Err(StateError::Invalid(
                     "failed to capture every regular restore rollback path".into(),

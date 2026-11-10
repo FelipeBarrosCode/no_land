@@ -31,7 +31,7 @@ struct IncompleteView {
 impl Drop for IncompleteView {
     fn drop(&mut self) {
         if !self.complete {
-            let _ = fs::remove_dir_all(&self.root);
+            let _ = discard_root(&self.root);
         }
     }
 }
@@ -40,6 +40,15 @@ pub fn create_view(
     snapshot_root: &Path,
     sources: &[PathBuf],
     prefer_btrfs: bool,
+) -> Result<SnapshotView> {
+    create_view_observed(snapshot_root, sources, prefer_btrfs, |_| Ok(()))
+}
+
+pub fn create_view_observed(
+    snapshot_root: &Path,
+    sources: &[PathBuf],
+    prefer_btrfs: bool,
+    mut on_file: impl FnMut(u64) -> Result<()>,
 ) -> Result<SnapshotView> {
     let id = Uuid::new_v4();
     let dest = snapshot_root.join(id.to_string());
@@ -76,6 +85,7 @@ pub fn create_view(
     let mut mappings = Vec::new();
     let mut consistent = true;
     for (source_index, source) in sources.iter().enumerate() {
+        on_file(source_index as u64)?;
         if !source.exists() {
             continue;
         }
@@ -93,6 +103,7 @@ pub fn create_view(
             staged,
         });
     }
+    on_file(sources.len() as u64)?;
     cleanup.complete = true;
     Ok(SnapshotView {
         id,
@@ -107,8 +118,24 @@ pub fn create_view(
 }
 
 pub fn discard(view: &SnapshotView) -> Result<()> {
-    if view.root.exists() {
-        fs::remove_dir_all(&view.root)?;
+    discard_root(&view.root)
+}
+
+pub fn discard_root(root: &Path) -> Result<()> {
+    let subvolume = root.join("btrfs");
+    if fs::symlink_metadata(&subvolume).is_ok_and(|meta| meta.is_dir()) {
+        let status = Command::new("btrfs")
+            .args(["subvolume", "delete"])
+            .arg(&subvolume)
+            .output()?;
+        if !status.status.success() {
+            return Err(StateError::Storage(
+                "failed to remove owned snapshot subvolume".into(),
+            ));
+        }
+    }
+    if root.exists() {
+        fs::remove_dir_all(root)?;
     }
     Ok(())
 }
@@ -166,19 +193,38 @@ fn copy_stable(src: &Path, dest: &Path) -> Result<bool> {
     copy_file(src, dest)?;
     let second = fs::metadata(src).ok();
     let stable = match (first, second) {
-        (Some(a), Some(b)) => a.len() == b.len() && a.modified().ok() == b.modified().ok(),
+        (Some(ref a), Some(ref b)) => same_file_identity(a, b),
         _ => false,
     };
     if !stable {
+        let before_retry = fs::metadata(src).ok();
         copy_file(src, dest)?;
         let third = fs::metadata(src).ok();
         let dest_meta = fs::metadata(dest).ok();
-        return Ok(match (third, dest_meta) {
-            (Some(a), Some(b)) => a.len() == b.len(),
+        return Ok(match (before_retry, third, dest_meta) {
+            (Some(a), Some(b), Some(c)) => same_file_identity(&a, &b) && b.len() == c.len(),
             _ => false,
         });
     }
     Ok(true)
+}
+
+pub fn same_file_identity(before: &fs::Metadata, after: &fs::Metadata) -> bool {
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || before.ctime() != after.ctime()
+            || before.ctime_nsec() != after.ctime_nsec()
+        {
+            return false;
+        }
+    }
+    true
 }
 
 fn copy_dir(src: &Path, dest: &Path) -> Result<()> {

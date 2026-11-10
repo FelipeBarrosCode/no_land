@@ -62,3 +62,9 @@ jobs:
       - name: Test reconciliation and observer-gap handling
         run: |
           cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --lib reconcile::
+      - name: Measure synthetic Hookshot file-count workload
+        if: github.event_name == 'push' && contains(github.event.head_commit.message, '[storage-scale]')
+        env:
+          NOLAND_SYNTHETIC_FILES: '186619'
+        run: |
+          cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --lib backup::scale::synthetic_storage_workload -- --ignored --nocapture --test-threads=1

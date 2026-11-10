@@ -59,6 +59,9 @@ impl Default for PipelineOptions {
 pub struct PipelineProgress {
     pub phase: String,
     pub checked_entries: u64,
+    pub rollback_entries: u64,
+    pub preflight_duration_ms: u64,
+    pub rollback_duration_ms: u64,
     pub completed_entries: u64,
     pub reused_entries: u64,
     pub total_entries: u64,
@@ -210,10 +213,22 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 initial.elapsed_ms = started.elapsed().as_millis() as u64;
                 on_progress(initial.clone())
             })?;
+        initial.preflight_duration_ms = started.elapsed().as_millis() as u64;
         initial.phase = "preparing_rollback".into();
         initial.elapsed_ms = started.elapsed().as_millis() as u64;
-        on_progress(initial)?;
-        transaction.prepare_rollback(&planned, &tombstones)?;
+        on_progress(initial.clone())?;
+        let rollback_started = Instant::now();
+        let mut last_rollback_progress = Instant::now();
+        transaction.prepare_rollback_observed(&planned, &tombstones, |count| {
+            initial.rollback_entries = count;
+            if last_rollback_progress.elapsed() >= Duration::from_millis(500) {
+                initial.elapsed_ms = started.elapsed().as_millis() as u64;
+                initial.rollback_duration_ms = rollback_started.elapsed().as_millis() as u64;
+                on_progress(initial.clone())?;
+                last_rollback_progress = Instant::now();
+            }
+            Ok(())
+        })?;
         let critical = transaction
             .priorities
             .entries
@@ -223,6 +238,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             .collect();
         let progress = PipelineProgress {
             phase: "preparing_destinations".into(),
+            checked_entries: planned.len() as u64,
+            rollback_entries: initial.rollback_entries,
+            preflight_duration_ms: initial.preflight_duration_ms,
+            rollback_duration_ms: rollback_started.elapsed().as_millis() as u64,
             total_entries: planned.len() as u64,
             total_bytes: planned
                 .iter()

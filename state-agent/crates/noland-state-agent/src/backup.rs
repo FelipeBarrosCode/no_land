@@ -29,6 +29,8 @@ use crate::reconcile::{
 use crate::StateAgent;
 
 mod packing;
+#[cfg(test)]
+mod scale;
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
@@ -360,6 +362,7 @@ fn hash_one_file(
     observed_at: chrono::DateTime<Utc>,
 ) -> Result<HashResult> {
     let snapshot_started = Instant::now();
+    let source_before = std::fs::metadata(&job.source)?;
     let view = if job.staged.is_none() {
         Some(create_view(
             &job.snapshot_root,
@@ -461,6 +464,11 @@ fn hash_one_file(
     let mut file_state = file_state_from_manifest(&job.app_id, &manifest_file, &current_record);
     if job.record.size != Some(metadata.len().min(i64::MAX as u64) as i64)
         || job.record.mtime_ns != current_mtime_ns
+        || job.record.inode != current_record.inode
+        || !noland_snapshot::same_file_identity(&source_before, &metadata)
+        || view
+            .as_ref()
+            .is_some_and(|view| view.consistency == ConsistencyKind::BestEffort)
     {
         file_state.trust = FileStateTrust::VerifyRequired;
     }
@@ -587,7 +595,7 @@ struct SnapshotCleanup(PathBuf);
 
 impl Drop for SnapshotCleanup {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        let _ = noland_snapshot::discard_root(&self.0);
     }
 }
 

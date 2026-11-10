@@ -268,6 +268,9 @@ pub async fn run_restore_with_session(
                             progress.detail_json["pipeline"] = serde_json::json!({
                                 "phase": sample.phase,
                                 "checked_files": sample.checked_entries,
+                                "rollback_files": sample.rollback_entries,
+                                "preflight_duration_ms": sample.preflight_duration_ms,
+                                "rollback_duration_ms": sample.rollback_duration_ms,
                             "version": 1,
                             "assembled_bytes": sample.assembled_bytes,
                             "readback_bytes": sample.readback_bytes,
