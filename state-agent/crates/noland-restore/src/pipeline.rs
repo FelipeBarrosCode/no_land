@@ -1138,4 +1138,58 @@ mod tests {
         assert!(!plan.staging.exists());
         fs::remove_dir_all(root).unwrap();
     }
+
+    #[test]
+    fn thousands_of_small_files_publish_without_per_file_journal_rewrites() {
+        let root = test_dir("pipeline-small-files");
+        let payload = b"deduplicated small file";
+        let files = (0..4096)
+            .map(|index| {
+                test_file(
+                    &format!("game/file-{index:05}"),
+                    PersistenceClass::ReconstructableApp,
+                    SemanticRole::AppContent,
+                    payload,
+                )
+            })
+            .collect();
+        let plan = test_plan(&root, test_manifest(files));
+        let roots = LogicalRootMap::from_home(root.join("home"));
+        let mut transaction = RestoreTransaction::new(&plan, &roots, None);
+        let mut updates = 0;
+        let mut pipeline = Pipeline::new(&mut transaction, 4, |_| {
+            updates += 1;
+            Ok(())
+        })
+        .unwrap();
+        let checkpoint =
+            fs::read(plan.staging.join(super::super::TRANSACTION_JOURNAL_FILE)).unwrap();
+        let log_size = fs::metadata(plan.staging.join("restore-intents.v1.log"))
+            .unwrap()
+            .len();
+        pipeline
+            .consume(&noland_cas::blake3_hex(payload), payload)
+            .unwrap();
+        assert_eq!(pipeline.progress.completed_entries, 4096);
+        assert_eq!(
+            fs::metadata(plan.staging.join("restore-intents.v1.log"))
+                .unwrap()
+                .len(),
+            log_size
+        );
+        assert_eq!(
+            fs::read(plan.staging.join(super::super::TRANSACTION_JOURNAL_FILE)).unwrap(),
+            checkpoint
+        );
+        assert_eq!(
+            fs::read_dir(plan.staging.join("materialized/.chunks"))
+                .unwrap()
+                .count(),
+            0
+        );
+        pipeline.finish().unwrap();
+        transaction.commit().unwrap();
+        assert!(updates >= 2);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

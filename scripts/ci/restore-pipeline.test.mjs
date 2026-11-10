@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
-const restore = read('state-agent/crates/noland-restore/src/pipeline.rs');
+const restore = read('state-agent/crates/noland-restore/src/pipeline.rs').split('#[cfg(test)]')[0];
 const journal = read('state-agent/crates/noland-restore/src/journal.rs');
 const agent = read('state-agent/crates/noland-state-agent/src/restore.rs');
 const storage = read('state-agent/crates/noland-storage/src/rclone.rs');
