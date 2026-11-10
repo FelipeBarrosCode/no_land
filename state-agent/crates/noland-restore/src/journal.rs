@@ -48,7 +48,7 @@ pub(super) fn append(workspace: &Path, intents: &[Intent]) -> Result<()> {
     let path = workspace.join(LOG);
     let exists = validate_log(&path)?;
     let mut options = OpenOptions::new();
-    options.write(true).append(true);
+    options.append(true);
     if !exists {
         options.create_new(true);
     }
