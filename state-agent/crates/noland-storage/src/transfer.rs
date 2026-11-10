@@ -763,9 +763,11 @@ mod tests {
         });
         let journal = TransferJournalCallbacks::new()
             .with_should_transfer(|_, key| Ok(key.as_str() != "packs/0"));
-        let mut tuning = TransferTuning::default();
-        tuning.max_parallel_uploads = 2;
-        tuning.min_request_interval_ms = 0;
+        let tuning = TransferTuning {
+            max_parallel_uploads: 2,
+            min_request_interval_ms: 0,
+            ..TransferTuning::default()
+        };
 
         let report = upload_immutable_bounded(Arc::clone(&provider), uploads, tuning, journal)
             .await
