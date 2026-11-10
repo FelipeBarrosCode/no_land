@@ -22,10 +22,15 @@ or Azure OIDC permission.
 Blocking lanes:
 
 - `typecheck-build`: `npm ci`, TypeScript compilation, and a Vite production build.
-- `rust-format`: rustfmt for all six lockfile roots.
+- `script-tests`: `npm run test:scripts` on all six Linux/macOS/Windows architecture runners.
+  Uses Node's built-in test runner and fixtures only; it never builds an app or installs native
+  SDKs. POSIX shell/permission tests run on Linux and macOS; Windows runs the portable suites.
+  Gitleaks scanner regression tests remain in the security gate.
+- `rust-format`: rustfmt for all seven lockfile roots plus runtime-contracts.
 - `rust-check`: `cargo check --locked` and Clippy for network-contracts, network-agent,
-  state-agent, the desktop/net-helper workspace, mic-sidecar, and vm-cloud-mic-agent.
-  Network contracts and network-agent are warning-free and use `-D warnings`. Other workspaces
+  state-agent, the desktop/net-helper/MCP workspace, mic-sidecar, vm-cloud-mic-agent, and runtime-agent
+  (including its runtime-contracts dependency).
+  Network contracts, network-agent, and runtime-agent use `-D warnings`. Other workspaces
   currently run Clippy with the existing-warning baseline; warnings remain visible and Clippy
   errors still fail.
 - `unit-tests`: the existing fast `npm run test:unit` network-contract and network-agent suite.
@@ -33,9 +38,15 @@ Blocking lanes:
   CodeQL, and actionlint.
 - `PR CI required`: fails unless every preceding lane succeeds.
 
-There is no JavaScript unit-test framework configured today. `npm run test:unit` is retained,
-but it runs the network-contract and network-agent Rust tests and is not treated as the complete
-test suite.
+`npm run test:scripts` discovers the JavaScript regression suites without shell glob expansion,
+so the same entry point works in PowerShell. `npm run test:unit` is retained, but runs the
+network-contract and network-agent Rust tests; unlike `test:scripts`, it does compile Rust code.
+
+For a **no-app-build audit**, use only `npm run test:scripts`, `npm run i18n:check`,
+`actionlint`, `node --check`, `bash -n`, dependency audits against the existing lockfiles,
+and the offline Python tests under `scripts/runtime` and `scripts/ci`.
+Do not run `test:unit`, Cargo checks/tests, native bootstrap, Tauri commands,
+or production/nightly workflows when builds have not been authorized.
 
 ### Complete test surface
 
@@ -45,6 +56,8 @@ Production and nightly run every lane after security succeeds. To keep PR feedba
 runs the existing network test entry point while compiling and linting every workspace:
 
 - `npm run test:unit` (network-contracts and network-agent).
+- `npm run test:scripts` (offline UI, packaging, download, signing and workflow regressions).
+- runtime-agent Rust security tests, Python artifact/launcher tests, and the Linux GUI smoke test.
 - `cargo test --locked --workspace --all-targets` for `src-tauri`, including the desktop backend
   and `noland-net-helper`.
 - all state-agent workspace unit and integration tests, including `noland-testkit` attribution,
@@ -73,6 +86,12 @@ Execution order:
 6. Per-platform package, sidecar, updater, signing, and notarization validation.
 7. Final package extraction/security scan, CycloneDX SBOM, and SHA-256 generation.
 8. Production-only tag and GitHub Release publication.
+
+Production and nightly calculate the next patch version with the same
+`scripts/ci/release-version.mjs` helper. Only exact stable `vMAJOR.MINOR.PATCH` tags count;
+runtime-image drafts and prereleases cannot corrupt version arithmetic. Release staging updates
+both package manifests and the root npm lockfile metadata. The package-validation job installs
+its own SquashFS/zstd extraction tools; tools installed by another job are not shared.
 
 The publish job is unreachable unless every preceding job succeeds. It also requires all of:
 
@@ -117,6 +136,30 @@ using the protected signing endpoint/account credentials, validated with Authent
 have their Tauri updater signatures regenerated.
 Linux `.deb` files pass structural checks and lintian. Every target runs bundled-sidecar/runtime
 validation and generates local SHA-256 checksums.
+
+### Native SDK download reliability
+
+The official GStreamer runtime/development packages are pinned by filename and upstream SHA-256
+in `scripts/gstreamer-checksums.json`. The checksum files are published beside the packages at
+`https://gstreamer.freedesktop.org/data/pkg/osx/1.24.13/` and
+`https://gstreamer.freedesktop.org/data/pkg/windows/1.24.13/msvc/`. Updating the SDK version also
+requires updating these pins; an unknown package fails closed.
+
+Downloads keep partial bytes for the same URL, fall back to HTTP/1.1 on truncated/broken HTTP/2
+responses, and back off between attempts. Each URL has at most 12 attempts and a 30-minute total
+retry budget. Range-unsupported servers restart cleanly. Completed and cached files must pass
+their checksum; validation uses bounded reads rather than loading a full SDK into memory.
+
+The two macOS targets share the universal-package cache. Windows caches remain target-specific.
+Only a complete, verified runtime/development set is saved, even if a later compilation/signing
+step fails. No partial files, extracted SDKs, app bundles, or signing material enter this cache.
+Updater metadata likewise refuses missing, empty-signature, or ambiguous platform artifacts.
+
+When diagnosing a failed release, inspect the failing step rather than assuming a compiler error.
+For example, production run `42846719837` failed on the Apple Silicon GStreamer download
+(curl 92/18); Windows, Linux, and Intel macOS passed. Earlier SQLite audit failures on the old
+nightly revision are separate from that download failure. Do not bypass dependency audits or
+signing/notarization checks to get a release through.
 
 ### Security policy and reports
 

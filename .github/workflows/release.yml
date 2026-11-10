@@ -25,10 +25,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install package extraction tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y squashfs-tools zstd
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
@@ -66,25 +62,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
       - name: Determine next release version without modifying refs
         id: version
-        shell: bash
-        run: |
-          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
-          configured_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          latest_version="${latest_tag#v}"
-          if [[ -z "$latest_version" ]] || [[ "$(printf '%s\n%s\n' "$latest_version" "$configured_version" | sort -V | tail -n 1)" == "$configured_version" ]]; then
-            version="$configured_version"
-          else
-            version="$latest_version"
-          fi
-          IFS='.' read -r major minor patch <<< "$version"
-          next_tag="v${major}.${minor}.$((patch + 1))"
-          {
-            echo "release_tag=$next_tag"
-            echo "release_name=$next_tag"
-            echo "version=${next_tag#v}"
-          } >> "$GITHUB_OUTPUT"
+        run: node scripts/ci/release-version.mjs
 
   build:
     name: signed-six-platform-build
@@ -102,12 +85,20 @@ jobs:
     needs: [build, version]
     runs-on: ubuntu-24.04
     environment: Secrets
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
+      - name: Install package extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd gnupg
       - name: Download all six signed build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -163,8 +154,26 @@ jobs:
           format: cyclonedx
           output: release-publish/SBOM.cdx.json
           exit-code: "0"
-      - name: Recompute checksums including SBOM
-        run: node scripts/ci/hash-artifacts.mjs release-publish release-publish/SHA256SUMS
+      - name: Sign Linux packages and manifest with OpenPGP
+        env:
+          LINUX_GPG_PRIVATE_KEY: ${{ secrets.LINUX_GPG_PRIVATE_KEY }}
+          LINUX_GPG_PASSPHRASE: ${{ secrets.LINUX_GPG_PASSPHRASE }}
+        run: node scripts/linux-gpg-signatures.mjs sign release-publish
+      - name: Sign exact release artifacts with Sigstore provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-publish/*
+      - name: Include the detached signed provenance bundle
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp -- "$PROVENANCE_BUNDLE" release-publish/provenance.sigstore.jsonl
+      - name: Verify every release signature and checksum before upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/verify-release-provenance.mjs release-publish
+          node scripts/linux-gpg-signatures.mjs verify release-publish
       - name: Upload validated production release set
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -184,15 +193,27 @@ jobs:
     environment: Secrets
     permissions:
       contents: write
+      attestations: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+      - name: Install public-key verification tools
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends gnupg
       - name: Download only the validated release set
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: validated-release-${{ github.sha }}
           path: release-publish
+      - name: Verify signed artifacts again before creating a release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/verify-release-provenance.mjs release-publish
+          node scripts/linux-gpg-signatures.mjs verify release-publish
       - name: Create and push production release tag
         shell: bash
         run: |

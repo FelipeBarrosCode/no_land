@@ -6,3 +6,4 @@ self-hosted-runner:
 
 config-variables:
   - NOLAND_ZAP_STAGING_URL
+  - TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME

@@ -12,6 +12,30 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime-artifact-tests:
+    name: Runtime Python 3.10 artifact and launcher tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - run: python3 -B scripts/runtime/test_artifacts.py
+      - run: python3 -B scripts/runtime/test_gui.py
+
+  script-tests:
+    name: No-build script tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, macos-15-intel, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run test:scripts
+
   typecheck-build:
     name: typecheck-build
     runs-on: ubuntu-24.04
@@ -44,7 +68,7 @@ jobs:
           components: rustfmt
       - name: Check every first-party Rust workspace
         run: |
-          for manifest in network-contracts/Cargo.toml network-agent/Cargo.toml state-agent/Cargo.toml src-tauri/Cargo.toml mic-sidecar/Cargo.toml vm-cloud-mic-agent/Cargo.toml; do
+          for manifest in network-contracts/Cargo.toml network-agent/Cargo.toml state-agent/Cargo.toml src-tauri/Cargo.toml mic-sidecar/Cargo.toml vm-cloud-mic-agent/Cargo.toml runtime-agent/Cargo.toml runtime-contracts/Cargo.toml; do
             cargo fmt --all --manifest-path "$manifest" -- --check
           done
 
@@ -87,6 +111,11 @@ jobs:
             workspace: vm-cloud-mic-agent
             strict: false
             native: true
+          - name: runtime-agent
+            manifest: runtime-agent/Cargo.toml
+            workspace: runtime-agent
+            strict: true
+            native: false
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
@@ -141,8 +170,6 @@ jobs:
             network-contracts
             network-agent
       - run: npm ci
-      - name: No-build Sunshine and CI regression tests
-        run: node --test scripts/sunshine-auth.test.mjs scripts/ci/*.test.mjs
       - run: npm run test:unit
 
   security:
@@ -157,7 +184,7 @@ jobs:
   required:
     name: PR CI required
     if: always()
-    needs: [typecheck-build, rust-format, rust-check, unit-tests, security]
+    needs: [runtime-artifact-tests, script-tests, typecheck-build, rust-format, rust-check, unit-tests, security]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every PR lane

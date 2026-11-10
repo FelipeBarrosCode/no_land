@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -18,7 +21,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
-import { downloadWithResume } from './native-download.mjs';
+import { downloadWithResume, verifyFileChecksum } from './native-download.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -29,6 +32,8 @@ const bundledGstreamerFramework = join(bundledMacosDir, 'GStreamer.framework');
 const gstreamerVersion = process.env.NOLAND_GSTREAMER_VERSION?.trim()
   || process.env.GSTREAMER_VERSION?.trim()
   || '1.24.13';
+// Upstream .sha256sum files live beside each official macOS/Windows installer.
+const gstreamerChecksums = JSON.parse(readFileSync(new URL('./gstreamer-checksums.json', import.meta.url), 'utf8'));
 const args = process.argv.slice(2);
 const target = readTarget(args)
   || process.env.NOLAND_NATIVE_TARGET?.trim()
@@ -347,8 +352,8 @@ function ensureExpandedMacGstreamerPackages() {
   const glibPkgConfigDir = join(glibComponentDir, 'Payload', 'lib', 'pkgconfig');
   const gstreamerPkgConfigDir = join(gstreamerComponentDir, 'Payload', 'lib', 'pkgconfig');
 
-  downloadFile(runtimeUrl, runtimePkg, { expectedKind: 'xar-pkg' });
-  downloadFile(develUrl, develPkg, { expectedKind: 'xar-pkg' });
+  downloadFile(runtimeUrl, runtimePkg, { expectedKind: 'xar-pkg', sha256: gstreamerChecksum(runtimePkg) });
+  downloadFile(develUrl, develPkg, { expectedKind: 'xar-pkg', sha256: gstreamerChecksum(develPkg) });
 
   if (!existsSync(join(runtimeExpandedDir, 'Distribution'))) {
     expandMacPkg(runtimePkg, runtimeExpandedDir);
@@ -474,8 +479,8 @@ function ensureWindowsGstreamerRoot(prefix, targetTriple) {
   const develUrl = `https://gstreamer.freedesktop.org/data/pkg/windows/${gstreamerVersion}/msvc/gstreamer-1.0-devel-msvc-${downloadArch}-${gstreamerVersion}.msi`;
 
   mkdirSync(cacheRoot, { recursive: true });
-  downloadFile(runtimeUrl, runtimeMsi, { expectedKind: 'msi' });
-  downloadFile(develUrl, develMsi, { expectedKind: 'msi' });
+  downloadFile(runtimeUrl, runtimeMsi, { expectedKind: 'msi', sha256: gstreamerChecksum(runtimeMsi) });
+  downloadFile(develUrl, develMsi, { expectedKind: 'msi', sha256: gstreamerChecksum(develMsi) });
 
   rmSync(extractedRoot, { recursive: true, force: true });
   mkdirSync(extractedRoot, { recursive: true });
@@ -1332,11 +1337,17 @@ function extractWindowsMsi(msiPath, extractionRoot) {
   ]);
 }
 
+function gstreamerChecksum(path) {
+  const checksum = gstreamerChecksums[basename(path)];
+  if (!checksum) throw new Error(`No pinned GStreamer checksum for ${basename(path)}; update scripts/gstreamer-checksums.json before changing SDK versions.`);
+  return checksum;
+}
+
 function downloadFile(url, destination, options = {}) {
-  const { expectedKind } = options;
+  const { expectedKind, sha256 } = options;
   const urls = Array.isArray(url) ? url : [url];
 
-  if (existsSync(destination) && validateDownloadedFile(destination, expectedKind)) {
+  if (existsSync(destination) && validateDownloadedFile(destination, expectedKind, sha256)) {
     return;
   }
 
@@ -1357,10 +1368,9 @@ function downloadFile(url, destination, options = {}) {
         console.log(`[bootstrap-native-deps] Downloading ${url}`);
         downloadWithResume(url, tempDestination);
 
-        if (!validateDownloadedFile(tempDestination, expectedKind)) {
+        if (!validateDownloadedFile(tempDestination, expectedKind, sha256)) {
           const preview = existsSync(tempDestination)
-            ? readFileSync(tempDestination)
-              .subarray(0, 256)
+            ? readDownloadHeader(tempDestination, 256)
               .toString('utf8')
               .replace(/\s+/g, ' ')
               .trim()
@@ -1381,7 +1391,7 @@ function downloadFile(url, destination, options = {}) {
   }
 }
 
-function validateDownloadedFile(path, expectedKind) {
+function validateDownloadedFile(path, expectedKind, sha256) {
   if (!existsSync(path)) {
     return false;
   }
@@ -1391,11 +1401,19 @@ function validateDownloadedFile(path, expectedKind) {
     return false;
   }
 
+  if (sha256) {
+    try {
+      verifyFileChecksum(path, sha256);
+    } catch {
+      return false;
+    }
+  }
+
   if (!expectedKind) {
     return true;
   }
 
-  const header = readFileSync(path).subarray(0, 512);
+  const header = readDownloadHeader(path);
   const headerUtf8 = header.toString('utf8').trimStart().toLowerCase();
   if (headerUtf8.startsWith('<!doctype html') || headerUtf8.startsWith('<html') || headerUtf8.startsWith('<?xml')) {
     return false;
@@ -1437,6 +1455,17 @@ function validateDownloadedFile(path, expectedKind) {
   }
 
   return true;
+}
+
+function readDownloadHeader(path, length = 512) {
+  const buffer = Buffer.alloc(length);
+  const descriptor = openSync(path, 'r');
+  try {
+    const bytes = readSync(descriptor, buffer, 0, length, 0);
+    return buffer.subarray(0, bytes);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function prepareBuildDir(sourceDir, buildDir) {

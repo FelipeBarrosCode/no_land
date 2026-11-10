@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
-  cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
+  chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readlinkSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -33,6 +33,9 @@ function fixture(t) {
   for (const dir of [bin, bundle, join(input, 'usr/share/applications'), join(input, 'usr/bin')]) {
     mkdirSync(dir, { recursive: true });
   }
+  // Both published v0.1.23 and v0.1.27 had a root-owned 0700 SquashFS root.
+  // FUSE hid that defect, while Firejail's kernel mount denied access to AppRun.
+  chmodSync(input, 0o700);
   writeFileSync(join(input, 'AppRun'), '#!/bin/sh\nexit 0\n', { mode: 0o644 });
   writeFileSync(join(input, 'usr/bin/sidecar'), 'bundled sidecar', { mode: 0o755 });
   writeFileSync(join(input, 'usr/share/applications/No Land.desktop'),
@@ -54,17 +57,25 @@ function event(value) { fs.appendFileSync(path.join(root, 'events'), value + '\\
 if (process.argv[2] !== '--appimage-extract') process.exit(2);
 event('extract-input');
 fs.cpSync(path.join(root, 'input AppDir'), path.join(process.cwd(), 'squashfs-root'), { recursive: true, verbatimSymlinks: true });
+fs.chmodSync(path.join(process.cwd(), 'squashfs-root'), fs.statSync(path.join(root, 'input AppDir')).mode & 0o7777);
 `);
   executable(join(root, 'output-runtime'), `${prelude}
 if (process.argv[2] !== '--appimage-extract') process.exit(2);
 event('extract-output');
 fs.cpSync(path.join(root, 'repacked'), path.join(process.cwd(), 'squashfs-root'), { recursive: true, verbatimSymlinks: true });
+fs.chmodSync(path.join(process.cwd(), 'squashfs-root'), fs.statSync(path.join(root, 'repacked')).mode & 0o7777);
 `);
   executable(join(root, 'repacker'), `${prelude}
 event('repack ' + process.env.ARCH + ' ' + process.env.SOURCE_DATE_EPOCH);
-fs.cpSync(process.argv[2], path.join(root, 'repacked'), { recursive: true, verbatimSymlinks: true });
+const args = process.argv.slice(2);
+fs.writeFileSync(path.join(root, 'repack-args.json'), JSON.stringify(args));
+const [source, destination] = args.filter(arg => !arg.startsWith('--mksquashfs-opt='));
+fs.cpSync(source, path.join(root, 'repacked'), { recursive: true, verbatimSymlinks: true });
+fs.chmodSync(path.join(root, 'repacked'), fs.statSync(source).mode & 0o7777);
 if (process.env.BAD_REPACK) fs.writeFileSync(path.join(root, 'repacked/.DirIcon'), 'not a PNG');
-fs.copyFileSync(path.join(root, 'output-runtime'), process.argv[3]);
+if (process.env.BAD_ROOT_REPACK) fs.chmodSync(path.join(root, 'repacked'), 0o700);
+if (process.env.BAD_APPRUN_REPACK) fs.chmodSync(path.join(root, 'repacked/AppRun'), 0o700);
+fs.copyFileSync(path.join(root, 'output-runtime'), destination);
 `);
   executable(join(root, 'tool-runtime'), `${prelude}
 if (process.argv[2] !== '--appimage-extract') process.exit(2);
@@ -137,12 +148,16 @@ for (const [arch, outputArch] of [['x64', 'x86_64'], ['arm64', 'aarch64']]) {
     assert.match(f.events(), new RegExp(`/download/1\\.9\\.1/appimagetool-${outputArch}\\.AppImage`));
     assert.match(f.events(), new RegExp(`checksum ${outputArch}\\nextract-tool\\nrepack ${outputArch} 1793440000\\nextract-output`));
     const repaired = join(f.root, 'repacked');
+    assert.equal(lstatSync(repaired).mode & 0o7777, 0o755);
     assert.equal(lstatSync(join(repaired, 'AppRun')).mode & 0o777, 0o755);
+    const args = JSON.parse(readFileSync(join(f.root, 'repack-args.json'), 'utf8'));
+    assert.ok(args.includes('--mksquashfs-opt=-root-mode'));
+    assert.ok(args.includes('--mksquashfs-opt=755'));
     assert.ok(lstatSync(join(repaired, '.DirIcon')).isFile());
     assert.deepEqual(readFileSync(join(repaired, '.DirIcon')), readFileSync(join(f.input, 'No Land.png')));
     assert.equal(readlinkSync(join(repaired, 'No Land.desktop')), 'usr/share/applications/No Land.desktop');
     assert.equal(readFileSync(join(repaired, 'usr/bin/sidecar'), 'utf8'), 'bundled sidecar');
-    assert.ok(lstatSync(f.appimage).mode & 0o111);
+    assert.equal(lstatSync(f.appimage).mode & 0o7777, 0o755);
   });
 }
 
@@ -184,11 +199,37 @@ test('rejects non-PNG metadata before downloading the tool', (t) => {
 
 test('re-extracts and rejects metadata corrupted by repacking', (t) => {
   const f = fixture(t);
+  const original = readFileSync(f.appimage);
   const result = f.run('x64', { BAD_REPACK: '1' });
   assert.notEqual(result.status, 0);
   assert.match(f.events(), /extract-output/);
   assert.doesNotMatch(result.stdout, /Repacked and verified/);
+  assert.deepEqual(readFileSync(f.appimage), original);
 });
+
+test('an executable AppRun does not hide a root directory inaccessible to other users', (t) => {
+  const f = fixture(t);
+  chmodSync(join(f.input, 'AppRun'), 0o755);
+  assert.equal(lstatSync(f.input).mode & 0o7777, 0o700);
+  const result = f.run();
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.equal(lstatSync(join(f.root, 'repacked')).mode & 0o7777, 0o755);
+});
+
+for (const [setting, diagnostic] of [
+  ['BAD_ROOT_REPACK', /AppDir root must have mode 0755/],
+  ['BAD_APPRUN_REPACK', /AppRun must have mode 0755/],
+]) {
+  test(`rejects ${setting} after repacking without replacing the original`, (t) => {
+    const f = fixture(t);
+    const original = readFileSync(f.appimage);
+    const result = f.run('x64', { [setting]: '1' });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, diagnostic);
+    assert.deepEqual(readFileSync(f.appimage), original);
+    assert.doesNotMatch(result.stdout, /Repacked and verified/);
+  });
+}
 
 test('rejects unsupported architectures and ambiguous AppImages', (t) => {
   const f = fixture(t);

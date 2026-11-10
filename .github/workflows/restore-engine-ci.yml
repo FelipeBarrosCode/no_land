@@ -1,6 +1,7 @@
 name: Restore engine regression tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [fix/bounded-restore-pipeline, perf/shared-storage-dev]
     paths: ["state-agent/**", ".github/workflows/restore-engine-ci.yml", "scripts/ci/restore-pipeline.test.mjs"]

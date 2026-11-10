@@ -33,8 +33,11 @@ test('both Windows targets freshly install the pinned signing action dependencie
 
 test('signature validation and updater re-signing remain mandatory and ordered', () => {
   const verification = step('Verify Windows Authenticode signatures');
-  assert.match(verification, /Get-AuthenticodeSignature -LiteralPath/u);
-  assert.match(verification, /if \(\$signature\.Status -ne 'Valid'\) \{ throw/u);
+  assert.match(verification, /verify-windows-signatures\.ps1.*-Recurse/u);
+  const verifier = readFileSync(new URL('../verify-windows-signatures.ps1', import.meta.url), 'utf8');
+  assert.match(verifier, /Get-AuthenticodeSignature -LiteralPath/u);
+  assert.match(verifier, /if \(\$signature\.Status -ne 'Valid'\)/u);
+  assert.match(verifier, /TimeStamperCertificate/u);
   assert.doesNotMatch(verification, /continue-on-error:/u);
   const updater = step('Regenerate Tauri updater signatures after Authenticode signing');
   assert.match(updater, /tauri\.js signer sign/u);
@@ -59,5 +62,8 @@ test('downloadable macOS archives use bounded ticket-validation retries without 
 
 test('release suite runs the offline Apple retry regression tests', () => {
   const suite = readFileSync(new URL('../../.github/workflows/_tests.yml', import.meta.url), 'utf8');
-  assert.match(suite, /run: node --test .*scripts\/apple-stapler-retry\.test\.mjs/u);
+  assert.match(suite, /run: npm run test:scripts/u);
+  const runner = readFileSync(new URL('./test-scripts.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /name\.endsWith\('\.test\.mjs'\)/u);
+  assert.doesNotMatch(runner, /'scripts\/apple-stapler-retry\.test\.mjs'/u);
 });

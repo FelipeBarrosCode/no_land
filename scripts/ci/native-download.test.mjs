@@ -1,12 +1,15 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { downloadWithResume } from '../native-download.mjs';
+import { downloadWithResume as download, verifyFileChecksum } from '../native-download.mjs';
+
+const downloadWithResume = (url, destination, options) => download(url, destination, { sleep() {}, ...options });
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'noland-download-test-'));
@@ -52,8 +55,8 @@ for (const status of [33, 36]) {
   });
 }
 
-for (const status of [16, 92]) {
-  test(`HTTP/2 failure ${status} resumes over HTTP/1.1 without discarding bytes`, t => {
+for (const status of [16, 18, 92]) {
+  test(`protocol/truncation failure ${status} resumes over HTTP/1.1 without discarding bytes`, t => {
     const destination = fixture(t);
     let calls = 0;
     downloadWithResume('https://example.test/sdk', destination, {
@@ -84,12 +87,63 @@ test('HTTP/1.1 can be selected before the first attempt', t => {
   });
 });
 
-test('repeated failures stop after four attempts', t => {
+test('repeated failures stop after twelve attempts with bounded exponential backoff', t => {
   let calls = 0;
+  const delays = [];
   assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
     run() { calls += 1; return { status: 28 }; },
-  }), /after 4 attempts \(exit 28\)/);
-  assert.equal(calls, 4);
+    sleep(ms) { delays.push(ms); },
+  }), /after 12 attempts \(exit 28\)/);
+  assert.equal(calls, 12);
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000, 30000, 30000, 30000]);
+});
+
+test('more than four interrupted responses retain progress until the download succeeds', t => {
+  const destination = fixture(t);
+  let calls = 0;
+  downloadWithResume('https://example.test/sdk', destination, {
+    run() {
+      assert.equal(existsSync(destination) ? readFileSync(destination, 'utf8').length : 0, calls);
+      writeFileSync(destination, 'x'.repeat(++calls));
+      return { status: calls < 7 ? 18 : 0 };
+    },
+  });
+  assert.equal(calls, 7);
+});
+
+test('retry time is capped and each curl timeout respects the remaining budget', t => {
+  let clock = 0;
+  let calls = 0;
+  assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
+    now: () => clock,
+    sleep(ms) { clock += ms; },
+    run(_command, args) {
+      assert.equal(args[args.indexOf('--max-time') + 1], calls === 0 ? '900' : '899');
+      calls += 1;
+      clock += 900_000;
+      return { status: 28 };
+    },
+  }), /30-minute retry budget/);
+  assert.equal(calls, 2);
+});
+
+test('interrupted curl is not silently retried', t => {
+  let calls = 0;
+  assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
+    run() { calls += 1; return { status: null, signal: 'SIGTERM' }; },
+  }), /interrupted \(SIGTERM\)/);
+  assert.equal(calls, 1);
+});
+
+test('checksum validation covers multiple blocks and rejects truncated packages', t => {
+  const destination = fixture(t);
+  const bytes = Buffer.alloc(2 * 1024 * 1024 + 7, 'x');
+  const checksum = createHash('sha256').update(bytes).digest('hex');
+  writeFileSync(destination, bytes);
+  verifyFileChecksum(destination, checksum);
+  writeFileSync(destination, bytes.subarray(0, -1));
+  assert.throws(() => verifyFileChecksum(destination, checksum), /checksum mismatch/);
+  assert.throws(() => verifyFileChecksum(destination, ''), /pinned SHA-256/);
 });
 
 test('missing curl fails immediately', t => {
@@ -103,8 +157,9 @@ test('release caches contain only completed SDK downloads with versioned target 
   for (const name of ['macOS', 'Windows']) {
     const step = workflow.split(`- name: Cache ${name} GStreamer downloads\n`)[1]?.split('\n      - ')[0];
     assert.ok(step, `${name} download cache is required`);
-    assert.match(step, /actions\/cache@[a-f0-9]{40}/);
-    assert.match(step, /key: native-download-v1-.*matrix\.target.*env\.GSTREAMER_VERSION/);
+    assert.match(step, /actions\/cache\/restore@[a-f0-9]{40}/);
+    assert.match(step, /key: native-download-v2-.*env\.GSTREAMER_VERSION/);
+    assert.ok(step.includes(name === 'macOS' ? 'macos-universal' : 'matrix.target'));
     assert.match(step, /path: src-tauri\/\.native-deps\/cache\/gstreamer-.*\/\*\.(pkg|msi)\n/);
     assert.doesNotMatch(step, /\.partial|restore-keys:/);
   }
