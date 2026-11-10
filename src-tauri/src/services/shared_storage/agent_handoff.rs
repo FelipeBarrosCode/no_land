@@ -561,10 +561,18 @@ fn emit_operation_progress(
                 .and_then(|value| value.get("total_items"))
                 .and_then(serde_json::Value::as_u64)
         });
-    let completed_bytes = progress
+    let pipeline = progress
         .and_then(|value| value.get("detail_json"))
-        .and_then(|value| value.get("completed_pack_bytes"))
+        .and_then(|value| value.get("pipeline"));
+    let completed_bytes = pipeline
+        .and_then(|value| value.get("published_bytes"))
         .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            progress
+                .and_then(|value| value.get("detail_json"))
+                .and_then(|value| value.get("completed_pack_bytes"))
+                .and_then(serde_json::Value::as_u64)
+        })
         .or_else(|| {
             pack_transfer
                 .and_then(|value| value.get("completed_bytes"))
@@ -579,10 +587,15 @@ fn emit_operation_progress(
                 .and_then(|value| value.get("bytes_transferred"))
                 .and_then(serde_json::Value::as_u64)
         });
-    let total_bytes = progress
-        .and_then(|value| value.get("detail_json"))
-        .and_then(|value| value.get("total_transfer_bytes"))
+    let total_bytes = pipeline
+        .and_then(|value| value.get("total_bytes"))
         .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            progress
+                .and_then(|value| value.get("detail_json"))
+                .and_then(|value| value.get("total_transfer_bytes"))
+                .and_then(serde_json::Value::as_u64)
+        })
         .or_else(|| {
             pack_transfer
                 .and_then(|value| value.get("total_bytes"))

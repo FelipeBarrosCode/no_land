@@ -832,7 +832,7 @@ function applySharedStorageProgress(
       event.completedObjects != null && event.totalObjects != null
         ? `${event.completedObjects}/${event.totalObjects} ${event.objectUnit ?? "objects"}`
         : null;
-    const isDownloadPhase = /download/i.test(event.phase ?? event.state);
+    const isDownloadPhase = event.kind === "restore" || /download/i.test(event.phase ?? event.state);
     const completedBytesLabel = isDownloadPhase ? "downloaded" : "ready";
     const bytes =
       event.completedBytes != null
@@ -860,7 +860,7 @@ function applySharedStorageProgress(
         ...state.blockingAction,
         label: phaseLabel,
         detail:
-          [event.message, units, transferPhase ? bytes : null, transferPhase ? transferred : null]
+          [event.message, units, bytes, transferPhase ? transferred : null]
             .filter(Boolean)
             .join(" · ") ||
           state.blockingAction.detail,

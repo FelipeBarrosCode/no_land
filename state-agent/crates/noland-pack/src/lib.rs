@@ -357,7 +357,16 @@ pub fn extract_chunk(
     use std::io::Seek;
     file.seek(std::io::SeekFrom::Start(entry.offset))?;
     file.read_exact(&mut buf)?;
-    if &buf[..4] != b"NLCH" {
+    decode_record(&buf, entry, master)
+}
+
+fn decode_record(buf: &[u8], entry: &PackIndexEntry, master: &MasterKey) -> Result<Vec<u8>> {
+    if buf.len() != RECORD_HEADER_LEN as usize + entry.ciphertext_len as usize
+        || &buf[..4] != b"NLCH"
+        || u32::from_le_bytes(buf[4..8].try_into().expect("four bytes")) != entry.plaintext_len
+        || u32::from_le_bytes(buf[8..12].try_into().expect("four bytes")) != entry.ciphertext_len
+        || buf[12..12 + NONCE_LEN] != entry.nonce
+    {
         return Err(StateError::Integrity("bad pack record".into()));
     }
     let mut nonce = [0u8; NONCE_LEN];
@@ -384,6 +393,123 @@ pub fn extract_chunk(
     Ok(plain)
 }
 
+/// Incremental decoder for immutable v1/v2 packs. Retains only the current
+/// selected encrypted record, never a whole pack or a decrypted on-disk copy.
+pub struct PackStreamDecoder {
+    pack_id: String,
+    entries: Vec<PackIndexEntry>,
+    cursor: u64,
+    header: Vec<u8>,
+    next: usize,
+    record: Vec<u8>,
+}
+
+impl PackStreamDecoder {
+    pub fn new(pack_id: &str, mut entries: Vec<PackIndexEntry>) -> Result<Self> {
+        entries.sort_by_key(|entry| entry.offset);
+        let mut end = PACK_HEADER_LEN;
+        for entry in &entries {
+            // Bound allocations using the authenticated index before reading any network length.
+            if entry.pack_id != pack_id
+                || entry.offset < end
+                || entry.plaintext_len as u64 > noland_state_core::constants::FASTCDC_MAX
+                || entry.ciphertext_len as u64 > noland_state_core::constants::FASTCDC_MAX + 1024
+                || entry.nonce.len() != NONCE_LEN
+            {
+                return Err(StateError::Integrity("invalid streaming pack index".into()));
+            }
+            end = entry
+                .offset
+                .checked_add(RECORD_HEADER_LEN + u64::from(entry.ciphertext_len))
+                .ok_or_else(|| StateError::Integrity("pack offset overflow".into()))?;
+            if end > PACK_MAX {
+                return Err(StateError::Integrity("pack exceeds format limit".into()));
+            }
+        }
+        Ok(Self {
+            pack_id: pack_id.into(),
+            entries,
+            cursor: 0,
+            header: Vec::new(),
+            next: 0,
+            record: Vec::new(),
+        })
+    }
+
+    pub fn received_bytes(&self) -> u64 {
+        self.cursor
+    }
+
+    pub fn push(
+        &mut self,
+        mut bytes: &[u8],
+        master: &MasterKey,
+        mut consume: impl FnMut(&PackIndexEntry, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        while !bytes.is_empty() {
+            if self.header.len() < PACK_HEADER_LEN as usize {
+                let count = bytes
+                    .len()
+                    .min(PACK_HEADER_LEN as usize - self.header.len());
+                self.header.extend_from_slice(&bytes[..count]);
+                self.cursor += count as u64;
+                bytes = &bytes[count..];
+                if self.header.len() == PACK_HEADER_LEN as usize {
+                    let version =
+                        u32::from_le_bytes(self.header[4..8].try_into().expect("four bytes"));
+                    let id = Uuid::from_slice(&self.header[8..24])
+                        .map_err(|_| StateError::Integrity("bad pack ID".into()))?;
+                    if &self.header[..4] != MAGIC
+                        || !(1..=VERSION).contains(&version)
+                        || id.to_string() != self.pack_id
+                    {
+                        return Err(StateError::Integrity("bad streaming pack header".into()));
+                    }
+                }
+                continue;
+            }
+            let Some(entry) = self.entries.get(self.next) else {
+                self.cursor = self
+                    .cursor
+                    .checked_add(bytes.len() as u64)
+                    .ok_or_else(|| StateError::Integrity("pack length overflow".into()))?;
+                if self.cursor > PACK_MAX {
+                    return Err(StateError::Integrity("pack exceeds format limit".into()));
+                }
+                break;
+            };
+            if self.cursor < entry.offset {
+                let count = bytes.len().min((entry.offset - self.cursor) as usize);
+                self.cursor += count as u64;
+                bytes = &bytes[count..];
+                continue;
+            }
+            let length = RECORD_HEADER_LEN as usize + entry.ciphertext_len as usize;
+            let count = bytes.len().min(length - self.record.len());
+            self.record.extend_from_slice(&bytes[..count]);
+            self.cursor += count as u64;
+            bytes = &bytes[count..];
+            if self.record.len() == length {
+                let plain = decode_record(&self.record, entry, master)?;
+                consume(entry, &plain)?;
+                self.record.clear();
+                self.next += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn finish(&self) -> Result<()> {
+        if self.header.len() != PACK_HEADER_LEN as usize
+            || self.next != self.entries.len()
+            || !self.record.is_empty()
+        {
+            return Err(StateError::Integrity("truncated streaming pack".into()));
+        }
+        Ok(())
+    }
+}
+
 pub fn index_by_hash(entries: &[PackIndexEntry]) -> BTreeMap<String, PackIndexEntry> {
     entries
         .iter()
@@ -396,6 +522,102 @@ pub fn index_by_hash(entries: &[PackIndexEntry]) -> BTreeMap<String, PackIndexEn
 mod tests {
     use super::*;
     use noland_cas::chunk_bytes;
+
+    #[test]
+    fn streaming_decoder_authenticates_fragmented_records_before_releasing_plaintext() {
+        let dir = std::env::temp_dir().join(format!("noland-stream-{}", Uuid::new_v4()));
+        let master = MasterKey::generate();
+        let payload = b"private saved state".repeat(500);
+        let packs = pack_chunks(
+            &dir,
+            &master,
+            vec![(blake3_hex(&payload), payload.clone())],
+            |_| false,
+        )
+        .unwrap();
+        let pack = &packs[0];
+        let bytes = std::fs::read(&pack.path).unwrap();
+        for version in [1u32, 2] {
+            let mut bytes = bytes.clone();
+            bytes[4..8].copy_from_slice(&version.to_le_bytes());
+            let mut decoder = PackStreamDecoder::new(&pack.pack_id, pack.entries.clone()).unwrap();
+            let mut output = Vec::new();
+            let split = bytes.len() - 1;
+            for part in bytes[..split].chunks(3) {
+                decoder
+                    .push(part, &master, |_, plain| {
+                        output.extend_from_slice(plain);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
+            assert!(
+                output.is_empty(),
+                "plaintext must wait for the complete authentication tag"
+            );
+            assert!(decoder.finish().is_err());
+            decoder
+                .push(&bytes[split..], &master, |_, plain| {
+                    output.extend_from_slice(plain);
+                    Ok(())
+                })
+                .unwrap();
+            decoder.finish().unwrap();
+            assert_eq!(output, payload);
+        }
+        let mut corrupt = bytes;
+        *corrupt.last_mut().unwrap() ^= 1;
+        let mut decoder = PackStreamDecoder::new(&pack.pack_id, pack.entries.clone()).unwrap();
+        let mut released = false;
+        assert!(decoder
+            .push(&corrupt, &master, |_, _| {
+                released = true;
+                Ok(())
+            })
+            .is_err());
+        assert!(!released);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn streaming_decoder_skips_unselected_records_and_bounds_index_allocations() {
+        let dir = std::env::temp_dir().join(format!("noland-stream-{}", Uuid::new_v4()));
+        let master = MasterKey::generate();
+        let packs = pack_chunks(
+            &dir,
+            &master,
+            vec![
+                (blake3_hex(b"unused"), b"unused".to_vec()),
+                (blake3_hex(b"selected"), b"selected".to_vec()),
+                (blake3_hex(b"trailing"), b"trailing".to_vec()),
+            ],
+            |_| false,
+        )
+        .unwrap();
+        let pack = &packs[0];
+        let entry = pack
+            .entries
+            .iter()
+            .find(|entry| entry.chunk_hash == blake3_hex(b"selected"))
+            .unwrap()
+            .clone();
+        let mut decoder = PackStreamDecoder::new(&pack.pack_id, vec![entry.clone()]).unwrap();
+        let mut output = Vec::new();
+        for bytes in std::fs::read(&pack.path).unwrap().chunks(5) {
+            decoder
+                .push(bytes, &master, |_, plain| {
+                    output.extend_from_slice(plain);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        decoder.finish().unwrap();
+        assert_eq!(output, b"selected");
+        let mut invalid = entry;
+        invalid.ciphertext_len = u32::MAX;
+        assert!(PackStreamDecoder::new(&pack.pack_id, vec![invalid]).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn pack_encrypt_extract_and_never_mutates() {
