@@ -11,7 +11,7 @@ mod network_monitor;
 mod services;
 mod utils;
 
-use std::{fs::OpenOptions, io::Write, path::Path, sync::Arc};
+use std::{fs::OpenOptions, io::Write, sync::Arc};
 
 use crate::moonlight::{domain::ColorRange, infrastructure::persistence::MoonlightStateRepository};
 use commands::*;
@@ -40,56 +40,6 @@ fn write_startup_diagnostic(stage: &str, message: &str) {
     let path = std::env::temp_dir().join("noland-connect-startup.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[startup:{stage}] {message}");
-    }
-}
-
-fn reset_persisted_state(
-    state_store: &Arc<dyn StateStore>,
-    state_path: &Path,
-    app_data_dir: &Path,
-    moonlight_bootstrap_created: &mut bool,
-    reason: &str,
-) -> crate::models::app_state::PersistedAppState {
-    write_startup_diagnostic("state-reset", reason);
-    warn!("{reason}");
-
-    if let Err(error) = std::fs::remove_file(state_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            let message = format!(
-                "Failed deleting persisted state file {}: {error}",
-                state_path.display()
-            );
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-        }
-    }
-
-    match tauri::async_runtime::block_on(moonlight::composition::bootstrap_default_services(
-        state_path.to_path_buf(),
-        app_data_dir.to_path_buf(),
-    )) {
-        Ok(result) => {
-            *moonlight_bootstrap_created = result.created;
-        }
-        Err(error) => {
-            let message =
-                format!("Moonlight bootstrap after state reset could not complete: {error}");
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-            *moonlight_bootstrap_created = false;
-        }
-    }
-
-    match tauri::async_runtime::block_on(state_store.load_state()) {
-        Ok(state) => state,
-        Err(error) => {
-            let message = format!(
-                "Failed recreating persisted state after reset, continuing with defaults: {error}"
-            );
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-            crate::models::app_state::PersistedAppState::default()
-        }
     }
 }
 
@@ -136,7 +86,7 @@ fn main() {
                 ),
             );
 
-            let mut moonlight_bootstrap_created = match tauri::async_runtime::block_on(
+            let moonlight_bootstrap_created = match tauri::async_runtime::block_on(
                 moonlight::composition::bootstrap_default_services(
                     state_path.clone(),
                     app_data_dir.clone(),
@@ -164,19 +114,13 @@ fn main() {
 
             let mut initial_state = match tauri::async_runtime::block_on(state_store.load_state()) {
                 Ok(state) => state,
-                Err(error @ crate::errors::AppError::SecureStorage(_)) => {
-                    return Err(format!(
-                        "Protected application state could not be unlocked; state.json was left unchanged: {error}"
-                    )
-                    .into());
+                Err(error) => {
+                    let message = format!(
+                        "Failed loading persisted state; startup stopped without resetting state.json. Free disk space or resolve the reported error, then retry: {error}"
+                    );
+                    write_startup_diagnostic("state-load", &message);
+                    return Err(message.into());
                 }
-                Err(error) => reset_persisted_state(
-                    &state_store,
-                    &state_path,
-                    &app_data_dir,
-                    &mut moonlight_bootstrap_created,
-                    &format!("Failed loading persisted state; deleting and recreating it: {error}"),
-                ),
             };
             let mut detected_stream_defaults = detect_client_display_for_provisioning();
 
@@ -208,16 +152,11 @@ fn main() {
                     }
                 }
                 Err(error) => {
-                    initial_state = reset_persisted_state(
-                        &state_store,
-                        &state_path,
-                        &app_data_dir,
-                        &mut moonlight_bootstrap_created,
-                        &format!(
-                            "Failed normalizing WireGuard state from disk; deleting and recreating persisted state: {error}"
-                        ),
+                    let message = format!(
+                        "Failed normalizing WireGuard state from disk; startup stopped without resetting state.json: {error}"
                     );
-                    state_changed = false;
+                    write_startup_diagnostic("state-normalization", &message);
+                    return Err(message.into());
                 }
             }
 
