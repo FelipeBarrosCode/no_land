@@ -12,6 +12,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  runtime-artifact-tests:
+    name: Runtime Python 3.10 artifact and launcher tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - run: python3 -B scripts/runtime/test_artifacts.py
+      - run: python3 -B scripts/runtime/test_gui.py
+
   typecheck-build:
     name: typecheck-build
     runs-on: ubuntu-24.04
@@ -157,7 +165,7 @@ jobs:
   required:
     name: PR CI required
     if: always()
-    needs: [typecheck-build, rust-format, rust-check, unit-tests, security]
+    needs: [runtime-artifact-tests, typecheck-build, rust-format, rust-check, unit-tests, security]
     runs-on: ubuntu-24.04
     steps:
       - name: Require every PR lane

@@ -7,7 +7,12 @@ import tarfile
 
 archive = Path("dist/runtime/ubuntu24-x86_64.tar.gz")
 with archive.open("rb") as stream:
-    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    # CI and supported cloud hosts still use Python 3.10; file_digest was
+    # introduced in 3.11. Stream bounded blocks rather than loading the image.
+    hasher = hashlib.sha256()
+    for block in iter(lambda: stream.read(1024 * 1024), b""):
+        hasher.update(block)
+    digest = hasher.hexdigest()
 with tarfile.open(archive, "r:gz") as tar:
     extracted = 0
     for member in tar:
