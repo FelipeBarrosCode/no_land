@@ -663,6 +663,7 @@ impl DownloadObserver for PackObserver<'_> {
         self.journal
             .db
             .update_sync_journal_progress(self.journal.operation_id, &self.key, bytes)
+            .map(|_| ())
     }
 }
 
