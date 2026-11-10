@@ -5,7 +5,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3.workspace = true
 chrono.workspace = true
+libc = "0.2"
 noland-cas.workspace = true
 noland-crypto.workspace = true
 noland-pack.workspace = true

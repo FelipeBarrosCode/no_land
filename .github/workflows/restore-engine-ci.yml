@@ -1,0 +1,54 @@
+name: Restore engine regression tests
+
+on:
+  push:
+    branches: [fix/bounded-restore-pipeline]
+    paths: ["state-agent/**", ".github/workflows/restore-engine-ci.yml", "scripts/ci/restore-pipeline.test.mjs"]
+  pull_request:
+    paths: ["state-agent/**", ".github/workflows/restore-engine-ci.yml", "scripts/ci/restore-pipeline.test.mjs"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-engine-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  restore-engine:
+    name: Restore engine libraries (no app builds)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94.1
+          components: rustfmt, clippy
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1
+        with:
+          workspaces: state-agent
+      - run: node --test scripts/ci/restore-pipeline.test.mjs
+      - run: cargo fmt --manifest-path state-agent/Cargo.toml --all -- --check
+      - name: Test restore, encryption, and storage libraries only
+        run: cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-restore -p noland-pack -p noland-storage --lib
+      - name: Lint restore libraries
+        run: cargo clippy --locked --manifest-path state-agent/Cargo.toml -p noland-restore -p noland-pack -p noland-storage --all-targets -- -D warnings
+  agent-contract:
+    name: Agent integration (no app builds)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: 1.94.1
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends clang llvm libelf-dev pkg-config zlib1g-dev
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1
+        with:
+          workspaces: state-agent
+      - name: Check agent integration without building desktop or mobile apps
+        run: cargo check --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --all-targets
