@@ -5,8 +5,8 @@ use bytes::Bytes;
 use noland_state_core::Result;
 
 use crate::{
-    transfer::local_storage_identity, Health, ProviderRootIdentity, RemoteEntry, RemoteKey,
-    RemoteMeta, SharedStorageProvider,
+    transfer::local_storage_identity, DownloadObserver, DownloadStreamConsumer, Health,
+    ProviderRootIdentity, RemoteEntry, RemoteKey, RemoteMeta, SharedStorageProvider,
 };
 
 /// Filesystem-backed provider used by tests and as the local cache layout.
@@ -85,6 +85,46 @@ impl SharedStorageProvider for LocalStorage {
         }
         std::fs::copy(self.abs(key), dest)?;
         Ok(())
+    }
+
+    fn supports_streaming_downloads(&self) -> bool {
+        true
+    }
+
+    async fn download_stream_observed(
+        &self,
+        key: &RemoteKey,
+        _scratch: &Path,
+        consumer: &dyn DownloadStreamConsumer,
+        observer: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
+        use std::io::Read;
+        consumer.restart()?;
+        if let Some(observer) = observer {
+            observer.transfer_started()?;
+        }
+        let mut source = std::fs::File::open(self.abs(key))?;
+        let mut buffer = vec![0; 256 * 1024];
+        let mut bytes = 0;
+        let mut last = std::time::Instant::now();
+        loop {
+            let count = source.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            consumer.write(&buffer[..count])?;
+            bytes += count as u64;
+            if last.elapsed() >= std::time::Duration::from_millis(500) {
+                if let Some(observer) = observer {
+                    observer.transfer_progress(bytes)?;
+                }
+                last = std::time::Instant::now();
+            }
+        }
+        if let Some(observer) = observer {
+            observer.transfer_progress(bytes)?;
+        }
+        consumer.finish()
     }
 
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {

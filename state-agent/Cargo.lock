@@ -639,7 +639,9 @@ dependencies = [
 name = "noland-restore"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "chrono",
+ "libc",
  "noland-cas",
  "noland-crypto",
  "noland-pack",

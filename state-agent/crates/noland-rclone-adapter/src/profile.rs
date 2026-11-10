@@ -211,7 +211,7 @@ impl TransferProfile {
 }
 
 pub fn provider_arg_is_allowed(provider: ProviderKind, arg: &str) -> bool {
-    let required_provider = if arg.starts_with("--s3-") {
+    if arg.starts_with("--s3-") {
         matches!(
             provider,
             ProviderKind::AmazonS3
@@ -240,8 +240,7 @@ pub fn provider_arg_is_allowed(provider: ProviderKind, arg: &str) -> bool {
         provider == ProviderKind::Webdav
     } else {
         true
-    };
-    required_provider
+    }
 }
 
 pub fn configured_backend_type<'a>(config_ini: &'a str, remote_name: &str) -> Option<&'a str> {
@@ -276,7 +275,7 @@ pub fn validate_provider_backend(provider: ProviderKind, backend_type: &str) -> 
 }
 
 fn format_size_mib(bytes: u64) -> Result<String> {
-    if bytes == 0 || bytes % MIB != 0 {
+    if bytes == 0 || !bytes.is_multiple_of(MIB) {
         return Err(AdapterError::Invalid(format!(
             "rclone transfer size {bytes} is not a positive whole MiB"
         )));

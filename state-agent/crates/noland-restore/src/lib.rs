@@ -1,6 +1,8 @@
 //! Storage-efficient restore: prioritize, verify, atomically publish, and roll back.
 
 mod download;
+mod journal;
+mod pipeline;
 mod planner;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,6 +26,7 @@ pub use download::{
     DownloadOptions, DownloadReport, PackCacheGcOptions, PackCacheGcReport,
     DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
 };
+pub use pipeline::{restore_pipelined, PipelineOptions, PipelineProgress, PipelineReport};
 pub use planner::{
     embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
     RestorePriority, RestorePriorityPlan, RestoreTarget, READY_TO_LAUNCH,
@@ -208,7 +211,8 @@ struct SymlinkRollback {
 }
 
 const TRANSACTION_JOURNAL_FILE: &str = "restore-transaction.json";
-const TRANSACTION_JOURNAL_VERSION: u32 = 1;
+// Older agents must refuse (not silently mis-recover) journals with intent logs.
+const TRANSACTION_JOURNAL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -277,12 +281,15 @@ pub struct RestoreTransaction<'a> {
     chunk_eviction_enabled: bool,
     tombstones_applied: bool,
     state: TransactionState,
+    priorities: RestorePriorityPlan,
+    uses_legacy_pack_cache: bool,
 }
 
 impl<'a> RestoreTransaction<'a> {
     pub fn new(plan: &'a RestorePlan, roots: &'a LogicalRootMap, db: Option<&'a StateDb>) -> Self {
+        let priorities = plan.priority_plan();
         let mut remaining_chunk_refs = BTreeMap::new();
-        for entry in plan.priority_plan().entries {
+        for entry in &priorities.entries {
             let unique_chunks = plan.manifest.files[entry.manifest_index]
                 .chunks
                 .iter()
@@ -308,6 +315,8 @@ impl<'a> RestoreTransaction<'a> {
             chunk_eviction_enabled: false,
             tombstones_applied: false,
             state: TransactionState::Active,
+            priorities,
+            uses_legacy_pack_cache: true,
         }
     }
 
@@ -439,7 +448,9 @@ impl<'a> RestoreTransaction<'a> {
         };
 
         self.release_staged_pack_links()?;
-        self.prune_restore_pack_cache()?;
+        if self.uses_legacy_pack_cache {
+            self.prune_restore_pack_cache()?;
+        }
 
         // Persist the filesystem commit decision before the SQLite commit. A crash after SQLite
         // commits can never leave an active journal that startup recovery would roll back.
@@ -485,10 +496,12 @@ impl<'a> RestoreTransaction<'a> {
             self.release_staged_pack_links().map(|_| ()),
             &mut first_error,
         );
-        record_cleanup_error(
-            self.prune_restore_pack_cache().map(|_| ()),
-            &mut first_error,
-        );
+        if self.uses_legacy_pack_cache {
+            record_cleanup_error(
+                self.prune_restore_pack_cache().map(|_| ()),
+                &mut first_error,
+            );
+        }
 
         if let Some(error) = first_error {
             return Err(error);
@@ -504,7 +517,7 @@ impl<'a> RestoreTransaction<'a> {
         &self,
         target: RestoreTarget,
     ) -> Result<(Vec<PlannedDestination>, Vec<PlannedTombstone>)> {
-        let priority_plan = self.plan.priority_plan();
+        let priority_plan = &self.priorities;
         let mut destinations = BTreeSet::new();
         let mut planned = Vec::new();
         for entry in priority_plan.entries_for(target) {
@@ -670,7 +683,8 @@ impl<'a> RestoreTransaction<'a> {
     }
 
     fn persist_journal(&self, state: JournalState) -> Result<()> {
-        persist_transaction_journal(&self.plan.staging, &self.journal_snapshot(state))
+        persist_transaction_journal(&self.plan.staging, &self.journal_snapshot(state))?;
+        journal::checkpoint(&self.plan.staging)
     }
 
     fn create_directory_chain_journaled(&mut self, root: &Path, destination: &Path) -> Result<()> {
@@ -680,7 +694,10 @@ impl<'a> RestoreTransaction<'a> {
             // creating it.
             self.allowed_roots.insert(directory.clone());
             self.created_directories.insert(directory.clone());
-            self.persist_journal(JournalState::Active)?;
+            journal::append(
+                &self.plan.staging,
+                &[journal::Intent::Directory(directory.clone())],
+            )?;
             fs::create_dir(&directory)?;
             sync_parent_directory(&directory)?;
         }
@@ -688,18 +705,27 @@ impl<'a> RestoreTransaction<'a> {
     }
 
     fn track_partial(&mut self, partial: &Path) -> Result<()> {
-        self.active_partials.insert(partial.to_path_buf());
-        self.persist_journal(JournalState::Active)
+        if self.active_partials.insert(partial.to_path_buf()) {
+            journal::append(
+                &self.plan.staging,
+                &[journal::Intent::Partial(partial.into())],
+            )?;
+        }
+        Ok(())
     }
 
     fn clear_partial(&mut self, partial: &Path) -> Result<()> {
         self.active_partials.remove(partial);
-        self.persist_journal(JournalState::Active)
+        // The durable intent may outlive the partial. Recovery removal is idempotent;
+        // no completion record or whole-journal rewrite is needed for every file.
+        Ok(())
     }
 
     fn track_created_path(&mut self, path: &Path) -> Result<()> {
-        self.created_paths.insert(path.to_path_buf());
-        self.persist_journal(JournalState::Active)
+        if self.created_paths.insert(path.to_path_buf()) {
+            journal::append(&self.plan.staging, &[journal::Intent::Created(path.into())])?;
+        }
+        Ok(())
     }
 
     fn release_entry_chunks(&mut self, manifest_index: usize) -> Result<()> {
@@ -751,31 +777,43 @@ impl<'a> RestoreTransaction<'a> {
             .write(true)
             .create_new(true)
             .open(&partial)?;
+        let mut hasher = blake3::Hasher::new();
+        let mut written = 0u64;
+        let mut buffer = vec![0u8; 256 * 1024];
         for chunk in &file.chunks {
             let chunk_path = restore_chunk_path(self.plan, &chunk.hash)?;
             let mut input = fs::File::open(chunk_path)?;
-            std::io::copy(&mut input, &mut output)?;
+            use std::io::Read;
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                output.write_all(&buffer[..count])?;
+                hasher.update(&buffer[..count]);
+                written = written.saturating_add(count as u64);
+            }
         }
         output.flush()?;
-        output.sync_all()?;
-        drop(output);
 
-        let size = fs::metadata(&partial)?.len();
+        let size = written;
         if size != file.size {
             return Err(StateError::Integrity(format!(
                 "file size mismatch for {}: expected {}, got {size}",
                 file.relative_path, file.size
             )));
         }
-        if blake3_file(&partial)? != file.file_hash {
+        if format!("blake3:{}", hasher.finalize().to_hex()) != file.file_hash {
             return Err(StateError::Integrity(format!(
                 "file hash mismatch for {}",
                 file.relative_path
             )));
         }
         if let Some(mode) = file.mode {
-            fs::set_permissions(&partial, fs::Permissions::from_mode(mode))?;
+            output.set_permissions(fs::Permissions::from_mode(mode))?;
         }
+        output.sync_all()?;
+        drop(output);
         validate_parent_chain(&planned.root, &planned.destination)?;
         if !planned.existed {
             self.track_created_path(&planned.destination)?;
@@ -903,8 +941,7 @@ fn recover_restore_workspace(workspace: &Path) -> Result<WorkspaceRecovery> {
             journal_path.display()
         )));
     }
-    let bytes = fs::read(&journal_path)?;
-    let journal: RestoreTransactionJournal = serde_json::from_slice(&bytes)?;
+    let journal = journal::read(workspace)?;
     if workspace
         .file_name()
         .and_then(|name| name.to_str())
@@ -1010,7 +1047,7 @@ fn sync_snapshot_view(rollback_root: &Path, view: &SnapshotView) -> Result<()> {
 }
 
 fn validate_recovery_journal(workspace: &Path, journal: &RestoreTransactionJournal) -> Result<()> {
-    if journal.version != TRANSACTION_JOURNAL_VERSION {
+    if !(1..=TRANSACTION_JOURNAL_VERSION).contains(&journal.version) {
         return Err(StateError::Invalid(format!(
             "unsupported restore transaction journal version {}",
             journal.version
@@ -1430,8 +1467,15 @@ fn record_cleanup_error(result: Result<()>, first_error: &mut Option<StateError>
 
 fn target_file_is_identical(path: &Path, file: &ManifestFile) -> bool {
     file.file_type == "file"
-        && fs::metadata(path)
-            .map(|metadata| metadata.is_file() && metadata.len() == file.size)
+        && fs::symlink_metadata(path)
+            .map(|metadata| {
+                metadata.is_file()
+                    && !metadata.file_type().is_symlink()
+                    && metadata.len() == file.size
+                    && file
+                        .mode
+                        .is_none_or(|mode| metadata.permissions().mode() & 0o7777 == mode & 0o7777)
+            })
             .unwrap_or(false)
         && blake3_file(path)
             .map(|hash| hash == file.file_hash)
@@ -1649,9 +1693,7 @@ mod tests {
                 .unwrap();
         transaction.track_partial(&partial).unwrap();
         fs::write(&partial, b"incomplete").unwrap();
-        let journal: RestoreTransactionJournal =
-            serde_json::from_slice(&fs::read(plan.staging.join(TRANSACTION_JOURNAL_FILE)).unwrap())
-                .unwrap();
+        let journal = journal::read(&plan.staging).unwrap();
         assert!(!journal.rollback_mappings.is_empty());
         assert!(!journal.prior_symlinks.is_empty());
         let canonical_created_path = fs::canonicalize(&created_path).unwrap();
@@ -2262,7 +2304,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    fn test_manifest(files: Vec<ManifestFile>) -> BundleManifest {
+    pub(super) fn test_manifest(files: Vec<ManifestFile>) -> BundleManifest {
         let mut manifest = BundleManifest::new(
             ManifestApp {
                 app_id: AppId::desktop("restore-test"),
@@ -2285,7 +2327,7 @@ mod tests {
         manifest
     }
 
-    fn test_file(
+    pub(super) fn test_file(
         path: &str,
         persistence_class: PersistenceClass,
         semantic_role: SemanticRole,
@@ -2315,7 +2357,7 @@ mod tests {
         }
     }
 
-    fn crash_test_plan(paths: &AgentPaths, manifest: BundleManifest) -> RestorePlan {
+    pub(super) fn crash_test_plan(paths: &AgentPaths, manifest: BundleManifest) -> RestorePlan {
         let restore_id = Uuid::new_v4();
         let staging = paths.restore_dir(&restore_id.to_string());
         for child in ["packs", "materialized/.chunks", "pre_restore"] {
@@ -2330,7 +2372,7 @@ mod tests {
         }
     }
 
-    fn test_plan(root: &Path, manifest: BundleManifest) -> RestorePlan {
+    pub(super) fn test_plan(root: &Path, manifest: BundleManifest) -> RestorePlan {
         let staging = root.join("restore");
         for child in ["packs", "materialized/.chunks", "pre_restore"] {
             fs::create_dir_all(staging.join(child)).unwrap();
@@ -2370,7 +2412,7 @@ mod tests {
         }
     }
 
-    fn test_dir(label: &str) -> PathBuf {
+    pub(super) fn test_dir(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!("noland-restore-{label}-{}", Uuid::new_v4()))
     }
 
@@ -2380,7 +2422,7 @@ mod tests {
         fn wake(self: Arc<Self>) {}
     }
 
-    fn block_on<F: Future>(future: F) -> F::Output {
+    pub(super) fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::from(Arc::new(NoopWaker));
         let mut context = Context::from_waker(&waker);
         let mut future = Box::pin(future);

@@ -11,15 +11,15 @@ use noland_rclone_adapter::{
     ProviderRootIdentity, RemoteErrorClass, TransferProfile, TransferTuning,
 };
 use noland_state_core::{Result, StateError};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
 use crate::{
     compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, AdaptiveConcurrency,
-    DownloadObserver, Health, ImmutableUpload, ImmutableUploadCompletion, ImmutableUploadObserver,
-    MetadataBatch, MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta, SharedRetryGate,
-    SharedStorageProvider, StorageOperationMetrics,
+    DownloadObserver, DownloadStreamConsumer, Health, ImmutableUpload, ImmutableUploadCompletion,
+    ImmutableUploadObserver, MetadataBatch, MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta,
+    SharedRetryGate, SharedStorageProvider, StorageOperationMetrics,
 };
 
 #[derive(Default)]
@@ -125,6 +125,15 @@ impl RcloneCommandBuilder {
         ];
         self.push_backend_options(&mut args);
         args.extend([source, destination]);
+        args
+    }
+
+    pub fn download_stream_args(&self, source: String) -> Vec<String> {
+        // cat produces an ordered stream; copyto's multistream output may have holes.
+        // Parallelism is across packs, with OS pipe backpressure instead of disk copies.
+        let mut args = vec!["cat".into()];
+        self.push_backend_options(&mut args);
+        args.push(source);
         args
     }
 
@@ -555,9 +564,8 @@ impl RcloneStorage {
             }
             None => self.run(args).await.map(|_| ()),
         };
-        match &result {
-            Ok(()) => self.upload_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.upload_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result
@@ -731,9 +739,8 @@ impl SharedStorageProvider for RcloneStorage {
             true,
         )?;
         let result = self.run(args).await;
-        match &result {
-            Ok(_) => self.upload_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.upload_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result?;
@@ -877,9 +884,8 @@ impl SharedStorageProvider for RcloneStorage {
             }
             None => self.run(args).await.map(|_| ()),
         };
-        match &result {
-            Ok(()) => self.download_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.download_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result?;
@@ -889,6 +895,125 @@ impl SharedStorageProvider for RcloneStorage {
                 .fetch_add(metadata.len(), Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    fn supports_streaming_downloads(&self) -> bool {
+        true
+    }
+
+    async fn download_stream_observed(
+        &self,
+        key: &RemoteKey,
+        _scratch: &Path,
+        consumer: &dyn DownloadStreamConsumer,
+        observer: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
+        validate_remote_key(key)?;
+        let _permit = self.download_limiter.acquire().await?;
+        let started = std::time::Instant::now();
+        let args = self
+            .command_builder
+            .download_stream_args(self.remote_path(key));
+        forbid_rclone_sync(&args)?;
+        if let Some(arg) =
+            self.extra_args.iter().chain(args.iter()).find(|arg| {
+                !noland_rclone_adapter::provider_arg_is_allowed(self.provider_kind, arg)
+            })
+        {
+            return Err(StateError::Invalid(format!(
+                "unsupported provider streaming option {arg}"
+            )));
+        }
+        self.metrics
+            .remote_download_calls
+            .fetch_add(1, Ordering::Relaxed);
+        for attempt in 1..=self.tuning.max_attempts.max(1) {
+            self.retry_gate.wait_for_turn().await;
+            consumer.restart()?;
+            if let Some(observer) = observer {
+                observer.transfer_started()?;
+            }
+            self.metrics
+                .rclone_invocations
+                .fetch_add(1, Ordering::Relaxed);
+            let mut cmd = Command::new("rclone");
+            cmd.args(&self.extra_args)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let mut child = cmd.spawn()?;
+            let mut stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| StateError::Storage("rclone stdout missing".into()))?;
+            let mut stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| StateError::Storage("rclone stderr missing".into()))?;
+            // Drain stderr concurrently, but retain only a bounded diagnostic tail.
+            let errors = async {
+                let mut tail = Vec::new();
+                let mut buffer = [0u8; 4096];
+                loop {
+                    let n = stderr.read(&mut buffer).await?;
+                    if n == 0 {
+                        break;
+                    }
+                    tail.extend_from_slice(&buffer[..n]);
+                    if tail.len() > 16 * 1024 {
+                        tail.drain(..tail.len() - 16 * 1024);
+                    }
+                }
+                Ok::<_, std::io::Error>(tail)
+            };
+            let stream = async {
+                let mut bytes = 0u64;
+                let mut last = std::time::Instant::now();
+                let mut buffer = vec![0u8; 256 * 1024];
+                loop {
+                    let count = stdout.read(&mut buffer).await?;
+                    if count == 0 {
+                        break;
+                    }
+                    self.metrics
+                        .bytes_downloaded
+                        .fetch_add(count as u64, Ordering::Relaxed);
+                    consumer.write(&buffer[..count])?;
+                    bytes = bytes.saturating_add(count as u64);
+                    if last.elapsed() >= std::time::Duration::from_millis(500) {
+                        if let Some(observer) = observer {
+                            observer.transfer_progress(bytes)?;
+                        }
+                        last = std::time::Instant::now();
+                    }
+                }
+                if let Some(observer) = observer {
+                    observer.transfer_progress(bytes)?;
+                }
+                Ok::<_, StateError>(())
+            };
+            // A consumer/integrity failure cancels stderr draining and kills the child.
+            let (_, tail) =
+                tokio::try_join!(stream, async { errors.await.map_err(StateError::from) })?;
+            let status = child.wait().await?;
+            if status.success() {
+                consumer.finish()?;
+                self.download_limiter.record_success(started.elapsed());
+                return Ok(());
+            }
+            let failure = RcloneFailure {
+                class: classify_remote_error(status.code(), &String::from_utf8_lossy(&tail)),
+                message: String::from_utf8_lossy(&tail).trim().to_string(),
+            };
+            self.record_remote_error(failure.class);
+            if failure.class.is_retryable() && attempt < self.tuning.max_attempts.max(1) {
+                self.retry_gate.wait_for_retry(attempt, failure.class).await;
+            } else {
+                return Err(failure.into_state_error());
+            }
+        }
+        unreachable!("rclone always makes at least one attempt")
     }
 
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {
@@ -945,9 +1070,8 @@ impl SharedStorageProvider for RcloneStorage {
                 false,
             )?;
             let result = self.run(args).await;
-            match &result {
-                Ok(_) => self.upload_limiter.record_success(started.elapsed()),
-                Err(_) => {}
+            if result.is_ok() {
+                self.upload_limiter.record_success(started.elapsed());
             }
             drop(permit);
             result

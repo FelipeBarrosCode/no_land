@@ -154,6 +154,14 @@ pub trait DownloadObserver: Send + Sync {
     }
 }
 
+/// Ordered network bytes. Consumers must be restartable: authenticated records
+/// from an interrupted attempt may already have been accepted by the restore.
+pub trait DownloadStreamConsumer: Send + Sync {
+    fn restart(&self) -> Result<()>;
+    fn write(&self, bytes: &[u8]) -> Result<()>;
+    fn finish(&self) -> Result<()>;
+}
+
 #[async_trait]
 pub trait SharedStorageProvider: Send + Sync {
     async fn health_check(&self) -> Result<Health>;
@@ -161,6 +169,34 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn stat(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>>;
     async fn upload_immutable(&self, local: &Path, key: &RemoteKey) -> Result<RemoteMeta>;
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()>;
+
+    fn supports_streaming_downloads(&self) -> bool {
+        false
+    }
+
+    /// Backends with a byte stream override this to avoid an encrypted disk copy.
+    /// The compatibility fallback retains at most one bounded pack per caller.
+    async fn download_stream_observed(
+        &self,
+        key: &RemoteKey,
+        scratch: &Path,
+        consumer: &dyn DownloadStreamConsumer,
+        observer: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
+        self.download_observed(key, scratch, observer).await?;
+        consumer.restart()?;
+        let mut file = std::fs::File::open(scratch)?;
+        let mut buffer = vec![0; 256 * 1024];
+        use std::io::Read;
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            consumer.write(&buffer[..count])?;
+        }
+        consumer.finish()
+    }
 
     async fn download_observed(
         &self,
