@@ -203,7 +203,9 @@ fn copy_file(src: &Path, dest: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
-        let source = fs::File::open(src)?;
+        let source = fs::File::open(src).map_err(|error| {
+            StateError::Message(format!("failed to copy {}: {error}", src.display()))
+        })?;
         let destination = fs::File::create(dest)?;
         // FICLONE creates independent CoW extents, never a mutable hardlink.
         // Unsupported/cross-device filesystems use the normal stable-copy fallback.

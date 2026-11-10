@@ -317,6 +317,7 @@ fn build_packs_parallel(
             });
         }
         drop(result_tx);
+        drop(plan_rx);
         let feeder_cancelled = Arc::clone(&cancelled);
         let feeder_stopped = Arc::clone(&stopped);
         let feeder = scope.spawn(move || {
@@ -556,6 +557,7 @@ fn hash_files_parallel(
             });
         }
         drop(result_tx);
+        drop(job_rx);
         for result in result_rx {
             match result {
                 Ok(result) if first_error.is_none() => {
@@ -689,6 +691,20 @@ pub async fn run_backup(
         .into_iter()
         .find(|dirty| dirty.app_id == *app_id);
     let pending_mutations = agent.db.pending_app_mutations(app_id, 10_000)?;
+    let dirty_path_ids = dirty_state
+        .as_ref()
+        .map(|state| {
+            state
+                .dirty_paths
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mutated_paths = pending_mutations
+        .iter()
+        .map(|mutation| mutation.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
     metrics.num_dirty_paths = dirty_state
         .as_ref()
         .map(|dirty| dirty.dirty_paths.len() as u64)
@@ -958,6 +974,8 @@ pub async fn run_backup(
             logical.relative_path.clone(),
         ));
         if performance != BackupPerformanceMode::Full
+            && !dirty_path_ids.contains(&record.path_id)
+            && !mutated_paths.contains(canonical.as_str())
             && indexed.is_some_and(|state| {
                 state.fast_identity_matches(metadata.len(), mtime_ns, inode, None)
             })
@@ -1327,7 +1345,7 @@ fn write_prepared_backup(
     let mut file = std::fs::File::create(&temp)?;
     file.write_all(&encrypted)?;
     file.sync_all()?;
-    std::fs::rename(temp, path)?;
+    std::fs::rename(temp, &path)?;
     std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
@@ -1714,18 +1732,7 @@ fn finish_backup_evidence(
     app_id: &AppId,
     mutations: &[AppMutationRecord],
 ) -> Result<()> {
-    let mutation_ids = mutations
-        .iter()
-        .map(|mutation| mutation.mutation_id)
-        .collect::<Vec<_>>();
-    agent
-        .db
-        .mark_app_mutations_processed(&mutation_ids, Utc::now())?;
-    if !agent.db.pending_app_mutations(app_id, 1)?.is_empty() {
-        return Ok(());
-    }
-    agent.db.clear_dirty_roots(app_id)?;
-    agent.db.clear_dirty(app_id)
+    agent.db.finish_backup_mutations(app_id, mutations)
 }
 
 fn mark_noop_completed(

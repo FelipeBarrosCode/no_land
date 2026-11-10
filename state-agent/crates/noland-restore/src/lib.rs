@@ -519,10 +519,21 @@ impl<'a> RestoreTransaction<'a> {
         &self,
         target: RestoreTarget,
     ) -> Result<(Vec<PlannedDestination>, Vec<PlannedTombstone>)> {
+        self.preflight_observed(target, |_| Ok(()))
+    }
+
+    fn preflight_observed(
+        &self,
+        target: RestoreTarget,
+        mut on_checked: impl FnMut(u64) -> Result<()>,
+    ) -> Result<(Vec<PlannedDestination>, Vec<PlannedTombstone>)> {
         let priority_plan = &self.priorities;
         let mut destinations = BTreeSet::new();
         let mut planned = Vec::new();
-        for entry in priority_plan.entries_for(target) {
+        for (checked, entry) in priority_plan.entries_for(target).enumerate() {
+            if checked % 256 == 0 {
+                on_checked(checked as u64)?;
+            }
             if self.published_entries.contains(&entry.manifest_index) {
                 continue;
             }
@@ -581,6 +592,7 @@ impl<'a> RestoreTransaction<'a> {
         }
 
         let mut tombstones = Vec::new();
+        on_checked(planned.len() as u64)?;
         if target == RestoreTarget::Complete && !self.tombstones_applied {
             for tombstone in &self.plan.manifest.tombstones {
                 validate_relative_path(&tombstone.relative_path)?;

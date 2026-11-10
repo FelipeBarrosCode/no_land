@@ -39,7 +39,7 @@ impl StateDb {
         if let Some(mutation_id) = existing_id {
             tx.execute(
                 r#"UPDATE app_mutation_journal
-                   SET observed_at_ms=?2, session_id=?3, provenance_json=?4
+                   SET observed_at_ms=MAX(observed_at_ms + 1, ?2), session_id=?3, provenance_json=?4
                    WHERE mutation_id=?1 AND processed_at_ms IS NULL"#,
                 params![
                     mutation_id,
@@ -152,6 +152,32 @@ impl StateDb {
                 params![before.timestamp_millis()],
             )
             .map_err(db_err)
+    }
+
+    /// Acknowledge exactly the mutation versions included in a capture. A write
+    /// coalesced into the same row during hashing/upload remains dirty.
+    pub fn finish_backup_mutations(
+        &self,
+        app_id: &AppId,
+        mutations: &[AppMutationRecord],
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        for mutation in mutations {
+            tx.execute("UPDATE app_mutation_journal SET processed_at_ms=?3 WHERE mutation_id=?1 AND observed_at_ms=?2 AND processed_at_ms IS NULL",
+                params![mutation.mutation_id.to_string(), mutation.observed_at.timestamp_millis(), Utc::now().timestamp_millis()]).map_err(db_err)?;
+        }
+        let pending: i64 = tx.query_row("SELECT COUNT(*) FROM app_mutation_journal WHERE app_id=?1 AND processed_at_ms IS NULL", [app_id.as_str()], |row| row.get(0)).map_err(db_err)?;
+        if pending == 0 {
+            tx.execute("DELETE FROM dirty_roots WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+            tx.execute("DELETE FROM dirty_paths WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+            tx.execute("DELETE FROM dirty_apps WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(())
     }
 
     /// Marks a root dirty, preserving its first timestamp and incrementing its

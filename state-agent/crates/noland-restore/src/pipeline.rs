@@ -58,6 +58,7 @@ impl Default for PipelineOptions {
 #[derive(Debug, Clone, Default)]
 pub struct PipelineProgress {
     pub phase: String,
+    pub checked_entries: u64,
     pub completed_entries: u64,
     pub reused_entries: u64,
     pub total_entries: u64,
@@ -203,7 +204,12 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             ..PipelineProgress::default()
         };
         on_progress(initial.clone())?;
-        let (planned, tombstones) = transaction.preflight(RestoreTarget::Complete)?;
+        let (planned, tombstones) =
+            transaction.preflight_observed(RestoreTarget::Complete, |checked| {
+                initial.checked_entries = checked;
+                initial.elapsed_ms = started.elapsed().as_millis() as u64;
+                on_progress(initial.clone())
+            })?;
         initial.phase = "preparing_rollback".into();
         initial.elapsed_ms = started.elapsed().as_millis() as u64;
         on_progress(initial)?;
