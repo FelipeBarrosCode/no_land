@@ -4,6 +4,7 @@ mod desktop;
 mod path_policy;
 mod portable;
 mod portable_apps;
+mod runtime;
 mod steam;
 mod wine;
 
@@ -13,6 +14,7 @@ pub use portable::{
     filter_backup_candidates, is_always_ignored_executable_name, is_backup_candidate,
     is_system_desktop_path,
 };
+pub use runtime::resolve_runtime_executable;
 pub use steam::{discover_steam, parse_acf, parse_vdf_map, SteamApp, SteamDiscovery};
 pub use wine::{discover_bottles, discover_wine_prefixes, PrefixDiscovery, PrefixKind};
 
@@ -103,6 +105,18 @@ pub fn derive_owned_install_root(home: &Path, app: &AppIdentity) -> Option<PathB
         return None;
     }
     let relative = canonical_executable.strip_prefix(&canonical_home).ok()?;
+    // The private runtime home is a collection, not one application's install root.
+    // Derive the narrow game directory inside it instead of backing up every app.
+    if let Ok(private_relative) = relative.strip_prefix(".local/share/noland-runtime/app-data") {
+        let mut parts = private_relative.components();
+        let app_dir = parts.next()?;
+        let private_home = canonical_home
+            .join(".local/share/noland-runtime/app-data")
+            .join(app_dir.as_os_str());
+        let mut private_app = app.clone();
+        private_app.canonical_executable = Some(canonical_executable);
+        return derive_owned_install_root(&private_home, &private_app);
+    }
     let components = relative.iter().collect::<Vec<_>>();
     if components.is_empty() {
         return None;

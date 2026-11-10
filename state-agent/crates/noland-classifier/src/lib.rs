@@ -209,6 +209,49 @@ mod tests {
     use chrono::Utc;
 
     #[test]
+    fn dated_access_logs_are_not_persistent_state_even_with_write_evidence() {
+        let db = StateDb::open_in_memory().unwrap();
+        let app = AppIdentity::new(AppId::desktop("server"), "Server");
+        db.upsert_app(&app).unwrap();
+        db.add_known_root(&app.app_id, "install", "/opt/apache-tomcat-9.0.112")
+            .unwrap();
+        let classifier = Classifier::new(&db, "img");
+        for (path, excluded) in [
+            (
+                "/opt/apache-tomcat-9.0.112/logs/localhost_access_log.2026-11-09.txt",
+                true,
+            ),
+            ("/opt/apache-tomcat-9.0.112/logs/catalina.out", true),
+            ("/opt/apache-tomcat-9.0.112/logs/important-save.dat", false),
+            (
+                "/home/gamer/.local/share/Hookshot/user/save/slot_00/progress.sav",
+                false,
+            ),
+        ] {
+            let path_id = db.upsert_path(path).unwrap();
+            let record = db.get_path_by_id(path_id).unwrap().unwrap();
+            let association = PathAssociation {
+                app_id: app.app_id.clone(),
+                path_id,
+                confidence: CONF_EXPLICIT,
+                evidence: vec![Evidence::new(EvidenceKind::DirectCgroupWrite)],
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+                first_seen_at: Utc::now(),
+                last_seen_at: Utc::now(),
+            };
+            for mode in [BackupMode::PersonalState, BackupMode::CompleteApplication] {
+                let decision = classifier.decide(&record, &association, mode).unwrap();
+                assert_eq!(
+                    decision == BackupDecision::Exclude,
+                    excluded,
+                    "{path}: {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn excludes_unchanged_os_and_includes_saves() {
         let db = StateDb::open_in_memory().unwrap();
         db.insert_baseline(
