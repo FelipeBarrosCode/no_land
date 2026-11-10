@@ -10,7 +10,8 @@ pub use adaptive::AdaptiveConcurrency;
 pub use commit::{
     commit_bundle, commit_bundle_with_index, commit_bundle_with_index_for_operation,
     commit_checkpoint, commit_seal, load_catalog, read_committed_manifest, read_pack_index,
-    read_pack_index_for_operation, update_catalog_with_bundle, CatalogStore,
+    read_pack_index_for_operation, update_catalog_with_bundle, upload_packs_for_operation,
+    CatalogStore,
 };
 pub use local::LocalStorage;
 pub use noland_rclone_adapter::{
@@ -156,10 +157,11 @@ pub trait DownloadObserver: Send + Sync {
 
 /// Ordered network bytes. Consumers must be restartable: authenticated records
 /// from an interrupted attempt may already have been accepted by the restore.
+#[async_trait]
 pub trait DownloadStreamConsumer: Send + Sync {
     fn restart(&self) -> Result<()>;
-    fn write(&self, bytes: &[u8]) -> Result<()>;
-    fn finish(&self) -> Result<()>;
+    async fn write(&self, bytes: &[u8]) -> Result<()>;
+    async fn finish(&self) -> Result<()>;
 }
 
 #[async_trait]
@@ -193,9 +195,9 @@ pub trait SharedStorageProvider: Send + Sync {
             if count == 0 {
                 break;
             }
-            consumer.write(&buffer[..count])?;
+            consumer.write(&buffer[..count]).await?;
         }
-        consumer.finish()
+        consumer.finish().await
     }
 
     async fn download_observed(

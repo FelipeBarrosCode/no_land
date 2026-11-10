@@ -40,12 +40,13 @@ pub struct PackIndexEntry {
     pub nonce: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuiltPack {
     pub pack_id: String,
     pub path: PathBuf,
     pub bytes: u64,
     pub entries: Vec<PackIndexEntry>,
+    pub checksum: String,
 }
 
 #[derive(Default)]
@@ -70,6 +71,7 @@ struct PackWriter {
     bytes: u64,
     entries: Vec<PackIndexEntry>,
     committed: bool,
+    hasher: blake3::Hasher,
 }
 
 impl PackWriter {
@@ -83,6 +85,10 @@ impl PackWriter {
         file.write_all(&VERSION.to_le_bytes())?;
         let uuid = Uuid::parse_str(&pack_id).unwrap();
         file.write_all(uuid.as_bytes())?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MAGIC);
+        hasher.update(&VERSION.to_le_bytes());
+        hasher.update(uuid.as_bytes());
 
         Ok(Self {
             pack_id,
@@ -92,6 +98,7 @@ impl PackWriter {
             bytes: PACK_HEADER_LEN,
             entries: Vec::new(),
             committed: false,
+            hasher,
         })
     }
 
@@ -99,6 +106,7 @@ impl PackWriter {
         let plaintext_len = u32::try_from(plaintext.len())
             .map_err(|_| StateError::msg("chunk plaintext length exceeds pack format"))?;
         let (compression, stored) = compress_chunk(plaintext)?;
+        noland_state_core::disk::ensure_space(&self.path, stored.len() as u64 + 64)?;
         let blob = encrypt(&self.key, hash.as_bytes(), stored.as_ref())?;
         let ciphertext_len = u32::try_from(blob.ciphertext.len())
             .map_err(|_| StateError::msg("chunk ciphertext length exceeds pack format"))?;
@@ -109,6 +117,11 @@ impl PackWriter {
         file.write_all(&ciphertext_len.to_le_bytes())?;
         file.write_all(&blob.nonce)?;
         file.write_all(&blob.ciphertext)?;
+        self.hasher.update(b"NLCH");
+        self.hasher.update(&plaintext_len.to_le_bytes());
+        self.hasher.update(&ciphertext_len.to_le_bytes());
+        self.hasher.update(&blob.nonce);
+        self.hasher.update(&blob.ciphertext);
 
         self.bytes += RECORD_HEADER_LEN + u64::from(ciphertext_len);
         self.entries.push(PackIndexEntry {
@@ -128,13 +141,22 @@ impl PackWriter {
             .as_mut()
             .expect("unfinished pack writer")
             .flush()?;
+        self.file
+            .as_ref()
+            .expect("unfinished pack writer")
+            .sync_all()?;
         self.file.take();
+        File::open(self.path.parent().expect("pack parent"))?.sync_all()?;
+        if let Some(parent) = self.path.parent().and_then(Path::parent) {
+            File::open(parent)?.sync_all()?;
+        }
         self.committed = true;
         Ok(BuiltPack {
             pack_id: std::mem::take(&mut self.pack_id),
             path: std::mem::take(&mut self.path),
             bytes: self.bytes,
             entries: std::mem::take(&mut self.entries),
+            checksum: format!("blake3:{}", self.hasher.finalize().to_hex()),
         })
     }
 }
@@ -440,6 +462,15 @@ impl PackStreamDecoder {
         self.cursor
     }
 
+    /// Limit one async consumer turn to one authenticated record, including any
+    /// skipped prefix. Compressed input must not inflate many queued records at once.
+    pub fn next_record_input_limit(&self) -> usize {
+        self.entries.get(self.next).map_or(usize::MAX, |entry| {
+            (entry.offset + RECORD_HEADER_LEN + u64::from(entry.ciphertext_len) - self.cursor)
+                as usize
+        })
+    }
+
     pub fn push(
         &mut self,
         mut bytes: &[u8],
@@ -522,6 +553,44 @@ pub fn index_by_hash(entries: &[PackIndexEntry]) -> BTreeMap<String, PackIndexEn
 mod tests {
     use super::*;
     use noland_cas::chunk_bytes;
+
+    #[test]
+    fn highly_compressed_network_buffers_emit_at_most_one_record_per_turn() {
+        let dir = std::env::temp_dir().join(format!("noland-stream-bound-{}", Uuid::new_v4()));
+        let master = MasterKey::generate();
+        let chunks = (1u8..=4)
+            .map(|value| {
+                let bytes = vec![value; 1024 * 1024];
+                (blake3_hex(&bytes), bytes)
+            })
+            .collect::<Vec<_>>();
+        let packs = pack_chunks(&dir, &master, chunks, |_| false).unwrap();
+        let pack = &packs[0];
+        let input = std::fs::read(&pack.path).unwrap();
+        assert_eq!(pack.checksum, noland_cas::blake3_file(&pack.path).unwrap());
+        assert!(input.len() < 64 * 1024);
+        let mut remaining = input.as_slice();
+        let mut decoder = PackStreamDecoder::new(&pack.pack_id, pack.entries.clone()).unwrap();
+        let mut total = 0;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(decoder.next_record_input_limit());
+            assert!(take > 0);
+            let mut emitted = 0;
+            decoder
+                .push(&remaining[..take], &master, |_, plain| {
+                    emitted += 1;
+                    assert_eq!(plain.len(), 1024 * 1024);
+                    Ok(())
+                })
+                .unwrap();
+            assert!(emitted <= 1);
+            total += emitted;
+            remaining = &remaining[take..];
+        }
+        decoder.finish().unwrap();
+        assert_eq!(total, 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn streaming_decoder_authenticates_fragmented_records_before_releasing_plaintext() {

@@ -616,6 +616,7 @@ dependencies = [
 name = "noland-pack"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "noland-cas",
  "noland-crypto",
  "noland-state-core",
@@ -639,6 +640,7 @@ dependencies = [
 name = "noland-restore"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "chrono",
  "libc",
@@ -651,6 +653,7 @@ dependencies = [
  "noland-storage",
  "serde",
  "serde_json",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -674,6 +677,7 @@ dependencies = [
 name = "noland-snapshot"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "noland-state-core",
  "tracing",
  "uuid",
@@ -685,6 +689,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "blake3",
+ "bytes",
  "chrono",
  "noland-attribution",
  "noland-baseline",
@@ -716,6 +721,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "hex",
+ "libc",
  "serde",
  "serde_json",
  "thiserror",

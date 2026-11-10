@@ -9,8 +9,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicU64, AtomicUsize, Ordering},
-    Mutex,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -38,6 +38,8 @@ pub struct PipelineOptions {
     /// Bounds encrypted scratch on non-streaming backends. Streaming uses pipes.
     pub max_inflight_pack_bytes: u64,
     pub reconstruction_workers: usize,
+    /// Each authenticated record is at most FASTCDC_MAX bytes.
+    pub buffered_chunks: usize,
 }
 
 impl Default for PipelineOptions {
@@ -48,12 +50,18 @@ impl Default for PipelineOptions {
             reconstruction_workers: std::thread::available_parallelism()
                 .map_or(1, usize::from)
                 .min(4),
+            buffered_chunks: 8,
         }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PipelineProgress {
+    pub phase: String,
+    pub checked_entries: u64,
+    pub rollback_entries: u64,
+    pub preflight_duration_ms: u64,
+    pub rollback_duration_ms: u64,
     pub completed_entries: u64,
     pub reused_entries: u64,
     pub total_entries: u64,
@@ -105,6 +113,7 @@ struct Pipeline<'tx, 'plan, F> {
     started: Instant,
     last_progress: Option<Instant>,
     apply_time: Duration,
+    last_space_check: Instant,
 }
 
 fn poisoned() -> StateError {
@@ -189,10 +198,37 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
     fn new(
         transaction: &'tx mut RestoreTransaction<'plan>,
         workers: usize,
-        on_progress: F,
+        mut on_progress: F,
     ) -> Result<Self> {
-        let (planned, tombstones) = transaction.preflight(RestoreTarget::Complete)?;
-        transaction.prepare_rollback(&planned, &tombstones)?;
+        let started = Instant::now();
+        let mut initial = PipelineProgress {
+            phase: "checking_existing_files".into(),
+            total_entries: transaction.priorities.entries.len() as u64,
+            ..PipelineProgress::default()
+        };
+        on_progress(initial.clone())?;
+        let (planned, tombstones) =
+            transaction.preflight_observed(RestoreTarget::Complete, |checked| {
+                initial.checked_entries = checked;
+                initial.elapsed_ms = started.elapsed().as_millis() as u64;
+                on_progress(initial.clone())
+            })?;
+        initial.preflight_duration_ms = started.elapsed().as_millis() as u64;
+        initial.phase = "preparing_rollback".into();
+        initial.elapsed_ms = started.elapsed().as_millis() as u64;
+        on_progress(initial.clone())?;
+        let rollback_started = Instant::now();
+        let mut last_rollback_progress = Instant::now();
+        transaction.prepare_rollback_observed(&planned, &tombstones, |count| {
+            initial.rollback_entries = count;
+            if last_rollback_progress.elapsed() >= Duration::from_millis(500) {
+                initial.elapsed_ms = started.elapsed().as_millis() as u64;
+                initial.rollback_duration_ms = rollback_started.elapsed().as_millis() as u64;
+                on_progress(initial.clone())?;
+                last_rollback_progress = Instant::now();
+            }
+            Ok(())
+        })?;
         let critical = transaction
             .priorities
             .entries
@@ -201,6 +237,11 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             .map(|entry| entry.manifest_index)
             .collect();
         let progress = PipelineProgress {
+            phase: "preparing_destinations".into(),
+            checked_entries: planned.len() as u64,
+            rollback_entries: initial.rollback_entries,
+            preflight_duration_ms: initial.preflight_duration_ms,
+            rollback_duration_ms: rollback_started.elapsed().as_millis() as u64,
             total_entries: planned.len() as u64,
             total_bytes: planned
                 .iter()
@@ -219,9 +260,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             report: RestoreReport::default(),
             workers,
             on_progress,
-            started: Instant::now(),
+            started,
             last_progress: None,
             apply_time: Duration::ZERO,
+            last_space_check: Instant::now(),
         };
 
         // Parents exist and are durable before batching child intents. Recovery can
@@ -320,6 +362,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             }
         }
         this.flush_ready()?;
+        this.progress.phase = "streaming".into();
         this.emit_progress(true)?;
         Ok(this)
     }
@@ -372,6 +415,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 .get_mut(&placement.index)
                 .ok_or_else(|| StateError::Integrity("missing pending restore file".into()))?;
             validate_parent_chain(&pending.planned.root, &pending.partial)?;
+            if self.last_space_check.elapsed() >= Duration::from_secs(1) {
+                noland_state_core::disk::ensure_space(&pending.partial, plain.len() as u64)?;
+                self.last_space_check = Instant::now();
+            }
             let mut output = open_partial(pending)?;
             let metadata = output.metadata()?;
             pending.identity = Some((metadata.dev(), metadata.ino()));
@@ -611,45 +658,82 @@ fn pack_jobs(
     Ok(jobs)
 }
 
-struct StreamConsumer<'a, 'tx, 'plan, F> {
+enum AssemblyMessage {
+    Chunk(String, Vec<u8>),
+    Flush,
+    Finalize,
+    Commit,
+    Abort,
+}
+
+/// Dropping a cancelled future joins the worker *before* rollback may be observed.
+/// It can never publish to destinations after the operation has terminated.
+struct AssemblyGuard {
+    thread: Option<std::thread::JoinHandle<()>>,
+    sender: tokio::sync::mpsc::Sender<AssemblyMessage>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl Drop for AssemblyGuard {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Release);
+        let _ = self.sender.try_send(AssemblyMessage::Abort);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+struct StreamConsumer<'a> {
     job: &'a PackJob,
     master: &'a MasterKey,
     decoder: Mutex<PackStreamDecoder>,
-    pipeline: &'a Mutex<Pipeline<'tx, 'plan, F>>,
+    sender: &'a tokio::sync::mpsc::Sender<AssemblyMessage>,
 }
 
-impl<F: FnMut(PipelineProgress) -> Result<()> + Send> DownloadStreamConsumer
-    for StreamConsumer<'_, '_, '_, F>
-{
+#[async_trait::async_trait]
+impl DownloadStreamConsumer for StreamConsumer<'_> {
     fn restart(&self) -> Result<()> {
         *self.decoder.lock().map_err(|_| poisoned())? =
             PackStreamDecoder::new(&self.job.id, self.job.entries.clone())?;
         Ok(())
     }
-    fn write(&self, bytes: &[u8]) -> Result<()> {
-        self.decoder
-            .lock()
-            .map_err(|_| poisoned())?
-            .push(bytes, self.master, |entry, plain| {
-                self.pipeline
-                    .lock()
-                    .map_err(|_| poisoned())?
-                    .consume(&entry.chunk_hash, plain)
-            })?;
-        self.pipeline
-            .lock()
-            .map_err(|_| poisoned())?
-            .emit_progress(false)
-    }
-    fn finish(&self) -> Result<()> {
-        let decoder = self.decoder.lock().map_err(|_| poisoned())?;
-        decoder.finish()?;
-        // Retained immutable packs can have unreferenced trailing records that
-        // are omitted from this manifest's index; the indexed extent is a minimum.
-        if decoder.received_bytes() < self.job.size {
-            return Err(StateError::Integrity("streamed pack size mismatch".into()));
+    async fn write(&self, mut bytes: &[u8]) -> Result<()> {
+        while !bytes.is_empty() {
+            let (consumed, record) = {
+                let mut decoder = self.decoder.lock().map_err(|_| poisoned())?;
+                let count = bytes.len().min(decoder.next_record_input_limit());
+                let mut record = None;
+                decoder.push(&bytes[..count], self.master, |entry, plain| {
+                    record = Some((entry.chunk_hash.clone(), plain.to_vec()));
+                    Ok(())
+                })?;
+                (count, record)
+            };
+            bytes = &bytes[consumed..];
+            if let Some((hash, plain)) = record {
+                self.sender
+                    .send(AssemblyMessage::Chunk(hash, plain))
+                    .await
+                    .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
+            }
         }
-        self.pipeline.lock().map_err(|_| poisoned())?.flush_ready()
+        Ok(())
+    }
+    async fn finish(&self) -> Result<()> {
+        {
+            let decoder = self.decoder.lock().map_err(|_| poisoned())?;
+            decoder.finish()?;
+            // Retained immutable packs can have unreferenced trailing records that
+            // are omitted from this manifest's index; the indexed extent is a minimum.
+            if decoder.received_bytes() < self.job.size {
+                return Err(StateError::Integrity("streamed pack size mismatch".into()));
+            }
+        }
+        self.sender
+            .send(AssemblyMessage::Flush)
+            .await
+            .map_err(|_| StateError::Storage("restore assembly stopped".into()))
     }
 }
 
@@ -674,12 +758,12 @@ impl Drop for ScratchGuard {
     }
 }
 
-async fn stream_pack<F: FnMut(PipelineProgress) -> Result<()> + Send>(
+async fn stream_pack(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
     plan: &RestorePlan,
     job: PackJob,
-    sink: &Mutex<Pipeline<'_, '_, F>>,
+    sender: &tokio::sync::mpsc::Sender<AssemblyMessage>,
     journal: Option<DownloadJournal<'_>>,
 ) -> Result<()> {
     let key = pack_key(&job.id);
@@ -707,7 +791,7 @@ async fn stream_pack<F: FnMut(PipelineProgress) -> Result<()> + Send>(
         decoder: Mutex::new(PackStreamDecoder::new(&job.id, job.entries.clone())?),
         job: &job,
         master,
-        pipeline: sink,
+        sender,
     };
     let result = provider
         .download_stream_observed(
@@ -802,24 +886,104 @@ pub async fn restore_pipelined(
     db: Option<&StateDb>,
     journal: Option<DownloadJournal<'_>>,
     options: PipelineOptions,
-    on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
+    mut on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
 ) -> Result<PipelineReport> {
     if options.max_parallel_packs == 0
         || options.max_inflight_pack_bytes < PACK_MAX
         || options.reconstruction_workers == 0
+        || options.buffered_chunks == 0
+        || options.buffered_chunks > 32
     {
         return Err(StateError::Invalid(
             "invalid bounded restore pipeline options".into(),
         ));
     }
-    let mut transaction = RestoreTransaction::new(plan, roots, db);
-    transaction.uses_legacy_pack_cache = false;
-    let pipeline = Pipeline::new(
-        &mut transaction,
-        options.reconstruction_workers.min(16),
-        on_progress,
-    )?;
-    let needed = pipeline.consumers.keys().cloned().collect();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(options.buffered_chunks);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
+    let (init_tx, init_rx) = tokio::sync::oneshot::channel();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_cancelled = Arc::clone(&cancelled);
+    let worker_plan = plan.clone();
+    let worker_roots = roots.clone();
+    let worker_db = db.cloned();
+    let thread = std::thread::spawn(move || {
+        let result = (|| {
+            let mut transaction =
+                RestoreTransaction::new(&worker_plan, &worker_roots, worker_db.as_ref());
+            transaction.uses_legacy_pack_cache = false;
+            let mut pipeline = match Pipeline::new(
+                &mut transaction,
+                options.reconstruction_workers.min(16),
+                |sample| {
+                    if worker_cancelled.load(Ordering::Acquire) {
+                        return Err(StateError::Storage("restore cancelled".into()));
+                    }
+                    let _ = progress_tx.try_send(sample);
+                    Ok(())
+                },
+            ) {
+                Ok(pipeline) => pipeline,
+                Err(error) => {
+                    let _ = init_tx.send(Err(StateError::Storage(error.to_string())));
+                    return Err(error);
+                }
+            };
+            let needed = pipeline.consumers.keys().cloned().collect::<BTreeSet<_>>();
+            init_tx
+                .send(Ok(needed))
+                .map_err(|_| StateError::Storage("restore cancelled".into()))?;
+            loop {
+                if worker_cancelled.load(Ordering::Acquire) {
+                    return Err(StateError::Storage("restore cancelled".into()));
+                }
+                match receiver.blocking_recv() {
+                    Some(AssemblyMessage::Chunk(hash, plain)) => pipeline.consume(&hash, &plain)?,
+                    Some(AssemblyMessage::Flush) => pipeline.flush_ready()?,
+                    Some(AssemblyMessage::Finalize) => break,
+                    Some(AssemblyMessage::Commit) => {
+                        return Err(StateError::Invalid(
+                            "restore commit before final validation".into(),
+                        ))
+                    }
+                    Some(AssemblyMessage::Abort) | None => {
+                        return Err(StateError::Storage("restore cancelled".into()))
+                    }
+                }
+            }
+            let report = pipeline.finish()?;
+            ready_tx
+                .send(())
+                .map_err(|_| StateError::Storage("restore cancelled".into()))?;
+            if !matches!(receiver.blocking_recv(), Some(AssemblyMessage::Commit)) {
+                return Err(StateError::Storage(
+                    "restore cancelled before commit".into(),
+                ));
+            }
+            if worker_cancelled.load(Ordering::Acquire) {
+                return Err(StateError::Storage("restore cancelled".into()));
+            }
+            transaction.commit()?;
+            Ok(report)
+        })();
+        let _ = result_tx.send(result);
+    });
+    let _guard = AssemblyGuard {
+        thread: Some(thread),
+        sender: sender.clone(),
+        cancelled,
+    };
+    let needed = monitor_progress(
+        async {
+            init_rx
+                .await
+                .map_err(|_| StateError::Storage("restore worker failed to initialize".into()))?
+        },
+        &mut progress_rx,
+        &mut on_progress,
+    )
+    .await?;
     let jobs = pack_jobs(plan, index, &needed)?;
     let total_packs = jobs.len();
     if let Some(journal) = journal {
@@ -834,12 +998,13 @@ pub async fn restore_pipelined(
             journal.db.upsert_sync_journal_entry(&entry)?;
         }
     }
-    let sink = Mutex::new(pipeline);
-    run_weighted(
+    let transfer = run_weighted(
         jobs.into_iter()
             .map(|job| {
                 let size = if provider.supports_streaming_downloads() {
-                    job.size
+                    // A pipe never retains a whole pack. Bound actual active records;
+                    // the assembly channel separately bounds queued plaintext.
+                    3 * noland_state_core::constants::FASTCDC_MAX + 1024
                 } else {
                     PACK_MAX
                 };
@@ -848,13 +1013,72 @@ pub async fn restore_pipelined(
             .collect(),
         options.max_parallel_packs.min(32),
         options.max_inflight_pack_bytes,
-        |job| stream_pack(provider, master, plan, job, &sink, journal),
+        |job| stream_pack(provider, master, plan, job, &sender, journal),
+    );
+    let transfer_result = monitor_progress(transfer, &mut progress_rx, &mut on_progress).await;
+    if transfer_result.is_err() {
+        _guard.cancelled.store(true, Ordering::Release);
+        let _ = sender.try_send(AssemblyMessage::Abort);
+    } else {
+        sender
+            .send(AssemblyMessage::Finalize)
+            .await
+            .map_err(|_| StateError::Storage("restore assembly failed".into()))?;
+        let ready = monitor_progress(
+            async {
+                ready_rx
+                    .await
+                    .map_err(|_| StateError::Storage("restore final validation failed".into()))
+            },
+            &mut progress_rx,
+            &mut on_progress,
+        )
+        .await;
+        if ready.is_ok() {
+            while let Ok(sample) = progress_rx.try_recv() {
+                on_progress(sample)?;
+            }
+            sender
+                .send(AssemblyMessage::Commit)
+                .await
+                .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
+        } else {
+            _guard.cancelled.store(true, Ordering::Release);
+            let _ = sender.try_send(AssemblyMessage::Abort);
+        }
+    }
+    let assembly_result = monitor_progress(
+        async {
+            result_rx
+                .await
+                .map_err(|_| StateError::Storage("restore assembly worker panicked".into()))?
+        },
+        &mut progress_rx,
+        &mut on_progress,
     )
-    .await?;
-    let mut report = sink.into_inner().map_err(|_| poisoned())?.finish()?;
-    transaction.commit()?;
+    .await;
+    // Prefer the assembly error (e.g. ENOSPC or a bad final hash) to a closed pipe.
+    let mut report = assembly_result?;
+    transfer_result?;
+    while let Ok(sample) = progress_rx.try_recv() {
+        on_progress(sample)?;
+    }
     report.packs_downloaded = total_packs;
     Ok(report)
+}
+
+async fn monitor_progress<T>(
+    future: impl Future<Output = Result<T>>,
+    progress: &mut tokio::sync::mpsc::Receiver<PipelineProgress>,
+    callback: &mut (impl FnMut(PipelineProgress) -> Result<()> + Send),
+) -> Result<T> {
+    tokio::pin!(future);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            Some(sample) = progress.recv() => callback(sample)?,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -928,6 +1152,48 @@ mod tests {
     }
 
     #[test]
+    fn disk_admission_rejects_oversized_restore_before_touching_existing_saves() {
+        let root = test_dir("pipeline-disk-admission");
+        fs::create_dir_all(&root).unwrap();
+        let mut file = test_file(
+            "game/save.dat",
+            PersistenceClass::PersistentState,
+            SemanticRole::UserState,
+            b"captured",
+        );
+        // Represent a legitimate large request without actually filling the disk.
+        file.size = noland_state_core::disk::available(&root)
+            .unwrap()
+            .1
+            .saturating_add(1);
+        file.chunks[0].size = file.size;
+        let plan = test_plan(&root, test_manifest(vec![file]));
+        let home = root.join("home");
+        let destination = home.join(".local/share/game/save.dat");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"preserve original save").unwrap();
+        let error = block_on(restore_pipelined(
+            &LocalStorage::new(root.join("unused-remote")),
+            &MasterKey::generate(),
+            &plan,
+            &[],
+            &LogicalRootMap::from_home(&home),
+            None,
+            None,
+            PipelineOptions::default(),
+            |_| Ok(()),
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("insufficient storage"),
+            "{error}"
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"preserve original save");
+        assert!(!plan.staging.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streamed_restore_uses_existing_file_verification_and_no_tier_rescans() {
         let root = test_dir("pipeline-stream");
         let master = MasterKey::generate();
@@ -988,6 +1254,59 @@ mod tests {
         .unwrap();
         assert_eq!(report.packs_downloaded, 0);
         assert_eq!(report.restore.reused_entries, 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn asynchronous_publication_waits_for_progress_ack_and_rolls_back_on_cancellation() {
+        let root = test_dir("pipeline-worker-cancel");
+        let master = MasterKey::generate();
+        let payload = b"new captured save";
+        let file = test_file(
+            "game/save.dat",
+            PersistenceClass::PersistentState,
+            SemanticRole::UserState,
+            payload,
+        );
+        let packs = noland_pack::pack_chunks(
+            &root.join("built"),
+            &master,
+            vec![(noland_cas::blake3_hex(payload), payload.to_vec())],
+            |_| false,
+        )
+        .unwrap();
+        let remote = root.join("remote");
+        let remote_pack = remote.join(pack_key(&packs[0].pack_id));
+        fs::create_dir_all(remote_pack.parent().unwrap()).unwrap();
+        fs::copy(&packs[0].path, remote_pack).unwrap();
+        let plan = test_plan(&root, test_manifest(vec![file]));
+        let home = root.join("home");
+        let destination = home.join(".local/share/game/save.dat");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"original save").unwrap();
+        let result = block_on(restore_pipelined(
+            &LocalStorage::new(remote),
+            &master,
+            &plan,
+            &packs[0].entries,
+            &LogicalRootMap::from_home(home),
+            None,
+            None,
+            PipelineOptions::default(),
+            |sample| {
+                if sample.completed_entries > 0 {
+                    Err(StateError::Storage("cancel at publication boundary".into()))
+                } else {
+                    Ok(())
+                }
+            },
+        ));
+        assert!(result.is_err());
+        assert_eq!(fs::read(&destination).unwrap(), b"original save");
+        assert!(
+            !plan.staging.exists(),
+            "worker must join and complete rollback before cancellation returns"
+        );
         fs::remove_dir_all(root).unwrap();
     }
 

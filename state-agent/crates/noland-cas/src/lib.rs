@@ -3,7 +3,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use noland_state_core::constants::{FASTCDC_AVG, FASTCDC_MAX, FASTCDC_MIN};
@@ -402,7 +403,110 @@ pub struct LocalCas {
     root: PathBuf,
 }
 
+static CACHE_MUTATION: RwLock<()> = RwLock::new(());
+
+/// Hardlink leases protect active inputs from GC, including concurrent backups.
+/// Each lease has its own links; releasing one cannot unpin another operation.
+pub struct CasLease {
+    cas: LocalCas,
+    root: PathBuf,
+    retained: AtomicBool,
+}
+
+impl CasLease {
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Make lease names durable before a retry checkpoint references them.
+    pub fn sync_all(&self) -> Result<()> {
+        for directory in [
+            Some(self.root.as_path()),
+            self.root.parent(),
+            Some(self.cas.root()),
+            self.cas.root().parent(),
+        ] {
+            if let Some(directory) = directory {
+                File::open(directory)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Used only after an authenticated capture checkpoint durably references
+    /// this lease. Its owner releases it after the corresponding packs are sealed.
+    pub fn retain_for_retry(&self) {
+        self.retained.store(true, Ordering::Release);
+    }
+
+    pub fn cache_path(&self, hash: &str) -> Result<PathBuf> {
+        self.cas.path_for_hash(hash)
+    }
+
+    pub fn put_prehashed(&self, hash: &str, data: &[u8]) -> Result<CasPut> {
+        let _lock = CACHE_MUTATION
+            .read()
+            .map_err(|_| StateError::Storage("CAS lock poisoned".into()))?;
+        let mut stored = self.cas.put_prehashed(hash, data)?;
+        let leased = self.root.join(object_name(hash)?);
+        match std::fs::hard_link(&stored.path, &leased) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        stored.path = leased;
+        Ok(stored)
+    }
+}
+
+impl Drop for CasLease {
+    fn drop(&mut self) {
+        if self.retained.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+        let max = std::env::var("NOLAND_CAS_CACHE_BYTES")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1024 * 1024 * 1024);
+        let _ = self.cas.evict_to(max);
+    }
+}
+
 impl LocalCas {
+    pub fn lease(&self) -> Result<CasLease> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let base = self.root.join(".leases");
+        std::fs::create_dir_all(&base)?;
+        let root = base.join(format!(
+            "{}-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root)?;
+        Ok(CasLease {
+            cas: self.clone(),
+            root,
+            retained: AtomicBool::new(false),
+        })
+    }
+
+    pub fn release_lease(&self, root: &Path) -> Result<()> {
+        if root.parent() != Some(self.root.join(".leases").as_path())
+            || std::fs::symlink_metadata(root).is_ok_and(|meta| meta.file_type().is_symlink())
+        {
+            return Err(StateError::UnsafePath("invalid CAS lease directory".into()));
+        }
+        match std::fs::remove_dir_all(root) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
         std::fs::create_dir_all(&root)?;
@@ -471,6 +575,7 @@ impl LocalCas {
         }
 
         let temp = self.temp_path(object_name(hash)?);
+        noland_state_core::disk::ensure_space(&self.root, data.len() as u64)?;
         let write_result = (|| -> Result<()> {
             let mut file = OpenOptions::new()
                 .write(true)
@@ -530,6 +635,18 @@ impl LocalCas {
     }
 
     pub fn is_pinned(&self, hash: &str) -> bool {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if self
+                .path_for_hash(hash)
+                .ok()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .is_some_and(|meta| meta.nlink() > 1)
+            {
+                return true;
+            }
+        }
         object_name(hash)
             .map(|name| self.root.join(".pins").join(name).is_file())
             .unwrap_or(false)
@@ -551,6 +668,9 @@ impl LocalCas {
     /// Removes oldest unpinned objects until total object bytes are at or below
     /// `max_bytes`. Pinned bytes are always retained.
     pub fn evict_to(&self, max_bytes: u64) -> Result<EvictionResult> {
+        let _lock = CACHE_MUTATION
+            .write()
+            .map_err(|_| StateError::Storage("CAS lock poisoned".into()))?;
         let mut objects = self.objects()?;
         let bytes_before = objects.iter().map(|object| object.bytes).sum::<u64>();
         let mut bytes_after = bytes_before;
@@ -838,6 +958,25 @@ mod tests {
         ));
         assert!(!cas.contains(&hash));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn independent_operation_leases_survive_gc_until_the_last_reader_releases() {
+        let root = temp_test_dir("lease-gc");
+        let cas = LocalCas::new(&root).unwrap();
+        let first = cas.lease().unwrap();
+        let second = cas.lease().unwrap();
+        let bytes = b"two active operations";
+        let hash = blake3_hex(bytes);
+        first.put_prehashed(&hash, bytes).unwrap();
+        let input = second.put_prehashed(&hash, bytes).unwrap().path;
+        assert!(!cas.evict_to(0).unwrap().target_met);
+        drop(first);
+        assert!(!cas.evict_to(0).unwrap().target_met);
+        assert_eq!(std::fs::read(input).unwrap(), bytes);
+        drop(second);
+        assert!(cas.evict_to(0).unwrap().target_met);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

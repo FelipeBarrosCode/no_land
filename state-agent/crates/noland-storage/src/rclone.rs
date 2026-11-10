@@ -200,6 +200,7 @@ pub struct RcloneStorage {
     retry_gate: Arc<SharedRetryGate>,
     upload_limiter: Arc<AdaptiveConcurrency>,
     download_limiter: Arc<AdaptiveConcurrency>,
+    stream_limiter: Arc<AdaptiveConcurrency>,
     root_ready: OnceCell<()>,
     metrics: StorageCounters,
 }
@@ -226,6 +227,7 @@ impl RcloneStorage {
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
             upload_limiter: AdaptiveConcurrency::for_uploads(&tuning),
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
+            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -272,6 +274,7 @@ impl RcloneStorage {
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
             upload_limiter: AdaptiveConcurrency::for_uploads(&tuning),
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
+            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -283,6 +286,7 @@ impl RcloneStorage {
         self.retry_gate = Arc::new(SharedRetryGate::new(tuning.clone()));
         self.upload_limiter = AdaptiveConcurrency::for_uploads(&tuning);
         self.download_limiter = AdaptiveConcurrency::for_downloads(&tuning);
+        self.stream_limiter = AdaptiveConcurrency::for_streams(&tuning);
         self.tuning = tuning;
         self
     }
@@ -335,6 +339,7 @@ impl RcloneStorage {
     fn record_remote_error(&self, class: RemoteErrorClass) {
         self.upload_limiter.record_error(class);
         self.download_limiter.record_error(class);
+        self.stream_limiter.record_error(class);
     }
 
     async fn run(&self, args: Vec<String>) -> Result<String> {
@@ -909,7 +914,7 @@ impl SharedStorageProvider for RcloneStorage {
         observer: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
         validate_remote_key(key)?;
-        let _permit = self.download_limiter.acquire().await?;
+        let _permit = self.stream_limiter.acquire().await?;
         let started = std::time::Instant::now();
         let args = self
             .command_builder
@@ -979,7 +984,7 @@ impl SharedStorageProvider for RcloneStorage {
                     self.metrics
                         .bytes_downloaded
                         .fetch_add(count as u64, Ordering::Relaxed);
-                    consumer.write(&buffer[..count])?;
+                    consumer.write(&buffer[..count]).await?;
                     bytes = bytes.saturating_add(count as u64);
                     if last.elapsed() >= std::time::Duration::from_millis(500) {
                         if let Some(observer) = observer {
@@ -998,8 +1003,8 @@ impl SharedStorageProvider for RcloneStorage {
                 tokio::try_join!(stream, async { errors.await.map_err(StateError::from) })?;
             let status = child.wait().await?;
             if status.success() {
-                consumer.finish()?;
-                self.download_limiter.record_success(started.elapsed());
+                consumer.finish().await?;
+                self.stream_limiter.record_success(started.elapsed());
                 return Ok(());
             }
             let failure = RcloneFailure {

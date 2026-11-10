@@ -198,6 +198,13 @@ CREATE TABLE IF NOT EXISTS chunk_index (
 
 /// Additive shared-storage optimization state. Existing v1 tables remain valid
 /// and are intentionally not altered or copied during migration.
+pub const MIGRATION_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS capture_generations (
+    app_id TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL
+);
+"#;
+
 pub const MIGRATION_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS app_mutation_journal (
     mutation_id TEXT PRIMARY KEY,

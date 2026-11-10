@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3.workspace = true
 noland-cas.workspace = true
 noland-crypto.workspace = true
 noland-state-core.workspace = true

@@ -5,7 +5,25 @@ use uuid::Uuid;
 
 use crate::StateDb;
 
+pub(crate) fn bump_capture_generation(conn: &rusqlite::Connection, app_id: &AppId) -> Result<()> {
+    conn.execute("INSERT INTO capture_generations(app_id, generation) VALUES (?1, 1) ON CONFLICT(app_id) DO UPDATE SET generation=generation+1", [app_id.as_str()]).map_err(db_err)?;
+    Ok(())
+}
+
 impl StateDb {
+    pub fn capture_generation(&self, app_id: &AppId) -> Result<i64> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT generation FROM capture_generations WHERE app_id=?1",
+                [app_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .unwrap_or(0))
+    }
+
     /// Appends a mutation unless an equivalent unprocessed observation already exists.
     ///
     /// The UUID remains the replay/idempotency key, while `(app_id, path, kind,
@@ -37,9 +55,10 @@ impl StateDb {
             .map_err(db_err)?;
 
         if let Some(mutation_id) = existing_id {
+            bump_capture_generation(&tx, &mutation.app_id)?;
             tx.execute(
                 r#"UPDATE app_mutation_journal
-                   SET observed_at_ms=?2, session_id=?3, provenance_json=?4
+                   SET observed_at_ms=MAX(observed_at_ms + 1, ?2), session_id=?3, provenance_json=?4
                    WHERE mutation_id=?1 AND processed_at_ms IS NULL"#,
                 params![
                     mutation_id,
@@ -73,6 +92,9 @@ impl StateDb {
         )
         .map_err(db_err)?;
         let inserted = tx.changes() != 0;
+        if inserted {
+            bump_capture_generation(&tx, &mutation.app_id)?;
+        }
         tx.commit().map_err(db_err)?;
         Ok(inserted)
     }
@@ -154,6 +176,49 @@ impl StateDb {
             .map_err(db_err)
     }
 
+    /// Acknowledge exactly the mutation versions included in a capture. A write
+    /// coalesced into the same row during hashing/upload remains dirty.
+    pub fn finish_backup_mutations(
+        &self,
+        app_id: &AppId,
+        mutations: &[AppMutationRecord],
+        captured_generation: i64,
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        for mutation in mutations {
+            tx.execute("UPDATE app_mutation_journal SET processed_at_ms=?3 WHERE mutation_id=?1 AND observed_at_ms=?2 AND processed_at_ms IS NULL",
+                params![mutation.mutation_id.to_string(), mutation.observed_at.timestamp_millis(), Utc::now().timestamp_millis()]).map_err(db_err)?;
+        }
+        let pending: i64 = tx.query_row("SELECT COUNT(*) FROM app_mutation_journal WHERE app_id=?1 AND processed_at_ms IS NULL", [app_id.as_str()], |row| row.get(0)).map_err(db_err)?;
+        let generation: i64 = tx
+            .query_row(
+                "SELECT generation FROM capture_generations WHERE app_id=?1",
+                [app_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .unwrap_or(0);
+        if generation != captured_generation {
+            tx.execute(
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                [app_id.as_str()],
+            )
+            .map_err(db_err)?;
+        }
+        if pending == 0 && generation == captured_generation {
+            tx.execute("DELETE FROM dirty_roots WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+            tx.execute("DELETE FROM dirty_paths WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+            tx.execute("DELETE FROM dirty_apps WHERE app_id=?1", [app_id.as_str()])
+                .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(())
+    }
+
     /// Marks a root dirty, preserving its first timestamp and incrementing its
     /// mutation count. Reconciliation requirements are sticky until cleared.
     pub fn mark_dirty_root(
@@ -164,9 +229,10 @@ impl StateDb {
         requires_reconciliation: bool,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        self.lock()?
-            .execute(
-                r#"INSERT INTO dirty_roots (
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute(
+            r#"INSERT INTO dirty_roots (
                        app_id, canonical_root, logical_root, first_dirty_at_ms,
                        last_dirty_at_ms, mutation_count, requires_reconciliation
                    ) VALUES (?1,?2,?3,?4,?4,1,?5)
@@ -178,15 +244,24 @@ impl StateDb {
                            dirty_roots.requires_reconciliation,
                            excluded.requires_reconciliation
                        )"#,
-                params![
-                    app_id.as_str(),
-                    canonical_root,
-                    logical_root,
-                    now,
-                    requires_reconciliation as i64,
-                ],
+            params![
+                app_id.as_str(),
+                canonical_root,
+                logical_root,
+                now,
+                requires_reconciliation as i64,
+            ],
+        )
+        .map_err(db_err)?;
+        bump_capture_generation(&tx, app_id)?;
+        if requires_reconciliation {
+            tx.execute(
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                [app_id.as_str()],
             )
             .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
     }
 
@@ -245,6 +320,17 @@ impl StateDb {
     }
 
     pub fn upsert_file_states(&self, states: &[FileStateRecord]) -> Result<()> {
+        self.reconcile_file_states(states, false)
+    }
+
+    /// Retain verified identity only when observation is continuous. Read/merge/write
+    /// share one transaction so a concurrently dirtied index cannot be overwritten
+    /// using an earlier snapshot of its trust state.
+    pub fn reconcile_file_states(
+        &self,
+        states: &[FileStateRecord],
+        preserve_trusted: bool,
+    ) -> Result<()> {
         if states.is_empty() {
             return Ok(());
         }
@@ -273,6 +359,27 @@ impl StateDb {
                 )
                 .map_err(db_err)?;
             for state in states {
+                let mut state = state.clone();
+                if preserve_trusted {
+                    let previous = tx.query_row(
+                        "SELECT app_id, logical_root, relative_path, canonical_path, file_type, size, mtime_ns, inode, mount_id, mode, content_hash, trust_state, last_seen_at_ms, last_hashed_at_ms FROM file_state_index WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3",
+                        params![state.app_id.as_str(), state.logical_root, state.relative_path],
+                        row_to_file_state,
+                    ).optional().map_err(db_err)?;
+                    if let Some(previous) = previous.filter(|previous| {
+                        previous.fast_identity_matches(
+                            state.size,
+                            state.mtime_ns,
+                            state.inode,
+                            state.mount_id,
+                        ) && previous.file_type == state.file_type
+                            && previous.mode == state.mode
+                    }) {
+                        state.content_hash = previous.content_hash;
+                        state.trust = previous.trust;
+                        state.last_hashed_at = previous.last_hashed_at;
+                    }
+                }
                 stmt.execute(params![
                     state.app_id.as_str(),
                     state.logical_root,
@@ -1252,6 +1359,33 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+
+    #[test]
+    fn captured_mutations_do_not_acknowledge_later_writes_or_observer_gaps() {
+        let (db, app_id) = test_db_with_app();
+        let mutation =
+            AppMutationRecord::new(app_id.clone(), "/home/user/save", AppMutationKind::Modify);
+        db.append_app_mutation(&mutation).unwrap();
+        db.mark_dirty(&app_id, None, false).unwrap();
+        let generation = db.capture_generation(&app_id).unwrap();
+        let captured = db.pending_app_mutations(&app_id, 10).unwrap();
+        // Even a coalesced observation in the same millisecond must have a new version.
+        db.append_app_mutation(&mutation).unwrap();
+        db.finish_backup_mutations(&app_id, &captured, generation)
+            .unwrap();
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 1);
+        assert_eq!(db.list_dirty_apps().unwrap().len(), 1);
+        let captured = db.pending_app_mutations(&app_id, 10).unwrap();
+        let generation = db.capture_generation(&app_id).unwrap();
+        db.mark_dirty(&app_id, None, true).unwrap();
+        db.finish_backup_mutations(&app_id, &captured, generation)
+            .unwrap();
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 0);
+        assert!(db.list_dirty_apps().unwrap()[0].requires_reconciliation);
+        db.finish_backup_mutations(&app_id, &[], db.capture_generation(&app_id).unwrap())
+            .unwrap();
+        assert!(db.list_dirty_apps().unwrap().is_empty());
+    }
     use crate::schema::MIGRATION_V1;
 
     fn test_db_with_app() -> (StateDb, AppId) {
@@ -1377,6 +1511,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored.fast_identity_matches(128, 99, Some(7), Some(8)));
+        let mut scanned = file_state.clone();
+        scanned.trust = FileStateTrust::VerifyRequired;
+        scanned.content_hash = None;
+        scanned.last_hashed_at = None;
+        db.reconcile_file_states(std::slice::from_ref(&scanned), true)
+            .unwrap();
+        assert!(db
+            .get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+            .unwrap()
+            .unwrap()
+            .fast_identity_matches(128, 99, Some(7), Some(8)));
         assert!(db
             .set_file_state_trust(
                 &app_id,
@@ -1390,6 +1535,24 @@ mod tests {
                 .unwrap()[0]
                 .trust,
             FileStateTrust::Dirty
+        );
+        db.reconcile_file_states(std::slice::from_ref(&scanned), true)
+            .unwrap();
+        assert_eq!(
+            db.get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+                .unwrap()
+                .unwrap()
+                .trust,
+            FileStateTrust::VerifyRequired
+        );
+        db.upsert_file_state(&file_state).unwrap();
+        db.reconcile_file_states(&[scanned], false).unwrap();
+        assert_eq!(
+            db.get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+                .unwrap()
+                .unwrap()
+                .trust,
+            FileStateTrust::VerifyRequired
         );
 
         let local = LocalCasEntry {

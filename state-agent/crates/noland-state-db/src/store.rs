@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
@@ -8,11 +8,12 @@ use noland_state_core::*;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use crate::schema::{MIGRATION_V1, MIGRATION_V2};
+use crate::schema::{MIGRATION_V1, MIGRATION_V2, MIGRATION_V3};
 use crate::SCHEMA_VERSION;
 
+#[derive(Clone)]
 pub struct StateDb {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +36,7 @@ impl StateDb {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
         Ok(db)
@@ -48,7 +49,7 @@ impl StateDb {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
         Ok(db)
@@ -70,6 +71,7 @@ impl StateDb {
         let conn = self.lock()?;
         conn.execute_batch(MIGRATION_V1).map_err(db_err)?;
         conn.execute_batch(MIGRATION_V2).map_err(db_err)?;
+        conn.execute_batch(MIGRATION_V3).map_err(db_err)?;
         for version in 1..=SCHEMA_VERSION {
             conn.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
@@ -582,7 +584,9 @@ impl StateDb {
         requires_reconciliation: bool,
     ) -> Result<()> {
         let now = now_secs();
-        self.lock()?
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        tx
             .execute(
                 r#"
                 INSERT INTO dirty_apps (app_id, first_dirty_at, last_dirty_at, requires_reconciliation)
@@ -595,13 +599,21 @@ impl StateDb {
             )
             .map_err(db_err)?;
         if let Some(path_id) = path_id {
-            self.lock()?
-                .execute(
-                    "INSERT OR IGNORE INTO dirty_paths (app_id, path_id) VALUES (?1,?2)",
-                    params![app_id.as_str(), path_id],
-                )
-                .map_err(db_err)?;
+            tx.execute(
+                "INSERT OR IGNORE INTO dirty_paths (app_id, path_id) VALUES (?1,?2)",
+                params![app_id.as_str(), path_id],
+            )
+            .map_err(db_err)?;
         }
+        crate::persistence::bump_capture_generation(&tx, app_id)?;
+        if requires_reconciliation {
+            tx.execute(
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                [app_id.as_str()],
+            )
+            .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
     }
 
