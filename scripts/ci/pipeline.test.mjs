@@ -45,6 +45,26 @@ test('all six platforms have a required, unprivileged no-build regression lane',
   }
 });
 
+test('manual Linux retries select exactly two architectures and reuse matching agent artifacts', () => {
+  const build = workflow('_build');
+  const unix = job(build, 'build-unix');
+  const matrices = [...unix.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)].map(match => JSON.parse(match[1]));
+  assert.equal(matrices.length, 2);
+  assert.deepEqual(matrices[0].map(entry => [entry.platform, entry.arch, entry.os]), [
+    ['linux', 'x64', 'ubuntu-22.04'], ['linux', 'arm64', 'ubuntu-22.04-arm'],
+  ]);
+  assert.equal(matrices[1].length, 4, 'ordinary builds retain both macOS and both Linux targets');
+  for (const name of ['remote-agents', 'build-windows']) {
+    assert.match(job(build, name), /if: inputs\.linux-retry-run-id == ''/u);
+  }
+  assert.match(unix, /!cancelled\(\).*needs\.remote-agents\.result == 'success'/u);
+  assert.match(unix, /needs\.remote-agents\.result == 'skipped' && inputs\.linux-retry-run-id != ''/u);
+  assert.equal([...unix.matchAll(/run-id: \$\{\{ inputs\.linux-retry-run-id \|\| github\.run_id \}\}/gu)].length, 2);
+  const verify = step(unix, 'Verify reused remote-agent source revision');
+  assert.match(verify, /git diff --quiet "\$agent_sha" HEAD -- state-agent network-agent network-contracts vm-cloud-mic-agent scripts\/ci\/build-remote-agents\.sh/u);
+  assert.ok(unix.indexOf('Verify reused remote-agent source revision') < unix.indexOf('Install dependencies and stage managed tools'));
+});
+
 test('runtime code and contracts are covered by formatting, linting and dependency security', () => {
   const ci = workflow('ci');
   const formatting = job(ci, 'rust-format');
