@@ -531,8 +531,11 @@ sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || tru
         sunshine_username: &str,
         sunshine_password: &str,
     ) -> AppResult<()> {
-        super::platform_credentials::validate_platform_credentials(sunshine_username, sunshine_password)
-            .map_err(AppError::InvalidInput)?;
+        super::platform_credentials::validate_platform_credentials(
+            sunshine_username,
+            sunshine_password,
+        )
+        .map_err(AppError::InvalidInput)?;
         if headless_edid_base64.trim().is_empty() {
             return Err(AppError::InvalidInput(
                 "Headless EDID is missing. Regenerate EDID from Settings before provisioning."

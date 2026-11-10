@@ -1,0 +1,52 @@
+name: Build optional Runtime image artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      runtime_id:
+        description: Immutable draft release tag/runtime ID (letters, digits, hyphens)
+        required: true
+      ubuntu_image:
+        description: 'Pinned base: ubuntu:24.04@sha256:<digest>'
+        required: true
+      apt_snapshot:
+        description: Ubuntu archive snapshot timestamp (YYYYMMDDTHHMMSSZ)
+        required: true
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - name: Install baseline smoke-test prerequisites
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-gi gir1.2-gtk-3.0 xvfb xauth bubblewrap
+      - name: Test and build companion on the Ubuntu 22.04 baseline
+        run: |
+          cargo test --locked --manifest-path runtime-agent/Cargo.toml
+          cargo build --locked --release --manifest-path runtime-agent/Cargo.toml
+          runtime-agent/target/release/noland-runtime --version
+          bash scripts/runtime/smoke-gui.sh
+      - name: Build pinned modern userspace
+        env:
+          UBUNTU_IMAGE: ${{ inputs.ubuntu_image }}
+          APT_SNAPSHOT: ${{ inputs.apt_snapshot }}
+          RUNTIME_ID: ${{ inputs.runtime_id }}
+          ARTIFACT_URL: https://github.com/${{ github.repository }}/releases/download/${{ inputs.runtime_id }}/ubuntu24-x86_64.tar.gz
+        run: bash scripts/runtime/build-image.sh
+      - name: Confirm actual newer-glibc symbol on the modern image
+        env:
+          RUNTIME_ID: ${{ inputs.runtime_id }}
+        run: docker run --rm "noland-runtime:$RUNTIME_ID" /usr/local/bin/noland-glibc-probe
+      - name: Prepare artifact checksums (no separate runtime signing key)
+        run: |
+          cp runtime-agent/target/release/noland-runtime dist/runtime/noland-runtime-linux-x86_64
+          sha256sum dist/runtime/noland-runtime-linux-x86_64 > dist/runtime/agent.sha256
+          (cd dist/runtime && sha256sum ubuntu24-x86_64.tar.gz manifest.json noland-runtime-linux-x86_64 > SHA256SUMS)
+      - name: Create draft only (requires live-instance acceptance before publication)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.runtime_id }}
+        run: gh release create "$TAG" dist/runtime/* --draft --title "No Land Runtime image $TAG" --notes 'Optional standalone image artifacts. Standard cloud-PC provisioning installs the bundled desktop launcher and a checksum-verified Ubuntu base directly; this draft is not required. Live GPU/audio acceptance is still required.'

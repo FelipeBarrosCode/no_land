@@ -4,16 +4,19 @@ set -euo pipefail
 bundle_dir=${1:?Usage: fix-appimage-metadata.sh <bundle-dir> <x64|arm64>}
 architecture=${2:?Usage: fix-appimage-metadata.sh <bundle-dir> <x64|arm64>}
 
+# Keep the release URL and checksums together; continuous assets are replaced upstream.
+tool_version=1.9.1
+
 case "$architecture" in
   x64)
     tool_arch=x86_64
     output_arch=x86_64
-    expected_sha256=95cbe7cce9717fce90c484e34052ee7c7f1d7635b33c12525b4776826a7d29b6
+    expected_sha256=ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
     ;;
   arm64)
     tool_arch=aarch64
     output_arch=aarch64
-    expected_sha256=a595ea34cd6136c7f595e9dcbb16f3e9725d7610efb9e43b38c3c6e86cafc270
+    expected_sha256=f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
     ;;
   *)
     echo "Unsupported AppImage architecture: $architecture" >&2
@@ -88,9 +91,12 @@ test -e "$appdir/$desktop_name"
 file "$appdir/.DirIcon" | grep -q 'PNG image data'
 
 tool="$work_dir/appimagetool-${tool_arch}.AppImage"
-tool_url="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-${tool_arch}.AppImage"
+tool_url="https://github.com/AppImage/appimagetool/releases/download/${tool_version}/appimagetool-${tool_arch}.AppImage"
 curl --fail --location --retry 3 --silent --show-error "$tool_url" --output "$tool"
-printf '%s  %s\n' "$expected_sha256" "$tool" | sha256sum --check --status
+if ! printf '%s  %s\n' "$expected_sha256" "$tool" | sha256sum --check; then
+  echo "appimagetool $tool_version ($tool_arch) checksum verification failed." >&2
+  exit 1
+fi
 chmod +x "$tool"
 
 tool_extract_dir="$work_dir/appimagetool"

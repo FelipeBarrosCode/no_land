@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { prepareRemoteAgentResources } from './remote-agent-artifacts.mjs';
+import { devResourceConfig } from './dev-resource-config.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -25,7 +26,13 @@ const tauriArgsWithTarget = requestedTarget || !target ? tauriArgs : [...tauriAr
 const windowsTargetConfig = resolveWindowsTargetConfig(target, tauriArgsWithTarget);
 const linuxBundleConfig = resolveLinuxBundleConfig(target, tauriArgsWithTarget);
 const tauriArgsPrepared = [...tauriArgsWithTarget, ...windowsTargetConfig, ...linuxBundleConfig];
-const tauriCliArgs = tauriArgsPrepared;
+const devResources = devResourceConfig(repoRoot, target, tauriArgsPrepared, mode);
+const tauriCliArgs = devResources
+  ? [...tauriArgsPrepared, '--config', JSON.stringify(devResources)]
+  : tauriArgsPrepared;
+if (devResources) {
+  console.log('[tauri-with-mic-sidecar] Dev mode: omitting absent release-only remote-agent bundles; native streaming and agent sources remain enabled.');
+}
 const prepArgs = [resolve(repoRoot, 'scripts', 'prepare-mic-sidecar.mjs'), mode, ...tauriArgsPrepared];
 let nativeEnv = buildNativeEnv(target);
 const prepEnv = {

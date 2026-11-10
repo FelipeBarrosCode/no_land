@@ -9,6 +9,8 @@ pub use noland_network_contracts::state::{
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PersistedAppState {
+    #[serde(default)]
+    pub mcp: noland_mcp::policy::Config,
     pub version: u32,
     pub onboarding_completed: bool,
     #[serde(default)]
@@ -53,6 +55,7 @@ pub struct PersistedAppState {
 impl Default for PersistedAppState {
     fn default() -> Self {
         Self {
+            mcp: noland_mcp::policy::Config::default(),
             version: 5,
             onboarding_completed: false,
             has_completed_guided_setup: false,
@@ -787,6 +790,8 @@ pub struct ProvisionedServerSteps {
     pub instance_created: bool,
     pub instance_ready: bool,
     pub ssh_connected: bool,
+    #[serde(default)]
+    pub desktop_password_configured: bool,
     pub nvidia_headless_configured: bool,
     #[serde(default)]
     pub post_nvidia_reboot_completed: bool,

@@ -680,7 +680,7 @@ impl FeedbackProgramService {
         let latest = context.load_state().await.feedback_program;
         if latest.consent_epoch != state.consent_epoch
             || latest.pending_control_action.is_some()
-            || !self.permits(&latest, &self.runtime.lock().await)
+            || !self.permits(&latest, &*self.runtime.lock().await)
             || cancel.has_changed().unwrap_or(true)
         {
             return Err(Failure::local(

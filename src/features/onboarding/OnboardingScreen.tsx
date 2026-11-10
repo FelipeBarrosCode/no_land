@@ -13,7 +13,7 @@ import {
 import type { OnboardingPayload } from "../../lib/types";
 import { TutorialModal } from "./TutorialModal";
 import { tutorialSteps } from "./tutorialSteps";
-import { useLocalization, translate } from "../../lib/i18n";
+import { useLocalization, translate, translateSource } from "../../lib/i18n";
 
 interface Props {
   busy: boolean;
@@ -201,8 +201,7 @@ export function OnboardingScreen({ busy, onSubmit }: Props) {
               error={touched.appPassword || form.appPassword ? errors.appPassword : undefined}
             />
             <p className="-mt-2 text-[1.1rem] text-[#8fb4d4]">
-              {t("onboarding.new")} {" "}
-              <span className="text-neon-lime">{translate("generated.5e884898da280471")}</span>.
+              {translateSource("New remote desktops use the password you set above. The Linux username and key-based SSH access stay unchanged.")}
             </p>
             <InputField
               label={

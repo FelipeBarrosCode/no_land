@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::fs;
-use tracing::warn;
 
 use crate::{
     errors::{AppError, AppResult},
@@ -109,27 +108,8 @@ impl JsonStateStore {
         Ok(migrated)
     }
 
-    async fn recover_invalid_state(&self, error: &AppError) -> AppResult<PersistedAppState> {
-        let backup_path = self.state_path.with_extension(format!(
-            "invalid-{}.json",
-            chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
-        ));
-
-        fs::rename(&self.state_path, &backup_path).await?;
-        warn!(
-            state_path = %self.state_path.display(),
-            backup_path = %backup_path.display(),
-            %error,
-            "Recovered an invalid persisted state file"
-        );
-
-        let state = PersistedAppState::default();
-        self.save_state(&state).await?;
-        Ok(state)
-    }
-
     async fn load_existing_root_map(&self) -> AppResult<Map<String, Value>> {
-        if !self.state_path.exists() {
+        if !fs::try_exists(&self.state_path).await? {
             return Ok(Map::new());
         }
 
@@ -156,31 +136,25 @@ impl StateStore for JsonStateStore {
     async fn load_state(&self) -> AppResult<PersistedAppState> {
         self.ensure_parent_exists().await?;
 
-        if !self.state_path.exists() {
+        if !fs::try_exists(&self.state_path).await? {
             let state = PersistedAppState::default();
             self.save_state(&state).await?;
             return Ok(state);
         }
 
         let contents = fs::read_to_string(&self.state_path).await?;
-        let raw_value: Value = match serde_json::from_str(&contents) {
-            Ok(value) => value,
-            Err(error) => {
-                let error = AppError::Serialization(format!(
-                    "Failed to parse state file at {}: {error}",
-                    self.state_path.display()
-                ));
-                return self.recover_invalid_state(&error).await;
-            }
-        };
-
-        let migrated = match self.migrate_value(raw_value) {
-            Ok(state) => state,
-            Err(error @ AppError::Serialization(_)) => {
-                return self.recover_invalid_state(&error).await;
-            }
-            Err(error) => return Err(error),
-        };
+        let raw_value: Value = serde_json::from_str(&contents).map_err(|error| {
+            AppError::Serialization(format!(
+                "Failed to parse state file at {} (file preserved): {error}",
+                self.state_path.display()
+            ))
+        })?;
+        if !raw_value.is_object() {
+            return Err(AppError::Serialization(
+                "Persisted state must be a JSON object; existing file was preserved".into(),
+            ));
+        }
+        let migrated = self.migrate_value(raw_value)?;
         self.save_state(&migrated).await?;
         Ok(migrated)
     }
@@ -188,11 +162,7 @@ impl StateStore for JsonStateStore {
     async fn save_state(&self, state: &PersistedAppState) -> AppResult<()> {
         self.ensure_parent_exists().await?;
 
-        let mut root_map = match self.load_existing_root_map().await {
-            Ok(map) => map,
-            Err(AppError::Serialization(_)) if self.state_path.exists() => Map::new(),
-            Err(error) => return Err(error),
-        };
+        let mut root_map = self.load_existing_root_map().await?;
 
         let next_value = serde_json::to_value(state)?;
         let next_map = match next_value {
@@ -375,29 +345,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_state_is_backed_up_and_replaced() {
+    async fn invalid_state_is_preserved_and_load_fails() {
         let path = temp_state_path("recover-invalid");
         fs::write(&path, b"{ truncated").await.unwrap();
 
         let store = JsonStateStore::new(path.clone(), 3);
-        let recovered = store.load_state().await.unwrap();
+        assert!(store.load_state().await.is_err());
+        assert_eq!(fs::read(&path).await.unwrap(), b"{ truncated");
+        assert!(store
+            .save_state(&PersistedAppState::default())
+            .await
+            .is_err());
+        assert_eq!(fs::read(&path).await.unwrap(), b"{ truncated");
+    }
 
-        assert_eq!(recovered.version, PersistedAppState::default().version);
-        let persisted: serde_json::Value =
-            serde_json::from_slice(&fs::read(&path).await.unwrap()).unwrap();
-        assert!(persisted.is_object());
-
-        let backup_count = std::fs::read_dir(path.parent().unwrap())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("state.invalid-")
-            })
-            .count();
-        assert_eq!(backup_count, 1);
+    #[tokio::test]
+    async fn non_object_state_is_not_overwritten_with_defaults() {
+        let path = temp_state_path("preserve-non-object");
+        fs::write(&path, b"[]").await.unwrap();
+        let store = JsonStateStore::new(path.clone(), 3);
+        assert!(store.load_state().await.is_err());
+        assert!(store
+            .save_state(&PersistedAppState::default())
+            .await
+            .is_err());
+        assert_eq!(fs::read(&path).await.unwrap(), b"[]");
     }
 
     #[tokio::test]

@@ -3,7 +3,8 @@ import { chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, r
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { resolveOpenSshRoot, stageOpenSshRuntime } from './windows-openssh.mjs';
+import { stageOpenSshRuntime } from './windows-openssh.mjs';
+import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -49,7 +50,8 @@ mkdirSync(binariesDir, { recursive: true });
 
 if (managedTarget) {
   if (isWindowsTarget(managedTarget)) {
-    const root = resolveOpenSshRoot(managedTarget, srcTauriDir);
+    const root = ensureWindowsOpenSshRoot(managedTarget, srcTauriDir);
+    process.env.NOLAND_OPENSSH_ROOT = root;
     stageOpenSshRuntime(root, join(binariesDir, 'ssh-runtime', managedTarget), managedTarget);
     // Flat copies remain build-time compatibility inputs only. Runtime lookup
     // uses the private distribution containing both executables and DLLs.

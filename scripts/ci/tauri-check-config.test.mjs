@@ -32,6 +32,20 @@ test('check and both clippy lanes do not require release bundle artifacts', () =
   }
 });
 
+test('release desktop tests exclude only packaging resources and keep native coverage', () => {
+  const fullSuite = readFileSync(new URL('../../.github/workflows/_tests.yml', import.meta.url), 'utf8');
+  const desktop = fullSuite.split('\n  desktop-tests:\n')[1]?.split('\n  state-agent-tests:\n')[0];
+  assert.ok(desktop, 'desktop release-test job exists');
+  const step = desktop.split('      - name: Run desktop workspace tests\n')[1];
+  assert.ok(step, 'desktop workspace tests remain enabled');
+  const override = step.match(/TAURI_CONFIG: '([^'\n]+)'/);
+  assert.ok(override, 'release tests override packaging-only resources');
+  assert.deepEqual(JSON.parse(override[1]), { bundle: { resources: [] } });
+  assert.match(step, /run: cargo test --locked --manifest-path src-tauri\/Cargo\.toml --workspace --all-targets/);
+  assert.match(desktop, /run: node scripts\/prepare-mic-sidecar\.mjs dev/);
+  assert.doesNotMatch(desktop, /NOLAND_SKIP_NATIVE_BUILD|NOLAND_SKIP_APP_BUILD_RS/);
+});
+
 test('shipping bundles still require their real resources and remote agents', () => {
   assert.ok(Array.isArray(shipping.bundle.resources));
   assert.ok(shipping.bundle.resources.length > 0);

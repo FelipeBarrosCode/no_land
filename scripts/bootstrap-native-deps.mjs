@@ -4,6 +4,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -16,7 +17,8 @@ import {
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { resolveOpenSshRoot, stageOpenSshRuntime } from './windows-openssh.mjs';
+import { ensureWindowsOpenSshRoot } from './windows-openssh-install.mjs';
+import { downloadWithResume } from './native-download.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -204,7 +206,7 @@ function bootstrapWindowsTarget(targetTriple) {
     ? ensureWindowsGstreamerRoot(prefix, targetTriple)
     : null;
   const libclangRoot = ensureWindowsLibclangRoot(targetTriple);
-  const openSshRoot = ensureWindowsOpenSshRoot(targetTriple);
+  const openSshRoot = ensureWindowsOpenSshRoot(targetTriple, srcTauriDir);
 
   console.log(`Native dependency bootstrap ready for ${targetTriple}`);
   console.log(`  prefix: ${prefix}`);
@@ -534,13 +536,6 @@ function ensureWindowsLibclangRoot(targetTriple) {
   throw new Error(`Downloaded LLVM archive did not contain libclang.dll for ${targetTriple}`);
 }
 
-function ensureWindowsOpenSshRoot(targetTriple) {
-  const cacheRoot = join(nativeDepsRoot, 'cache', `openssh-${targetTriple}`);
-  const stagedRoot = join(cacheRoot, 'root');
-  const sourceRoot = resolveOpenSshRoot(targetTriple, join(repoRoot, 'src-tauri'));
-  stageOpenSshRuntime(sourceRoot, stagedRoot, targetTriple);
-  return stagedRoot;
-}
 
 function ensureOpenSsl(prefix, targetTriple) {
   const cryptoLib = join(prefix, 'lib', 'libcrypto.3.dylib');
@@ -599,7 +594,12 @@ function ensureOpus(prefix, targetTriple) {
   }
 
   ensureExtractedSourceTarball(
-    'https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz',
+    [
+      // Use the upstream release asset first: downloads.xiph.org sometimes
+      // terminates TLS handshakes from GitHub-hosted runners.
+      'https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz',
+      'https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz',
+    ],
     'opus-1.5.2.tar.gz',
     'opus-1.5.2',
   );
@@ -1345,42 +1345,40 @@ function downloadFile(url, destination, options = {}) {
   }
 
   mkdirSync(dirname(destination), { recursive: true });
-  const tempDestination = `${destination}.partial`;
+  // Isolate overlapping builds: one process must never remove or rename
+  // another process's in-progress SDK download.
+  const tempRoot = mkdtempSync(`${destination}.download-`);
+  const tempDestination = join(tempRoot, 'artifact.partial');
   const failures = [];
-  for (const url of urls) {
-    rmSync(tempDestination, { force: true });
-    try {
-      console.log(`[bootstrap-native-deps] Downloading ${url}`);
-      run('curl', [
-        '-fL',
-        '--connect-timeout', '30',
-        '--max-time', '300',
-        '--retry', '3',
-        '--retry-all-errors',
-        '-o', tempDestination,
-        url,
-      ]);
-    } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
+  try {
+    for (const url of urls) {
+      rmSync(tempDestination, { force: true });
+      try {
+        console.log(`[bootstrap-native-deps] Downloading ${url}`);
+        downloadWithResume(url, tempDestination);
 
-    if (!validateDownloadedFile(tempDestination, expectedKind)) {
-      const preview = readFileSync(tempDestination)
-        .subarray(0, 256)
-        .toString('utf8')
-        .replace(/\s+/g, ' ')
-        .trim();
-      failures.push(`${url}: invalid ${expectedKind || 'artifact'} (${preview || '<binary/empty>'})`);
-      continue;
-    }
+        if (!validateDownloadedFile(tempDestination, expectedKind)) {
+          const preview = existsSync(tempDestination)
+            ? readFileSync(tempDestination)
+              .subarray(0, 256)
+              .toString('utf8')
+              .replace(/\s+/g, ' ')
+              .trim()
+            : '<missing download>';
+          failures.push(`${url}: invalid ${expectedKind || 'artifact'} (${preview || '<binary/empty>'})`);
+          continue;
+        }
 
-    renameSync(tempDestination, destination);
-    return;
+        renameSync(tempDestination, destination);
+        return;
+      } catch (error) {
+        failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(`Could not download ${destination}. Attempts:\n${failures.join('\n')}`);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
   }
-
-  rmSync(tempDestination, { force: true });
-  throw new Error(`Could not download ${destination}. Attempts:\n${failures.join('\n')}`);
 }
 
 function validateDownloadedFile(path, expectedKind) {

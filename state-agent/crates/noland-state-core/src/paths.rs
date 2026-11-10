@@ -218,7 +218,56 @@ pub fn looks_like_cache(path: &Path) -> bool {
         || text.contains("/code cache/")
         || text.contains("/tmp/")
         || text.ends_with(".tmp")
-        || text.ends_with(".log")
+        || looks_like_diagnostic_log(path)
+}
+
+/// Diagnostic output is regenerable, even when log rotation changes its suffix.
+/// Do not exclude whole `logs` directories: they can also contain real app data.
+pub fn looks_like_diagnostic_log(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
+    if name.ends_with(".log") {
+        return true;
+    }
+    if let Some((_, rotation)) = name.rsplit_once(".log.") {
+        if !rotation.is_empty()
+            && rotation
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '-' || c == '_' || c == '.')
+        {
+            return true;
+        }
+    }
+    let in_logs_dir = path.parent().is_some_and(|parent| {
+        parent.components().any(|part| {
+            part.as_os_str()
+                .to_str()
+                .is_some_and(|part| part.eq_ignore_ascii_case("logs"))
+        })
+    });
+    in_logs_dir
+        && (name == "catalina.out"
+            || name == "access_log"
+            || name == "error_log"
+            || ["localhost_access_log.", "access_log.", "error_log."]
+                .iter()
+                .any(|prefix| {
+                    name.strip_prefix(prefix)
+                        .and_then(|rest| rest.strip_suffix(".txt"))
+                        .is_some_and(|date| {
+                            date.len() == 10
+                                && date.bytes().enumerate().all(|(i, c)| {
+                                    if i == 4 || i == 7 {
+                                        c == b'-'
+                                    } else {
+                                        c.is_ascii_digit()
+                                    }
+                                })
+                        })
+                }))
 }
 
 pub fn looks_like_secret(path: &Path) -> bool {
@@ -255,6 +304,30 @@ pub fn looks_like_os_or_lib(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_logs_include_rotated_and_dated_server_logs_but_not_save_data() {
+        for path in [
+            "/opt/apache-tomcat-9.0.112/logs/localhost_access_log.2026-11-09.txt",
+            "/opt/tomcat/logs/catalina.out",
+            "/opt/server/logs/access_log.2026-11-09.txt.gz",
+            "/home/gamer/.local/share/game/player.log.1",
+            "/home/gamer/.local/share/game/player.log.2026-11-09.gz",
+            "/home/gamer/game/PLAYER.LOG",
+        ] {
+            assert!(looks_like_cache(Path::new(path)), "{path}");
+        }
+        for path in [
+            "/home/gamer/game/logs/progress.sav",
+            "/home/gamer/game/logs/settings.txt",
+            "/home/gamer/game/logs/world.log.dat",
+            "/home/gamer/game/user/save/slot_00/progress.sav",
+            "/home/gamer/game/hookshot_options.ini",
+            "/home/gamer/game/localhost_access_log.2026-11-09.txt",
+        ] {
+            assert!(!looks_like_cache(Path::new(path)), "{path}");
+        }
+    }
 
     #[test]
     fn base_system_roots_are_component_aware() {

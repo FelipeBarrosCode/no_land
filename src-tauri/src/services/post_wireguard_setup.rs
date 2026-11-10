@@ -501,7 +501,9 @@ async fn ensure_sunshine_credentials(
         ));
     }
 
-    if let Err(message) = super::platform_credentials::validate_platform_credentials(username, password) {
+    if let Err(message) =
+        super::platform_credentials::validate_platform_credentials(username, password)
+    {
         set_setup_failure(
             context,
             SetupStage::SunshineCredentialsConfiguring,

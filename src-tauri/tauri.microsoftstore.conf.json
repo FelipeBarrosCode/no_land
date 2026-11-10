@@ -4,7 +4,7 @@
     "resources": [
       "binaries/wintun-*-pc-windows-msvc.dll",
       "binaries/wintun-LICENSE.txt",
-      "binaries/ssh-*-pc-windows-msvc.exe",
+      "binaries/ssh-[ax]*-pc-windows-msvc.exe",
       "binaries/scp-*-pc-windows-msvc.exe",
       "binaries/ssh-keygen-*-pc-windows-msvc.exe",
       "binaries/ssh-runtime/**/*",

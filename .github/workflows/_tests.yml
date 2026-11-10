@@ -7,6 +7,22 @@ permissions:
   contents: read
 
 jobs:
+  runtime-tests:
+    name: Runtime security and baseline tests
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - name: Install desktop launcher test dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends python3-gi gir1.2-gtk-3.0 xvfb xauth bubblewrap
+      - run: cargo test --locked --manifest-path runtime-agent/Cargo.toml
+      - run: python3 -B scripts/runtime/test_artifacts.py
+      - run: python3 -B scripts/runtime/test_gui.py
+      - name: Smoke-test the cloud-side drag-and-drop window
+        run: |
+          cargo build --locked --release --manifest-path runtime-agent/Cargo.toml
+          bash scripts/runtime/smoke-gui.sh
+      - run: cargo clippy --locked --manifest-path runtime-agent/Cargo.toml --all-targets -- -D warnings
   network-tests:
     name: Network contracts and agent tests
     runs-on: ubuntu-24.04
@@ -23,6 +39,10 @@ jobs:
             network-contracts
             network-agent
       - run: npm ci
+      - name: No-build Sunshine and workflow regression tests
+        run: node --test scripts/sunshine-auth.test.mjs scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/appimage-metadata.test.mjs scripts/apple-stapler-retry.test.mjs scripts/instance-controls.test.mjs scripts/ci/*.test.mjs
+      - name: Fixed MCP SSH helper safety tests (no VM)
+        run: python3 -B scripts/ci/mcp-remote.test.py
       - name: Existing unit-test entry point
         run: npm run test:unit
       - name: Verify provisioning package plans and dual-architecture artifacts
@@ -49,6 +69,9 @@ jobs:
       - name: Prepare required desktop sidecars
         run: node scripts/prepare-mic-sidecar.mjs dev
       - name: Run desktop workspace tests
+        env:
+          # Unit tests do not package release-only agent archives.
+          TAURI_CONFIG: '{"bundle":{"resources":[]}}'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --workspace --all-targets
 
   state-agent-tests:

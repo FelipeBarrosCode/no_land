@@ -412,6 +412,7 @@ export interface ProvisionedServerSteps {
   instanceCreated: boolean;
   instanceReady: boolean;
   sshConnected: boolean;
+  desktopPasswordConfigured?: boolean;
   nvidiaHeadlessConfigured: boolean;
   sunshineConfigured: boolean;
   lowLatencyAudioConfigured: boolean;
@@ -582,6 +583,24 @@ export interface RentedInstanceSummary {
   embeddedMoonlightRendererDroppedFrameCount?: number | null;
   embeddedMoonlightAudioSampleCount?: number | null;
   embeddedMoonlightPaired?: boolean | null;
+}
+
+export interface RuntimeStatus {
+  enabled: boolean;
+  releaseConfigured: boolean;
+  details: {
+    installed: boolean;
+    runtimeId: string | null;
+    previousId: string | null;
+    compatibility: string;
+    progress: { phase: string; message: string; error: string | null } | null;
+    apps: { id: string; name: string; file: string; profile: string }[];
+  } | null;
+}
+
+export interface RuntimePlan {
+  requiredBytes: number;
+  manifest: { id: string; sha256: string; downloadBytes: number; extractedBytes: number };
 }
 
 export interface LaunchLibraryItem {

@@ -83,6 +83,66 @@ fn interactive_sessions(
 }
 
 impl RemoteExec {
+    /// Quiet, cancellable automation transport. Unlike interactive diagnostics,
+    /// it never logs command arguments/output. Host identity is pinned per VM.
+    pub fn automation_command(
+        &self,
+        remote_command: &str,
+        known_hosts: &Path,
+    ) -> AppResult<tokio::process::Command> {
+        let os = OsDetection::new();
+        let binary = resolve_ssh_binary("ssh")?;
+        let mut command = Command::new(&binary);
+        configure_no_window(&mut command);
+        configure_bundled_linux_runtime(
+            &mut command,
+            &binary,
+            "ssh-runtime",
+            os.managed_binary_target_triple(),
+        );
+        let known = known_hosts
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('"', "\\\"");
+        command.args([
+            "-T",
+            "-p",
+            &self.ssh_port.to_string(),
+            "-i",
+            &self.private_key_path,
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "ForwardAgent=no",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "PermitLocalCommand=no",
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "-o",
+            &format!("UserKnownHostsFile=\"{known}\""),
+            "-o",
+            "ConnectTimeout=15",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-l",
+            &self.ssh_user,
+            "--",
+            &self.ssh_host,
+            remote_command,
+        ]);
+        let mut command = tokio::process::Command::from(command);
+        command.kill_on_drop(true);
+        Ok(command)
+    }
+
     pub fn is_root(&self) -> bool {
         self.ssh_user == "root"
     }

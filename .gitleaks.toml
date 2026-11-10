@@ -3,6 +3,18 @@ title = "No Land Gitleaks configuration"
 [extend]
 useDefault = true
 
+# The generic rule can cross a JSON comma/newline and capture the next generated
+# translation key as a secret. Match that boundary, not arbitrary locale values.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Cross-property generated translation IDs, not credential assignments"
+condition = "AND"
+paths = ['''(?:^|/)src/locales/[^/]+\.json$''']
+regexTarget = "match"
+regexes = ['''^[^\r\n"]*",\r?\n[ \t]+"generated\.[0-9a-f]{16}"$''']
+
 [allowlist]
 description = "Known non-secret protocol example and redacted legacy README credential"
 regexTarget = "secret"

@@ -4,11 +4,12 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { isTransientAppleNetworkFailure, redactAppleCredentials, runStaplerWithRetry } from './apple-stapler-retry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 const target = process.argv[2] ?? 'aarch64-apple-darwin';
-const scriptRevision = '2026-08-08-notary-dmg-verify-v4';
+const scriptRevision = '2026-11-01-stapler-network-retry-v5';
 const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
 const productName = tauriConfig.productName ?? 'Noland Connect';
 const version = tauriConfig.version ?? '0.1.0';
@@ -53,7 +54,7 @@ try {
   const appSubmission = submitForNotarization(zipPath, 'app zip');
 
   console.log('[notarize-macos-bundle] Stapling notarization ticket to app bundle');
-  run('xcrun', ['stapler', 'staple', '-v', appPath]);
+  runStaplerWithRetry('staple', appPath);
   validateStapledArtifact(appPath, 'app bundle');
   validateGatekeeperForApp(appPath, 'app bundle');
 
@@ -68,7 +69,7 @@ try {
   const dmgSubmission = submitForNotarization(dmgPath, 'dmg');
 
   console.log('[notarize-macos-bundle] Stapling notarization ticket to DMG');
-  run('xcrun', ['stapler', 'staple', '-v', dmgPath]);
+  runStaplerWithRetry('staple', dmgPath);
   validateStapledArtifact(dmgPath, 'dmg');
   validateGatekeeperForDmg(dmgPath, 'dmg');
   validateMountedDmgApp(dmgPath, productName);
@@ -160,7 +161,7 @@ function submitForNotarization(path, label) {
     if (result.status === 0) break;
 
     const diagnostic = formatCommandFailure(result);
-    if (!isTransientNotaryFailure(diagnostic) || attempt === 3) {
+    if (!isTransientAppleNetworkFailure(diagnostic) || attempt === 3) {
       throw new Error(
         `[notarize-macos-bundle] Apple notary submission failed for ${label} (exit ${result.status}).\n${diagnostic}`,
       );
@@ -197,9 +198,6 @@ function formatCommandFailure(result) {
     || 'notarytool returned no diagnostic output';
 }
 
-function isTransientNotaryFailure(output) {
-  return /(?:timed? out|timeout|temporar|network|connection|service unavailable|internal server|HTTP status code: 5\d\d|NSURLErrorDomain|CloudKit)/iu.test(output);
-}
 
 function fetchNotarizationLog(submissionId) {
   const result = run('xcrun', [
@@ -233,7 +231,7 @@ function fetchNotarizationLog(submissionId) {
 
 function validateStapledArtifact(path, label) {
   console.log(`[notarize-macos-bundle] Validating stapled ticket for ${label}`);
-  run('xcrun', ['stapler', 'validate', '-v', path]);
+  runStaplerWithRetry('validate', path);
 }
 
 function validateGatekeeperForApp(path, label) {
@@ -368,18 +366,26 @@ function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: repoRoot,
     env: process.env,
-    stdio: captureOutput ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    encoding: captureOutput ? 'utf8' : undefined,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf8',
+    maxBuffer: 16 * 1024 * 1024,
   });
+  const stdout = redactAppleCredentials(result.stdout);
+  const stderr = redactAppleCredentials(result.stderr);
+  if (!captureOutput) {
+    if (stdout) process.stdout.write(stdout);
+    if (stderr) process.stderr.write(stderr);
+  }
   const status = result.status ?? (result.signal ? 128 : 1);
   if (!allowFailure && status !== 0) {
-    const diagnostic = [result.stderr?.trim(), result.stdout?.trim()].filter(Boolean).join('\n');
+    const diagnostic = [stderr.trim(), stdout.trim()].filter(Boolean).join('\n');
     const signal = result.signal ? ` (signal ${result.signal})` : '';
-    throw new Error(`Command failed: ${command}${signal}${diagnostic ? `\n${diagnostic}` : ''}`);
+    const processError = result.error?.code ? ` (${result.error.code})` : '';
+    throw new Error(`Command failed: ${command}${signal}${processError}${diagnostic ? `\n${diagnostic}` : ''}`);
   }
   return {
     status,
-    stdout: typeof result.stdout === 'string' ? result.stdout : '',
-    stderr: typeof result.stderr === 'string' ? result.stderr : '',
+    stdout,
+    stderr,
   };
 }

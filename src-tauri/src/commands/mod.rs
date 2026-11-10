@@ -3,6 +3,8 @@ pub mod connection;
 pub mod feedback;
 pub use feedback::*;
 pub mod launch_library;
+pub mod runtime;
+pub use runtime::{get_instance_runtime_status, instance_runtime_action};
 pub mod shared_storage;
 pub mod spend;
 
@@ -2168,6 +2170,14 @@ pub async fn select_offer(
         )
     })?;
 
+    if storage_gb > selected.available_storage_gb.min(10000) {
+        return Err(AppError::InvalidInput(format!(
+            "Storage must be between 30GB and {}GB for this offer",
+            selected.available_storage_gb.min(10000)
+        ))
+        .into());
+    }
+
     let next_state = context
         .update_state(|state| {
             state.selected_offer = Some(selected);
@@ -2985,6 +2995,33 @@ pub async fn update_platform_credentials(
         .await?;
 
     Ok(next_state)
+}
+
+#[tauri::command]
+pub async fn apply_instance_desktop_password(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+) -> Result<(), FrontendError> {
+    let guard = context.orchestration_guard.lock().await;
+    if *guard {
+        return Err(AppError::InvalidInput(
+            "Wait for provisioning to finish before changing a desktop password".into(),
+        )
+        .into());
+    }
+    let _action = InstanceLifecycleService::begin_action(
+        context.inner(),
+        instance_id,
+        "desktop password update",
+    )
+    .await?;
+    let result = async {
+        let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+        crate::services::desktop_password::apply(context.inner(), &remote, instance_id).await
+    }
+    .await;
+    drop(guard);
+    result.map_err(Into::into)
 }
 
 #[tauri::command]
@@ -4495,7 +4532,9 @@ pub async fn apply_instance_display_mode(
     instance_id: u64,
     mode: DisplayModeSpec,
 ) -> Result<ApplyDisplayModeResult, FrontendError> {
-    InstanceLifecycleService::acquire_lock(instance_id, "display apply").await?;
+    let _action =
+        InstanceLifecycleService::begin_action(context.inner(), instance_id, "display apply")
+            .await?;
     let result = async {
         let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
         let state = context.load_state().await;
@@ -4540,7 +4579,6 @@ pub async fn apply_instance_display_mode(
             })
             .await;
     }
-    InstanceLifecycleService::release_lock(instance_id).await;
     result.map_err(Into::into)
 }
 
@@ -4549,7 +4587,8 @@ pub async fn reboot_instance_services(
     context: State<'_, AppContext>,
     instance_id: u64,
 ) -> Result<String, FrontendError> {
-    InstanceLifecycleService::acquire_lock(instance_id, "reboot").await?;
+    let _action =
+        InstanceLifecycleService::begin_action(context.inner(), instance_id, "reboot").await?;
     let result = async {
         let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
         let target_user = context.config.audio_target_user.clone();
@@ -4611,7 +4650,6 @@ pub async fn reboot_instance_services(
         result
     }
     .await;
-    InstanceLifecycleService::release_lock(instance_id).await;
     result.map_err(Into::into)
 }
 
@@ -4762,6 +4800,9 @@ pub async fn upload_paths_to_instance(
     local_paths: Vec<String>,
     destination: Option<String>,
 ) -> Result<DirectUploadResult, FrontendError> {
+    let _action =
+        InstanceLifecycleService::begin_action(context.inner(), instance_id, "files upload")
+            .await?;
     if local_paths.is_empty() {
         return Err(AppError::InvalidInput("Select at least one file or folder".into()).into());
     }

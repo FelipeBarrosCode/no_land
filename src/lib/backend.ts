@@ -55,6 +55,7 @@ import type {
   InstanceDisplayStatus,
   ApplyDisplayModeResult,
   LaunchLibraryResponse,
+  RuntimeStatus,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
@@ -68,9 +69,29 @@ import type {
   InstanceConnectionStatusResponse,
 } from "./types";
 
+export async function confirmAppExit(): Promise<void> {
+  return invokeSafe<void>("confirm_app_exit");
+}
+
+export async function cancelAppQuit(): Promise<void> {
+  return invokeSafe<void>("cancel_app_quit");
+}
+
+export async function appQuitDialogReady(): Promise<boolean> {
+  return invokeSafe<boolean>("app_quit_dialog_ready");
+}
+
+export async function takeAppQuitRequest(): Promise<boolean> {
+  return invokeSafe<boolean>("take_app_quit_request");
+}
+
 export async function getAppState(): Promise<PersistedAppState> {
   const state = await invokeSafe<PersistedAppState>("get_app_state");
   return { ...state, feedbackProgram: normalizeFeedbackProgram(state.feedbackProgram) };
+}
+
+export async function applyInstanceDesktopPassword(instanceId: number): Promise<void> {
+  return invokeSafe<void>("apply_instance_desktop_password", { instanceId });
 }
 
 export async function getSpendSummary(): Promise<SpendSummary> {
@@ -250,6 +271,14 @@ export async function subscribeDirectUploadProgress(
   return listen<DirectUploadProgressEvent>("direct-upload:progress", ({ payload }) => {
     callback(payload);
   });
+}
+
+export async function getInstanceRuntimeStatus(instanceId: number): Promise<RuntimeStatus> {
+  return invokeSafe<RuntimeStatus>("get_instance_runtime_status", { instanceId });
+}
+
+export async function instanceRuntimeAction(instanceId: number, action: string, file?: string, appId?: string, artifactSha256?: string): Promise<unknown> {
+  return invokeSafe<unknown>("instance_runtime_action", { instanceId, action, file, appId, artifactSha256 });
 }
 
 export async function getInstanceLaunchLibrary(

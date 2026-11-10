@@ -487,6 +487,24 @@ impl VastApiClient {
         self.get_instance(instance_id).await
     }
 
+    pub async fn start_instance(&self, instance_id: u64) -> AppResult<VastInstance> {
+        let url = format!(
+            "{}/api/v0/instances/{instance_id}/",
+            self.base_url.trim_end_matches('/')
+        );
+        let started = Instant::now();
+        let response = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.api_key)
+            .json(&json!({"state":"running"}))
+            .send()
+            .await
+            .map_err(|error| map_send_error("PUT", &url, error))?;
+        parse_response(response, "PUT", &url, started).await?;
+        self.get_instance(instance_id).await
+    }
+
     pub async fn destroy_instance(&self, instance_id: u64) -> AppResult<()> {
         let url = format!(
             "{}/api/v0/instances/{instance_id}/",

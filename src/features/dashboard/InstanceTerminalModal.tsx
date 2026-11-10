@@ -32,16 +32,22 @@ interface Props {
 export function InstanceTerminalModal({ instance, onClose }: Props) {
   const { t } = useLocalization();
   const hostRef = useRef<HTMLDivElement>(null);
-  const sessionIdRef = useRef<string | null>(null);
+  const instanceId = instance?.instanceId;
+  const sshHost = instance?.sshHost;
+  const sshPort = instance?.sshPort;
   const [status, setStatus] = useState<"connecting" | "connected" | "closed" | "error">(
     instance ? "connecting" : "error",
   );
 
   useEffect(() => {
-    if (!instance || !hostRef.current) return;
+    if (instanceId === undefined || !hostRef.current) return;
 
     let disposed = false;
+    let sessionId: string | null = null;
+    let opening = true;
+    setStatus("connecting");
     const earlyOutput: TerminalOutputEvent[] = [];
+    const earlyClosed: TerminalClosedEvent[] = [];
     const terminal = new Terminal({
       cursorBlink: true,
       cursorStyle: "block",
@@ -79,87 +85,94 @@ export function InstanceTerminalModal({ instance, onClose }: Props) {
     terminal.open(hostRef.current);
     fitAddon.fit();
     terminal.writeln(`\x1b[36m${translate("terminal.banner")}\x1b[0m`);
-    terminal.writeln(`${translate("terminal.connecting", { host: instance.sshHost, port: instance.sshPort })}\r\n`);
+    terminal.writeln(`${translate("terminal.connecting", { host: sshHost ?? "", port: sshPort ?? 22 })}\r\n`);
 
     const resizeObserver = new ResizeObserver(() => {
       fitAddon.fit();
-      const sessionId = sessionIdRef.current;
       if (sessionId) void resizeRemoteTerminal(sessionId, terminal.rows, terminal.cols);
     });
     resizeObserver.observe(hostRef.current);
     const inputDisposable = terminal.onData((data) => {
-      const sessionId = sessionIdRef.current;
       if (sessionId) void writeRemoteTerminal(sessionId, data);
     });
 
     let removeOutputListener: (() => void) | undefined;
     let removeClosedListener: (() => void) | undefined;
-    void Promise.all([
-      listen<TerminalOutputEvent>("remote-terminal-output", ({ payload }) => {
-        const sessionId = sessionIdRef.current;
-        if (!sessionId) {
+    const handleClosed = (payload: TerminalClosedEvent) => {
+      if (typeof payload.exitCode === "number" && payload.exitCode !== 0) {
+        setStatus("error");
+        terminal.writeln(`\r\n\x1b[31m${translate("terminal.ssh.exit", { code: payload.exitCode })}\x1b[0m`);
+      } else {
+        setStatus("closed");
+        terminal.writeln(`\r\n\x1b[33m${translate("terminal.ssh.closed")}\x1b[0m`);
+      }
+      sessionId = null;
+    };
+
+    // Subscribe before spawning SSH, including failures that exit before invoke resolves.
+    void (async () => {
+      removeOutputListener = await listen<TerminalOutputEvent>("remote-terminal-output", ({ payload }) => {
+        if (disposed) return;
+        if (!sessionId && opening) {
           earlyOutput.push(payload);
         } else if (payload.sessionId === sessionId) {
           setStatus((current) => current === "connecting" ? "connected" : current);
           terminal.write(payload.data);
         }
-      }),
-      listen<TerminalClosedEvent>("remote-terminal-closed", ({ payload }) => {
-        if (payload.sessionId !== sessionIdRef.current) return;
-
-        if (typeof payload.exitCode === "number" && payload.exitCode !== 0) {
-          setStatus("error");
-          terminal.writeln(`\r\n\x1b[31m${translate("terminal.ssh.exit", { code: payload.exitCode })}\x1b[0m`);
-        } else {
-          setStatus("closed");
-          terminal.writeln(`\r\n\x1b[33m${translate("terminal.ssh.closed")}\x1b[0m`);
-        }
-      }),
-    ]).then(([removeOutput, removeClosed]) => {
-      if (disposed) {
-        removeOutput();
-        removeClosed();
-      } else {
-        removeOutputListener = removeOutput;
-        removeClosedListener = removeClosed;
-      }
-    });
-
-    void openRemoteTerminal(instance.instanceId)
-      .then((session) => {
-        if (disposed) {
-          void closeRemoteTerminal(session.sessionId);
-          return;
-        }
-        sessionIdRef.current = session.sessionId;
-        fitAddon.fit();
-        void resizeRemoteTerminal(session.sessionId, terminal.rows, terminal.cols);
-        for (const output of earlyOutput) {
-          if (output.sessionId === session.sessionId) terminal.write(output.data);
-        }
-        if (earlyOutput.some((output) => output.sessionId === session.sessionId)) {
-          setStatus("connected");
-        }
-        terminal.focus();
-      })
-      .catch((error) => {
-        if (disposed) return;
-        setStatus("error");
-        terminal.writeln(`\r\n\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`);
       });
+      if (disposed) {
+        removeOutputListener();
+        return;
+      }
+      removeClosedListener = await listen<TerminalClosedEvent>("remote-terminal-closed", ({ payload }) => {
+        if (disposed) return;
+        if (!sessionId && opening) earlyClosed.push(payload);
+        else if (payload.sessionId === sessionId) handleClosed(payload);
+      });
+      if (disposed) {
+        removeClosedListener();
+        return;
+      }
+      const session = await openRemoteTerminal(instanceId);
+      opening = false;
+      if (disposed) {
+        void closeRemoteTerminal(session.sessionId);
+        return;
+      }
+      sessionId = session.sessionId;
+      fitAddon.fit();
+      void resizeRemoteTerminal(session.sessionId, terminal.rows, terminal.cols);
+      for (const output of earlyOutput) {
+        if (output.sessionId === session.sessionId) terminal.write(output.data);
+      }
+      if (earlyOutput.some((output) => output.sessionId === session.sessionId)) {
+        setStatus("connected");
+      }
+      const closed = earlyClosed.find((event) => event.sessionId === session.sessionId);
+      earlyOutput.length = 0;
+      earlyClosed.length = 0;
+      if (closed) handleClosed(closed);
+      terminal.focus();
+    })().catch((error) => {
+      opening = false;
+      if (disposed) return;
+      removeOutputListener?.();
+      removeClosedListener?.();
+      setStatus("error");
+      terminal.writeln(`\r\n\x1b[31m${error instanceof Error ? error.message : String(error)}\x1b[0m`);
+    });
 
     return () => {
       disposed = true;
-      const sessionId = sessionIdRef.current;
-      sessionIdRef.current = null;
       if (sessionId) void closeRemoteTerminal(sessionId);
+      sessionId = null;
       removeOutputListener?.();
       removeClosedListener?.();
       inputDisposable.dispose();
       resizeObserver.disconnect();
       terminal.dispose();
     };
-  }, [instance]);
+  }, [instanceId, sshHost, sshPort]);
 
   return (
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-5xl">

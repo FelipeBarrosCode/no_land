@@ -127,7 +127,7 @@ impl VastOffer {
                 .get("disk_space")
                 .and_then(Value::as_f64)
                 .unwrap_or(50.0)
-                .round() as u32,
+                .floor() as u32,
             raw_geolocation: geolocation,
             time_remaining_hours: parse_time_remaining(value),
             is_verified: value
