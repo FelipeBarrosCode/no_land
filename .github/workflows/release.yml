@@ -25,10 +25,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install package extraction tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y squashfs-tools zstd
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
@@ -102,12 +98,20 @@ jobs:
     needs: [build, version]
     runs-on: ubuntu-24.04
     environment: Secrets
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
           cache: npm
+      - name: Install package extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd
       - name: Download all six signed build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -165,6 +169,19 @@ jobs:
           exit-code: "0"
       - name: Recompute checksums including SBOM
         run: node scripts/ci/hash-artifacts.mjs release-publish release-publish/SHA256SUMS
+      - name: Sign exact release artifacts with Sigstore provenance
+        id: provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-publish/*
+      - name: Include the detached signed provenance bundle
+        env:
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: cp -- "$PROVENANCE_BUNDLE" release-publish/provenance.sigstore.jsonl
+      - name: Verify every release signature and checksum before upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-provenance.mjs release-publish
       - name: Upload validated production release set
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -184,6 +201,7 @@ jobs:
     environment: Secrets
     permissions:
       contents: write
+      attestations: read
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -193,6 +211,10 @@ jobs:
         with:
           name: validated-release-${{ github.sha }}
           path: release-publish
+      - name: Verify signed artifacts again before creating a release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-release-provenance.mjs release-publish
       - name: Create and push production release tag
         shell: bash
         run: |

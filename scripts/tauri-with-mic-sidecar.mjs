@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { prepareRemoteAgentResources } from './remote-agent-artifacts.mjs';
 import { devResourceConfig } from './dev-resource-config.mjs';
+import { codesignRetryEnv } from './apple-codesign-retry.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -370,7 +371,9 @@ function buildNativeEnv(targetTriple) {
       join(env.NOLAND_NATIVE_DEPS_PREFIX, 'share', 'pkgconfig'),
       process.env.PKG_CONFIG_PATH,
     ].filter(Boolean).join(':');
-    return env;
+    // Tauri and the post-build dependency repair both resolve codesign via PATH.
+    // Keep timestamping mandatory while retrying only transient Apple transport failures.
+    return mode === 'build' && process.platform === 'darwin' ? codesignRetryEnv(repoRoot, env) : env;
   }
 
   if (targetTriple.includes('linux')) {
