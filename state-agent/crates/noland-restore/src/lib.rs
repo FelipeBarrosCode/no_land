@@ -283,6 +283,7 @@ pub struct RestoreTransaction<'a> {
     state: TransactionState,
     priorities: RestorePriorityPlan,
     uses_legacy_pack_cache: bool,
+    disk_reservations: Vec<disk::DiskReservation>,
 }
 
 impl<'a> RestoreTransaction<'a> {
@@ -317,6 +318,7 @@ impl<'a> RestoreTransaction<'a> {
             state: TransactionState::Active,
             priorities,
             uses_legacy_pack_cache: true,
+            disk_reservations: Vec::new(),
         }
     }
 
@@ -620,6 +622,22 @@ impl<'a> RestoreTransaction<'a> {
             .extend(tombstones.iter().map(|tombstone| tombstone.root.clone()));
         let mut regular_files = Vec::new();
         let mut symlinks = Vec::new();
+        let mut requests = BTreeMap::<PathBuf, u64>::new();
+        for entry in planned.iter().filter(|entry| !entry.identical) {
+            let file = &self.plan.manifest.files[entry.manifest_index];
+            if file.file_type == "file" {
+                *requests
+                    .entry(
+                        entry
+                            .destination
+                            .parent()
+                            .unwrap_or(&entry.root)
+                            .to_path_buf(),
+                    )
+                    .or_default() += file.size;
+            }
+        }
+        let mut rollback_bytes = 0u64;
         for destination in planned
             .iter()
             .filter(|planned| !planned.identical)
@@ -635,9 +653,14 @@ impl<'a> RestoreTransaction<'a> {
                     target: fs::read_link(destination)?,
                 });
             } else if metadata.is_file() {
+                rollback_bytes = rollback_bytes.saturating_add(metadata.len());
                 regular_files.push(destination.clone());
             }
         }
+        *requests.entry(self.plan.staging.clone()).or_default() += rollback_bytes;
+        self.disk_reservations.push(disk::DiskReservation::reserve(
+            &requests.into_iter().collect::<Vec<_>>(),
+        )?);
         if !regular_files.is_empty() {
             let rollback_root = self.plan.staging.join("pre_restore");
             let view = create_view(&rollback_root, &regular_files, false)?;

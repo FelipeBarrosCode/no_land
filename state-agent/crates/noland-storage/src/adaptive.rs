@@ -46,6 +46,12 @@ impl AdaptiveConcurrency {
         Self::new(max, 1, max)
     }
 
+    /// `rclone cat` has one ordered connection per process, unlike copyto.
+    pub fn for_streams(tuning: &TransferTuning) -> Arc<Self> {
+        let max = tuning.max_parallel_downloads.clamp(1, 32);
+        Self::new(max, 1, max)
+    }
+
     pub fn new(initial: usize, min: usize, max: usize) -> Arc<Self> {
         let max = max.max(1);
         let min = min.max(1).min(max);
@@ -163,6 +169,16 @@ impl Drop for AdaptivePermit<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ordered_streams_do_not_pay_the_copyto_multistream_divisor() {
+        let tuning = TransferTuning::throughput();
+        assert_eq!(AdaptiveConcurrency::for_downloads(&tuning).max(), 2);
+        assert_eq!(AdaptiveConcurrency::for_streams(&tuning).max(), 8);
+        let streams = AdaptiveConcurrency::for_streams(&tuning);
+        streams.record_error(RemoteErrorClass::RateLimited);
+        assert_eq!(streams.current(), 4);
+    }
 
     #[test]
     fn rate_limits_halve_concurrency_within_bounds() {

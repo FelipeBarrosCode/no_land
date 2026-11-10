@@ -279,6 +279,17 @@ fn reconcile_roots(
 ) -> Result<usize> {
     noland_state_core::metrics::Metrics::inc(&agent.metrics.reconciliations_total);
     let roots = roots.into_iter().collect::<BTreeSet<_>>();
+    let preserve_trusted = !agent
+        .db
+        .list_dirty_apps()?
+        .iter()
+        .any(|dirty| dirty.app_id == *app_id && dirty.requires_reconciliation)
+        && !agent
+            .db
+            .list_dirty_roots(Some(app_id))?
+            .iter()
+            .any(|root| root.requires_reconciliation);
+    let mut file_states = Vec::with_capacity(512);
     let mut found = 0;
     let now = Utc::now();
     for root in roots {
@@ -343,7 +354,7 @@ fn reconcile_roots(
             };
             agent.db.update_path_meta(path_id, &record)?;
             if let Some(logical) = logical.as_ref() {
-                agent.db.upsert_file_state(&FileStateRecord {
+                file_states.push(FileStateRecord {
                     app_id: app_id.clone(),
                     logical_root: logical.logical_root.as_token(),
                     relative_path: logical.relative_path.clone(),
@@ -362,7 +373,13 @@ fn reconcile_roots(
                     trust: FileStateTrust::VerifyRequired,
                     last_seen_at: now,
                     last_hashed_at: None,
-                })?;
+                });
+                if file_states.len() >= 512 {
+                    agent
+                        .db
+                        .reconcile_file_states(&file_states, preserve_trusted)?;
+                    file_states.clear();
+                }
             }
             let install_content = install_roots.iter().any(|root| path.starts_with(root));
             let explicit_content = strict_scope.is_some_and(|scope| scope.contains_explicit(&path));
@@ -451,6 +468,9 @@ fn reconcile_roots(
             found += 1;
         }
     }
+    agent
+        .db
+        .reconcile_file_states(&file_states, preserve_trusted)?;
     if clear_dirty_evidence {
         agent.db.clear_reconciliation_required(app_id)?;
         agent.db.clear_dirty_roots(app_id)?;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
@@ -11,8 +11,9 @@ use uuid::Uuid;
 use crate::schema::{MIGRATION_V1, MIGRATION_V2};
 use crate::SCHEMA_VERSION;
 
+#[derive(Clone)]
 pub struct StateDb {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,7 +36,7 @@ impl StateDb {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
         Ok(db)
@@ -48,7 +49,7 @@ impl StateDb {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(db_err)?;
         let db = Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         };
         db.migrate()?;
         Ok(db)

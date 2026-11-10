@@ -265,7 +265,8 @@ pub async fn run_restore_with_session(
                         progress.unit = Some("files".into());
                         progress.detail_json["ready_to_launch_reached"] =
                             serde_json::json!(sample.ready_to_launch);
-                        progress.detail_json["pipeline"] = serde_json::json!({
+                            progress.detail_json["pipeline"] = serde_json::json!({
+                                "phase": sample.phase,
                             "version": 1,
                             "assembled_bytes": sample.assembled_bytes,
                             "readback_bytes": sample.readback_bytes,
@@ -286,7 +287,7 @@ pub async fn run_restore_with_session(
                             &mut progress,
                             RestoreState::Applying.as_str(),
                             sample.completed_entries,
-                            &format!("Streaming and atomically publishing restore files · {:.1} MiB assembled · {:.1} MiB read-back verified",
+                            &format!("{} · {:.1} MiB assembled · {:.1} MiB read-back verified", sample.phase,
                                 sample.assembled_bytes as f64 / 1_048_576.0, sample.readback_bytes as f64 / 1_048_576.0),
                         )
                     },

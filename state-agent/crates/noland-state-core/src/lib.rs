@@ -34,6 +34,7 @@ pub use persistence::*;
 pub use policy::*;
 pub use process::*;
 pub use session::*;
+pub mod disk;
 
 /// FastCDC / packfile constants locked by the implementation plan.
 pub mod constants {

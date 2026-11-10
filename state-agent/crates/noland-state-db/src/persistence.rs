@@ -245,6 +245,17 @@ impl StateDb {
     }
 
     pub fn upsert_file_states(&self, states: &[FileStateRecord]) -> Result<()> {
+        self.reconcile_file_states(states, false)
+    }
+
+    /// Retain verified identity only when observation is continuous. Read/merge/write
+    /// share one transaction so a concurrently dirtied index cannot be overwritten
+    /// using an earlier snapshot of its trust state.
+    pub fn reconcile_file_states(
+        &self,
+        states: &[FileStateRecord],
+        preserve_trusted: bool,
+    ) -> Result<()> {
         if states.is_empty() {
             return Ok(());
         }
@@ -273,6 +284,27 @@ impl StateDb {
                 )
                 .map_err(db_err)?;
             for state in states {
+                let mut state = state.clone();
+                if preserve_trusted {
+                    let previous = tx.query_row(
+                        "SELECT app_id, logical_root, relative_path, canonical_path, file_type, size, mtime_ns, inode, mount_id, mode, content_hash, trust_state, last_seen_at_ms, last_hashed_at_ms FROM file_state_index WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3",
+                        params![state.app_id.as_str(), state.logical_root, state.relative_path],
+                        row_to_file_state,
+                    ).optional().map_err(db_err)?;
+                    if let Some(previous) = previous.filter(|previous| {
+                        previous.fast_identity_matches(
+                            state.size,
+                            state.mtime_ns,
+                            state.inode,
+                            state.mount_id,
+                        ) && previous.file_type == state.file_type
+                            && previous.mode == state.mode
+                    }) {
+                        state.content_hash = previous.content_hash;
+                        state.trust = previous.trust;
+                        state.last_hashed_at = previous.last_hashed_at;
+                    }
+                }
                 stmt.execute(params![
                     state.app_id.as_str(),
                     state.logical_root,
@@ -1377,6 +1409,17 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(stored.fast_identity_matches(128, 99, Some(7), Some(8)));
+        let mut scanned = file_state.clone();
+        scanned.trust = FileStateTrust::VerifyRequired;
+        scanned.content_hash = None;
+        scanned.last_hashed_at = None;
+        db.reconcile_file_states(std::slice::from_ref(&scanned), true)
+            .unwrap();
+        assert!(db
+            .get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+            .unwrap()
+            .unwrap()
+            .fast_identity_matches(128, 99, Some(7), Some(8)));
         assert!(db
             .set_file_state_trust(
                 &app_id,
@@ -1390,6 +1433,24 @@ mod tests {
                 .unwrap()[0]
                 .trust,
             FileStateTrust::Dirty
+        );
+        db.reconcile_file_states(std::slice::from_ref(&scanned), true)
+            .unwrap();
+        assert_eq!(
+            db.get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+                .unwrap()
+                .unwrap()
+                .trust,
+            FileStateTrust::VerifyRequired
+        );
+        db.upsert_file_state(&file_state).unwrap();
+        db.reconcile_file_states(&[scanned], false).unwrap();
+        assert_eq!(
+            db.get_file_state(&app_id, "$XDG_CONFIG_HOME", "game/save.dat")
+                .unwrap()
+                .unwrap()
+                .trust,
+            FileStateTrust::VerifyRequired
         );
 
         let local = LocalCasEntry {

@@ -112,7 +112,7 @@ impl SharedStorageProvider for LocalStorage {
             if count == 0 {
                 break;
             }
-            consumer.write(&buffer[..count])?;
+            consumer.write(&buffer[..count]).await?;
             bytes += count as u64;
             if last.elapsed() >= std::time::Duration::from_millis(500) {
                 if let Some(observer) = observer {
@@ -124,7 +124,7 @@ impl SharedStorageProvider for LocalStorage {
         if let Some(observer) = observer {
             observer.transfer_progress(bytes)?;
         }
-        consumer.finish()
+        consumer.finish().await
     }
 
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {

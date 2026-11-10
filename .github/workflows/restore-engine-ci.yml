@@ -2,7 +2,7 @@ name: Restore engine regression tests
 
 on:
   push:
-    branches: [fix/bounded-restore-pipeline]
+    branches: [fix/bounded-restore-pipeline, perf/shared-storage-dev]
     paths: ["state-agent/**", ".github/workflows/restore-engine-ci.yml", "scripts/ci/restore-pipeline.test.mjs"]
   pull_request:
     paths: ["state-agent/**", ".github/workflows/restore-engine-ci.yml", "scripts/ci/restore-pipeline.test.mjs"]
@@ -34,7 +34,7 @@ jobs:
       - run: node --test scripts/ci/restore-pipeline.test.mjs
       - run: cargo fmt --manifest-path state-agent/Cargo.toml --all -- --check
       - name: Test restore, encryption, and storage libraries only
-        run: cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-restore -p noland-pack -p noland-storage --lib
+        run: cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-restore -p noland-pack -p noland-storage -p noland-cas -p noland-snapshot -p noland-state-core -p noland-state-db --lib
       - name: Lint restore libraries
         # Strict lint for these three engines, not unrelated database API style.
         # Dependencies are still compiled; their normal CI baseline is unchanged.
@@ -56,3 +56,9 @@ jobs:
         run: cargo check --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --all-targets
       - name: Test agent recovery safety
         run: cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --lib recover_
+      - name: Test incremental and retryable backups
+        run: |
+          cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --lib backup::
+      - name: Test reconciliation and observer-gap handling
+        run: |
+          cargo test --locked --manifest-path state-agent/Cargo.toml -p noland-state-agent --lib reconcile::

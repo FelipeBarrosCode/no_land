@@ -46,6 +46,7 @@ pub struct BuiltPack {
     pub path: PathBuf,
     pub bytes: u64,
     pub entries: Vec<PackIndexEntry>,
+    pub checksum: String,
 }
 
 #[derive(Default)]
@@ -70,6 +71,7 @@ struct PackWriter {
     bytes: u64,
     entries: Vec<PackIndexEntry>,
     committed: bool,
+    hasher: blake3::Hasher,
 }
 
 impl PackWriter {
@@ -83,6 +85,10 @@ impl PackWriter {
         file.write_all(&VERSION.to_le_bytes())?;
         let uuid = Uuid::parse_str(&pack_id).unwrap();
         file.write_all(uuid.as_bytes())?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MAGIC);
+        hasher.update(&VERSION.to_le_bytes());
+        hasher.update(uuid.as_bytes());
 
         Ok(Self {
             pack_id,
@@ -92,6 +98,7 @@ impl PackWriter {
             bytes: PACK_HEADER_LEN,
             entries: Vec::new(),
             committed: false,
+            hasher,
         })
     }
 
@@ -99,6 +106,7 @@ impl PackWriter {
         let plaintext_len = u32::try_from(plaintext.len())
             .map_err(|_| StateError::msg("chunk plaintext length exceeds pack format"))?;
         let (compression, stored) = compress_chunk(plaintext)?;
+        noland_state_core::disk::ensure_space(&self.path, stored.len() as u64 + 64)?;
         let blob = encrypt(&self.key, hash.as_bytes(), stored.as_ref())?;
         let ciphertext_len = u32::try_from(blob.ciphertext.len())
             .map_err(|_| StateError::msg("chunk ciphertext length exceeds pack format"))?;
@@ -109,6 +117,11 @@ impl PackWriter {
         file.write_all(&ciphertext_len.to_le_bytes())?;
         file.write_all(&blob.nonce)?;
         file.write_all(&blob.ciphertext)?;
+        self.hasher.update(b"NLCH");
+        self.hasher.update(&plaintext_len.to_le_bytes());
+        self.hasher.update(&ciphertext_len.to_le_bytes());
+        self.hasher.update(&blob.nonce);
+        self.hasher.update(&blob.ciphertext);
 
         self.bytes += RECORD_HEADER_LEN + u64::from(ciphertext_len);
         self.entries.push(PackIndexEntry {
@@ -128,6 +141,10 @@ impl PackWriter {
             .as_mut()
             .expect("unfinished pack writer")
             .flush()?;
+        self.file
+            .as_ref()
+            .expect("unfinished pack writer")
+            .sync_all()?;
         self.file.take();
         self.committed = true;
         Ok(BuiltPack {
@@ -135,6 +152,7 @@ impl PackWriter {
             path: std::mem::take(&mut self.path),
             bytes: self.bytes,
             entries: std::mem::take(&mut self.entries),
+            checksum: format!("blake3:{}", self.hasher.finalize().to_hex()),
         })
     }
 }
