@@ -5,7 +5,25 @@ use uuid::Uuid;
 
 use crate::StateDb;
 
+pub(crate) fn bump_capture_generation(conn: &rusqlite::Connection, app_id: &AppId) -> Result<()> {
+    conn.execute("INSERT INTO capture_generations(app_id, generation) VALUES (?1, 1) ON CONFLICT(app_id) DO UPDATE SET generation=generation+1", [app_id.as_str()]).map_err(db_err)?;
+    Ok(())
+}
+
 impl StateDb {
+    pub fn capture_generation(&self, app_id: &AppId) -> Result<i64> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT generation FROM capture_generations WHERE app_id=?1",
+                [app_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .unwrap_or(0))
+    }
+
     /// Appends a mutation unless an equivalent unprocessed observation already exists.
     ///
     /// The UUID remains the replay/idempotency key, while `(app_id, path, kind,
@@ -37,6 +55,7 @@ impl StateDb {
             .map_err(db_err)?;
 
         if let Some(mutation_id) = existing_id {
+            bump_capture_generation(&tx, &mutation.app_id)?;
             tx.execute(
                 r#"UPDATE app_mutation_journal
                    SET observed_at_ms=MAX(observed_at_ms + 1, ?2), session_id=?3, provenance_json=?4
@@ -73,6 +92,9 @@ impl StateDb {
         )
         .map_err(db_err)?;
         let inserted = tx.changes() != 0;
+        if inserted {
+            bump_capture_generation(&tx, &mutation.app_id)?;
+        }
         tx.commit().map_err(db_err)?;
         Ok(inserted)
     }
@@ -160,6 +182,7 @@ impl StateDb {
         &self,
         app_id: &AppId,
         mutations: &[AppMutationRecord],
+        captured_generation: i64,
     ) -> Result<()> {
         let mut conn = self.lock()?;
         let tx = conn.transaction().map_err(db_err)?;
@@ -168,7 +191,23 @@ impl StateDb {
                 params![mutation.mutation_id.to_string(), mutation.observed_at.timestamp_millis(), Utc::now().timestamp_millis()]).map_err(db_err)?;
         }
         let pending: i64 = tx.query_row("SELECT COUNT(*) FROM app_mutation_journal WHERE app_id=?1 AND processed_at_ms IS NULL", [app_id.as_str()], |row| row.get(0)).map_err(db_err)?;
-        if pending == 0 {
+        let generation: i64 = tx
+            .query_row(
+                "SELECT generation FROM capture_generations WHERE app_id=?1",
+                [app_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_err)?
+            .unwrap_or(0);
+        if generation != captured_generation {
+            tx.execute(
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                [app_id.as_str()],
+            )
+            .map_err(db_err)?;
+        }
+        if pending == 0 && generation == captured_generation {
             tx.execute("DELETE FROM dirty_roots WHERE app_id=?1", [app_id.as_str()])
                 .map_err(db_err)?;
             tx.execute("DELETE FROM dirty_paths WHERE app_id=?1", [app_id.as_str()])
@@ -190,9 +229,10 @@ impl StateDb {
         requires_reconciliation: bool,
     ) -> Result<()> {
         let now = Utc::now().timestamp_millis();
-        self.lock()?
-            .execute(
-                r#"INSERT INTO dirty_roots (
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        tx.execute(
+            r#"INSERT INTO dirty_roots (
                        app_id, canonical_root, logical_root, first_dirty_at_ms,
                        last_dirty_at_ms, mutation_count, requires_reconciliation
                    ) VALUES (?1,?2,?3,?4,?4,1,?5)
@@ -204,15 +244,24 @@ impl StateDb {
                            dirty_roots.requires_reconciliation,
                            excluded.requires_reconciliation
                        )"#,
-                params![
-                    app_id.as_str(),
-                    canonical_root,
-                    logical_root,
-                    now,
-                    requires_reconciliation as i64,
-                ],
+            params![
+                app_id.as_str(),
+                canonical_root,
+                logical_root,
+                now,
+                requires_reconciliation as i64,
+            ],
+        )
+        .map_err(db_err)?;
+        bump_capture_generation(&tx, app_id)?;
+        if requires_reconciliation {
+            tx.execute(
+                "UPDATE file_state_index SET trust_state='VERIFY_REQUIRED' WHERE app_id=?1",
+                [app_id.as_str()],
             )
             .map_err(db_err)?;
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
     }
 
@@ -1310,6 +1359,33 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+
+    #[test]
+    fn captured_mutations_do_not_acknowledge_later_writes_or_observer_gaps() {
+        let (db, app_id) = test_db_with_app();
+        let mutation =
+            AppMutationRecord::new(app_id.clone(), "/home/user/save", AppMutationKind::Modify);
+        db.append_app_mutation(&mutation).unwrap();
+        db.mark_dirty(&app_id, None, false).unwrap();
+        let generation = db.capture_generation(&app_id).unwrap();
+        let captured = db.pending_app_mutations(&app_id, 10).unwrap();
+        // Even a coalesced observation in the same millisecond must have a new version.
+        db.append_app_mutation(&mutation).unwrap();
+        db.finish_backup_mutations(&app_id, &captured, generation)
+            .unwrap();
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 1);
+        assert_eq!(db.list_dirty_apps().unwrap().len(), 1);
+        let captured = db.pending_app_mutations(&app_id, 10).unwrap();
+        let generation = db.capture_generation(&app_id).unwrap();
+        db.mark_dirty(&app_id, None, true).unwrap();
+        db.finish_backup_mutations(&app_id, &captured, generation)
+            .unwrap();
+        assert_eq!(db.count_pending_app_mutations(&app_id).unwrap(), 0);
+        assert!(db.list_dirty_apps().unwrap()[0].requires_reconciliation);
+        db.finish_backup_mutations(&app_id, &[], db.capture_generation(&app_id).unwrap())
+            .unwrap();
+        assert!(db.list_dirty_apps().unwrap().is_empty());
+    }
     use crate::schema::MIGRATION_V1;
 
     fn test_db_with_app() -> (StateDb, AppId) {

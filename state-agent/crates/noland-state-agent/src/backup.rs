@@ -685,6 +685,7 @@ pub async fn run_backup(
         .db
         .get_app(app_id)?
         .ok_or_else(|| StateError::NotFound(app_id.to_string()))?;
+    let captured_generation = agent.db.capture_generation(app_id)?;
     let dirty_state = agent
         .db
         .list_dirty_apps()?
@@ -940,7 +941,7 @@ pub async fn run_backup(
             logical.relative_path.clone(),
         ));
         if !Path::new(&canonical).is_file() {
-            if manifest.parent_bundle_id.is_some() {
+            if inherited.is_some() {
                 tombstones.insert(
                     (logical.logical_root.as_token(), logical.relative_path),
                     "observed deletion or rename".into(),
@@ -962,6 +963,11 @@ pub async fn run_backup(
             }
             _ => {}
         }
+        // A delete followed by recreation in the same capture has live content.
+        tombstones.remove(&(
+            logical.logical_root.as_token(),
+            logical.relative_path.clone(),
+        ));
 
         let metadata = std::fs::metadata(&canonical)?;
         let mtime_ns = metadata_mtime_ns(&metadata).unwrap_or(0);
@@ -974,10 +980,15 @@ pub async fn run_backup(
             logical.relative_path.clone(),
         ));
         if performance != BackupPerformanceMode::Full
+            && !requires_reconciliation
             && !dirty_path_ids.contains(&record.path_id)
             && !mutated_paths.contains(canonical.as_str())
             && indexed.is_some_and(|state| {
                 state.fast_identity_matches(metadata.len(), mtime_ns, inode, None)
+                    && inherited
+                        .as_ref()
+                        .is_some_and(|file| state.content_hash.as_ref() == Some(&file.file_hash))
+                    && state.mode == Some(metadata.mode())
             })
             && inherited.is_some()
         {
@@ -1038,7 +1049,7 @@ pub async fn run_backup(
             {
                 metrics.total_duration_ms =
                     elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
-                finish_backup_evidence(agent, app_id, &pending_mutations)?;
+                finish_backup_evidence(agent, app_id, &pending_mutations, captured_generation)?;
                 mark_noop_completed(agent, &mut op, &mut metrics, &parent_manifest)?;
                 return Ok(parent_manifest);
             }
@@ -1285,6 +1296,7 @@ pub async fn run_backup(
         cas_observations,
         trusted_states,
         pending_mutations,
+        captured_generation,
         incremental,
         metrics,
         checksums: packs
@@ -1309,6 +1321,7 @@ struct PreparedBackup {
     cas_observations: Vec<LocalCasEntry>,
     trusted_states: Vec<FileStateRecord>,
     pending_mutations: Vec<AppMutationRecord>,
+    captured_generation: i64,
     incremental: u64,
     metrics: OperationMetrics,
     checksums: BTreeMap<String, String>,
@@ -1425,6 +1438,7 @@ async fn finish_prepared_backup(
         cas_observations,
         mut trusted_states,
         pending_mutations,
+        captured_generation,
         incremental,
         mut metrics,
         ..
@@ -1525,7 +1539,7 @@ async fn finish_prepared_backup(
         }
     }
     agent.db.upsert_file_states(&trusted_states)?;
-    finish_backup_evidence(agent, app_id, &pending_mutations)?;
+    finish_backup_evidence(agent, app_id, &pending_mutations, captured_generation)?;
     if resumed {
         agent.db.mark_dirty(app_id, None, true)?;
     }
@@ -1731,8 +1745,11 @@ fn finish_backup_evidence(
     agent: &StateAgent,
     app_id: &AppId,
     mutations: &[AppMutationRecord],
+    captured_generation: i64,
 ) -> Result<()> {
-    agent.db.finish_backup_mutations(app_id, mutations)
+    agent
+        .db
+        .finish_backup_mutations(app_id, mutations, captured_generation)
 }
 
 fn mark_noop_completed(

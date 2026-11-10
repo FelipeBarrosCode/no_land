@@ -6,4 +6,4 @@ mod store;
 
 pub use store::{RestoredPathAssociationInput, StateDb};
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;

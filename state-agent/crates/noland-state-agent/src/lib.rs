@@ -169,8 +169,10 @@ impl StateAgent {
         for event in noland_observer::bootstrap_from_procfs() {
             self.hub.inject_process(event);
         }
-        for dirty in self.db.list_dirty_apps()? {
-            self.db.mark_dirty(&dirty.app_id, None, true)?;
+        // Changes made while the observer was offline cannot be inferred from a
+        // clean dirty-app list or metadata alone (same-size rewrites can occur).
+        for app in self.db.list_apps()? {
+            self.db.mark_dirty(&app.app_id, None, true)?;
         }
         Ok(())
     }
