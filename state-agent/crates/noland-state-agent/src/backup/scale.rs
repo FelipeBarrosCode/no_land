@@ -120,7 +120,7 @@ async fn synthetic_storage_workload() {
         println!(
             "STORAGE_SCALE {}",
             serde_json::json!({
-                "phase": ["first_capture", "unchanged_capture", "one_save_capture"][round],
+                "phase": (["first_capture", "unchanged_capture", "one_save_capture"][round]),
                 "files": count, "elapsed_ms": elapsed_ms(started), "metrics": metrics,
                 "filesystem_peak_delta_bytes": sampler.peak.load(Ordering::Relaxed),
             })
@@ -174,7 +174,7 @@ async fn synthetic_storage_workload() {
         println!(
             "STORAGE_SCALE {}",
             serde_json::json!({
-                "phase": ["restore", "unchanged_restore"][round], "files": count,
+                "phase": (["restore", "unchanged_restore"][round]), "files": count,
                 "elapsed_ms": duration.as_millis(), "files_per_second": count as f64 / duration.as_secs_f64(),
                 "assembled_bytes": last.assembled_bytes, "readback_bytes": last.readback_bytes,
                 "published_bytes": last.published_bytes, "reused_files": report.restore.reused_entries,
