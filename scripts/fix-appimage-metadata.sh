@@ -31,7 +31,8 @@ if [[ ${#appimages[@]} -ne 1 ]]; then
 fi
 
 appimage=$(realpath "${appimages[0]}")
-work_dir=$(mktemp -d)
+# Stage on the artifact's filesystem, so the final, verified replacement is a rename.
+work_dir=$(mktemp -d "$(dirname "$appimage")/.appimage-metadata.XXXXXX")
 trap 'rm -rf "$work_dir"' EXIT
 
 extract_dir="$work_dir/appimage"
@@ -43,6 +44,24 @@ mkdir -p "$extract_dir"
 )
 appdir="$extract_dir/squashfs-root"
 
+verify_public_entrypoint() {
+  local root=$1
+  # FUSE can hide a bad root inode mode. Firejail mounts SquashFS with the
+  # kernel, which correctly denies access to root-owned 0700 directories.
+  if [[ -z "$(find "$root" -maxdepth 0 -type d -perm 0755 -print -quit)" ]]; then
+    echo "The packaged AppDir root must have mode 0755 for non-root users: $root" >&2
+    return 1
+  fi
+  if [[ -z "$(find -L "$root/AppRun" -maxdepth 0 -type f -perm 0755 -print -quit)" ]]; then
+    echo "The packaged AppRun must have mode 0755 for non-root users: $root/AppRun" >&2
+    return 1
+  fi
+}
+
+# AppRun alone being executable is insufficient: the serialized filesystem root
+# must also be traversable after appimagetool changes its owner to root.
+chmod 0755 "$appdir"
+
 # AppRun is the AppImage entry point. Some Tauri/linuxdeploy combinations
 # leave it without an executable bit, which makes sandboxed catalog checks
 # fail before the application can start.
@@ -52,6 +71,7 @@ if [[ ! -e "$appdir/AppRun" ]]; then
 fi
 chmod 0755 "$appdir/AppRun"
 test -x "$appdir/AppRun"
+verify_public_entrypoint "$appdir"
 
 mapfile -d '' desktop_files < <(find "$appdir/usr/share/applications" -maxdepth 1 -type f -name '*.desktop' -print0)
 if [[ ${#desktop_files[@]} -ne 1 ]]; then
@@ -108,16 +128,17 @@ mkdir -p "$tool_extract_dir"
 
 repacked="$work_dir/$(basename "$appimage")"
 ARCH="$output_arch" SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}" \
-  "$tool_extract_dir/squashfs-root/AppRun" "$appdir" "$repacked"
+  "$tool_extract_dir/squashfs-root/AppRun" \
+    --mksquashfs-opt=-root-mode --mksquashfs-opt=755 "$appdir" "$repacked"
 test -s "$repacked"
-chmod +x "$repacked"
-mv "$repacked" "$appimage"
+chmod 0755 "$repacked"
 
 verify_dir="$work_dir/verify"
 mkdir -p "$verify_dir"
 (
   cd "$verify_dir"
-  "$appimage" --appimage-extract >/dev/null
+  "$repacked" --appimage-extract >/dev/null
+  verify_public_entrypoint squashfs-root
   test -x squashfs-root/AppRun
   test -s squashfs-root/.DirIcon
   file squashfs-root/.DirIcon | grep -q 'PNG image data'
@@ -126,4 +147,6 @@ mkdir -p "$verify_dir"
   test -e "$desktop"
 )
 
+# Failed validation must leave the original artifact intact.
+mv "$repacked" "$appimage"
 echo "Repacked and verified AppImage metadata: $appimage"
