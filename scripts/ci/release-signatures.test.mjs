@@ -7,13 +7,24 @@ import { test } from 'node:test';
 import { manageSigningInputs, windowsSigningInputs } from '../windows-signing-inputs.mjs';
 import { provenanceBundle, verifyReleaseProvenance } from '../verify-release-provenance.mjs';
 
-const read = path => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
+const normalizeLineEndings = text => text.replace(/\r\n/gu, '\n');
+const read = path => normalizeLineEndings(readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8'));
 const sha = value => createHash('sha256').update(value).digest('hex');
 const fixture = t => {
   const root = mkdtempSync(join(tmpdir(), 'noland-signature-test-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   return root;
 };
+
+test('workflow inspection accepts Windows CRLF checkouts without losing job boundaries', () => {
+  for (const newline of ['\n', '\r\n']) {
+    const text = ['jobs:', '  build-windows:', '    steps: []', '  package-validation:', '    steps: []', '  release:', '    steps: []'].join(newline);
+    const normalized = normalizeLineEndings(text);
+    assert.match(normalized.split('\n  build-windows:\n')[1], /steps: \[\]/u);
+    assert.match(normalized.split('\n  package-validation:\n')[1].split('\n  release:\n')[0], /steps: \[\]/u);
+    assert.match(normalized.split('\n  release:\n')[1], /steps: \[\]/u);
+  }
+});
 
 for (const target of ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']) {
   test(`${target}: app and sidecars are signed before bundling; mutations are detected`, t => {
