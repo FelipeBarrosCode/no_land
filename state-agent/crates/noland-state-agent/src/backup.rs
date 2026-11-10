@@ -2787,9 +2787,13 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect::<BTreeSet<_>>();
             let remote = root.join("cloud");
-            let packs_before = std::fs::read_dir(remote.join("packs"))
+            let packs_before = storage
+                .list_prefix(&noland_storage::RemoteKey::new("packs/"))
+                .await
                 .unwrap()
-                .map(|entry| entry.unwrap().path())
+                .into_iter()
+                .filter(|entry| !entry.is_prefix)
+                .map(|entry| PathBuf::from(entry.key.as_str()))
                 .collect::<BTreeSet<_>>();
             let manifest_path = remote
                 .join(bundle_dir(&app_id, prepared.manifest.bundle_id))
@@ -2807,9 +2811,13 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(resumed.bundle_id, prepared.manifest.bundle_id);
-            let packs_after = std::fs::read_dir(remote.join("packs"))
+            let packs_after = storage
+                .list_prefix(&noland_storage::RemoteKey::new("packs/"))
+                .await
                 .unwrap()
-                .map(|entry| entry.unwrap().path())
+                .into_iter()
+                .filter(|entry| !entry.is_prefix)
+                .map(|entry| PathBuf::from(entry.key.as_str()))
                 .collect::<BTreeSet<_>>();
             assert!(
                 packs_before.is_subset(&packs_after),
