@@ -25,10 +25,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Install package extraction tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y squashfs-tools zstd
       - run: npm ci
       - name: Validate frontend production compilation
         run: npm run build
@@ -66,25 +62,12 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22
       - name: Determine next release version without modifying refs
         id: version
-        shell: bash
-        run: |
-          latest_tag=$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-version:refname | head -n 1)
-          configured_version=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          latest_version="${latest_tag#v}"
-          if [[ -z "$latest_version" ]] || [[ "$(printf '%s\n%s\n' "$latest_version" "$configured_version" | sort -V | tail -n 1)" == "$configured_version" ]]; then
-            version="$configured_version"
-          else
-            version="$latest_version"
-          fi
-          IFS='.' read -r major minor patch <<< "$version"
-          next_tag="v${major}.${minor}.$((patch + 1))"
-          {
-            echo "release_tag=$next_tag"
-            echo "release_name=$next_tag"
-            echo "version=${next_tag#v}"
-          } >> "$GITHUB_OUTPUT"
+        run: node scripts/ci/release-version.mjs
 
   build:
     name: signed-six-platform-build
@@ -108,6 +91,10 @@ jobs:
         with:
           node-version: 22
           cache: npm
+      - name: Install package extraction tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools zstd
       - name: Download all six signed build outputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:

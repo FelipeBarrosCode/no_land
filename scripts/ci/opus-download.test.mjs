@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { verifyFileChecksum } from '../native-download.mjs';
 
 const bootstrap = fs.readFileSync(new URL('../bootstrap-native-deps.mjs', import.meta.url), 'utf8');
 
@@ -30,7 +32,7 @@ function downloader(t, downloadWithResume) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = bootstrap.slice(bootstrap.indexOf('function downloadFile('), bootstrap.indexOf('function prepareBuildDir('));
   const download = runInNewContext(`${source}\ndownloadFile;`, {
-    ...fs, dirname, join, downloadWithResume, Error, console: { log() {} },
+    ...fs, dirname, join, downloadWithResume, verifyFileChecksum, Buffer, Error, console: { log() {} },
   });
   return { destination: join(root, 'opus.tar.gz'), download };
 }
@@ -92,4 +94,40 @@ test('overlapping downloads cannot remove or rename each other\'s partial file',
   assert.notEqual(partials[0], partials[1]);
   assert.deepEqual(fs.readFileSync(destination), bytes);
   assert.deepEqual(fs.readdirSync(dirname(destination)), ['opus.tar.gz']);
+});
+
+test('a truncated cached package with valid magic is replaced only after its pinned checksum passes', t => {
+  const bytes = Buffer.from([0x1f, 0x8b, 0x08, 1, 2, 3, 4]);
+  const sha256 = createHash('sha256').update(bytes).digest('hex');
+  let calls = 0;
+  const { destination, download } = downloader(t, (_url, partial) => {
+    calls += 1;
+    fs.writeFileSync(partial, bytes);
+  });
+  fs.writeFileSync(destination, bytes.subarray(0, 3));
+  download('upstream', destination, { expectedKind: 'tar.gz', sha256 });
+  assert.deepEqual(fs.readFileSync(destination), bytes);
+  download('upstream', destination, { expectedKind: 'tar.gz', sha256 });
+  assert.equal(calls, 1, 'verified cached downloads are reused');
+});
+
+test('a corrupt successful HTTP response never becomes a completed cached package', t => {
+  const { destination, download } = downloader(t, (_url, partial) => {
+    fs.writeFileSync(partial, Buffer.from([0x1f, 0x8b, 0x08]));
+  });
+  assert.throws(() => download('upstream', destination, { expectedKind: 'tar.gz', sha256: 'a'.repeat(64) }), /invalid tar\.gz/);
+  assert.deepEqual(fs.readdirSync(dirname(destination)), []);
+});
+
+test('every managed macOS/Windows SDK package has a pinned upstream checksum', () => {
+  const gstreamerChecksums = JSON.parse(fs.readFileSync(new URL('../gstreamer-checksums.json', import.meta.url), 'utf8'));
+  assert.equal(Object.keys(gstreamerChecksums).length, 4);
+  for (const checksum of Object.values(gstreamerChecksums)) assert.match(checksum, /^[a-f0-9]{64}$/u);
+  const source = bootstrap.slice(bootstrap.indexOf('function gstreamerChecksum('), bootstrap.indexOf('function downloadFile('));
+  const checksum = runInNewContext(`${source}\ngstreamerChecksum;`, { gstreamerChecksums, basename: path => path.split('/').pop(), Error });
+  for (const [name, expected] of Object.entries(gstreamerChecksums)) assert.equal(checksum(`/cache/${name}`), expected);
+  assert.throws(() => checksum('/cache/gstreamer-unknown.pkg'), /No pinned GStreamer checksum/);
+  for (const file of ['runtimePkg', 'develPkg', 'runtimeMsi', 'develMsi']) {
+    assert.ok(bootstrap.includes(`sha256: gstreamerChecksum(${file})`), file);
+  }
 });

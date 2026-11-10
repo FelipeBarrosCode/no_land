@@ -1,0 +1,6 @@
+{
+  "gstreamer-1.0-1.24.13-universal.pkg": "a18458c7cd61e5f2c71bb17c6eb88d54493adb964ec30dd53d96244aac537839",
+  "gstreamer-1.0-devel-1.24.13-universal.pkg": "95633de7eec859e1dbfc4e8e7b650b78a47a31075735eee7550ccf9b919ba398",
+  "gstreamer-1.0-msvc-x86_64-1.24.13.msi": "66915d82adda34189703c36a5d2ef145d2e3afb7afc12c66fcf2ea506e2466d2",
+  "gstreamer-1.0-devel-msvc-x86_64-1.24.13.msi": "0afb4394c2cba3999c0f5e74f28c2ac5d98f03131140e09246d4dcd60a0a0395"
+}

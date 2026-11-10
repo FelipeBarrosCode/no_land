@@ -173,13 +173,17 @@ npm run tauri:build
 
 The repository includes GitHub Actions workflows for direct-download desktop builds.
 
-- macOS artifacts include `.dmg` / app archives;
+- macOS artifacts include `.dmg`, downloadable app ZIPs, and signed updater archives;
 - Windows builds produce installer artifacts;
 - Linux builds produce AppImage, Debian, and RPM packages for x86_64 and ARM64, plus a native Arch Linux x86_64 package;
-- pushes to `main` can update a rolling prerelease;
-- version tags can publish release artifacts.
+- trusted pushes to `main` run the full gated, signed six-platform production release;
+- production tags are created only after every build and package validation succeeds;
+- nightly rehearsals use the same build pipeline without publishing desktop releases.
 
-macOS release builds are designed to require Developer ID signing and notarization credentials. Windows Authenticode and Linux package signing remain separate release-hardening work.
+macOS releases require Developer ID signing and notarization. Windows installers require Azure
+Artifact Signing and Authenticode verification. Linux packages and every updater artifact are
+validated before publication; Linux package-repository signing is separate work. See
+[`docs/operations.md`](docs/operations.md) for the release gates and no-app-build audit commands.
 
 ## Provisioning state and recovery
 

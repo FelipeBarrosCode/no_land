@@ -8,10 +8,11 @@ if (!version || !/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/u.test(version)) {
   process.exit(1);
 }
 
-for (const relativePath of ["package.json", "src-tauri/tauri.conf.json"]) {
+for (const relativePath of ["package.json", "package-lock.json", "src-tauri/tauri.conf.json"]) {
   const path = resolve(relativePath);
   const value = JSON.parse(readFileSync(path, "utf8"));
   value.version = version;
+  if (relativePath === "package-lock.json") value.packages[""].version = version;
   writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
 }
 
