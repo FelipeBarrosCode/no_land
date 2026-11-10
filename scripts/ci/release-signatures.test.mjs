@@ -45,6 +45,7 @@ function release(t) {
   const files = { 'Noland.AppImage': 'appimage bytes', 'Noland.deb': 'deb bytes', 'Noland.rpm': 'rpm bytes', 'latest.json': '{}' };
   for (const [name, content] of Object.entries(files)) writeFileSync(join(root, name), content);
   writeFileSync(join(root, 'SHA256SUMS'), Object.entries(files).map(([name, content]) => `${sha(content)}  ${name}\n`).join(''));
+  writeFileSync(join(root, 'SHA256SUMS.asc'), 'OpenPGP orchestration fixture, not a valid signature');
   writeFileSync(join(root, provenanceBundle), 'offline orchestration fixture, not a valid signature');
   return root;
 }
@@ -54,7 +55,7 @@ test('every exact final artifact and its checksum manifest require cryptographic
   const root = release(t);
   const calls = [];
   const files = await verifyReleaseProvenance(root, { ...policy, run(command, args) { calls.push([command, args]); return { status: 0 }; } });
-  assert.equal(files.length, 5);
+  assert.equal(files.length, 6);
   assert.ok(files.includes('SHA256SUMS'));
   for (const [command, args] of calls) {
     assert.equal(command, 'gh');
@@ -135,7 +136,7 @@ test('release attestations bind all final bytes and are re-verified before a pub
   assert.match(packaging, /attestations: write/);
   assert.match(packaging, /actions\/attest-build-provenance@[a-f0-9]{40}/);
   assert.match(packaging, /subject-path: release-publish\/\*/);
-  assert.ok(packaging.indexOf('Recompute checksums including SBOM') < packaging.indexOf('Sign exact release artifacts'));
+  assert.ok(packaging.indexOf('Sign Linux packages and manifest with OpenPGP') < packaging.indexOf('Sign exact release artifacts'));
   assert.ok(packaging.indexOf('Verify every release signature') < packaging.indexOf('Upload validated production release set'));
   const publish = workflow.split('\n  release:\n')[1];
   assert.ok(publish.indexOf('Verify signed artifacts again') < publish.indexOf('Create and push production release tag'));
