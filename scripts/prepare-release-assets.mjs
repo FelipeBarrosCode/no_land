@@ -65,22 +65,28 @@ for (const descriptor of [
   { artifact: 'tauri-windows-arm64', platform: 'windows-aarch64', pattern: /-setup\.exe$/iu },
   { artifact: 'tauri-windows-x64', platform: 'windows-x86_64', pattern: /-setup\.exe$/iu },
 ]) {
-  const bundle = discoveredFiles.find((file) => {
+  const bundles = discoveredFiles.filter((file) => {
     const relativePath = relative(downloadedAssetsRoot, file).replaceAll('\\', '/');
     return relativePath.startsWith(`${descriptor.artifact}/`) && descriptor.pattern.test(basename(file)) && !/-store-setup\.exe$/iu.test(basename(file));
   });
-  if (!bundle) {
-    console.error(`Missing updater bundle for ${descriptor.platform}`);
+  if (bundles.length !== 1) {
+    console.error(`Expected exactly one updater bundle for ${descriptor.platform}, found ${bundles.length}`);
     process.exit(1);
   }
+  const [bundle] = bundles;
   const signature = `${bundle}.sig`;
   const publishedBundle = publishedBySource.get(bundle);
   if (!existsSync(signature) || !publishedBundle || !publishedBySource.has(signature)) {
     console.error(`Missing updater signature for ${descriptor.platform}: ${signature}`);
     process.exit(1);
   }
+  const signatureText = readFileSync(signature, 'utf8').trim();
+  if (!signatureText) {
+    console.error(`Empty updater signature for ${descriptor.platform}: ${signature}`);
+    process.exit(1);
+  }
   updaterPlatforms[descriptor.platform] = {
-    signature: readFileSync(signature, 'utf8').trim(),
+    signature: signatureText,
     url: `https://github.com/${repositoryOwner}/${repositoryName}/releases/download/${releaseTag}/${encodeURIComponent(basename(publishedBundle))}`,
   };
 }

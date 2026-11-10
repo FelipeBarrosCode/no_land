@@ -42,6 +42,18 @@ updates:
     schedule:
       interval: weekly
 
+  - package-ecosystem: cargo
+    directory: /runtime-agent
+    open-pull-requests-limit: 0
+    schedule:
+      interval: weekly
+
+  - package-ecosystem: cargo
+    directory: /runtime-contracts
+    open-pull-requests-limit: 0
+    schedule:
+      interval: weekly
+
   - package-ecosystem: github-actions
     directory: /
     open-pull-requests-limit: 0

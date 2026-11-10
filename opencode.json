@@ -1,0 +1,16 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "servers": {
+      "noland": {
+        "type": "remote",
+        "oauth": false,
+        "disabled": false,
+        "url": "http://127.0.0.1:47831/mcp",
+        "headers": {
+          "Authorization": "Bearer {file:~/.config/opencode/secrets/noland-token}"
+        }
+      }
+    }
+  }
+}

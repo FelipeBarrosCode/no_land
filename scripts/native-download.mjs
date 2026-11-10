@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
-import { rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { closeSync, openSync, readSync, rmSync } from 'node:fs';
 
 const sleepSync = milliseconds => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
 
@@ -47,9 +48,27 @@ export function downloadWithResume(url, destination, {
     if (attempt === attempts) {
       throw new Error(`curl download failed after ${attempt} attempts (exit ${result.status}): ${url}`);
     }
+    // A few immediate retries exhaust the budget during upstream 503s. Keep
+    // progress through repeated truncations, but bound both attempts and time.
     const delay = Math.min(30_000, 1000 * 2 ** (attempt - 1));
     if (deadline - now() <= delay) throw new Error(`curl download exceeded its 30-minute retry budget: ${url}`);
     console.warn(`[bootstrap-native-deps] Retrying download (${attempt}/${attempts}) in ${delay / 1000}s: ${url}`);
     sleep(delay);
   }
+}
+
+export function verifyFileChecksum(path, expected) {
+  if (!/^[a-f0-9]{64}$/u.test(expected)) throw new Error('Expected a pinned SHA-256 checksum');
+  const hash = createHash('sha256');
+  const descriptor = openSync(path, 'r');
+  try {
+    const buffer = Buffer.alloc(1024 * 1024);
+    let bytes;
+    while ((bytes = readSync(descriptor, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, bytes));
+    }
+  } finally {
+    closeSync(descriptor);
+  }
+  if (hash.digest('hex') !== expected) throw new Error(`SHA-256 checksum mismatch: ${path}`);
 }

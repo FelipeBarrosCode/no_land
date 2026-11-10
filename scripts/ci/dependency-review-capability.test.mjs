@@ -188,7 +188,7 @@ test("the full npm/Rust audit matrix is an unconditional prerequisite, not a ski
   assert.doesNotMatch(audits, /^    if:|continue-on-error/mu);
   assert.match(audits, /^      fail-fast: false$/mu);
   assert.deepEqual([...audits.matchAll(/^          - ecosystem: (.+)$/gmu)].map((match) => match[1]), [
-    "npm", "rust-network-contracts", "rust-network-agent", "rust-state-agent", "rust-desktop", "rust-mic-sidecar", "rust-mic-receiver",
+    "npm", "rust-network-contracts", "rust-network-agent", "rust-state-agent", "rust-desktop", "rust-mic-sidecar", "rust-mic-receiver", "rust-runtime-agent",
   ]);
   assert.match(audits, /^        run: npm audit --audit-level=high$/mu);
   assert.match(audits, /cargo audit --file "\$\{\{ matrix\.directory \}\}\/Cargo\.lock"/u);

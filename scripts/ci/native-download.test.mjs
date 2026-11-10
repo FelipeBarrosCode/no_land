@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { promisify } from 'node:util';
-import { downloadWithResume as download } from '../native-download.mjs';
+import { downloadWithResume as download, verifyFileChecksum } from '../native-download.mjs';
 
 const downloadWithResume = (url, destination, options) => download(url, destination, { sleep() {}, ...options });
 
@@ -110,7 +111,7 @@ test('more than four interrupted responses retain progress until the download su
   assert.equal(calls, 7);
 });
 
-test('retry time is capped and curl uses the remaining budget', t => {
+test('retry time is capped and each curl timeout respects the remaining budget', t => {
   let clock = 0;
   let calls = 0;
   assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
@@ -134,6 +135,17 @@ test('interrupted curl is not silently retried', t => {
   assert.equal(calls, 1);
 });
 
+test('checksum validation covers multiple blocks and rejects truncated packages', t => {
+  const destination = fixture(t);
+  const bytes = Buffer.alloc(2 * 1024 * 1024 + 7, 'x');
+  const checksum = createHash('sha256').update(bytes).digest('hex');
+  writeFileSync(destination, bytes);
+  verifyFileChecksum(destination, checksum);
+  writeFileSync(destination, bytes.subarray(0, -1));
+  assert.throws(() => verifyFileChecksum(destination, checksum), /checksum mismatch/);
+  assert.throws(() => verifyFileChecksum(destination, ''), /pinned SHA-256/);
+});
+
 test('missing curl fails immediately', t => {
   assert.throws(() => downloadWithResume('https://example.test/sdk', fixture(t), {
     run() { return { error: new Error('spawn curl ENOENT') }; },
@@ -145,8 +157,9 @@ test('release caches contain only completed SDK downloads with versioned target 
   for (const name of ['macOS', 'Windows']) {
     const step = workflow.split(`- name: Cache ${name} GStreamer downloads\n`)[1]?.split('\n      - ')[0];
     assert.ok(step, `${name} download cache is required`);
-    assert.match(step, /actions\/cache@[a-f0-9]{40}/);
-    assert.match(step, /key: native-download-v1-.*matrix\.target.*env\.GSTREAMER_VERSION/);
+    assert.match(step, /actions\/cache\/restore@[a-f0-9]{40}/);
+    assert.match(step, /key: native-download-v2-.*env\.GSTREAMER_VERSION/);
+    assert.ok(step.includes(name === 'macOS' ? 'macos-universal' : 'matrix.target'));
     assert.match(step, /path: src-tauri\/\.native-deps\/cache\/gstreamer-.*\/\*\.(pkg|msi)\n/);
     assert.doesNotMatch(step, /\.partial|restore-keys:/);
   }

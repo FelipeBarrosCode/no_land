@@ -62,5 +62,8 @@ test('downloadable macOS archives use bounded ticket-validation retries without 
 
 test('release suite runs the offline Apple retry regression tests', () => {
   const suite = readFileSync(new URL('../../.github/workflows/_tests.yml', import.meta.url), 'utf8');
-  assert.match(suite, /run: node --test .*scripts\/apple-stapler-retry\.test\.mjs/u);
+  assert.match(suite, /run: npm run test:scripts/u);
+  const runner = readFileSync(new URL('./test-scripts.mjs', import.meta.url), 'utf8');
+  assert.match(runner, /name\.endsWith\('\.test\.mjs'\)/u);
+  assert.doesNotMatch(runner, /'scripts\/apple-stapler-retry\.test\.mjs'/u);
 });

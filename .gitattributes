@@ -9,3 +9,14 @@
 *.rs text eol=lf
 *.toml text eol=lf
 *.txt text eol=lf
+
+# CI regression fixtures parse source/config text on all six hosted targets.
+# Keep PowerShell checkouts identical to the Linux/macOS workflow inputs.
+*.mjs text eol=lf
+*.cjs text eol=lf
+*.js text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
