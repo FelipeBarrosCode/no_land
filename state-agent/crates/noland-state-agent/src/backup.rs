@@ -1130,9 +1130,7 @@ pub async fn run_backup(
         Arc::new(move || operations.cancel_requested(op_id))
     };
     let snapshot_time = Utc::now();
-    let storage_id = provider
-        .storage_identity()
-        .map(|identity| identity.cache_key());
+    let storage_id = repository_cache_binding(provider.storage_identity(), master);
     let remote_chunks = load_remote_chunk_index(agent, storage_id.as_deref(), snapshot_time)?;
     let cas_observed_at = snapshot_time;
     let mut cas_observations = Vec::<LocalCasEntry>::new();
@@ -1297,6 +1295,7 @@ pub async fn run_backup(
         ContentObjectKind::Pack,
         SyncDirection::Upload,
     )?;
+    cas_lease.sync_all()?;
     write_prepared_backup(agent, master, op_id, &prepared)?;
     if prepared.storage_id.is_some() {
         cas_lease.retain_for_retry();
@@ -1545,7 +1544,8 @@ async fn finish_prepared_backup(
     persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
     let commit_started = Instant::now();
     update_catalog_with_bundle(provider, master, &manifest, incremental).await?;
-    cache_parent(agent, &manifest, &pack_index)?;
+    let cache_binding = repository_cache_binding(provider.storage_identity(), master);
+    cache_parent(agent, &manifest, &pack_index, cache_binding.as_deref())?;
     metrics.commit_duration_ms = elapsed_ms(commit_started);
     let storage_metrics = provider.operation_metrics().saturating_sub(storage_before);
     apply_storage_metrics(&mut metrics, storage_metrics);
@@ -1561,7 +1561,7 @@ async fn finish_prepared_backup(
         })
         .collect::<Vec<_>>();
     agent.db.remember_chunks_bulk(&chunk_rows)?;
-    remember_remote_pack_index(agent, provider.storage_identity(), &pack_index)?;
+    remember_remote_pack_index(agent, provider.storage_identity(), master, &pack_index)?;
     agent.db.upsert_local_cas_entries(
         &cas_observations
             .into_iter()
@@ -1622,8 +1622,9 @@ async fn load_parent(
     app_id: &AppId,
 ) -> Option<(BundleManifest, Vec<PackIndexEntry>)> {
     let (_, bundle_id, _) = agent.db.latest_commit(app_id).ok().flatten()?;
-    if let Some(cached) = read_cached_parent(agent, app_id, bundle_id) {
-        let _ = remember_remote_pack_index(agent, provider.storage_identity(), &cached.1);
+    let binding = repository_cache_binding(provider.storage_identity(), master);
+    if let Some(cached) = read_cached_parent(agent, app_id, bundle_id, binding.as_deref()) {
+        let _ = remember_remote_pack_index(agent, provider.storage_identity(), master, &cached.1);
         return Some(cached);
     }
     let manifest = read_committed_manifest(provider, master, app_id, bundle_id)
@@ -1632,9 +1633,26 @@ async fn load_parent(
     let index = read_pack_index(provider, master, app_id, bundle_id)
         .await
         .ok()?;
-    cache_parent(agent, &manifest, &index).ok()?;
-    let _ = remember_remote_pack_index(agent, provider.storage_identity(), &index);
+    cache_parent(agent, &manifest, &index, binding.as_deref()).ok()?;
+    let _ = remember_remote_pack_index(agent, provider.storage_identity(), master, &index);
     Some((manifest, index))
+}
+
+fn repository_cache_binding(
+    identity: Option<ProviderRootIdentity>,
+    master: &MasterKey,
+) -> Option<String> {
+    let identity = identity?;
+    // Opaque, domain-separated cache scope; neither the key nor credentials are
+    // persisted. Reuse must match both the remote namespace and the vault key.
+    Some(
+        blake3::keyed_hash(
+            &master.0,
+            format!("noland-cache-v1:{}", identity.cache_key()).as_bytes(),
+        )
+        .to_hex()
+        .to_string(),
+    )
 }
 
 fn parent_cache_dir(agent: &StateAgent, app_id: &AppId, bundle_id: Uuid) -> PathBuf {
@@ -1654,8 +1672,9 @@ fn read_cached_parent(
     agent: &StateAgent,
     app_id: &AppId,
     bundle_id: Uuid,
+    binding: Option<&str>,
 ) -> Option<(BundleManifest, Vec<PackIndexEntry>)> {
-    let dir = parent_cache_dir(agent, app_id, bundle_id);
+    let dir = parent_cache_dir(agent, app_id, bundle_id).join(binding?);
     let manifest: BundleManifest =
         serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
     if manifest.bundle_id != bundle_id || manifest.app.app_id != *app_id {
@@ -1694,12 +1713,12 @@ fn load_remote_chunk_index(
 pub(crate) fn remember_remote_pack_index(
     agent: &StateAgent,
     identity: Option<ProviderRootIdentity>,
+    master: &MasterKey,
     index: &[PackIndexEntry],
 ) -> Result<()> {
-    let Some(identity) = identity else {
+    let Some(storage_id) = repository_cache_binding(identity, master) else {
         return Ok(());
     };
-    let storage_id = identity.cache_key();
     let now = Utc::now();
     let entries = index
         .iter()
@@ -1724,8 +1743,12 @@ fn cache_parent(
     agent: &StateAgent,
     manifest: &BundleManifest,
     index: &[PackIndexEntry],
+    binding: Option<&str>,
 ) -> Result<()> {
-    let dir = parent_cache_dir(agent, &manifest.app.app_id, manifest.bundle_id);
+    let Some(binding) = binding else {
+        return Ok(());
+    };
+    let dir = parent_cache_dir(agent, &manifest.app.app_id, manifest.bundle_id).join(binding);
     std::fs::create_dir_all(&dir)?;
     let manifest_temp = dir.join("manifest.json.tmp");
     let index_temp = dir.join("index.json.tmp");
@@ -3256,7 +3279,7 @@ mod tests {
         let index = read_pack_index(&storage, &master, &app_id, first.bundle_id)
             .await
             .unwrap();
-        remember_remote_pack_index(&agent, storage.storage_identity(), &index).unwrap();
+        remember_remote_pack_index(&agent, storage.storage_identity(), &master, &index).unwrap();
 
         std::fs::remove_dir_all(parent_cache_dir(&agent, &app_id, first.bundle_id)).ok();
         agent
@@ -3290,5 +3313,68 @@ mod tests {
             "expected remote pack-index hits, got {metrics:?}"
         );
         std::fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn cache_reuse_is_bound_to_both_repository_and_vault_key() {
+        let root = test_root("cache-scope");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("cache-scope");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Cache Scope"))
+            .unwrap();
+        tracked_save(&agent, &app, "save.dat", b"portable save");
+        let key = MasterKey::generate();
+        let first_storage = LocalStorage::new(root.join("first-cloud"));
+        let second_storage = LocalStorage::new(root.join("second-cloud"));
+        let first = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &first_storage,
+            &key,
+            None,
+        )
+        .await
+        .unwrap();
+        let second = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &second_storage,
+            &key,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.bundle_id, second.bundle_id);
+        assert_eq!(first.files[0].file_hash, second.files[0].file_hash);
+        let index = read_pack_index(&second_storage, &key, &app, second.bundle_id)
+            .await
+            .unwrap();
+        for entry in index {
+            assert!(second_storage
+                .stat(&noland_storage::RemoteKey::new(pack_key(&entry.pack_id)))
+                .await
+                .unwrap()
+                .is_some());
+        }
+        let other_key = MasterKey::generate();
+        let original_scope =
+            repository_cache_binding(second_storage.storage_identity(), &key).unwrap();
+        let other_scope =
+            repository_cache_binding(second_storage.storage_identity(), &other_key).unwrap();
+        assert_ne!(original_scope, other_scope);
+        assert!(read_cached_parent(&agent, &app, second.bundle_id, Some(&other_scope)).is_none());
+        assert!(
+            load_remote_chunk_index(&agent, Some(&other_scope), Utc::now())
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

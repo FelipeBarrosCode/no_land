@@ -418,6 +418,21 @@ impl CasLease {
         &self.root
     }
 
+    /// Make lease names durable before a retry checkpoint references them.
+    pub fn sync_all(&self) -> Result<()> {
+        for directory in [
+            Some(self.root.as_path()),
+            self.root.parent(),
+            Some(self.cas.root()),
+            self.cas.root().parent(),
+        ] {
+            if let Some(directory) = directory {
+                File::open(directory)?.sync_all()?;
+            }
+        }
+        Ok(())
+    }
+
     /// Used only after an authenticated capture checkpoint durably references
     /// this lease. Its owner releases it after the corresponding packs are sealed.
     pub fn retain_for_retry(&self) {

@@ -236,6 +236,7 @@ pub async fn run_restore_with_session(
                 crate::backup::remember_remote_pack_index(
                     agent,
                     storage.storage_identity(),
+                    master,
                     &index,
                 )?;
                 // Restore retries reuse verified local pack/chunk caches directly. Their old

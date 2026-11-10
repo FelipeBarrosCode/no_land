@@ -21,7 +21,7 @@ Rust state-agent; desktop, Android, and iOS send operations to that engine.
 | Restore overlap | Bounded authenticated-record channel feeds an owned assembly thread and bounded verification workers | Cancellation closes channels, joins workers and rolls back before returning; commit waits for progress acknowledgement |
 | Memory | At most one decrypted record per stream turn, even for highly compressed input | Default queue holds eight records, each at most 8 MiB; active streams are separately bounded |
 | Disk admission | Per-filesystem reservations cover destination data, rollback copies and the largest recovery temporary | Space is rechecked during writes; admission never deletes saves |
-| Cache | Operation-specific CAS hardlink leases protect active and retryable inputs; released cache is trimmed | Another operation's lease prevents eviction; retry-owned leases survive interruption |
+| Cache | Operation-specific CAS hardlink leases protect active and retryable inputs; released cache is trimmed | Another operation's lease prevents eviction; retry-owned leases survive interruption; manifest/chunk-index reuse is scoped to the repository and vault key |
 | Visibility | Live hash, pack/upload, preflight, rollback, assembled, published and readback counters | Stage times can overlap and must not be added to estimate elapsed time |
 
 `NOLAND_STORAGE_MIN_FREE_BYTES` controls the free-space margin (default 64 MiB).
@@ -42,7 +42,8 @@ checks, formatting, source contracts and restore/pack/storage lint. Regression
 cases cover authenticated/truncated records, shared/out-of-order chunks, atomic
 publication, cancellation, crash recovery, rollback, 4,096 tiny files, independent
 CAS leases, unchanged complete captures, one-file changes, observation gaps,
-lost upload acknowledgements and interruption after the commit marker.
+lost upload acknowledgements, interruption after the commit marker, repository/key
+cache isolation and low-disk admission before existing saves are touched.
 
 An opt-in library workload exercises the complete capture and restore paths with
 186,619 synthetic files (the Hookshot file count), mixing four 8 MiB files with

@@ -147,6 +147,9 @@ impl PackWriter {
             .sync_all()?;
         self.file.take();
         File::open(self.path.parent().expect("pack parent"))?.sync_all()?;
+        if let Some(parent) = self.path.parent().and_then(Path::parent) {
+            File::open(parent)?.sync_all()?;
+        }
         self.committed = true;
         Ok(BuiltPack {
             pack_id: std::mem::take(&mut self.pack_id),

@@ -87,6 +87,9 @@ fn write_receipt(path: &Path, master: &MasterKey, aad: &str, pack: &BuiltPack) -
     file.sync_all()?;
     std::fs::rename(partial, path)?;
     std::fs::File::open(parent)?.sync_all()?;
+    if let Some(parent) = parent.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 

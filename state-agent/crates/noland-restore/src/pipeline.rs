@@ -1152,6 +1152,48 @@ mod tests {
     }
 
     #[test]
+    fn disk_admission_rejects_oversized_restore_before_touching_existing_saves() {
+        let root = test_dir("pipeline-disk-admission");
+        fs::create_dir_all(&root).unwrap();
+        let mut file = test_file(
+            "game/save.dat",
+            PersistenceClass::PersistentState,
+            SemanticRole::UserState,
+            b"captured",
+        );
+        // Represent a legitimate large request without actually filling the disk.
+        file.size = noland_state_core::disk::available(&root)
+            .unwrap()
+            .1
+            .saturating_add(1);
+        file.chunks[0].size = file.size;
+        let plan = test_plan(&root, test_manifest(vec![file]));
+        let home = root.join("home");
+        let destination = home.join(".local/share/game/save.dat");
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::write(&destination, b"preserve original save").unwrap();
+        let error = block_on(restore_pipelined(
+            &LocalStorage::new(root.join("unused-remote")),
+            &MasterKey::generate(),
+            &plan,
+            &[],
+            &LogicalRootMap::from_home(&home),
+            None,
+            None,
+            PipelineOptions::default(),
+            |_| Ok(()),
+        ))
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("insufficient storage"),
+            "{error}"
+        );
+        assert_eq!(fs::read(destination).unwrap(), b"preserve original save");
+        assert!(!plan.staging.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streamed_restore_uses_existing_file_verification_and_no_tier_rescans() {
         let root = test_dir("pipeline-stream");
         let master = MasterKey::generate();
