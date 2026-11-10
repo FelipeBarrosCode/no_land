@@ -1891,6 +1891,86 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn personal_backup_excludes_dated_server_logs_and_keeps_saves() {
+        let root = test_root("dated-server-log-exclusion");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("test-game"), "Test Game");
+        agent.db.upsert_app(&app).unwrap();
+        let log = agent
+            .config
+            .home
+            .join("server/logs/localhost_access_log.2026-11-09.txt");
+        let save = agent.config.home.join("game/user/save/progress.sav");
+        for (path, bytes) in [
+            (&log, b"diagnostic".as_slice()),
+            (&save, b"save data".as_slice()),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+            associate_path(&agent, &app.app_id, path, EvidenceKind::DirectCgroupWrite);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+        let manifest = run_backup_to_local(
+            &agent,
+            &app.app_id,
+            BackupMode::PersonalState,
+            root.join("cloud"),
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(
+            manifest.files[0].source_path_hint.as_deref(),
+            Some(save.to_string_lossy().as_ref())
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn complete_backup_includes_private_runtime_application_files() {
+        let root = test_root("private-runtime-complete");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let game = agent
+            .config
+            .home
+            .join(".local/share/noland-runtime/app-data/runtime-app/Games/Hookshot");
+        std::fs::create_dir_all(game.join("bin")).unwrap();
+        std::fs::write(game.join("bin/hookshot"), b"executable").unwrap();
+        std::fs::write(game.join("game.data"), b"game assets").unwrap();
+        let other = agent
+            .config
+            .home
+            .join(".local/share/noland-runtime/app-data/other-app/Games/Other/private.dat");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"other app").unwrap();
+        let app = noland_discovery::fallback_exe_identity(Path::new(
+            "/home/runtime/Games/Hookshot/bin/hookshot",
+        ));
+        agent.db.upsert_app(&app).unwrap();
+        agent.discover().unwrap();
+        let manifest = run_backup_to_local(
+            &agent,
+            &app.app_id,
+            BackupMode::CompleteApplication,
+            root.join("cloud"),
+            &MasterKey::generate(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(manifest.files.len(), 2);
+        assert!(manifest.files.iter().all(|file| file
+            .source_path_hint
+            .as_deref()
+            .is_some_and(|path| Path::new(path).starts_with(&game))));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn backup_rejects_directly_indexed_agent_storage() {
         let root = test_root("self-exclusion");
         let cloud = root.join("cloud");

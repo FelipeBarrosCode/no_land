@@ -4,6 +4,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  mkdtempSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -1344,34 +1345,40 @@ function downloadFile(url, destination, options = {}) {
   }
 
   mkdirSync(dirname(destination), { recursive: true });
-  const tempDestination = `${destination}.partial`;
+  // Isolate overlapping builds: one process must never remove or rename
+  // another process's in-progress SDK download.
+  const tempRoot = mkdtempSync(`${destination}.download-`);
+  const tempDestination = join(tempRoot, 'artifact.partial');
   const failures = [];
-  for (const url of urls) {
-    rmSync(tempDestination, { force: true });
-    try {
-      console.log(`[bootstrap-native-deps] Downloading ${url}`);
-      downloadWithResume(url, tempDestination);
-    } catch (error) {
-      failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
-      continue;
-    }
+  try {
+    for (const url of urls) {
+      rmSync(tempDestination, { force: true });
+      try {
+        console.log(`[bootstrap-native-deps] Downloading ${url}`);
+        downloadWithResume(url, tempDestination);
 
-    if (!validateDownloadedFile(tempDestination, expectedKind)) {
-      const preview = readFileSync(tempDestination)
-        .subarray(0, 256)
-        .toString('utf8')
-        .replace(/\s+/g, ' ')
-        .trim();
-      failures.push(`${url}: invalid ${expectedKind || 'artifact'} (${preview || '<binary/empty>'})`);
-      continue;
-    }
+        if (!validateDownloadedFile(tempDestination, expectedKind)) {
+          const preview = existsSync(tempDestination)
+            ? readFileSync(tempDestination)
+              .subarray(0, 256)
+              .toString('utf8')
+              .replace(/\s+/g, ' ')
+              .trim()
+            : '<missing download>';
+          failures.push(`${url}: invalid ${expectedKind || 'artifact'} (${preview || '<binary/empty>'})`);
+          continue;
+        }
 
-    renameSync(tempDestination, destination);
-    return;
+        renameSync(tempDestination, destination);
+        return;
+      } catch (error) {
+        failures.push(`${url}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    throw new Error(`Could not download ${destination}. Attempts:\n${failures.join('\n')}`);
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
   }
-
-  rmSync(tempDestination, { force: true });
-  throw new Error(`Could not download ${destination}. Attempts:\n${failures.join('\n')}`);
 }
 
 function validateDownloadedFile(path, expectedKind) {

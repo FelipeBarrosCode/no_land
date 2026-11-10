@@ -13,6 +13,7 @@ import { InputField } from "../../components/ui/InputField";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import { NotificationSettings } from "./NotificationSettings";
+import { McpSettings } from "./McpSettings";
 import { RemoteDesktopPasswordSettings } from "./RemoteDesktopPasswordSettings";
 import { LOCALE_OPTIONS, translateSource, useLocalization, type LocalePreference, translate } from "../../lib/i18n";
 import { BudgetSettings } from "../spend/BudgetSettings";
@@ -52,6 +53,7 @@ type SettingsSection =
   | "connection"
   | "budget"
   | "notifications"
+  | "mcp"
   | "language";
 type ClientForm = {
   bitrate: string;
@@ -265,7 +267,7 @@ export function SettingsScreen({
       ? "storage"
       : searchParams.get("section") === "budget"
         ? "budget"
-        : "profile",
+        : searchParams.get("section") === "mcp" ? "mcp" : "profile",
   );
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
   const [platformUsername, setPlatformUsername] = useState(
@@ -1487,7 +1489,7 @@ export function SettingsScreen({
   );
 
   const panel =
-    section === "profile"
+    section === "mcp" ? <McpSettings /> : section === "profile"
       ? profilePanel
       : section === "server"
         ? serverPanel
@@ -1585,6 +1587,7 @@ export function SettingsScreen({
               >
                 {t("settings.language")}
               </Button>
+              <Button variant={section === "mcp" ? "secondary" : "ghost"} onClick={() => setSection("mcp")}>{t("mcp.label")}</Button>
             </div>
           </Card>
 

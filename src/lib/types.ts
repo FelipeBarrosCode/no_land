@@ -585,6 +585,24 @@ export interface RentedInstanceSummary {
   embeddedMoonlightPaired?: boolean | null;
 }
 
+export interface RuntimeStatus {
+  enabled: boolean;
+  releaseConfigured: boolean;
+  details: {
+    installed: boolean;
+    runtimeId: string | null;
+    previousId: string | null;
+    compatibility: string;
+    progress: { phase: string; message: string; error: string | null } | null;
+    apps: { id: string; name: string; file: string; profile: string }[];
+  } | null;
+}
+
+export interface RuntimePlan {
+  requiredBytes: number;
+  manifest: { id: string; sha256: string; downloadBytes: number; extractedBytes: number };
+}
+
 export interface LaunchLibraryItem {
   appId: string;
   displayName: string;

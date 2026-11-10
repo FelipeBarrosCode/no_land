@@ -21,6 +21,21 @@ pub struct PathMapping {
     pub staged: PathBuf,
 }
 
+/// A failed copy must not leave a partial snapshot behind. Successful views are
+/// still owned by the caller and retained for backup or restore rollback.
+struct IncompleteView {
+    root: PathBuf,
+    complete: bool,
+}
+
+impl Drop for IncompleteView {
+    fn drop(&mut self) {
+        if !self.complete {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+}
+
 pub fn create_view(
     snapshot_root: &Path,
     sources: &[PathBuf],
@@ -29,6 +44,10 @@ pub fn create_view(
     let id = Uuid::new_v4();
     let dest = snapshot_root.join(id.to_string());
     fs::create_dir_all(&dest)?;
+    let mut cleanup = IncompleteView {
+        root: dest.clone(),
+        complete: false,
+    };
 
     if prefer_btrfs {
         if let Some(common) = common_btrfs_parent(sources) {
@@ -43,6 +62,7 @@ pub fn create_view(
                         })
                     })
                     .collect();
+                cleanup.complete = true;
                 return Ok(SnapshotView {
                     id,
                     root: dest,
@@ -73,6 +93,7 @@ pub fn create_view(
             staged,
         });
     }
+    cleanup.complete = true;
     Ok(SnapshotView {
         id,
         root: dest,
@@ -182,6 +203,35 @@ fn try_btrfs_snapshot(src: &Path, dest: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_copy_removes_only_its_partial_snapshot_and_preserves_sources() {
+        let tmp = std::env::temp_dir().join(format!("noland-snap-failure-{}", Uuid::new_v4()));
+        fs::create_dir_all(&tmp).unwrap();
+        let save = tmp.join("save.dat");
+        fs::write(&save, b"preserve this save").unwrap();
+        // macOS limits Unix socket paths to roughly 100 bytes; the approved
+        // temporary directory alone may already occupy most of that budget.
+        let socket =
+            std::env::temp_dir().join(format!("s-{}", &Uuid::new_v4().simple().to_string()[..12]));
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let snapshots = tmp.join("snapshots");
+        fs::create_dir_all(snapshots.join("previous-successful-view")).unwrap();
+        fs::write(snapshots.join("previous-successful-view/keep"), b"previous").unwrap();
+        let error = create_view(&snapshots, &[save.clone(), socket.clone()], false).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains(&socket.to_string_lossy().to_string()));
+        assert_eq!(fs::read(&save).unwrap(), b"preserve this save");
+        assert_eq!(fs::read_dir(&snapshots).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(snapshots.join("previous-successful-view/keep")).unwrap(),
+            b"previous"
+        );
+        fs::remove_file(socket).unwrap();
+        fs::remove_dir_all(tmp).unwrap();
+    }
 
     #[test]
     fn copy_fallback_uses_distinct_artifacts_for_ambiguous_paths() {

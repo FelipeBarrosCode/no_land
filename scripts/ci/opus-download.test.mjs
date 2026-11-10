@@ -30,7 +30,7 @@ function downloader(t, downloadWithResume) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const source = bootstrap.slice(bootstrap.indexOf('function downloadFile('), bootstrap.indexOf('function prepareBuildDir('));
   const download = runInNewContext(`${source}\ndownloadFile;`, {
-    ...fs, dirname, downloadWithResume, Error, console: { log() {} },
+    ...fs, dirname, join, downloadWithResume, Error, console: { log() {} },
   });
   return { destination: join(root, 'opus.tar.gz'), download };
 }
@@ -63,4 +63,33 @@ test('all mirrors failing reports both errors without publishing a partial archi
     /primary: TLS failure at primary[\s\S]*fallback: TLS failure at fallback/);
   assert.equal(fs.existsSync(destination), false);
   assert.equal(fs.existsSync(`${destination}.partial`), false);
+});
+
+test('missing output is reported cleanly and falls back instead of throwing ENOENT', t => {
+  const { destination, download } = downloader(t, (url, partial) => {
+    if (url === 'fallback') fs.writeFileSync(partial, Buffer.from([0x1f, 0x8b, 0x08]));
+  });
+  assert.throws(() => download('primary', destination, { expectedKind: 'tar.gz' }), /<missing download>/);
+  assert.deepEqual(fs.readdirSync(dirname(destination)), []);
+  download(['primary', 'fallback'], destination, { expectedKind: 'tar.gz' });
+  assert.deepEqual(fs.readFileSync(destination), Buffer.from([0x1f, 0x8b, 0x08]));
+  assert.deepEqual(fs.readdirSync(dirname(destination)), ['opus.tar.gz']);
+});
+
+test('overlapping downloads cannot remove or rename each other\'s partial file', t => {
+  const partials = [];
+  const bytes = Buffer.from([0x1f, 0x8b, 0x08]);
+  const { destination, download } = downloader(t, (url, partial) => {
+    partials.push(partial);
+    fs.writeFileSync(partial, bytes);
+    if (url === 'outer') {
+      download('inner', destination, { expectedKind: 'tar.gz' });
+      assert.deepEqual(fs.readFileSync(partial), bytes);
+    }
+  });
+  download('outer', destination, { expectedKind: 'tar.gz' });
+  assert.equal(partials.length, 2);
+  assert.notEqual(partials[0], partials[1]);
+  assert.deepEqual(fs.readFileSync(destination), bytes);
+  assert.deepEqual(fs.readdirSync(dirname(destination)), ['opus.tar.gz']);
 });

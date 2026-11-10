@@ -116,6 +116,7 @@ export function PostWireguardModal({
     <ModalFrame
       panelClassName="glass-panel pixel-frame crt-surface max-w-3xl"
       zIndexClassName="z-40"
+      mcpInstanceId={appState.instance.instanceId ?? undefined}
     >
         <div className="shrink-0 flex items-center justify-between gap-3 border-b border-[#3e4270] px-6 py-4">
           <div className="min-w-0">
@@ -154,6 +155,7 @@ export function PostWireguardModal({
               variant="ghost"
               className="px-3 py-1 text-[16px]"
               onClick={onClose}
+              data-mcp-allow="true"
               aria-label={translate("generated.11972a6796cce45b")}
             >
               {translate("generated.8db71ed28b0f2f14")}
@@ -193,6 +195,7 @@ export function PostWireguardModal({
               {setup.stage !== "wireguard_connected" ? (
                 <Button
                   onClick={() => void onSetupWireguardAppHandoff()}
+                  data-mcp-allow="true" data-mcp-capability="control"
                   disabled={busy}
                 >
                   {translate("generated.8c8f4e6f0b52ecb8")}
@@ -200,6 +203,7 @@ export function PostWireguardModal({
               ) : (
                 <Button
                   onClick={() => void onSetupMoonlightSunshine()}
+                  data-mcp-allow="true" data-mcp-capability="control"
                   disabled={busy}
                 >
                   {translate("generated.31fbef162594de01")}
@@ -289,6 +293,7 @@ export function PostWireguardModal({
                           )
                         }
                         disabled={busy}
+                        data-mcp-allow="true" data-mcp-capability="control"
                       >
                         {translate("generated.989da04b0aaaa57f")}
                       </Button>
@@ -299,6 +304,7 @@ export function PostWireguardModal({
                   <div className="mt-4 flex flex-wrap gap-2">
                     <Button
                       onClick={() => void onPrepareMoonlightPairingHandoff()}
+                      data-mcp-allow="true" data-mcp-capability="control"
                       disabled={busy}
                     >
                       {translate("generated.f72d57066e49db03")}
@@ -311,6 +317,7 @@ export function PostWireguardModal({
                     <Button
                       variant="ghost"
                       onClick={() => void onRetrySetupStage(setup.lastError!.stage)}
+                      data-mcp-allow="true" data-mcp-capability="control"
                       disabled={busy}
                     >
                       {translate("generated.5501dfe50b30ae90")}

@@ -81,8 +81,9 @@ test('existing-server update is an explicit registered action using the saved pa
   const handler = commands.split('pub async fn apply_instance_desktop_password(')[1]?.split('\n}\n')[0];
   assert.ok(handler);
   assert.match(handler, /orchestration_guard\.lock\(\)\.await/);
-  assert.match(handler, /InstanceLifecycleService::acquire_lock/);
-  assert.match(handler, /InstanceLifecycleService::release_lock/);
+  assert.match(handler, /let _action\s*=\s*InstanceLifecycleService::begin_action\(/);
+  const lifecycle = read('src-tauri/src/services/instance_lifecycle.rs');
+  assert.match(lifecycle, /impl Drop for InstanceActionGuard[\s\S]*?actions\.remove\(&self\.instance_id\)/);
   assert.match(handler, /build_remote_exec_for_instance\(context\.inner\(\), instance_id\)/);
   const entry = ['src-tauri/src/main.rs', 'src-tauri/src/lib.rs']
     .filter((path) => existsSync(new URL(`../${path}`, import.meta.url)))

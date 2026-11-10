@@ -1,10 +1,4 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 
 use serde_json::{Map, Value};
 
@@ -47,44 +41,20 @@ impl JsonMoonlightStateRepository {
         Ok(())
     }
 
-    fn recover_corrupt_state(&self) -> Result<(), MoonlightError> {
-        if !self.state_path.exists() {
-            return Ok(());
-        }
-
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| MoonlightError::Persistence(error.to_string()))?
-            .as_secs();
-        let backup_name = format!("state.corrupt.{timestamp}.json");
-        let backup_path = self
-            .state_path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(backup_name);
-        fs::rename(&self.state_path, backup_path)?;
-        Ok(())
-    }
-
     fn load_root_document(&self) -> Result<MoonlightRootDocument, MoonlightError> {
         self.ensure_parent_exists()?;
 
-        if !self.state_path.exists() {
+        if !self.state_path.try_exists()? {
             return Ok(MoonlightRootDocument::default());
         }
 
         let contents = fs::read_to_string(&self.state_path)?;
-        let raw_value: Value = match serde_json::from_str(&contents) {
-            Ok(value) => value,
-            Err(_) => {
-                self.recover_corrupt_state()?;
-                return Ok(MoonlightRootDocument::default());
-            }
-        };
+        let raw_value: Value = serde_json::from_str(&contents)?;
 
         let Value::Object(mut root_map) = raw_value else {
-            self.recover_corrupt_state()?;
-            return Ok(MoonlightRootDocument::default());
+            return Err(MoonlightError::Persistence(
+                "Persisted state must be a JSON object; existing file was preserved".into(),
+            ));
         };
 
         let moonlight_value = root_map.remove(MOONLIGHT_CONFIG_KEY).unwrap_or(Value::Null);
@@ -191,13 +161,12 @@ mod tests {
     }
 
     #[test]
-    fn recovers_malformed_json() {
+    fn malformed_json_is_preserved_without_resetting() {
         let path = temp_state_path("corrupt");
         fs::write(&path, b"{").unwrap();
         let repo = JsonMoonlightStateRepository::new(path.clone());
-        let snapshot = repo.snapshot().unwrap();
-        assert_eq!(snapshot.schema_version, 1);
-        let dir_entries = fs::read_dir(path.parent().unwrap()).unwrap().count();
-        assert!(dir_entries >= 1);
+        assert!(repo.snapshot().is_err());
+        assert!(repo.update(|_| Ok(())).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{");
     }
 }

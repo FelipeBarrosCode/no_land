@@ -148,51 +148,56 @@ test('closing while SSH is opening closes the late session and removes listeners
 const appSource = ts.createSourceFile('App.tsx', read('src/app/App.tsx'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
 const app = appSource.statements.find((node) => ts.isFunctionDeclaration(node) && node.name?.text === 'App');
 const closeFunctions = app.body.statements.filter((node) => ts.isFunctionDeclaration(node)
-  && ['requestQuit', 'quitWindow', 'deleteAllAndQuit'].includes(node.name?.text)).map((node) => node.getText(appSource)).join('\n');
+  && ['requestQuit', 'quitWindow', 'cancelQuit', 'manageInstancesFromCloseGuard'].includes(node.name?.text)).map((node) => node.getText(appSource)).join('\n');
 
-test('close listener reads current rental state without needing re-registration', async () => {
+test('native close requests use one replayable UI dialog even with empty or unknown rentals', async () => {
   const effect = app.body.statements.find((node) => ts.isExpressionStatement(node)
     && ts.isCallExpression(node.expression) && node.expression.expression.getText(appSource) === 'useEffect'
-    && node.getText(appSource).includes('currentWindow.onCloseRequested'));
+    && node.getText(appSource).includes('"app:quit-requested"'));
   const callback = effect.expression.arguments[0].getText(appSource);
-  let listener; let quitListener; let opened = false; let prevented = 0; let removed = 0; let exits = 0;
-  const current = { loading: false, rentedInstances: [] };
+  const listeners = new Map();
+  let opened = false; let removed = 0; let exits = 0; let pending = false;
   const { register } = compile(`${closeFunctions}\nexports.register = ${callback};`, {}, {
     windowLabelResolved: true, windowLabel: 'main', isRunningInTauri: () => true,
-    getCurrentWindow: () => ({ onCloseRequested: async (handler) => {
-      listener = handler; return () => { removed++; };
-    }, listen: async (event, handler) => {
-      assert.equal(event, 'app:quit-requested');
-      quitListener = handler; return () => { removed++; };
+    getCurrentWindow: () => ({ listen: async (event, handler) => {
+      listeners.set(event, handler); return () => { removed++; };
     } }),
-    useAppStore: { getState: () => current }, closeActionRunningRef: { current: false },
+    closeActionRunningRef: { current: false },
     setCloseGuardError() {}, setCloseGuardOpen: (value) => { opened = value; },
     setDeletingBeforeClose() {}, exitApp: async () => { exits++; },
-    takeAppQuitRequest: async () => false,
+    takeAppQuitRequest: async () => { const value = pending; pending = false; return value; },
   });
+  const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
   const cleanup = register();
-  const event = { preventDefault: () => { prevented++; } };
-  listener(event);
-  assert.equal(prevented, 0);
-  current.rentedInstances = [{ instanceId: 42 }];
-  listener(event);
+  await flush();
+  assert.equal(opened, false);
+  pending = true;
+  listeners.get('app:quit-requested')();
+  await flush();
   assert.equal(opened, true);
-  assert.equal(prevented, 1);
-  opened = false;
-  quitListener();
-  assert.equal(opened, true, 'OS/menu Quit shares the rental confirmation');
-  current.rentedInstances = [];
-  current.loading = true;
-  opened = false;
-  listener(event);
-  assert.equal(opened, true, 'loading must show the guard, not silently swallow close');
-  current.loading = false;
-  quitListener();
-  await Promise.resolve();
-  assert.equal(exits, 1, 'Quit with known empty rentals uses approved native exit');
+  listeners.get('app:quit-dismissed')();
+  assert.equal(opened, false);
+  listeners.get('app:quit-requested')();
+  await flush();
+  assert.equal(opened, false, 'already consumed requests cannot create a second dialog');
+  pending = true;
+  listeners.get('app:quit-requested')();
+  await flush();
+  assert.equal(opened, true);
+  assert.equal(exits, 0, 'no empty-rentals shortcut can silently quit');
   cleanup();
-  for (let i = 0; i < 8; i++) await Promise.resolve();
+  await flush();
   assert.equal(removed, 2);
+});
+
+test('native main-window close and global Quit are intercepted before React', () => {
+  const native = read('src-tauri/src/main.rs');
+  const coordinator = read('src-tauri/src/services/app_exit.rs');
+  assert.match(native, /window\.label\(\) == "main"[\s\S]*?api\.prevent_close\(\);[\s\S]*?request_app_quit\(window\.app_handle\(\)\)/);
+  assert.match(native, /RunEvent::ExitRequested[\s\S]*?api\.prevent_exit\(\);[\s\S]*?request_app_quit\(app\)/);
+  assert.match(coordinator, /claim_fallback/);
+  assert.match(coordinator, /app_quit_dialog_ready/);
+  assert.doesNotMatch(closeFunctions, /destroyInstance|deleteAllAndQuit|rentedInstances\.length/);
 });
 
 test('real Tauri close listener can destroy only the authorized main window', async () => {
@@ -224,9 +229,9 @@ test('loading screen still renders the quit confirmation', () => {
   const loadingBranch = app.body.statements.find((node) => ts.isIfStatement(node)
     && node.expression.getText(appSource) === 'loading');
   const { render } = compile(`exports.render = () => { ${guard.getText(appSource)} ${loadingBranch.getText(appSource)} return closeGuard; };`, {}, {
-    closeGuardOpen: true, loading: true, rentedInstances: [], deletingBeforeClose: false, closeGuardError: null,
+    closeGuardOpen: true, loading: true, instancesStatus: 'loading', quitActiveJobs: 2, rentedInstances: [], deletingBeforeClose: false, closeGuardError: null,
     CloseWithInstancesModal: 'quit-dialog', BootScreen: 'boot-screen',
-    setCloseGuardOpen() {}, quitWindow() {}, deleteAllAndQuit() {}, openSharedStorageFromCloseGuard() {},
+    setCloseGuardOpen() {}, quitWindow() {}, manageInstancesFromCloseGuard() {},
   });
   const children = render().props.children;
   assert.equal(children[0].type, 'boot-screen');
@@ -234,11 +239,11 @@ test('loading screen still renders the quit confirmation', () => {
   assert.equal(children[1].props.instancesLoading, true);
 });
 
-test('failed quit after deletion resets popup state so the user can retry', async () => {
+test('failed quit resets popup state so the user can retry without deleting anything', async () => {
   let deleting = false; let opened = true; let error = null;
   const running = { current: false };
   const destroyed = [];
-  const handlers = compile(`${closeFunctions}\nexports.remove = deleteAllAndQuit;`, {}, {
+  const handlers = compile(`${closeFunctions}\nexports.quit = quitWindow;`, {}, {
     closeActionRunningRef: running,
     useAppStore: { getState: () => ({ rentedInstances: [{ instanceId: 42 }] }) },
     destroyInstance: async (id) => destroyed.push(id),
@@ -247,28 +252,24 @@ test('failed quit after deletion resets popup state so the user can retry', asyn
     setCloseGuardOpen: (value) => { opened = value; },
     setCloseGuardError: (value) => { error = value; },
   });
-  await handlers.remove();
-  assert.deepEqual(destroyed, [42]);
+  await handlers.quit();
+  assert.deepEqual(destroyed, []);
   assert.equal(deleting, false);
   assert.equal(opened, true);
   assert.equal(running.current, false);
   assert.match(error, /Exit refused/);
 });
 
-test('failed rental destruction leaves the app open and unlocks the popup', async () => {
-  let deleting = false; let exits = 0; let error;
-  const running = { current: false };
-  const handlers = compile(`${closeFunctions}\nexports.remove = deleteAllAndQuit;`, {}, {
-    closeActionRunningRef: running,
-    useAppStore: { getState: () => ({ rentedInstances: [{ instanceId: 42 }] }) },
-    destroyInstance: async () => { throw new Error('Provider refused'); },
-    exitApp: async () => { exits++; },
-    setDeletingBeforeClose: (value) => { deleting = value; },
-    setCloseGuardOpen() {}, setCloseGuardError: (value) => { error = value; },
+test('Manage cloud PCs cancels the pending native quit and navigates without exiting', async () => {
+  let opened = true; let cancelled = 0;
+  const window = { location: { hash: '' } };
+  const handlers = compile(`${closeFunctions}\nexports.manage = manageInstancesFromCloseGuard;`, {}, {
+    window,
+    cancelAppQuit: async () => { cancelled++; },
+    setCloseGuardOpen: (value) => { opened = value; },
   });
-  await handlers.remove();
-  assert.equal(exits, 0);
-  assert.equal(deleting, false);
-  assert.equal(running.current, false);
-  assert.match(error, /Provider refused/);
+  await handlers.manage();
+  assert.equal(cancelled, 1);
+  assert.equal(opened, false);
+  assert.equal(window.location.hash, '#/');
 });

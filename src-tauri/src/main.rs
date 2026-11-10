@@ -3,6 +3,7 @@
 mod commands;
 mod errors;
 mod input;
+mod mcp;
 mod mic_client;
 mod models;
 mod moonlight;
@@ -10,14 +11,17 @@ mod network_monitor;
 mod services;
 mod utils;
 
-use std::{fs::OpenOptions, io::Write, path::Path, sync::Arc};
+use std::{fs::OpenOptions, io::Write, sync::Arc};
 
 use crate::moonlight::{domain::ColorRange, infrastructure::persistence::MoonlightStateRepository};
 use commands::*;
 use services::{
     app_config::AppConfig,
     app_context::AppContext,
-    app_exit::{confirm_app_exit, take_app_quit_request, AppExitState, QUIT_REQUESTED_EVENT},
+    app_exit::{
+        app_quit_dialog_ready, cancel_app_quit, confirm_app_exit, request_app_quit,
+        take_app_quit_request, AppExitState,
+    },
     mic_passthrough::MicPassthroughService,
     moonlight::detect_client_display_for_provisioning,
     orchestration::OrchestrationService,
@@ -36,56 +40,6 @@ fn write_startup_diagnostic(stage: &str, message: &str) {
     let path = std::env::temp_dir().join("noland-connect-startup.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[startup:{stage}] {message}");
-    }
-}
-
-fn reset_persisted_state(
-    state_store: &Arc<dyn StateStore>,
-    state_path: &Path,
-    app_data_dir: &Path,
-    moonlight_bootstrap_created: &mut bool,
-    reason: &str,
-) -> crate::models::app_state::PersistedAppState {
-    write_startup_diagnostic("state-reset", reason);
-    warn!("{reason}");
-
-    if let Err(error) = std::fs::remove_file(state_path) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            let message = format!(
-                "Failed deleting persisted state file {}: {error}",
-                state_path.display()
-            );
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-        }
-    }
-
-    match tauri::async_runtime::block_on(moonlight::composition::bootstrap_default_services(
-        state_path.to_path_buf(),
-        app_data_dir.to_path_buf(),
-    )) {
-        Ok(result) => {
-            *moonlight_bootstrap_created = result.created;
-        }
-        Err(error) => {
-            let message =
-                format!("Moonlight bootstrap after state reset could not complete: {error}");
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-            *moonlight_bootstrap_created = false;
-        }
-    }
-
-    match tauri::async_runtime::block_on(state_store.load_state()) {
-        Ok(state) => state,
-        Err(error) => {
-            let message = format!(
-                "Failed recreating persisted state after reset, continuing with defaults: {error}"
-            );
-            write_startup_diagnostic("state-reset", &message);
-            warn!("{message}");
-            crate::models::app_state::PersistedAppState::default()
-        }
     }
 }
 
@@ -132,7 +86,7 @@ fn main() {
                 ),
             );
 
-            let mut moonlight_bootstrap_created = match tauri::async_runtime::block_on(
+            let moonlight_bootstrap_created = match tauri::async_runtime::block_on(
                 moonlight::composition::bootstrap_default_services(
                     state_path.clone(),
                     app_data_dir.clone(),
@@ -160,19 +114,13 @@ fn main() {
 
             let mut initial_state = match tauri::async_runtime::block_on(state_store.load_state()) {
                 Ok(state) => state,
-                Err(error @ crate::errors::AppError::SecureStorage(_)) => {
-                    return Err(format!(
-                        "Protected application state could not be unlocked; state.json was left unchanged: {error}"
-                    )
-                    .into());
+                Err(error) => {
+                    let message = format!(
+                        "Failed loading persisted state; startup stopped without resetting state.json. Free disk space or resolve the reported error, then retry: {error}"
+                    );
+                    write_startup_diagnostic("state-load", &message);
+                    return Err(message.into());
                 }
-                Err(error) => reset_persisted_state(
-                    &state_store,
-                    &state_path,
-                    &app_data_dir,
-                    &mut moonlight_bootstrap_created,
-                    &format!("Failed loading persisted state; deleting and recreating it: {error}"),
-                ),
             };
             let mut detected_stream_defaults = detect_client_display_for_provisioning();
 
@@ -204,16 +152,11 @@ fn main() {
                     }
                 }
                 Err(error) => {
-                    initial_state = reset_persisted_state(
-                        &state_store,
-                        &state_path,
-                        &app_data_dir,
-                        &mut moonlight_bootstrap_created,
-                        &format!(
-                            "Failed normalizing WireGuard state from disk; deleting and recreating persisted state: {error}"
-                        ),
+                    let message = format!(
+                        "Failed normalizing WireGuard state from disk; startup stopped without resetting state.json: {error}"
                     );
-                    state_changed = false;
+                    write_startup_diagnostic("state-normalization", &message);
+                    return Err(message.into());
                 }
             }
 
@@ -485,6 +428,7 @@ fn main() {
             });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
+            mcp::initialize(app.handle(), context.clone());
             services::feedback::FeedbackProgramService::start(app.handle().clone(), context.clone());
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
@@ -511,6 +455,14 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() == "main" {
+                if let WindowEvent::CloseRequested { api, .. } = event {
+                    if window.state::<AppExitState>().needs_confirmation(None) {
+                        api.prevent_close();
+                        request_app_quit(window.app_handle());
+                    }
+                }
+            }
             if matches!(event, WindowEvent::Focused(true)) {
                 let context = window.state::<AppContext>().inner().clone();
                 tauri::async_runtime::spawn(async move { context.feedback.foreground(&context).await; });
@@ -603,8 +555,20 @@ fn main() {
             });
         })
         .invoke_handler(tauri::generate_handler![
+            mcp::mcp_status,
+            mcp::mcp_configure,
+            mcp::mcp_disable,
+            mcp::mcp_access_token,
+            mcp::mcp_rotate_token,
+            mcp::mcp_revoke_token,
+            mcp::mcp_disconnect_agents,
+            mcp::mcp_decide_approval,
+            mcp::mcp_publish_ui,
+            mcp::mcp_complete_ui,
             confirm_app_exit,
             take_app_quit_request,
+            cancel_app_quit,
+            app_quit_dialog_ready,
             get_app_state,
             provider_creation_clear_unconfirmed,
             feedback_program_status,
@@ -638,6 +602,8 @@ fn main() {
             resume_provisioning_existing_instance,
             start_play_existing_instance,
             get_instance_launch_library,
+            get_instance_runtime_status,
+            instance_runtime_action,
             launch_instance_software,
             get_launch_instance_software_job,
             get_software_artwork,
@@ -770,25 +736,16 @@ fn main() {
         .run(|app, event| {
             if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
                 if app.state::<AppExitState>().needs_confirmation(code) {
-                    if let Some(window) = app.get_webview_window("main") {
-                        // OS/menu Quit does not produce a window close event.
-                        // Keep the event loop alive while React presents the same guard.
-                        api.prevent_exit();
-                        app.state::<AppExitState>().request();
-                        if let Err(error) = window.emit(QUIT_REQUESTED_EVENT, ()) {
-                            warn!(%error, "Could not deliver application quit request");
-                        }
-                        #[cfg(target_os = "macos")]
-                        let _ = app.show();
-                        let _ = window.show();
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
-                        return;
-                    }
+                    api.prevent_exit();
+                    request_app_quit(app);
+                    return;
                 }
                 if let Some(context) = app.try_state::<AppContext>() {
                     // Bounded best effort, no feedback HTTP on application shutdown.
                     tauri::async_runtime::block_on(services::feedback::before_teardown(app, context.inner()));
+                }
+                if let Some(manager) = app.try_state::<mcp::McpManager>() {
+                    tauri::async_runtime::block_on(manager.stop());
                 }
             }
         });

@@ -153,6 +153,7 @@ interface AppStore {
   appState: PersistedAppState | null;
   offers: OfferCandidate[];
   rentedInstances: RentedInstanceSummary[];
+  instancesStatus: "loading" | "known" | "unavailable";
   logs: ProvisioningEvent[];
   loading: boolean;
   searching: boolean;
@@ -1073,6 +1074,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     appState: null,
     offers: [],
     rentedInstances: [],
+    instancesStatus: "loading",
     logs: [],
     loading: true,
     searching: false,
@@ -1126,13 +1128,14 @@ export const useAppStore = create<AppStore>((set, get) => {
           getCloudflareTurnSettings().catch(() => null),
         ]);
         let rentedInstances: RentedInstanceSummary[] = [];
+        let instancesStatus: "known" | "unavailable" = "known";
         let vastWalletSummary: VastWalletSummary | null = null;
         if (
           appState.onboardingCompleted &&
           appState.credentials.vastApiKey.trim().length > 0
         ) {
           const [instances, wallet] = await Promise.all([
-            getRentedInstances().catch(() => []),
+            getRentedInstances().catch(() => { instancesStatus = "unavailable"; return []; }),
             getVastWalletSummaryCommand().catch(() => null),
           ]);
           rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(instances);
@@ -1146,6 +1149,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           },
           logs,
           rentedInstances,
+          instancesStatus,
           sharedStorageProfiles: appState.sharedStorageProfiles ?? [],
           vastWalletSummary,
           systemHealth,
@@ -1155,7 +1159,7 @@ export const useAppStore = create<AppStore>((set, get) => {
         });
       } catch (error) {
         const message = mapError(error);
-        set({ loading: false, error: message });
+        set({ loading: false, instancesStatus: "unavailable", error: message });
         void createCrashReport("app.initialize", serializeErrorForReport(error));
       }
     },
@@ -1512,14 +1516,15 @@ export const useAppStore = create<AppStore>((set, get) => {
     loadRentedInstances: async (options) => {
       const background = options?.background === true;
       if (!background) {
-        set({ busy: true, error: null });
+        set({ busy: true, error: null, instancesStatus: "loading" });
       }
       try {
         const rentedInstances = await enrichRentedInstancesWithEmbeddedStatus(
           await getRentedInstances(),
         );
-        set(background ? { rentedInstances } : { rentedInstances, busy: false });
+        set(background ? { rentedInstances, instancesStatus: "known" } : { rentedInstances, instancesStatus: "known", busy: false });
       } catch (error) {
+        set({ instancesStatus: "unavailable" });
         if (!background) {
           set({ busy: false, error: mapError(error) });
         }
