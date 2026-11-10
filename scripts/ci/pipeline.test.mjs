@@ -14,13 +14,16 @@ const step = (source, name) => {
   return body.split('\n      - ')[0];
 };
 
-test('package extraction tools are installed in the consuming release job before any filesystem scan', () => {
+test('package extraction tools are installed in each consuming job before filesystem access', () => {
   const release = workflow('release');
   const packages = job(release, 'package-validation');
   const install = step(packages, 'Install package extraction tools');
   assert.match(install, /apt-get install .*squashfs-tools zstd/u);
   assert.ok(packages.indexOf('Install package extraction tools') < packages.indexOf('Extract scannable package filesystems'));
   assert.doesNotMatch(job(release, 'validation'), /Install package extraction tools/u);
+  const build = job(workflow('_build'), 'build-unix');
+  assert.match(step(build, 'Install Linux build and package dependencies'), /apt-get install .*squashfs-tools/u);
+  assert.ok(build.indexOf('Install Linux build and package dependencies') < build.indexOf('Repair and re-sign portable AppImage metadata'));
 });
 
 test('all six platforms have a required, unprivileged no-build regression lane', () => {
