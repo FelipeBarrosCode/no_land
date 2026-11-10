@@ -30,7 +30,7 @@ export async function verifyReleaseProvenance(root, {
     const match = /^([a-f0-9]{64})  (.+)$/u.exec(line);
     if (!match) throw new Error('Malformed release checksum entry');
     const [, digest, name] = match;
-    if (basename(name) !== name || /[\\\r\n]/u.test(name) || ['.', '..', 'SHA256SUMS', provenanceBundle].includes(name) || expected.has(name)) {
+    if (basename(name) !== name || /[\\\r\n]/u.test(name) || ['.', '..', 'SHA256SUMS', 'SHA256SUMS.asc', provenanceBundle].includes(name) || expected.has(name)) {
       throw new Error(`Unsafe or duplicate release filename: ${name}`);
     }
     expected.set(name, digest);
@@ -38,7 +38,7 @@ export async function verifyReleaseProvenance(root, {
   for (const extension of ['.AppImage', '.deb', '.rpm']) {
     if (![...expected.keys()].some(name => name.endsWith(extension))) throw new Error(`No signed Linux ${extension} artifact in the release`);
   }
-  const files = [...expected.keys(), 'SHA256SUMS'];
+  const files = [...expected.keys(), 'SHA256SUMS', 'SHA256SUMS.asc'];
   const actual = readdirSync(root);
   if (actual.length !== files.length + 1 || actual.some(name => !files.includes(name) && name !== provenanceBundle)) {
     throw new Error('Release set contains files without signed provenance/checksum coverage');
