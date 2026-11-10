@@ -1282,6 +1282,7 @@ pub async fn run_backup(
         incremental: 0,
         metrics,
         checksums: BTreeMap::new(),
+        release_lease: None,
         packing: Some(packing::PackingState {
             plans,
             lease: cas_lease.root().to_path_buf(),
@@ -1320,6 +1321,10 @@ struct PreparedBackup {
     metrics: OperationMetrics,
     checksums: BTreeMap<String, String>,
     packing: Option<packing::PackingState>,
+    // Retain cleanup ownership across a crash after the sealed checkpoint is
+    // durable but before its plaintext lease has been released.
+    #[serde(default)]
+    release_lease: Option<PathBuf>,
 }
 
 fn prepared_backup_path(agent: &StateAgent, operation_id: Uuid) -> PathBuf {
@@ -1356,6 +1361,9 @@ fn write_prepared_backup(
     file.sync_all()?;
     std::fs::rename(temp, &path)?;
     std::fs::File::open(parent)?.sync_all()?;
+    if let Some(parent) = parent.parent() {
+        std::fs::File::open(parent)?.sync_all()?;
+    }
     Ok(())
 }
 
@@ -1426,6 +1434,9 @@ async fn finish_prepared_backup(
     total_started: Instant,
     resumed: bool,
 ) -> Result<BundleManifest> {
+    if agent.operations.cancel_requested(op.operation_id) {
+        return Err(cancellation_error());
+    }
     let storage_before = provider.operation_metrics();
     packing::pack_and_upload(
         agent,
@@ -1436,6 +1447,9 @@ async fn finish_prepared_backup(
         resumed,
     )
     .await?;
+    if agent.operations.cancel_requested(op.operation_id) {
+        return Err(cancellation_error());
+    }
     let PreparedBackup {
         manifest,
         pack_index,
@@ -2278,6 +2292,7 @@ mod tests {
         fail_pack: std::sync::atomic::AtomicBool,
         fail_catalog: std::sync::atomic::AtomicBool,
         uploads: std::sync::atomic::AtomicUsize,
+        after_upload: Option<Box<dyn Fn() -> Result<()> + Send + Sync>>,
     }
 
     #[async_trait::async_trait]
@@ -2302,6 +2317,9 @@ mod tests {
             self.uploads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let meta = self.inner.upload_immutable(local, key).await?;
+            if let Some(after_upload) = &self.after_upload {
+                after_upload()?;
+            }
             if self
                 .fail_pack
                 .swap(false, std::sync::atomic::Ordering::SeqCst)
@@ -2364,6 +2382,7 @@ mod tests {
             fail_pack: false.into(),
             fail_catalog: false.into(),
             uploads: 0.into(),
+            after_upload: None,
         };
         let operation_id = Uuid::new_v4();
         assert!(run_backup(
@@ -2389,6 +2408,19 @@ mod tests {
         .unwrap();
         let uploaded = storage.uploads.load(std::sync::atomic::Ordering::SeqCst);
         assert!(uploaded > 0);
+        // Emulate a crash after persisting the sealed checkpoint, before removing
+        // its lease. An independent capture must remain pinned during recovery.
+        let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks")).unwrap();
+        let active = cas.lease().unwrap();
+        let hash = noland_cas::blake3_hex(b"captured save");
+        let active_chunk = active.put_prehashed(&hash, b"captured save").unwrap();
+        let retired_lease = prepared.release_lease.as_ref().unwrap();
+        std::fs::create_dir_all(retired_lease).unwrap();
+        std::fs::hard_link(
+            &active_chunk.path,
+            retired_lease.join(active_chunk.path.file_name().unwrap()),
+        )
+        .unwrap();
         std::fs::write(&path, b"newer local save must survive retry").unwrap();
         let resumed = run_backup(
             &agent,
@@ -2421,6 +2453,267 @@ mod tests {
             .iter()
             .any(|dirty| dirty.app_id == app_id));
         assert!(!prepared_backup_path(&agent, operation_id).exists());
+        assert!(!retired_lease.exists());
+        cas.evict_to(0).unwrap();
+        assert_eq!(std::fs::read(&active_chunk.path).unwrap(), b"captured save");
+        drop(active);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn writes_during_upload_stay_pending_for_the_next_capture() {
+        let root = test_root("concurrent-save");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("concurrent-save");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Concurrent Save"))
+            .unwrap();
+        let (path, path_id) = tracked_save(&agent, &app, "save.dat", b"save-v1");
+        let mutation =
+            AppMutationRecord::new(app.clone(), path.to_string_lossy(), AppMutationKind::Modify);
+        agent.db.append_app_mutation(&mutation).unwrap();
+        agent.db.mark_dirty(&app, Some(path_id), false).unwrap();
+        let db = agent.db.clone();
+        let changed_app = app.clone();
+        let changed_path = path.clone();
+        let storage = InterruptedUpload {
+            inner: LocalStorage::new(root.join("cloud")),
+            fail: false.into(),
+            fail_pack: false.into(),
+            fail_catalog: false.into(),
+            uploads: 0.into(),
+            after_upload: Some(Box::new(move || {
+                std::fs::write(&changed_path, b"save-v2")?;
+                let mut later = AppMutationRecord::new(
+                    changed_app.clone(),
+                    changed_path.to_string_lossy(),
+                    AppMutationKind::Modify,
+                );
+                // Coalesce into the captured row even within the same millisecond.
+                later.observed_at = mutation.observed_at;
+                db.append_app_mutation(&later)?;
+                db.mark_dirty(&changed_app, Some(path_id), false)?;
+                Ok(())
+            })),
+        };
+        let key = MasterKey::generate();
+        let captured = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &key,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            captured.files[0].file_hash,
+            noland_cas::blake3_hex(b"save-v1")
+        );
+        assert_eq!(agent.db.count_pending_app_mutations(&app).unwrap(), 1);
+        assert!(agent
+            .db
+            .list_dirty_apps()
+            .unwrap()
+            .iter()
+            .any(|dirty| dirty.app_id == app));
+        let next = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage.inner,
+            &key,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.files[0].file_hash, noland_cas::blake3_hex(b"save-v2"));
+        assert_eq!(agent.db.count_pending_app_mutations(&app).unwrap(), 0);
+        assert!(!agent
+            .db
+            .list_dirty_apps()
+            .unwrap()
+            .iter()
+            .any(|dirty| dirty.app_id == app));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn restart_rehashes_same_identity_saves_changed_while_observer_was_offline() {
+        let root = test_root("restart-trust");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("restart-trust");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Restart Trust"))
+            .unwrap();
+        let (path, _) = tracked_save(&agent, &app, "save.dat", b"save-v1");
+        let storage = LocalStorage::new(root.join("cloud"));
+        let key = MasterKey::generate();
+        let first = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &key,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(agent.db.list_dirty_apps().unwrap().is_empty());
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        drop(agent);
+        std::fs::write(&path, b"save-v2").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        let restarted = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        restarted.recover().unwrap();
+        let operation = Uuid::new_v4();
+        let next = run_backup(
+            &restarted,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &key,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_ne!(first.bundle_id, next.bundle_id);
+        assert_eq!(next.files[0].file_hash, noland_cas::blake3_hex(b"save-v2"));
+        assert_eq!(
+            operation_metrics(&restarted.db.get_operation(operation).unwrap().unwrap())
+                .num_files_rehashed,
+            1
+        );
+        drop(restarted);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupted_retry_inputs_fail_before_publication_and_remain_recoverable() {
+        let root = test_root("retry-integrity");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("retry-integrity");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Retry Integrity"))
+            .unwrap();
+        let (save, _) = tracked_save(&agent, &app, "save.dat", b"preserve this save");
+        let storage = InterruptedUpload {
+            inner: LocalStorage::new(root.join("cloud")),
+            fail: false.into(),
+            fail_pack: true.into(),
+            fail_catalog: false.into(),
+            uploads: 0.into(),
+            after_upload: None,
+        };
+        let key = MasterKey::generate();
+        let operation = Uuid::new_v4();
+        assert!(run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &key,
+            Some(operation)
+        )
+        .await
+        .is_err());
+        let prepared = read_prepared_backup(
+            &agent,
+            &storage,
+            &key,
+            operation,
+            &app,
+            BackupMode::PersonalState,
+        )
+        .unwrap()
+        .unwrap();
+        let checkpoint = prepared_backup_path(&agent, operation);
+        let receipt = checkpoint.with_extension("packs").join("0.enc");
+        let directory = agent
+            .config
+            .paths
+            .packs
+            .join(prepared.manifest.bundle_id.to_string());
+        let pack = std::fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "pack"))
+            .unwrap();
+        let uploaded = storage.uploads.load(std::sync::atomic::Ordering::SeqCst);
+        let committed = root
+            .join("cloud")
+            .join(bundle_dir(&app, prepared.manifest.bundle_id))
+            .join(COMMITTED_MARKER);
+        for artifact in [checkpoint, receipt, pack] {
+            let bytes = std::fs::read(&artifact).unwrap();
+            let mut corrupted = bytes.clone();
+            let middle = corrupted.len() / 2;
+            corrupted[middle] ^= 1;
+            std::fs::write(&artifact, corrupted).unwrap();
+            assert!(run_backup(
+                &agent,
+                &app,
+                BackupMode::PersonalState,
+                BackupPerformanceMode::Balanced,
+                &storage,
+                &key,
+                Some(operation)
+            )
+            .await
+            .is_err());
+            assert!(!committed.exists());
+            assert_eq!(
+                storage.uploads.load(std::sync::atomic::Ordering::SeqCst),
+                uploaded
+            );
+            std::fs::write(artifact, bytes).unwrap();
+        }
+        assert!(read_prepared_backup(
+            &agent,
+            &storage,
+            &MasterKey::generate(),
+            operation,
+            &app,
+            BackupMode::PersonalState
+        )
+        .is_err());
+        assert!(read_prepared_backup(
+            &agent,
+            &LocalStorage::new(root.join("other-cloud")),
+            &key,
+            operation,
+            &app,
+            BackupMode::PersonalState
+        )
+        .is_err());
+        let resumed = run_backup(
+            &agent,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &key,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.bundle_id, prepared.manifest.bundle_id);
+        assert_eq!(std::fs::read(save).unwrap(), b"preserve this save");
+        assert!(committed.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2434,13 +2727,15 @@ mod tests {
                 .db
                 .upsert_app(&AppIdentity::new(app_id.clone(), "Pipeline Fixture"))
                 .unwrap();
-            for index in 0..32 {
-                tracked_save(
-                    &agent,
-                    &app_id,
-                    &format!("slot-{index}.sav"),
-                    format!("captured-{index}").as_bytes(),
-                );
+            // Three small-file pack plans exercise a failed upload while other
+            // sealing workers are active, rather than only a one-pack retry.
+            for index in 0..if fail_pack { 132 } else { 32 } {
+                let bytes = if fail_pack {
+                    vec![index as u8; 256 * 1024]
+                } else {
+                    format!("captured-{index}").into_bytes()
+                };
+                tracked_save(&agent, &app_id, &format!("slot-{index}.sav"), &bytes);
             }
             let storage = InterruptedUpload {
                 inner: LocalStorage::new(root.join("cloud")),
@@ -2448,6 +2743,7 @@ mod tests {
                 fail_pack: fail_pack.into(),
                 fail_catalog: (!fail_pack).into(),
                 uploads: 0.into(),
+                after_upload: None,
             };
             let master = MasterKey::generate();
             let operation = Uuid::new_v4();
@@ -2473,6 +2769,23 @@ mod tests {
             .unwrap()
             .unwrap();
             assert_eq!(prepared.packing.is_some(), fail_pack);
+            let expected_packs = prepared
+                .packing
+                .as_ref()
+                .map_or(prepared.pack_files.len(), |packing| packing.plans.len());
+            if fail_pack {
+                assert!(expected_packs > 1);
+            }
+            let sealed_before = std::fs::read_dir(
+                agent
+                    .config
+                    .paths
+                    .packs
+                    .join(prepared.manifest.bundle_id.to_string()),
+            )
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<BTreeSet<_>>();
             let remote = root.join("cloud");
             let packs_before = std::fs::read_dir(remote.join("packs"))
                 .unwrap()
@@ -2498,10 +2811,19 @@ mod tests {
                 .unwrap()
                 .map(|entry| entry.unwrap().path())
                 .collect::<BTreeSet<_>>();
-            assert_eq!(
-                packs_after, packs_before,
-                "retry must keep immutable pack IDs"
+            assert!(
+                packs_before.is_subset(&packs_after),
+                "retry must keep uploaded pack IDs"
             );
+            let remote_names = packs_after
+                .iter()
+                .map(|path| path.file_name().unwrap().to_owned())
+                .collect::<BTreeSet<_>>();
+            assert!(
+                sealed_before.is_subset(&remote_names),
+                "retry must keep locally sealed pack IDs too"
+            );
+            assert_eq!(packs_after.len(), expected_packs);
             if let Some(before) = previous_ciphertext {
                 assert_eq!(std::fs::read(manifest_path).unwrap(), before);
             }

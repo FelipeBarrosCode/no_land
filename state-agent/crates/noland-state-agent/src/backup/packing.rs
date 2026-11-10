@@ -163,7 +163,7 @@ pub(super) async fn pack_and_upload(
     resumed: bool,
 ) -> Result<()> {
     let Some(packing) = prepared.packing.take() else {
-        return Ok(());
+        return release_prepared_lease(agent, operation, prepared);
     };
     let started = Instant::now();
     let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks"))?;
@@ -343,8 +343,21 @@ pub(super) async fn pack_and_upload(
         .pack_index
         .dedup_by(|left, right| left.chunk_hash == right.chunk_hash);
     // After this durable replacement, retry needs only packs, not plaintext chunks.
+    prepared.release_lease = Some(packing.lease);
     write_prepared_backup(agent, master, operation, prepared)?;
-    cas.release_lease(&packing.lease)?;
+    release_prepared_lease(agent, operation, prepared)
+}
+
+fn release_prepared_lease(
+    agent: &StateAgent,
+    operation: Uuid,
+    prepared: &PreparedBackup,
+) -> Result<()> {
+    let Some(lease) = &prepared.release_lease else {
+        return Ok(());
+    };
+    let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks"))?;
+    cas.release_lease(lease)?;
     let max = std::env::var("NOLAND_CAS_CACHE_BYTES")
         .ok()
         .and_then(|value| value.parse().ok())
