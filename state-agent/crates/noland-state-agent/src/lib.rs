@@ -122,6 +122,12 @@ impl StateAgent {
                 "interrupted restore rollback failed; retaining recovery artifacts"
             );
         }
+        if !restore_recovery.failures.is_empty() {
+            return Err(StateError::Invalid(format!(
+                "{} interrupted restore(s) could not be recovered; refusing new operations and retaining recovery artifacts",
+                restore_recovery.failures.len()
+            )));
+        }
         for mut op in self.db.unfinished_operations()? {
             let journal = self.db.sync_journal_summary(op.operation_id)?;
             let has_retry = matches!(op.kind.as_str(), "backup" | "restore");
@@ -504,6 +510,21 @@ mod tests {
             .expect("test working directory should be available")
             .join("target/noland-state-agent-tests")
             .join(format!("{label}-{}", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn recover_refuses_corrupt_restore_journal_without_deleting_it() {
+        let root = test_root("recover-corrupt-restore");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let workspace = agent.config.paths.restore_dir(&Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&workspace).unwrap();
+        let journal = workspace.join("restore-transaction.json");
+        let malformed = b"{preserve-this-corrupt-journal";
+        std::fs::write(&journal, malformed).unwrap();
+        assert!(agent.recover().is_err());
+        assert_eq!(std::fs::read(journal).unwrap(), malformed);
+        drop(agent);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

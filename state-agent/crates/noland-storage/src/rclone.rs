@@ -564,9 +564,8 @@ impl RcloneStorage {
             }
             None => self.run(args).await.map(|_| ()),
         };
-        match &result {
-            Ok(()) => self.upload_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.upload_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result
@@ -740,9 +739,8 @@ impl SharedStorageProvider for RcloneStorage {
             true,
         )?;
         let result = self.run(args).await;
-        match &result {
-            Ok(_) => self.upload_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.upload_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result?;
@@ -886,9 +884,8 @@ impl SharedStorageProvider for RcloneStorage {
             }
             None => self.run(args).await.map(|_| ()),
         };
-        match &result {
-            Ok(()) => self.download_limiter.record_success(started.elapsed()),
-            Err(_) => {}
+        if result.is_ok() {
+            self.download_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result?;
@@ -1073,9 +1070,8 @@ impl SharedStorageProvider for RcloneStorage {
                 false,
             )?;
             let result = self.run(args).await;
-            match &result {
-                Ok(_) => self.upload_limiter.record_success(started.elapsed()),
-                Err(_) => {}
+            if result.is_ok() {
+                self.upload_limiter.record_success(started.elapsed());
             }
             drop(permit);
             result
