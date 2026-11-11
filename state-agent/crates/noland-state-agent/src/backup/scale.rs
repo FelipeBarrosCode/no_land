@@ -177,6 +177,7 @@ async fn synthetic_storage_workload() {
                 "phase": (["restore", "unchanged_restore"][round]), "files": count,
                 "elapsed_ms": duration.as_millis(), "files_per_second": count as f64 / duration.as_secs_f64(),
                 "assembled_bytes": last.assembled_bytes, "readback_bytes": last.readback_bytes,
+                "verified_bytes": last.verified_bytes, "io": report.io,
                 "published_bytes": last.published_bytes, "reused_files": report.restore.reused_entries,
                 "packs_downloaded": report.packs_downloaded,
                 "filesystem_peak_delta_bytes": sampler.peak.load(Ordering::Relaxed),

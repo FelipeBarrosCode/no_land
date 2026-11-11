@@ -266,14 +266,15 @@ pub async fn run_restore_with_session(
                         progress.unit = Some("files".into());
                         progress.detail_json["ready_to_launch_reached"] =
                             serde_json::json!(sample.ready_to_launch);
-                            progress.detail_json["pipeline"] = serde_json::json!({
-                                "phase": sample.phase,
-                                "checked_files": sample.checked_entries,
-                                "rollback_files": sample.rollback_entries,
-                                "preflight_duration_ms": sample.preflight_duration_ms,
-                                "rollback_duration_ms": sample.rollback_duration_ms,
-                            "version": 1,
+                        progress.detail_json["pipeline"] = serde_json::json!({
+                            "phase": sample.phase,
+                            "checked_files": sample.checked_entries,
+                            "rollback_files": sample.rollback_entries,
+                            "preflight_duration_ms": sample.preflight_duration_ms,
+                            "rollback_duration_ms": sample.rollback_duration_ms,
+                            "version": 2,
                             "assembled_bytes": sample.assembled_bytes,
+                            "verified_bytes": sample.verified_bytes,
                             "readback_bytes": sample.readback_bytes,
                             "published_bytes": sample.published_bytes,
                             "total_bytes": sample.total_bytes,
@@ -281,6 +282,7 @@ pub async fn run_restore_with_session(
                             "elapsed_ms": sample.elapsed_ms,
                             "files_per_second": sample.completed_entries as f64 * 1000.0 / sample.elapsed_ms.max(1) as f64,
                             "assembled_bytes_per_second": sample.assembled_bytes as f64 * 1000.0 / sample.elapsed_ms.max(1) as f64,
+                            "io": sample.io,
                         });
                         if sample.ready_to_launch {
                             progress.detail_json["milestones"] =
@@ -292,14 +294,17 @@ pub async fn run_restore_with_session(
                             &mut progress,
                             RestoreState::Applying.as_str(),
                             sample.completed_entries,
-                            &format!("{} · {:.1} MiB assembled · {:.1} MiB read-back verified", sample.phase,
-                                sample.assembled_bytes as f64 / 1_048_576.0, sample.readback_bytes as f64 / 1_048_576.0),
+                            &format!("{} · {:.1} MiB assembled · {:.1} MiB verified · {:.1} MiB extra read-back", sample.phase,
+                                sample.assembled_bytes as f64 / 1_048_576.0,
+                                sample.verified_bytes as f64 / 1_048_576.0,
+                                sample.readback_bytes as f64 / 1_048_576.0),
                         )
                     },
                 )
                 .await?;
                 metrics.restore_apply_duration_ms = report.apply_duration_ms;
                 metrics.download_duration_ms = report.pipeline_duration_ms;
+                progress.detail_json["pipeline"]["io"] = serde_json::to_value(&report.io)?;
                 progress.detail_json["total_packs"] = serde_json::json!(report.packs_downloaded);
                 progress.detail_json["complete_published_files"] =
                     serde_json::json!(report.restore.published_entries);

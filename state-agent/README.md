@@ -45,6 +45,49 @@ cd state-agent
 cargo test --workspace
 ```
 
+## Restore publication pipeline
+
+Linux agents overlap destination-side assembly with a persistent pool that verifies
+and flushes the previous completed-file window. A hand-off is triggered by 128 files,
+32 MiB, or a 100 ms idle timer. Admission covers both windows (queued, verifying,
+and ready files): at most 256 completed files / 64 MiB, with one oversized file
+admitted alone. These are on-disk partials and metadata, not retained file buffers;
+the existing chunk-channel and read-back buffer limits still apply.
+
+Publication waits for the active verification window to finish. It then renames
+files and syncs each distinct parent directory once before reporting publication.
+The next verification window starts after that barrier to avoid concurrent fsyncs
+serializing the rename batch. Every file still receives its full-file hash/size
+check and `sync_all`; write-ahead intents and rollback ordering are preserved.
+All workers are joined before cancellation, failure, or transaction rollback returns.
+
+`PipelineOptions::overlap_file_syncs` enables the overlap on Linux. Non-Linux hosts
+default to staged writes with the same persistent workers: local APFS measurements
+showed concurrent fsyncs slowing small writes. Actual Linux/cloud throughput still
+needs measurement on the target filesystem; this is not a measured cloud speedup.
+
+Progress schema version 2 retains the existing fields and adds `verified_bytes`
+(newly reconstructed files that passed verification and sync) and `io` counters.
+`readback_bytes` counts only extra disk reads; ordered files are hashed during
+assembly. `io` separates write, inline-hash, verification, file-sync, rename,
+directory-sync, batched file-intent journal, destination preparation, and publication
+wait time in microseconds, plus sync/batch counts and peak admission. Worker timings
+are cumulative across threads and overlap assembly, so their sum is not wall time.
+The I/O counters are retained in completed operation details.
+
+Targeted checks, including cancellation, late corruption, idle downloads, partial
+replacement, empty/oversized files, and crash recovery:
+
+```bash
+cargo test -p noland-restore -p noland-state-agent --lib
+cargo test -p noland-restore --lib pipeline::tests::large_small_file_publication_workload -- --ignored --exact --nocapture
+```
+
+The opt-in workload exercises the overlapped path with 186,664 synthetic files,
+checks every published file, and prints `RESTORE_PUBLICATION` timings/counters.
+Its data and storage backend are synthetic; use the reported I/O breakdown for a
+later native Shared Storage restore comparison on the cloud PC.
+
 ## Constraints that are not negotiable
 
 - Backup uses `rclone copy` / `copyto`. Never `rclone sync`.

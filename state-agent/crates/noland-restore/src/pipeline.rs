@@ -1,15 +1,20 @@
 //! Ordered ciphertext -> authenticated records -> destination-side partial files.
 //! Only final file data is retained: no full encrypted cache plus decrypted CAS.
-//! Network pipes provide backpressure while bounded workers verify ready files.
+//! Network pipes provide backpressure while persistent workers verify and flush
+//! completed files concurrently with assembly of a bounded next window.
+#[cfg(test)]
+mod publication_tests;
+mod verification;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::future::{poll_fn, Future};
-use std::io::{Read, Seek, SeekFrom, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::io::{Seek, SeekFrom, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::task::Poll;
@@ -24,6 +29,8 @@ use noland_state_core::{
 use noland_state_db::StateDb;
 use noland_storage::{DownloadObserver, DownloadStreamConsumer, RemoteKey, SharedStorageProvider};
 
+use verification::{VerificationPool, VerificationTask, VerifiedFile};
+
 use super::{
     destination_partial_path, journal, sync_parent_directory, validate_parent_chain,
     DownloadJournal, LogicalRootMap, PlannedDestination, PlannedTombstone, RestorePlan,
@@ -31,6 +38,16 @@ use super::{
 };
 
 const PUBLICATION_BATCH: usize = 128;
+const PUBLICATION_BYTES: u64 = 32 * 1024 * 1024;
+const PUBLICATION_DELAY: Duration = Duration::from_millis(100);
+// Two windows include queued, verifying and verified-but-unpublished files.
+// One oversized file is admitted alone; no file contents are buffered here.
+const MAX_UNPUBLISHED_FILES: usize = PUBLICATION_BATCH * 2;
+const MAX_UNPUBLISHED_BYTES: u64 = PUBLICATION_BYTES * 2;
+
+fn elapsed_us(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineOptions {
@@ -38,6 +55,10 @@ pub struct PipelineOptions {
     /// Bounds encrypted scratch on non-streaming backends. Streaming uses pipes.
     pub max_inflight_pack_bytes: u64,
     pub reconstruction_workers: usize,
+    /// Overlap assembly with the previous window's file flushes. Enabled for
+    /// Linux cloud agents. APFS serializes small writes behind concurrent fsyncs,
+    /// so other hosts retain staged writes while reusing the same worker pool.
+    pub overlap_file_syncs: bool,
     /// Each authenticated record is at most FASTCDC_MAX bytes.
     pub buffered_chunks: usize,
 }
@@ -50,9 +71,32 @@ impl Default for PipelineOptions {
             reconstruction_workers: std::thread::available_parallelism()
                 .map_or(1, usize::from)
                 .min(4),
+            overlap_file_syncs: cfg!(target_os = "linux"),
             buffered_chunks: 8,
         }
     }
+}
+
+/// Cumulative I/O timings, in microseconds. Worker times are summed across
+/// workers and overlap assembly, so they must not be added to elapsed time.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct PipelineIoMetrics {
+    pub overlap_file_syncs: bool,
+    pub write_us: u64,
+    pub inline_hash_us: u64,
+    pub verify_us: u64,
+    pub file_sync_us: u64,
+    pub rename_us: u64,
+    pub directory_sync_us: u64,
+    /// Batched file-intent appends; directory intents are in destination_prepare_us.
+    pub intent_journal_us: u64,
+    pub destination_prepare_us: u64,
+    pub publication_wait_us: u64,
+    pub file_syncs: u64,
+    pub directory_syncs: u64,
+    pub publication_batches: u64,
+    pub peak_unpublished_files: u64,
+    pub peak_unpublished_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -67,10 +111,13 @@ pub struct PipelineProgress {
     pub total_entries: u64,
     pub published_bytes: u64,
     pub assembled_bytes: u64,
+    /// Newly reconstructed bytes that passed full-file verification and sync.
+    pub verified_bytes: u64,
     pub readback_bytes: u64,
     pub total_bytes: u64,
     pub ready_to_launch: bool,
     pub elapsed_ms: u64,
+    pub io: PipelineIoMetrics,
 }
 
 #[derive(Debug, Default)]
@@ -79,6 +126,7 @@ pub struct PipelineReport {
     pub apply_duration_ms: u64,
     pub pipeline_duration_ms: u64,
     pub packs_downloaded: usize,
+    pub io: PipelineIoMetrics,
 }
 
 struct PendingFile {
@@ -103,12 +151,20 @@ struct Pipeline<'tx, 'plan, F> {
     transaction: &'tx mut RestoreTransaction<'plan>,
     pending: BTreeMap<usize, PendingFile>,
     consumers: BTreeMap<String, Vec<Placement>>,
-    ready: Vec<PendingFile>,
+    assembled: Vec<PendingFile>,
+    assembled_bytes: u64,
+    assembled_since: Option<Instant>,
+    ready: Vec<VerifiedFile>,
+    ready_bytes: u64,
+    verifying_files: usize,
+    unpublished_files: usize,
+    unpublished_bytes: u64,
+    verification: VerificationPool,
+    overlap_file_syncs: bool,
     tombstones: Vec<PlannedTombstone>,
     critical: BTreeSet<usize>,
     progress: PipelineProgress,
     report: RestoreReport,
-    workers: usize,
     on_progress: F,
     started: Instant,
     last_progress: Option<Instant>,
@@ -142,56 +198,6 @@ fn open_partial(pending: &PendingFile) -> Result<fs::File> {
         ));
     }
     Ok(file)
-}
-
-fn verify_file(
-    pending: &PendingFile,
-    file: &noland_state_core::ManifestFile,
-    readback: &AtomicU64,
-    buffer: &mut [u8],
-) -> Result<(u64, u64)> {
-    validate_parent_chain(&pending.planned.root, &pending.partial)?;
-    let mut output = open_partial(pending)?;
-    let metadata = output.metadata()?;
-    if pending.received != file.size || metadata.len() != file.size {
-        return Err(StateError::Integrity(
-            "reconstructed file size mismatch".into(),
-        ));
-    }
-    let digest = if pending.out_of_order {
-        let mut hasher = blake3::Hasher::new();
-        loop {
-            let count = output.read(buffer)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-            readback.fetch_add(count as u64, Ordering::Relaxed);
-        }
-        format!("blake3:{}", hasher.finalize().to_hex())
-    } else {
-        format!(
-            "blake3:{}",
-            pending
-                .hasher
-                .as_ref()
-                .map_or_else(
-                    || blake3::Hasher::new().finalize(),
-                    |hasher| hasher.finalize()
-                )
-                .to_hex()
-        )
-    };
-    if digest != file.file_hash {
-        return Err(StateError::Integrity(
-            "reconstructed file hash mismatch".into(),
-        ));
-    }
-    if let Some(mode) = file.mode {
-        output.set_permissions(fs::Permissions::from_mode(mode))?;
-    }
-    output.sync_all()?;
-    Ok((metadata.dev(), metadata.ino()))
 }
 
 impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 'plan, F> {
@@ -253,12 +259,20 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             transaction,
             pending: BTreeMap::new(),
             consumers: BTreeMap::new(),
+            assembled: Vec::new(),
+            assembled_bytes: 0,
+            assembled_since: None,
             ready: Vec::new(),
+            ready_bytes: 0,
+            verifying_files: 0,
+            unpublished_files: 0,
+            unpublished_bytes: 0,
+            verification: VerificationPool::new(workers)?,
+            overlap_file_syncs: PipelineOptions::default().overlap_file_syncs,
             tombstones,
             critical,
             progress,
             report: RestoreReport::default(),
-            workers,
             on_progress,
             started,
             last_progress: None,
@@ -282,8 +296,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                     StateError::UnsafePath("restore destination has no parent".into())
                 })?
             };
+            let prepare_started = Instant::now();
             this.transaction
                 .create_directory_chain_journaled(&entry.root, parent)?;
+            this.progress.io.destination_prepare_us += elapsed_us(prepare_started);
             if !is_directory {
                 let partial =
                     destination_partial_path(&entry.destination, this.transaction.plan.restore_id)?;
@@ -297,12 +313,16 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 }
             }
             if intents.len() >= PUBLICATION_BATCH * 2 {
+                let journal_started = Instant::now();
                 journal::append(&this.transaction.plan.staging, &intents)?;
+                this.progress.io.intent_journal_us += elapsed_us(journal_started);
                 intents.clear();
             }
             this.emit_progress(false)?;
         }
+        let journal_started = Instant::now();
         journal::append(&this.transaction.plan.staging, &intents)?;
+        this.progress.io.intent_journal_us += elapsed_us(journal_started);
         for entry in planned {
             let index = entry.manifest_index;
             if entry.identical {
@@ -353,7 +373,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                         identity: None,
                     };
                     if pending.remaining == 0 {
-                        this.ready.push(pending);
+                        this.queue_completed(pending)?;
                     } else {
                         this.pending.insert(index, pending);
                     }
@@ -390,6 +410,8 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 .last_progress
                 .is_none_or(|last| last.elapsed() >= Duration::from_millis(500))
         {
+            self.verification.snapshot(&mut self.progress);
+            self.progress.io.overlap_file_syncs = self.overlap_file_syncs;
             self.progress.ready_to_launch = self.critical.is_empty();
             self.progress.elapsed_ms =
                 self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -406,6 +428,9 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             return Ok(());
         };
         for placement in placements {
+            if !self.overlap_file_syncs && self.verifying_files != 0 {
+                self.wait_for_publication()?;
+            }
             let started = Instant::now();
             if placement.length != plain.len() as u64 {
                 return Err(StateError::Integrity("chunk length mismatch".into()));
@@ -419,14 +444,17 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 noland_state_core::disk::ensure_space(&pending.partial, plain.len() as u64)?;
                 self.last_space_check = Instant::now();
             }
+            let write_started = Instant::now();
             let mut output = open_partial(pending)?;
             let metadata = output.metadata()?;
             pending.identity = Some((metadata.dev(), metadata.ino()));
             pending.opened = true;
             output.seek(SeekFrom::Start(placement.offset))?;
             output.write_all(plain)?;
+            self.progress.io.write_us += elapsed_us(write_started);
             // The normal ordered case hashes during writing. Out-of-order packs
             // use one bounded-worker readback, never an incorrectly ordered hash.
+            let hash_started = Instant::now();
             if !pending.out_of_order && placement.offset == pending.cursor {
                 pending
                     .hasher
@@ -437,108 +465,147 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 pending.out_of_order = true;
                 pending.hasher = None;
             }
+            self.progress.io.inline_hash_us += elapsed_us(hash_started);
             pending.received += plain.len() as u64;
             pending.remaining -= 1;
             self.progress.assembled_bytes += plain.len() as u64;
-            if pending.remaining == 0 {
-                self.ready.push(
-                    self.pending
-                        .remove(&placement.index)
-                        .expect("pending file exists"),
-                );
-            }
+            let completed = pending.remaining == 0;
+            drop(output);
             self.apply_time += started.elapsed();
-            if self.ready.len() >= PUBLICATION_BATCH {
-                self.flush_ready()?;
+            if completed {
+                let pending = self
+                    .pending
+                    .remove(&placement.index)
+                    .expect("pending file exists");
+                self.queue_completed(pending)?;
             }
-            self.emit_progress(false)?;
+            self.tick()?;
         }
         self.emit_progress(false)
     }
 
+    fn queue_completed(&mut self, pending: PendingFile) -> Result<()> {
+        let size = pending.received;
+        while self.unpublished_files != 0
+            && (self.unpublished_files >= MAX_UNPUBLISHED_FILES
+                || self.unpublished_bytes.saturating_add(size) > MAX_UNPUBLISHED_BYTES)
+        {
+            self.wait_for_publication()?;
+        }
+        self.assembled_since.get_or_insert_with(Instant::now);
+        self.assembled_bytes += size;
+        self.assembled.push(pending);
+        self.unpublished_files += 1;
+        self.unpublished_bytes += size;
+        self.progress.io.peak_unpublished_files = self
+            .progress
+            .io
+            .peak_unpublished_files
+            .max(self.unpublished_files as u64);
+        self.progress.io.peak_unpublished_bytes = self
+            .progress
+            .io
+            .peak_unpublished_bytes
+            .max(self.unpublished_bytes);
+        self.dispatch_if_due()
+    }
+
+    fn dispatch_if_due(&mut self) -> Result<()> {
+        if self.assembled.len() >= PUBLICATION_BATCH
+            || self.assembled_bytes >= PUBLICATION_BYTES
+            || self
+                .assembled_since
+                .is_some_and(|since| since.elapsed() >= PUBLICATION_DELAY)
+        {
+            self.dispatch_assembled()?;
+        }
+        Ok(())
+    }
+
+    fn dispatch_assembled(&mut self) -> Result<()> {
+        if self.verifying_files != 0 {
+            return Ok(());
+        }
+        // Give the filesystem a window of small writes before starting flushes.
+        // Eager per-file dispatch causes write/fsync contention on journaled disks.
+        self.verifying_files = self.assembled.len();
+        for pending in std::mem::take(&mut self.assembled) {
+            let file = &self.transaction.plan.manifest.files[pending.planned.manifest_index];
+            self.verification
+                .submit(VerificationTask::new(pending, file))?;
+        }
+        self.assembled_bytes = 0;
+        self.assembled_since = None;
+        Ok(())
+    }
+
+    fn collect_verified(&mut self, mut timeout: Duration) -> Result<()> {
+        while self.ready.len() < self.verifying_files {
+            let Some(verified) = self.verification.receive(timeout)? else {
+                break;
+            };
+            self.ready_bytes += verified.pending.received;
+            self.ready.push(verified);
+            timeout = Duration::ZERO;
+        }
+        Ok(())
+    }
+
+    fn publication_due(&self) -> bool {
+        // Let the active flush window finish before renaming its files. Starting
+        // another fsync window during publication serializes tiny rename writes
+        // behind journal commits on APFS/ext4 and defeats batching.
+        self.verifying_files != 0 && self.ready.len() == self.verifying_files
+    }
+
+    // Called for incoming data AND idle receive timeouts. A slow pack must not
+    // keep a small completed batch unpublished indefinitely.
+    fn tick(&mut self) -> Result<()> {
+        self.collect_verified(Duration::ZERO)?;
+        if self.publication_due() {
+            self.publish_ready()?;
+        }
+        self.dispatch_if_due()?;
+        self.emit_progress(false)
+    }
+
+    fn wait_for_publication(&mut self) -> Result<()> {
+        self.dispatch_assembled()?;
+        let started = Instant::now();
+        loop {
+            self.collect_verified(PUBLICATION_DELAY)?;
+            if self.publication_due() {
+                break;
+            }
+            self.emit_progress(false)?;
+        }
+        self.progress.io.publication_wait_us += elapsed_us(started);
+        self.apply_time += started.elapsed();
+        self.publish_ready()
+    }
+
     fn flush_ready(&mut self) -> Result<()> {
+        while self.unpublished_files != 0 {
+            self.wait_for_publication()?;
+        }
+        Ok(())
+    }
+
+    fn publish_ready(&mut self) -> Result<()> {
         if self.ready.is_empty() {
             return Ok(());
         }
         let started = Instant::now();
         let ready = std::mem::take(&mut self.ready);
-        let next = AtomicUsize::new(0);
-        let manifest = &self.transaction.plan.manifest;
-        let readback = AtomicU64::new(0);
-        let readback_before = self.progress.readback_bytes;
-        let progress = &mut self.progress;
-        let on_progress = &mut self.on_progress;
-        let last_progress = &mut self.last_progress;
-        let pipeline_started = self.started;
-        // Scoped workers cannot outlive cancellation/rollback or access the DB.
-        let verified = std::thread::scope(|scope| -> Result<BTreeMap<usize, (u64, u64)>> {
-            let mut handles = Vec::new();
-            let (alive, finished) = std::sync::mpsc::channel::<()>();
-            for _ in 0..self.workers.min(ready.len()) {
-                let ready = &ready;
-                let next = &next;
-                let readback = &readback;
-                let alive = alive.clone();
-                handles.push(scope.spawn(move || -> Result<Vec<(usize, (u64, u64))>> {
-                    let _alive = alive;
-                    let mut verified = Vec::new();
-                    let mut buffer = vec![0u8; 256 * 1024];
-                    loop {
-                        let index = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(pending) = ready.get(index) else {
-                            break;
-                        };
-                        let file = &manifest.files[pending.planned.manifest_index];
-                        verified.push((index, verify_file(pending, file, readback, &mut buffer)?));
-                    }
-                    Ok(verified)
-                }));
-            }
-            drop(alive);
-            let mut first_error = None;
-            while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
-                finished.recv_timeout(Duration::from_millis(500))
-            {
-                progress.readback_bytes = readback_before + readback.load(Ordering::Relaxed);
-                progress.elapsed_ms = pipeline_started
-                    .elapsed()
-                    .as_millis()
-                    .min(u128::from(u64::MAX)) as u64;
-                if first_error.is_none() {
-                    if let Err(error) = on_progress(progress.clone()) {
-                        first_error = Some(error);
-                    }
-                    *last_progress = Some(Instant::now());
-                }
-            }
-            // Join EVERY worker, even after failure, before unwinding the restore.
-            let mut verified = BTreeMap::new();
-            for handle in handles {
-                let result = handle.join().unwrap_or_else(|_| {
-                    Err(StateError::Storage(
-                        "restore verification worker panicked".into(),
-                    ))
-                });
-                match result {
-                    Ok(entries) => verified.extend(entries),
-                    Err(error) => {
-                        first_error.get_or_insert(error);
-                    }
-                }
-            }
-            progress.readback_bytes = readback_before + readback.load(Ordering::Relaxed);
-            match first_error {
-                Some(error) => Err(error),
-                None => Ok(verified),
-            }
-        })?;
         let mut parents = BTreeSet::new();
-        for (index, pending) in ready.iter().enumerate() {
+        let rename_started = Instant::now();
+        for verified in &ready {
+            let pending = &verified.pending;
             validate_parent_chain(&pending.planned.root, &pending.planned.destination)?;
             let metadata = fs::symlink_metadata(&pending.partial)?;
             if !metadata.is_file()
                 || metadata.file_type().is_symlink()
-                || verified.get(&index) != Some(&(metadata.dev(), metadata.ino()))
+                || verified.identity != (metadata.dev(), metadata.ino())
             {
                 return Err(StateError::UnsafePath(
                     "verified restore partial was replaced".into(),
@@ -554,10 +621,22 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                     .to_path_buf(),
             );
         }
+        self.progress.io.rename_us += elapsed_us(rename_started);
+        let directory_started = Instant::now();
+        // Coalesce parents across the entire verified window before acknowledging
+        // any publication. The next window remains write-only until this barrier.
         for parent in parents {
             fs::File::open(parent)?.sync_all()?;
+            self.progress.io.directory_syncs += 1;
         }
-        for pending in ready {
+        self.progress.io.directory_sync_us += elapsed_us(directory_started);
+        self.progress.io.publication_batches += 1;
+        self.unpublished_files -= ready.len();
+        self.unpublished_bytes -= self.ready_bytes;
+        self.ready_bytes = 0;
+        self.verifying_files = 0;
+        for verified in ready {
+            let pending = verified.pending;
             self.transaction.clear_partial(&pending.partial)?;
             self.mark_published(
                 pending.planned.manifest_index,
@@ -589,6 +668,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             pipeline_duration_ms: self.started.elapsed().as_millis().min(u128::from(u64::MAX))
                 as u64,
             packs_downloaded: 0,
+            io: self.progress.io,
         })
     }
 }
@@ -910,6 +990,12 @@ pub async fn restore_pipelined(
     let worker_db = db.cloned();
     let thread = std::thread::spawn(move || {
         let result = (|| {
+            // This restore-owned thread only runs the timer while awaiting input.
+            // Idle downloads must still publish small ready batches and observe
+            // cancellation; no filesystem work runs on the caller's async runtime.
+            let receiver_runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()?;
             let mut transaction =
                 RestoreTransaction::new(&worker_plan, &worker_roots, worker_db.as_ref());
             transaction.uses_legacy_pack_cache = false;
@@ -930,6 +1016,7 @@ pub async fn restore_pipelined(
                     return Err(error);
                 }
             };
+            pipeline.overlap_file_syncs = options.overlap_file_syncs;
             let needed = pipeline.consumers.keys().cloned().collect::<BTreeSet<_>>();
             init_tx
                 .send(Ok(needed))
@@ -938,9 +1025,22 @@ pub async fn restore_pipelined(
                 if worker_cancelled.load(Ordering::Acquire) {
                     return Err(StateError::Storage("restore cancelled".into()));
                 }
-                match receiver.blocking_recv() {
+                let message = match receiver_runtime.block_on(async {
+                    tokio::time::timeout(PUBLICATION_DELAY, receiver.recv()).await
+                }) {
+                    Ok(message) => message,
+                    Err(_) => {
+                        pipeline.tick()?;
+                        continue;
+                    }
+                };
+                match message {
                     Some(AssemblyMessage::Chunk(hash, plain)) => pipeline.consume(&hash, &plain)?,
-                    Some(AssemblyMessage::Flush) => pipeline.flush_ready()?,
+                    // Pack completion is not a barrier between assembly and fsync.
+                    Some(AssemblyMessage::Flush) => {
+                        pipeline.dispatch_assembled()?;
+                        pipeline.tick()?;
+                    }
                     Some(AssemblyMessage::Finalize) => break,
                     Some(AssemblyMessage::Commit) => {
                         return Err(StateError::Invalid(
@@ -1016,25 +1116,22 @@ pub async fn restore_pipelined(
         |job| stream_pack(provider, master, plan, job, &sender, journal),
     );
     let transfer_result = monitor_progress(transfer, &mut progress_rx, &mut on_progress).await;
-    if transfer_result.is_err() {
-        _guard.cancelled.store(true, Ordering::Release);
-        let _ = sender.try_send(AssemblyMessage::Abort);
-    } else {
-        sender
-            .send(AssemblyMessage::Finalize)
-            .await
-            .map_err(|_| StateError::Storage("restore assembly failed".into()))?;
-        let ready = monitor_progress(
-            async {
-                ready_rx
-                    .await
-                    .map_err(|_| StateError::Storage("restore final validation failed".into()))
-            },
-            &mut progress_rx,
-            &mut on_progress,
-        )
-        .await;
-        if ready.is_ok() {
+    let completion_result = if transfer_result.is_ok() {
+        async {
+            sender
+                .send(AssemblyMessage::Finalize)
+                .await
+                .map_err(|_| StateError::Storage("restore assembly failed".into()))?;
+            monitor_progress(
+                async {
+                    ready_rx
+                        .await
+                        .map_err(|_| StateError::Storage("restore final validation failed".into()))
+                },
+                &mut progress_rx,
+                &mut on_progress,
+            )
+            .await?;
             while let Ok(sample) = progress_rx.try_recv() {
                 on_progress(sample)?;
             }
@@ -1042,10 +1139,15 @@ pub async fn restore_pipelined(
                 .send(AssemblyMessage::Commit)
                 .await
                 .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
-        } else {
-            _guard.cancelled.store(true, Ordering::Release);
-            let _ = sender.try_send(AssemblyMessage::Abort);
+            Ok::<(), StateError>(())
         }
+        .await
+    } else {
+        Ok(())
+    };
+    if transfer_result.is_err() || completion_result.is_err() {
+        _guard.cancelled.store(true, Ordering::Release);
+        let _ = sender.try_send(AssemblyMessage::Abort);
     }
     let assembly_result = monitor_progress(
         async {
@@ -1060,6 +1162,7 @@ pub async fn restore_pipelined(
     // Prefer the assembly error (e.g. ENOSPC or a bad final hash) to a closed pipe.
     let mut report = assembly_result?;
     transfer_result?;
+    completion_result?;
     while let Ok(sample) = progress_rx.try_recv() {
         on_progress(sample)?;
     }
@@ -1087,6 +1190,8 @@ mod tests {
     use crate::tests::{block_on, crash_test_plan, test_dir, test_file, test_manifest, test_plan};
     use noland_state_core::{AgentPaths, ChunkRef, PersistenceClass, SemanticRole};
     use noland_storage::LocalStorage;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn direct_pipeline_handles_out_of_order_shared_chunks_without_a_decrypted_cas() {
@@ -1460,12 +1565,23 @@ mod tests {
 
     #[test]
     fn thousands_of_small_files_publish_without_per_file_journal_rewrites() {
+        small_file_workload(4096, PipelineOptions::default().overlap_file_syncs);
+    }
+
+    #[test]
+    #[ignore = "opt-in 186k-file restore publication workload"]
+    fn large_small_file_publication_workload() {
+        // Exercise the Linux cloud-agent path even on a non-Linux development host.
+        small_file_workload(186_664, true);
+    }
+
+    fn small_file_workload(count: usize, overlap_file_syncs: bool) {
         let root = test_dir("pipeline-small-files");
         let payload = b"deduplicated small file";
-        let files = (0..4096)
+        let files = (0..count)
             .map(|index| {
                 test_file(
-                    &format!("game/file-{index:05}"),
+                    &format!("game/{:04}/file-{index:06}", index / 512),
                     PersistenceClass::ReconstructableApp,
                     SemanticRole::AppContent,
                     payload,
@@ -1476,11 +1592,13 @@ mod tests {
         let roots = LogicalRootMap::from_home(root.join("home"));
         let mut transaction = RestoreTransaction::new(&plan, &roots, None);
         let mut updates = 0;
+        let started = Instant::now();
         let mut pipeline = Pipeline::new(&mut transaction, 4, |_| {
             updates += 1;
             Ok(())
         })
         .unwrap();
+        pipeline.overlap_file_syncs = overlap_file_syncs;
         let checkpoint =
             fs::read(plan.staging.join(super::super::TRANSACTION_JOURNAL_FILE)).unwrap();
         let log_size = fs::metadata(plan.staging.join("restore-intents.v1.log"))
@@ -1489,7 +1607,8 @@ mod tests {
         pipeline
             .consume(&noland_cas::blake3_hex(payload), payload)
             .unwrap();
-        assert_eq!(pipeline.progress.completed_entries, 4096);
+        pipeline.flush_ready().unwrap();
+        assert_eq!(pipeline.progress.completed_entries, count as u64);
         assert_eq!(
             fs::metadata(plan.staging.join("restore-intents.v1.log"))
                 .unwrap()
@@ -1506,8 +1625,31 @@ mod tests {
                 .count(),
             0
         );
-        pipeline.finish().unwrap();
+        let report = pipeline.finish().unwrap();
+        assert_eq!(report.io.file_syncs, count as u64);
+        assert!(report.io.peak_unpublished_files <= MAX_UNPUBLISHED_FILES as u64);
+        assert!(report.io.peak_unpublished_bytes <= MAX_UNPUBLISHED_BYTES);
+        assert!(report.io.directory_syncs < count as u64 / 2);
         transaction.commit().unwrap();
+        println!(
+            "RESTORE_PUBLICATION {}",
+            serde_json::json!({
+                "files": count,
+                "elapsed_ms": started.elapsed().as_millis(),
+                "io": report.io,
+            })
+        );
+        // Publication counts alone must not hide a missing or corrupt file.
+        for index in 0..count {
+            assert_eq!(
+                fs::read(root.join(format!(
+                    "home/.local/share/game/{:04}/file-{index:06}",
+                    index / 512
+                )))
+                .unwrap(),
+                payload
+            );
+        }
         assert!(updates >= 2);
         fs::remove_dir_all(root).unwrap();
     }

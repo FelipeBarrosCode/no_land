@@ -26,7 +26,9 @@ pub use download::{
     DownloadOptions, DownloadReport, PackCacheGcOptions, PackCacheGcReport,
     DEFAULT_MAX_PARALLEL_PACK_DOWNLOADS,
 };
-pub use pipeline::{restore_pipelined, PipelineOptions, PipelineProgress, PipelineReport};
+pub use pipeline::{
+    restore_pipelined, PipelineIoMetrics, PipelineOptions, PipelineProgress, PipelineReport,
+};
 pub use planner::{
     embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
     RestorePriority, RestorePriorityPlan, RestoreTarget, READY_TO_LAUNCH,
