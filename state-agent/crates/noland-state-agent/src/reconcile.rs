@@ -158,6 +158,20 @@ pub(crate) fn reconcile_app_for_complete_backup(
     agent: &StateAgent,
     app_id: &AppId,
 ) -> Result<usize> {
+    reconcile_full_app(agent, app_id, false)
+}
+
+/// Explicit refresh must cover durable roots even when dirty events name paths inside
+/// a private runtime namespace. Unlike an incremental scan, it has no depth limit.
+pub(crate) fn reconcile_app_for_refresh(agent: &StateAgent, app_id: &AppId) -> Result<usize> {
+    reconcile_full_app(agent, app_id, true)
+}
+
+fn reconcile_full_app(
+    agent: &StateAgent,
+    app_id: &AppId,
+    clear_dirty_evidence: bool,
+) -> Result<usize> {
     if let Some(scope) = SteamBackupScope::load(agent, app_id)? {
         let roots = scope.reconciliation_roots();
         return reconcile_roots(
@@ -167,7 +181,7 @@ pub(crate) fn reconcile_app_for_complete_backup(
             None,
             &roots,
             scope.install_roots(),
-            false,
+            clear_dirty_evidence,
             Some(&scope),
         );
     }
@@ -189,7 +203,7 @@ pub(crate) fn reconcile_app_for_complete_backup(
         None,
         &known_roots,
         &install_roots,
-        false,
+        clear_dirty_evidence,
         None,
     )
 }

@@ -774,6 +774,51 @@ mod tests {
     }
 
     #[test]
+    fn manual_refresh_scans_runtime_host_root_despite_stale_dirty_paths() {
+        let root = test_root("runtime-manual-refresh");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let game = agent
+            .config
+            .home
+            .join(".local/share/noland-runtime/app-data/private-app/Games/Hookshot");
+        let nested = game.join("romfs/a/b/c/d/e/f/g/asset.bin");
+        let save = game.join("user/save/slot_00/progress.sav");
+        for path in [&nested, &save, &game.join("bin/hookshot")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"preserve").unwrap();
+        }
+        let identity = noland_discovery::fallback_exe_identity(std::path::Path::new(
+            "/home/runtime/Games/Hookshot/bin/hookshot",
+        ));
+        agent.db.upsert_app(&identity).unwrap();
+        agent.discover().unwrap();
+        agent
+            .db
+            .mark_dirty_root(
+                &identity.app_id,
+                "/home/runtime/Games/Hookshot/user/save",
+                None,
+                true,
+            )
+            .unwrap();
+        agent.db.mark_dirty(&identity.app_id, None, true).unwrap();
+        assert!(reconcile::reconcile_app_for_refresh(&agent, &identity.app_id).unwrap() >= 3);
+        let files = agent.db.associations_for_app(&identity.app_id).unwrap();
+        for expected in [&nested, &save] {
+            let (record, _) = files
+                .iter()
+                .find(|(record, _)| {
+                    std::path::Path::new(&record.canonical_path) == expected.as_path()
+                })
+                .expect("refresh must inventory deep assets and saves at durable host paths");
+            assert_eq!(record.size, Some(8));
+            assert!(record.last_scanned_at.is_some());
+            assert_eq!(std::fs::read(expected).unwrap(), b"preserve");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn discovery_persists_owned_roots_for_non_steam_apps() {
         let root = test_root("owned-roots");
         let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();

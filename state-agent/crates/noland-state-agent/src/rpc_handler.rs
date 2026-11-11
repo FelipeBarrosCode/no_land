@@ -652,7 +652,7 @@ impl RpcHandler for AgentRpc {
             }
             "ReconcileApp" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
-                let n = crate::reconcile::reconcile_app(agent, &app_id)?;
+                let n = crate::reconcile::reconcile_app_for_refresh(agent, &app_id)?;
                 Ok(json!({"reconciled": n}))
             }
             "RefreshIndex" => {
@@ -674,7 +674,8 @@ impl RpcHandler for AgentRpc {
                 for action in actions {
                     match action {
                         ReconciliationAction::Reconcile(app_id) => {
-                            reconciled_paths += crate::reconcile::reconcile_app(agent, &app_id)?;
+                            reconciled_paths +=
+                                crate::reconcile::reconcile_app_for_refresh(agent, &app_id)?;
                             apps_reconciled += 1;
                         }
                         ReconciliationAction::ClearExcluded(app_id) => {
@@ -1757,17 +1758,19 @@ fn reconciliation_actions(
     candidate_ids: &HashSet<AppId>,
     dirty_apps: Vec<DirtyState>,
 ) -> Vec<ReconciliationAction> {
-    dirty_apps
+    let mut candidates = candidate_ids.iter().cloned().collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut actions = candidates
         .into_iter()
-        .filter(|dirty| dirty.requires_reconciliation)
-        .map(|dirty| {
-            if candidate_ids.contains(&dirty.app_id) {
-                ReconciliationAction::Reconcile(dirty.app_id)
-            } else {
-                ReconciliationAction::ClearExcluded(dirty.app_id)
-            }
-        })
-        .collect()
+        .map(ReconciliationAction::Reconcile)
+        .collect::<Vec<_>>();
+    actions.extend(
+        dirty_apps
+            .into_iter()
+            .filter(|dirty| dirty.requires_reconciliation && !candidate_ids.contains(&dirty.app_id))
+            .map(|dirty| ReconciliationAction::ClearExcluded(dirty.app_id)),
+    );
+    actions
 }
 
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
@@ -1905,7 +1908,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_index_only_reconciles_flagged_candidates() {
+    fn refresh_index_reconciles_candidates_even_without_dirty_flags() {
         let candidate = AppId("app:candidate".into());
         let unflagged_candidate = AppId("app:unflagged".into());
         let excluded = AppId("exe:noland-state-agent".into());
@@ -1923,7 +1926,7 @@ mod tests {
             &candidate_ids,
             vec![
                 dirty(candidate.clone(), true),
-                dirty(unflagged_candidate, false),
+                dirty(unflagged_candidate.clone(), false),
                 dirty(excluded.clone(), true),
             ],
         );
@@ -1932,6 +1935,7 @@ mod tests {
             actions,
             vec![
                 ReconciliationAction::Reconcile(candidate),
+                ReconciliationAction::Reconcile(unflagged_candidate),
                 ReconciliationAction::ClearExcluded(excluded),
             ]
         );
