@@ -4306,9 +4306,17 @@ pub async fn get_storage_operation_status(
 ) -> Result<serde_json::Value, FrontendError> {
     let id = match operation_id {
         Some(id) => id,
-        None => context.active_agent_operation(instance_id, None).await
-            .ok_or_else(|| AppError::InvalidInput("No active Shared Storage operation is tracked for this PC.".into()))?
-            .operation_id,
+        None => {
+            context
+                .active_agent_operation(instance_id, None)
+                .await
+                .ok_or_else(|| {
+                    AppError::InvalidInput(
+                        "No active Shared Storage operation is tracked for this PC.".into(),
+                    )
+                })?
+                .operation_id
+        }
     };
     let id = uuid::Uuid::parse_str(&id)
         .map_err(|_| AppError::InvalidInput("Invalid storage operation ID.".into()))?;
@@ -4316,9 +4324,12 @@ pub async fn get_storage_operation_status(
     // session minting or operation submission while a deletion is active.
     let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
     crate::services::shared_storage::agent_runtime::call_agent_raw(
-        &remote, "GetOperationStatus",
+        &remote,
+        "GetOperationStatus",
         serde_json::json!({"operation_id":id,"projection":"progress"}),
-    ).await.map_err(Into::into)
+    )
+    .await
+    .map_err(Into::into)
 }
 
 #[tauri::command]

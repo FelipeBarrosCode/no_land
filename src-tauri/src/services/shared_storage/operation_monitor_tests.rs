@@ -12,16 +12,31 @@ const FAST: PollPolicy = PollPolicy {
 
 #[tokio::test]
 async fn deletion_preflight_progress_is_visible_even_before_the_first_object_is_removed() {
-    let sample = |count| json!({"operation_id":"delete", "state":"RUNNING", "progress": {
+    let sample = |count| {
+        json!({"operation_id":"delete", "state":"RUNNING", "progress": {
         "phase":"validating", "completed_units":0, "total_units":119,
-        "detail_json":{"deletion":{"validated_packs":count,"completed_objects":0}}}});
-    let mut replies = VecDeque::from([sample(1), sample(2), json!({"operation_id":"delete", "state":"COMPLETED"})]);
+        "detail_json":{"deletion":{"validated_packs":count,"completed_objects":0}}}})
+    };
+    let mut replies = VecDeque::from([
+        sample(1),
+        sample(2),
+        json!({"operation_id":"delete", "state":"COMPLETED"}),
+    ]);
     let mut events = Vec::new();
-    monitor_with_policy("delete", Duration::from_secs(1), FAST,
+    monitor_with_policy(
+        "delete",
+        Duration::from_secs(1),
+        FAST,
         |_| future::ready(Ok::<_, ()>(replies.pop_front().unwrap())),
-        |event| events.push(event.clone())).await.unwrap();
+        |event| events.push(event.clone()),
+    )
+    .await
+    .unwrap();
     assert_eq!(events.len(), 3);
-    assert_eq!(events[1].pointer("/progress/detail_json/deletion/validated_packs"), Some(&json!(2)));
+    assert_eq!(
+        events[1].pointer("/progress/detail_json/deletion/validated_packs"),
+        Some(&json!(2))
+    );
 }
 
 #[tokio::test]

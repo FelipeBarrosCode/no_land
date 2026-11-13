@@ -106,12 +106,24 @@ mod tests {
     fn storage_progress_remains_available_with_only_a_read_only_instance_grant() {
         use noland_mcp::policy::{Config, Scope};
         let specs = super::specs();
-        let spec = specs.iter().find(|spec| spec.name == "storage_operation_status").unwrap();
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name == "storage_operation_status")
+            .unwrap();
         assert!(spec.scope == Scope::Read);
         assert!(!spec.approval);
         assert!(spec.machine);
-        let config = Config { enabled:true, instances:vec![42], ..Config::default() };
-        let arguments = |id| serde_json::json!({"instance_id":id}).as_object().unwrap().clone();
+        let config = Config {
+            enabled: true,
+            instances: vec![42],
+            ..Config::default()
+        };
+        let arguments = |id| {
+            serde_json::json!({"instance_id":id})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
         assert!(spec.authorize(&config, &arguments(42)).is_ok());
         assert!(spec.authorize(&config, &arguments(43)).is_err());
     }

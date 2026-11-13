@@ -160,7 +160,8 @@ pub(super) async fn start(
                         &task_agent.config.paths.run_root,
                         &session,
                     )?;
-                    let provider = RcloneStorage::try_from_session(&session, &config)?.for_deletion();
+                    let provider =
+                        RcloneStorage::try_from_session(&session, &config)?.for_deletion();
                     plan.run(&task_agent, Some(&provider), Some(&master)).await
                 } else {
                     plan.run(&task_agent, None, None).await

@@ -4072,7 +4072,14 @@ pub(crate) fn mark_server_step_completed<'a>(
 ) -> impl Future<Output = AppResult<()>> + 'a {
     boxed_stage(move || {
         mark_server_step_completed_inner(
-            context, instance_id, step, state, status, ssh_host, ssh_port, offer_id,
+            context,
+            instance_id,
+            step,
+            state,
+            status,
+            ssh_host,
+            ssh_port,
+            offer_id,
         )
     })
 }

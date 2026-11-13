@@ -147,7 +147,10 @@ test('fixtures cover every Tauri config and all six release targets', () => {
   assert.deepEqual(readdirSync(configDir).filter((name) => /^tauri(?:\..+)?\.conf\.json$/u.test(name)).sort(),
     [...configNames].sort());
   const workflow = readFileSync(new URL('../.github/workflows/_build.yml', import.meta.url), 'utf8');
-  assert.deepEqual([...new Set([...workflow.matchAll(/^\s+target: (\S+)$/gmu)].map((match) => match[1]))].sort(),
+  const staticTargets = [...workflow.matchAll(/^\s+target: (\S+)$/gmu)].map(match => match[1]);
+  const dynamicTargets = [...workflow.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)]
+    .flatMap(match => JSON.parse(match[1])).map(entry => entry.target);
+  assert.deepEqual([...new Set([...staticTargets, ...dynamicTargets])].sort(),
     [...targets].sort());
 });
 

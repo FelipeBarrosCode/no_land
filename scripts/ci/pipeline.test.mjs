@@ -118,7 +118,13 @@ test('Windows and Linux net-helper tests gate real native bundles before artifac
     assert.doesNotMatch(verify, /continue-on-error|\|\| true/u);
     assert.ok(source.indexOf('Verify bundled sidecars and runtime') < source.indexOf(publish));
   }
-  for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']) assert.ok(unix.includes(`target: ${target}`));
+  const unixMatrices = [...unix.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)].map(match => JSON.parse(match[1]));
+  assert.equal(unixMatrices.length, 2, 'verify both the ordinary and Linux-retry matrices');
+  for (const matrix of unixMatrices) {
+    for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']) {
+      assert.ok(matrix.some(entry => entry.platform === 'linux' && entry.target === target), target);
+    }
+  }
   for (const target of ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']) assert.ok(windows.includes(`target: ${target}`));
   const arch = readFileSync(new URL('../build-arch-package.sh', import.meta.url), 'utf8');
   assert.match(arch, /pacman -Qlp "\$package" \| grep -Eq .*noland-net-helper/u);

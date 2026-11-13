@@ -532,12 +532,17 @@ impl RcloneStorage {
         &self,
         args: Vec<String>,
     ) -> std::result::Result<(String, std::time::Duration), RcloneFailure> {
-        self.run_classified_with_deadline(args, self.deletion_control.then_some(self.control_timeout)).await
+        self.run_classified_with_deadline(
+            args,
+            self.deletion_control.then_some(self.control_timeout),
+        )
+        .await
     }
 
     async fn run_control(&self, args: Vec<String>) -> std::result::Result<String, RcloneFailure> {
         self.run_classified_with_deadline(args, Some(self.control_timeout))
-            .await.map(|(output, _)| output)
+            .await
+            .map(|(output, _)| output)
     }
 
     fn command(&self, _control: bool) -> Command {
@@ -640,10 +645,21 @@ impl RcloneStorage {
 
     async fn stat_inner(&self, key: &RemoteKey, control: bool) -> Result<Option<RemoteMeta>> {
         validate_remote_key(key)?;
-        self.metrics.remote_stat_calls.fetch_add(1, Ordering::Relaxed);
-        let args = vec!["lsjson".into(), "--stat".into(), "--no-modtime".into(),
-            "--no-mimetype".into(), self.remote_path(key)];
-        let result = if control { self.run_control(args).await } else { self.run_classified(args).await };
+        self.metrics
+            .remote_stat_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let args = vec![
+            "lsjson".into(),
+            "--stat".into(),
+            "--no-modtime".into(),
+            "--no-mimetype".into(),
+            self.remote_path(key),
+        ];
+        let result = if control {
+            self.run_control(args).await
+        } else {
+            self.run_classified(args).await
+        };
         match result {
             Ok(out) => {
                 let object: ListedObject = serde_json::from_str(&out)
@@ -651,9 +667,14 @@ impl RcloneStorage {
                 if object.is_dir {
                     Ok(None)
                 } else if object.size < 0 {
-                    Err(StateError::Integrity("cloud object has an unknown size".into()))
+                    Err(StateError::Integrity(
+                        "cloud object has an unknown size".into(),
+                    ))
                 } else {
-                    Ok(Some(RemoteMeta { key: key.clone(), size: object.size as u64 }))
+                    Ok(Some(RemoteMeta {
+                        key: key.clone(),
+                        size: object.size as u64,
+                    }))
                 }
             }
             Err(failure) if failure.class == RemoteErrorClass::NotFound => Ok(None),
@@ -1043,7 +1064,9 @@ impl SharedStorageProvider for RcloneStorage {
         crate::deletion::validate_deletable_key(key)?;
         if self.stat_for_deletion(key).await?.is_some() {
             // Trash still consumes Drive quota; delete this exact object permanently.
-            self.run_control(self.deletion_args(key)?).await.map_err(RcloneFailure::into_state_error)?;
+            self.run_control(self.deletion_args(key)?)
+                .await
+                .map_err(RcloneFailure::into_state_error)?;
         }
         if self.stat_for_deletion(key).await?.is_some() {
             return Err(StateError::Storage(
@@ -1623,11 +1646,16 @@ mod tests {
     #[tokio::test]
     async fn deletion_control_timeout_reaps_the_child_without_an_overlapping_retry() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("noland-deletion-timeout-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("noland-deletion-timeout-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let script = root.join("slow-control");
         let pids = root.join("pids");
-        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s\\n' \"$$\" >> {pids:?}\nexec sleep 30\n")).unwrap();
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$$\" >> {pids:?}\nexec sleep 30\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut storage = RcloneStorage::new("fixture", "").for_deletion();
         storage.control_executable = Some(script);
@@ -1635,22 +1663,41 @@ mod tests {
         // startup allowance as the stream fixtures; the intentional 30s sleep
         // must be what exercises the timeout, not interpreter startup latency.
         storage.control_timeout = std::time::Duration::from_secs(2);
-        let result = storage.stat_for_deletion(&RemoteKey::new("packs/fixture")).await;
-        assert!(result.unwrap_err().to_string().contains("cloud outcome is unknown"));
+        let result = storage
+            .stat_for_deletion(&RemoteKey::new("packs/fixture"))
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cloud outcome is unknown"));
         let observed = std::fs::read_to_string(pids).unwrap();
-        assert_eq!(observed.lines().count(), 1, "a timed-out delete must not immediately retry an uncertain provider request");
-        let status = std::process::Command::new("kill").args(["-0", observed.trim()])
-            .stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
-        assert!(!status.success(), "the child must be reaped before returning");
-        assert!(!RcloneStorage::new("fixture", "").deletion_control,
-            "long backup/restore transfers must not inherit maintenance deadlines");
+        assert_eq!(
+            observed.lines().count(),
+            1,
+            "a timed-out delete must not immediately retry an uncertain provider request"
+        );
+        let status = std::process::Command::new("kill")
+            .args(["-0", observed.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "the child must be reaped before returning"
+        );
+        assert!(
+            !RcloneStorage::new("fixture", "").deletion_control,
+            "long backup/restore transfers must not inherit maintenance deadlines"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
     #[ignore = "requires real rclone; fresh local fixture, no cloud credentials"]
     async fn real_rclone_prevalidated_delete_uses_one_command_and_tolerates_absence() {
-        let root = std::env::temp_dir().join(format!("noland-exact-delete-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("noland-exact-delete-{}", uuid::Uuid::new_v4()));
         let id = uuid::Uuid::new_v4().to_string();
         let key = RemoteKey::new(noland_state_core::pack_key(&id));
         let config = root.join("local.conf");
@@ -1658,7 +1705,8 @@ mod tests {
         std::fs::write(&config, "[fixture]\ntype = local\n").unwrap();
         let object = root.join("cloud").join(key.as_str());
         std::fs::write(&object, b"fixture payload").unwrap();
-        let keep = root.join("cloud/keep"); std::fs::write(&keep, b"unrelated").unwrap();
+        let keep = root.join("cloud/keep");
+        std::fs::write(&keep, b"unrelated").unwrap();
         let mut storage = RcloneStorage::new("fixture", root.join("cloud").to_string_lossy());
         storage.extra_args = vec!["--config".into(), config.to_string_lossy().into()];
         let capability = crate::PrevalidatedDeletion::fixture(key.clone());

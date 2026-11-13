@@ -40,9 +40,9 @@ pub use rclone::{
     write_guarded_ephemeral_session, EphemeralSessionGuard, RcloneCommandBuilder, RcloneStorage,
 };
 pub use reclamation::{
-    converge_application, execute_full_deletion, execute_full_deletion_observed, load_full_deletion,
-    pending_deletions, prepare_full_deletion, prepare_full_deletion_selected, retired_pack_ids,
-    DeletionObserver, DeletionProgress, FullDeletionPlan, PrevalidatedDeletion,
+    converge_application, execute_full_deletion, execute_full_deletion_observed,
+    load_full_deletion, pending_deletions, prepare_full_deletion, prepare_full_deletion_selected,
+    retired_pack_ids, DeletionObserver, DeletionProgress, FullDeletionPlan, PrevalidatedDeletion,
 };
 pub use rolling::{RollingUploadWindow, UploadReservation};
 pub use stream::StreamTransferDiagnostics;

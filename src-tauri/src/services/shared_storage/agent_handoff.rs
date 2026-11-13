@@ -719,7 +719,11 @@ fn operation_progress_event(
         .and_then(|p| p.pointer("/detail_json/streaming_pipeline"))
         .cloned();
     let deletion = (kind == "delete")
-        .then(|| progress.and_then(|p| p.pointer("/detail_json/deletion")).cloned())
+        .then(|| {
+            progress
+                .and_then(|p| p.pointer("/detail_json/deletion"))
+                .cloned()
+        })
         .flatten();
     let phase = progress
         .and_then(|value| value.get("phase"))
@@ -756,38 +760,53 @@ fn operation_progress_event(
         }
     };
     let pack_transfer = status.get("pack_transfer");
-    let completed_objects = deletion.as_ref().and_then(|value| value.get("completed_packs"))
-        .and_then(serde_json::Value::as_u64).or_else(|| pack_transfer
-        .and_then(|value| value.get("completed_items"))
-        .and_then(serde_json::Value::as_u64));
-    let total_objects = deletion.as_ref().and_then(|value| value.get("total_packs"))
-        .and_then(serde_json::Value::as_u64).or_else(|| progress
-        .and_then(|value| value.get("detail_json"))
-        .and_then(|value| value.get("total_packs"))
+    let completed_objects = deletion
+        .as_ref()
+        .and_then(|value| value.get("completed_packs"))
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
             pack_transfer
-                .and_then(|value| value.get("total_items"))
+                .and_then(|value| value.get("completed_items"))
                 .and_then(serde_json::Value::as_u64)
-        }));
-    let pipeline = progress
-        .and_then(|value| value.get("detail_json"))
-        .and_then(|value| value.get("pipeline"));
-    let completed_bytes = deletion.as_ref().and_then(|value| value.get("verified_absent_bytes"))
-        .and_then(serde_json::Value::as_u64).or_else(|| pipeline
-        .and_then(|value| value.get("published_bytes"))
+        });
+    let total_objects = deletion
+        .as_ref()
+        .and_then(|value| value.get("total_packs"))
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
             progress
                 .and_then(|value| value.get("detail_json"))
-                .and_then(|value| value.get("completed_pack_bytes"))
+                .and_then(|value| value.get("total_packs"))
                 .and_then(serde_json::Value::as_u64)
-                .max(
+                .or_else(|| {
                     pack_transfer
-                        .and_then(|value| value.get("completed_bytes"))
-                        .and_then(serde_json::Value::as_u64),
-                )
-        }));
+                        .and_then(|value| value.get("total_items"))
+                        .and_then(serde_json::Value::as_u64)
+                })
+        });
+    let pipeline = progress
+        .and_then(|value| value.get("detail_json"))
+        .and_then(|value| value.get("pipeline"));
+    let completed_bytes = deletion
+        .as_ref()
+        .and_then(|value| value.get("verified_absent_bytes"))
+        .and_then(serde_json::Value::as_u64)
+        .or_else(|| {
+            pipeline
+                .and_then(|value| value.get("published_bytes"))
+                .and_then(serde_json::Value::as_u64)
+                .or_else(|| {
+                    progress
+                        .and_then(|value| value.get("detail_json"))
+                        .and_then(|value| value.get("completed_pack_bytes"))
+                        .and_then(serde_json::Value::as_u64)
+                        .max(
+                            pack_transfer
+                                .and_then(|value| value.get("completed_bytes"))
+                                .and_then(serde_json::Value::as_u64),
+                        )
+                })
+        });
     let transferred_bytes = progress
         .and_then(|value| value.get("detail_json"))
         .and_then(|value| value.get("bytes_transferred"))
@@ -797,21 +816,26 @@ fn operation_progress_event(
                 .and_then(|value| value.get("bytes_transferred"))
                 .and_then(serde_json::Value::as_u64),
         );
-    let total_bytes = deletion.as_ref().and_then(|value| value.get("total_bytes"))
-        .and_then(serde_json::Value::as_u64).or_else(|| pipeline
+    let total_bytes = deletion
+        .as_ref()
         .and_then(|value| value.get("total_bytes"))
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
-            progress
-                .and_then(|value| value.get("detail_json"))
-                .and_then(|value| value.get("total_transfer_bytes"))
+            pipeline
+                .and_then(|value| value.get("total_bytes"))
                 .and_then(serde_json::Value::as_u64)
-                .max(
-                    pack_transfer
-                        .and_then(|value| value.get("total_bytes"))
-                        .and_then(serde_json::Value::as_u64),
-                )
-        }));
+                .or_else(|| {
+                    progress
+                        .and_then(|value| value.get("detail_json"))
+                        .and_then(|value| value.get("total_transfer_bytes"))
+                        .and_then(serde_json::Value::as_u64)
+                        .max(
+                            pack_transfer
+                                .and_then(|value| value.get("total_bytes"))
+                                .and_then(serde_json::Value::as_u64),
+                        )
+                })
+        });
     let object_unit = total_objects
         .filter(|total| *total > 0)
         .map(|_| "packs".to_string());
@@ -1272,10 +1296,10 @@ mod tests {
     #[test]
     fn deletion_event_preserves_verified_absence_without_calling_it_network_transfer() {
         let status = json!({"state":"RUNNING", "running":true, "progress": {
-            "phase":"deleting_packs", "completed_units":41, "total_units":119,
-            "unit":"objects", "detail_json":{"deletion":{
-                "completed_packs":37,"total_packs":115,"verified_absent_bytes":9000,"total_bytes":26000
-            }}}});
+        "phase":"deleting_packs", "completed_units":41, "total_units":119,
+        "unit":"objects", "detail_json":{"deletion":{
+            "completed_packs":37,"total_packs":115,"verified_absent_bytes":9000,"total_bytes":26000
+        }}}});
         let event = super::operation_progress_event(42, "delete", "plan", &status);
         assert_eq!(event.completed_objects, Some(37));
         assert_eq!(event.total_objects, Some(115));

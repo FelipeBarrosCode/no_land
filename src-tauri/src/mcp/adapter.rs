@@ -623,8 +623,13 @@ impl Backend for DesktopBackend {
             }
             "storage_operation_status" => pack(
                 commands::get_storage_operation_status(
-                    app.state(), id(&args)?, args.get("operation_id").and_then(Value::as_str).map(str::to_owned),
-                ).await
+                    app.state(),
+                    id(&args)?,
+                    args.get("operation_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+                .await,
             ),
             "storage_status" => {
                 let backup=crate::services::shared_storage::shared_storage_manager::SharedStorageManager::get_instance_backup_status(&self.context,id(&args)?)

@@ -73,7 +73,8 @@ all three frontend builds and all nine locales per client passed. Three scale
 fixtures remain opt-in. At that local sign-off, native Linux deployment, live
 multi-PC/provider destructive acceptance, and Android/iOS device packaging remained
 pending; API 22 had not been deployed and no real cloud backup was deleted. See the
-later live Sync result below. Changes remain uncommitted/unpushed.
+later live Sync result below. Source changes are now carried by the consolidated
+review branches; publishing source does not establish destructive acceptance.
 
 The API 21 evidence below is historical and its pack-retention limitation is
 superseded by this follow-up.

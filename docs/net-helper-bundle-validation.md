@@ -57,7 +57,8 @@ injected read-only tool responses; they do **not** claim to create valid product
 signatures. The full Windows/Linux/macOS artifact checks require their native CI
 hosts, real bundles and existing managed release credentials. No workflow was
 dispatched, signing credential read, release published, or production bundle
-re-signed during this local change. All changes remain uncommitted/unpushed.
+re-signed during this local validation. The source is now carried by the
+consolidated review branch; that publication is not native release acceptance.
 
 Local results: **91 focused packaging/signing-policy tests** and **386 full script
 tests passed**. Workflow YAML parsing and Arch script syntax validation passed.

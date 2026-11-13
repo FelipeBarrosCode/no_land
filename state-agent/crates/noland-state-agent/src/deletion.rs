@@ -40,10 +40,13 @@ struct DeletionJournal<'a> {
 
 impl noland_storage::DeletionObserver for DeletionJournal<'_> {
     fn progress(&self, sample: &noland_storage::DeletionProgress) -> Result<()> {
-        let mut flushed = self.flushed.lock()
+        let mut flushed = self
+            .flushed
+            .lock()
             .map_err(|_| StateError::Storage("deletion progress lock poisoned".into()))?;
-        if flushed.as_ref().is_some_and(|(phase, at)|
-            phase == &sample.phase && at.elapsed() < Duration::from_millis(500)) {
+        if flushed.as_ref().is_some_and(|(phase, at)| {
+            phase == &sample.phase && at.elapsed() < Duration::from_millis(500)
+        }) {
             return Ok(());
         }
         let mut progress = OperationProgress::new(&sample.phase, sample.completed_objects);
@@ -284,7 +287,9 @@ pub(crate) async fn prepare_cloud(
             .map_err(|_| StateError::Invalid("invalid backup ID".into()))?;
         selected.push((AppId(parts[0].into()), id));
     }
-    let full = noland_storage::prepare_full_deletion_selected(provider, master, &selected, id, owner).await?;
+    let full =
+        noland_storage::prepare_full_deletion_selected(provider, master, &selected, id, owner)
+            .await?;
     Ok(DeletionPlan::from_full(full, binding))
 }
 
@@ -355,10 +360,18 @@ impl DeletionPlan {
             let guard =
                 crate::repository::acquire(agent, provider, master, full.operation_id).await?;
             let observer = DeletionJournal {
-                db: &agent.db, id: self.id, preview: &self.preview,
+                db: &agent.db,
+                id: self.id,
+                preview: &self.preview,
                 flushed: std::sync::Mutex::new(None),
             };
-            let result = noland_storage::execute_full_deletion_observed(provider, master, full, Some(&observer)).await;
+            let result = noland_storage::execute_full_deletion_observed(
+                provider,
+                master,
+                full,
+                Some(&observer),
+            )
+            .await;
             guard.release().await?;
             result?;
         }
@@ -425,35 +438,86 @@ mod tests {
         use noland_storage::DeletionObserver;
         let (root, agent, _, _) = fixture();
         let id = Uuid::new_v4();
-        agent.db.upsert_operation(&OperationRecord {
-            operation_id:id, kind:"delete".into(), app_id:None, state:"RUNNING".into(),
-            created_at:chrono::Utc::now(), updated_at:chrono::Utc::now(), last_error:None,
-            detail_json:json!({"target":"cloud"}),
-        }).unwrap();
+        agent
+            .db
+            .upsert_operation(&OperationRecord {
+                operation_id: id,
+                kind: "delete".into(),
+                app_id: None,
+                state: "RUNNING".into(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+                last_error: None,
+                detail_json: json!({"target":"cloud"}),
+            })
+            .unwrap();
         let preview = json!({"planId":id,"fullDeletion":true});
-        let observer = DeletionJournal { db:&agent.db, id, preview:&preview, flushed:std::sync::Mutex::new(None) };
+        let observer = DeletionJournal {
+            db: &agent.db,
+            id,
+            preview: &preview,
+            flushed: std::sync::Mutex::new(None),
+        };
         let mut sample = noland_storage::DeletionProgress {
-            phase:"validating".into(), validated_packs:0, completed_objects:0, total_objects:4,
-            completed_packs:0, total_packs:2, verified_absent_bytes:0, total_bytes:30,
-            last_success_at:None, elapsed_ms:0, concurrency:4, storage_metrics:Default::default(),
+            phase: "validating".into(),
+            validated_packs: 0,
+            completed_objects: 0,
+            total_objects: 4,
+            completed_packs: 0,
+            total_packs: 2,
+            verified_absent_bytes: 0,
+            total_bytes: 30,
+            last_success_at: None,
+            elapsed_ms: 0,
+            concurrency: 4,
+            storage_metrics: Default::default(),
         };
         observer.progress(&sample).unwrap();
         sample.validated_packs = 1;
         observer.progress(&sample).unwrap();
-        assert_eq!(agent.db.get_operation_progress(id).unwrap().unwrap().detail_json["deletion"]["validated_packs"], 0,
-            "unchanged-phase SQLite flushes are throttled");
-        sample.phase = "deleting_packs".into(); sample.completed_objects = 1;
-        sample.completed_packs = 1; sample.verified_absent_bytes = 10;
+        assert_eq!(
+            agent
+                .db
+                .get_operation_progress(id)
+                .unwrap()
+                .unwrap()
+                .detail_json["deletion"]["validated_packs"],
+            0,
+            "unchanged-phase SQLite flushes are throttled"
+        );
+        sample.phase = "deleting_packs".into();
+        sample.completed_objects = 1;
+        sample.completed_packs = 1;
+        sample.verified_absent_bytes = 10;
         sample.last_success_at = Some(chrono::Utc::now());
         observer.progress(&sample).unwrap();
-        let status = rpc(&agent, "GetOperationStatus", json!({"operation_id":id,"projection":"progress"})).await.unwrap();
-        assert_eq!(status["progress"]["detail_json"]["deletion"]["completed_packs"], 1);
+        let status = rpc(
+            &agent,
+            "GetOperationStatus",
+            json!({"operation_id":id,"projection":"progress"}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            status["progress"]["detail_json"]["deletion"]["completed_packs"],
+            1
+        );
         assert_eq!(status["progress"]["completed_units"], 1);
-        sample.phase = "finalizing".into(); sample.completed_objects = 4;
-        sample.completed_packs = 2; sample.verified_absent_bytes = 30;
+        sample.phase = "finalizing".into();
+        sample.completed_objects = 4;
+        sample.completed_packs = 2;
+        sample.verified_absent_bytes = 30;
         observer.progress(&sample).unwrap();
-        assert_eq!(agent.db.get_operation_progress(id).unwrap().unwrap().detail_json["deletion"]["verified_absent_bytes"], 30,
-            "phase changes force a final snapshot even inside the throttle window");
+        assert_eq!(
+            agent
+                .db
+                .get_operation_progress(id)
+                .unwrap()
+                .unwrap()
+                .detail_json["deletion"]["verified_absent_bytes"],
+            30,
+            "phase changes force a final snapshot even inside the throttle window"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

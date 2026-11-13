@@ -221,10 +221,16 @@ async fn inventory(
                 "committed manifest identity differs from storage path".into(),
             ));
         }
-        if catalog.apps.iter().filter(|app| app.app_id == manifest.app.app_id)
-            .flat_map(|app| &app.bundles).any(|bundle|
-                bundle.bundle_id == id && bundle.commit_id != manifest.commit_id) {
-            return Err(StateError::Integrity("catalog/manifest identity mismatch".into()));
+        if catalog
+            .apps
+            .iter()
+            .filter(|app| app.app_id == manifest.app.app_id)
+            .flat_map(|app| &app.bundles)
+            .any(|bundle| bundle.bundle_id == id && bundle.commit_id != manifest.commit_id)
+        {
+            return Err(StateError::Integrity(
+                "catalog/manifest identity mismatch".into(),
+            ));
         }
         let marker = download_metadata(provider, &entry.key, 64).await?;
         if marker != manifest.commit_id.to_string().as_bytes() {
@@ -403,14 +409,20 @@ pub async fn prepare_full_deletion_selected(
     owner: &str,
 ) -> Result<FullDeletionPlan> {
     if requested.is_empty() || requested.len() > LIMIT_BUNDLES {
-        return Err(StateError::Invalid("select 1–10000 explicit backups".into()));
+        return Err(StateError::Invalid(
+            "select 1–10000 explicit backups".into(),
+        ));
     }
     provider.check_full_deletion_support().await?;
     let items = inventory(provider, master).await?;
     let mut selected = BTreeSet::new();
     for (app, id) in requested {
-        if !items.iter().any(|bundle| &bundle.target.deletion.app_id == app && bundle.target.deletion.bundle_id == *id) {
-            return Err(StateError::NotFound("selected backup is not in the authenticated inventory".into()));
+        if !items.iter().any(|bundle| {
+            &bundle.target.deletion.app_id == app && bundle.target.deletion.bundle_id == *id
+        }) {
+            return Err(StateError::NotFound(
+                "selected backup is not in the authenticated inventory".into(),
+            ));
         }
         selected.insert(*id);
     }
