@@ -6,31 +6,39 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use noland_cas::{chunk_file_streaming, CasLease, LocalCas};
+use noland_cas::{CasLease, ChunkFileReader, ChunkSource, LocalCas};
 use noland_classifier::Classifier;
 use noland_crypto::MasterKey;
 use noland_pack::{pack_chunk_files_with_limits, BuiltPack, PackIndexEntry};
 use noland_rclone_adapter::{
     EphemeralRcloneSession, ProviderKind, ProviderRootIdentity, TransferTuning, TransferWorkload,
 };
-use noland_snapshot::create_view;
+use noland_snapshot::{open_regular_nofollow, SourceMetadata, SourcePath};
 use noland_state_core::*;
 use noland_storage::{
-    commit_bundle_with_index_for_operation, read_committed_manifest, read_pack_index,
+    commit_bundle_with_pack_index_for_operation, read_committed_manifest, read_pack_index,
     update_catalog_with_bundle, write_guarded_ephemeral_session, LocalStorage, RcloneStorage,
     SharedStorageProvider,
 };
 use uuid::Uuid;
 
+use crate::backup_policy::RegenerableCachePolicy;
 use crate::reconcile::{
     known_install_roots, reconcile_app, reconcile_app_for_complete_backup, steam_appmanifest_path,
     SteamBackupScope,
 };
 use crate::StateAgent;
 
+mod cache;
+mod capture_pipeline;
+mod group;
+#[cfg(test)]
+mod optimizations;
 mod packing;
+mod preparation;
 #[cfg(test)]
 mod scale;
+mod scoped_index;
 
 fn elapsed_ms(started: Instant) -> u64 {
     started.elapsed().as_millis().min(u64::MAX as u128) as u64
@@ -91,11 +99,9 @@ impl ProgressReporter {
         metrics: &OperationMetrics,
     ) -> Result<()> {
         progress.completed_units = self.completed_files;
-        progress.detail_json = serde_json::json!({
-            "bytes_hashed": metrics.bytes_hashed,
-            "files_rehashed": metrics.num_files_rehashed,
-            "bytes_completed": self.completed_bytes,
-        });
+        progress.detail_json["bytes_hashed"] = serde_json::json!(metrics.bytes_hashed);
+        progress.detail_json["files_rehashed"] = serde_json::json!(metrics.num_files_rehashed);
+        progress.detail_json["bytes_completed"] = serde_json::json!(self.completed_bytes);
         progress.updated_at = Utc::now();
         agent
             .db
@@ -109,9 +115,10 @@ impl ProgressReporter {
 
 struct RemoteChunkIndex {
     entries: HashMap<String, PackIndexEntry>,
+    scoped: Option<scoped_index::ScopedIndex>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct HashJob {
     app_id: AppId,
     source: PathBuf,
@@ -123,7 +130,7 @@ struct HashJob {
     shared_app_ids: Vec<AppId>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct HashMetricsDelta {
     bytes_hashed: u64,
     chunks_reused: u64,
@@ -133,13 +140,13 @@ struct HashMetricsDelta {
     bytes_reused_local: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct HashResult {
     snapshot_duration_ms: u64,
     consistency: ConsistencyKind,
     manifest_file: ManifestFile,
     file_state: FileStateRecord,
-    new_chunks: Vec<(String, PathBuf)>,
+    new_chunks: Vec<(String, ChunkSource)>,
     remote_entries: Vec<PackIndexEntry>,
     cas_observations: Vec<LocalCasEntry>,
     small_file_chunk_hashes: Vec<String>,
@@ -147,41 +154,24 @@ struct HashResult {
 }
 
 impl RemoteChunkIndex {
+    #[cfg(test)]
     fn empty() -> Self {
         Self {
             entries: HashMap::new(),
+            scoped: None,
         }
     }
 
+    #[cfg(test)]
     fn get(&self, hash: &str) -> Option<&PackIndexEntry> {
         self.entries.get(hash)
     }
-}
 
-fn hashing_worker_count(performance: BackupPerformanceMode) -> usize {
-    if let Ok(value) = std::env::var("NOLAND_HASH_WORKERS") {
-        if let Ok(value) = value.parse::<usize>() {
-            return value.clamp(1, 8);
+    fn lookup(&self, hash: &str) -> Result<Option<PackIndexEntry>> {
+        match &self.scoped {
+            Some(index) => index.get(hash),
+            None => Ok(self.entries.get(hash).cloned()),
         }
-    }
-    let available = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(4);
-    match performance {
-        BackupPerformanceMode::Balanced => 4.min(available).max(1),
-        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => 8.min(available).max(1),
-    }
-}
-
-fn pack_worker_count(performance: BackupPerformanceMode) -> usize {
-    if let Ok(value) = std::env::var("NOLAND_PACK_WORKERS") {
-        if let Ok(value) = value.parse::<usize>() {
-            return value.clamp(1, 4);
-        }
-    }
-    match performance {
-        BackupPerformanceMode::Balanced => 2,
-        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => 4,
     }
 }
 
@@ -191,11 +181,12 @@ fn cancellation_error() -> StateError {
     StateError::Invalid("backup cancellation requested".into())
 }
 
-fn plan_pack_chunks(
-    chunks: Vec<(String, PathBuf)>,
+#[cfg(test)]
+fn plan_pack_chunks<S: Into<ChunkSource>>(
+    chunks: Vec<(String, S)>,
     target: u64,
     max: u64,
-) -> Result<Vec<Vec<(String, PathBuf)>>> {
+) -> Result<Vec<Vec<(String, ChunkSource)>>> {
     const PACK_HEADER_BYTES: u64 = 24;
     const RECORD_OVERHEAD_BYTES: u64 = 52;
     if target == 0 || target > max {
@@ -206,8 +197,9 @@ fn plan_pack_chunks(
     let mut plans = Vec::new();
     let mut current = Vec::new();
     let mut current_bytes = PACK_HEADER_BYTES;
-    for (hash, path) in chunks {
-        let payload_bytes = std::fs::metadata(&path)?.len();
+    for (hash, source) in chunks {
+        let source = source.into();
+        let payload_bytes = source.len()?;
         let record_bytes = RECORD_OVERHEAD_BYTES
             .checked_add(payload_bytes)
             .ok_or_else(|| StateError::msg("chunk length exceeds pack format"))?;
@@ -227,7 +219,7 @@ fn plan_pack_chunks(
             current_bytes = PACK_HEADER_BYTES;
         }
         current_bytes += record_bytes;
-        current.push((hash, path));
+        current.push((hash, source));
     }
     if !current.is_empty() {
         plans.push(current);
@@ -272,7 +264,7 @@ fn build_packs_parallel(
         mpsc, Arc, Mutex,
     };
     let workers = worker_count.min(plans.len()).max(1);
-    let (plan_tx, plan_rx) = mpsc::sync_channel::<Vec<(String, PathBuf)>>(workers * 2);
+    let (plan_tx, plan_rx) = mpsc::sync_channel::<Vec<(String, ChunkSource)>>(workers * 2);
     let (result_tx, result_rx) = mpsc::sync_channel::<Result<BuiltPack>>(workers * 2);
     let plan_rx = Arc::new(Mutex::new(plan_rx));
     let stopped = Arc::new(AtomicBool::new(false));
@@ -357,77 +349,91 @@ fn build_packs_parallel(
 fn hash_one_file(
     job: HashJob,
     cas: &CasLease,
+    reader: &mut ChunkFileReader,
     inherited_hashes: &std::collections::HashSet<String>,
     remote_chunks: &RemoteChunkIndex,
     observed_at: chrono::DateTime<Utc>,
+    cancelled: &CancellationCheck,
 ) -> Result<HashResult> {
     let snapshot_started = Instant::now();
-    let source_before = std::fs::metadata(&job.source)?;
-    let view = if job.staged.is_none() {
-        Some(create_view(
-            &job.snapshot_root,
-            std::slice::from_ref(&job.source),
-            false,
-        )?)
-    } else {
-        None
-    };
-    let _cleanup = view.as_ref().map(|view| SnapshotCleanup(view.root.clone()));
-    let staged = job
-        .staged
-        .as_ref()
-        .or_else(|| {
-            view.as_ref()
-                .and_then(|view| view.mappings.first().map(|mapping| &mapping.staged))
-        })
-        .ok_or_else(|| {
-            StateError::Invalid("backup source disappeared while snapshotting".into())
-        })?;
-    let snapshot_duration_ms = elapsed_ms(snapshot_started);
+    let mut source = open_regular_nofollow(&job.source)?;
+    let source_before = source.metadata()?;
     let mut new_chunks = Vec::new();
     let mut remote_entries = Vec::new();
     let mut cas_observations = Vec::new();
     let mut metrics = HashMetricsDelta::default();
-    let summary = chunk_file_streaming(staged, |chunk, payload| {
+    let mut capture = |chunk: &ChunkRef, payload: &[u8]| {
+        if cancelled() {
+            return Err(cancellation_error());
+        }
         if inherited_hashes.contains(&chunk.hash) {
             metrics.chunks_reused = metrics.chunks_reused.saturating_add(1);
             return Ok(());
         }
-        if let Some(remote_entry) = remote_chunks.get(&chunk.hash) {
+        if let Some(remote_entry) = remote_chunks.lookup(&chunk.hash)? {
             metrics.remote_index_hits = metrics.remote_index_hits.saturating_add(1);
             metrics.chunks_reused = metrics.chunks_reused.saturating_add(1);
-            remote_entries.push(remote_entry.clone());
+            remote_entries.push(remote_entry);
             return Ok(());
         }
-        let stored = cas.put_prehashed(&chunk.hash, payload)?;
-        cas_observations.push(LocalCasEntry {
-            object_kind: ContentObjectKind::Chunk,
-            content_hash: chunk.hash.clone(),
-            local_path: cas.cache_path(&chunk.hash)?.to_string_lossy().into_owned(),
-            size: stored.bytes,
-            created_at: observed_at,
-            verified_at: Some(observed_at),
-            last_accessed_at: observed_at,
-        });
+        let stored = cas.capture_prehashed(&chunk.hash, payload)?;
+        if let Some(path) = &stored.cache_path {
+            cas_observations.push(LocalCasEntry {
+                object_kind: ContentObjectKind::Chunk,
+                content_hash: chunk.hash.clone(),
+                local_path: path.to_string_lossy().into_owned(),
+                size: stored.bytes,
+                created_at: observed_at,
+                verified_at: Some(observed_at),
+                last_accessed_at: observed_at,
+            });
+        }
         if stored.reused {
-            metrics.local_cas_hits = metrics.local_cas_hits.saturating_add(1);
-            metrics.bytes_reused_local = metrics.bytes_reused_local.saturating_add(stored.bytes);
+            if stored.cache_path.is_some() {
+                metrics.local_cas_hits = metrics.local_cas_hits.saturating_add(1);
+                metrics.bytes_reused_local =
+                    metrics.bytes_reused_local.saturating_add(stored.bytes);
+            } else {
+                metrics.chunks_reused = metrics.chunks_reused.saturating_add(1);
+            }
         } else {
             metrics.chunks_created = metrics.chunks_created.saturating_add(1);
         }
-        new_chunks.push((chunk.hash.clone(), stored.path));
+        new_chunks.push((chunk.hash.clone(), stored.source));
         Ok(())
-    })?;
-
-    let metadata = std::fs::metadata(&job.source)?;
+    };
+    let mut consistency = ConsistencyKind::Snapshot;
+    let (summary, metadata) = if let Some(staged) = &job.staged {
+        // Keep the atomic whole-capture view even for tiny files.
+        let mut staged = open_regular_nofollow(staged)?;
+        let metadata = staged.metadata()?;
+        let summary = reader.chunk_open_file(&mut staged, &mut capture)?;
+        if !noland_snapshot::same_file_identity(&metadata, &staged.metadata()?) {
+            return Err(StateError::Integrity(
+                "atomic snapshot file changed while reading".into(),
+            ));
+        }
+        (summary, metadata)
+    } else if let Some(captured) = reader.capture_small_file(&mut source, &mut capture)? {
+        captured
+    } else {
+        let (view, metadata) =
+            noland_snapshot::create_file_view(&job.snapshot_root, &job.source, &mut source)?;
+        let _cleanup = SnapshotCleanup(view.root.clone());
+        consistency = view.consistency;
+        let summary = reader.chunk_file(&view.mappings[0].staged, &mut capture)?;
+        (summary, metadata)
+    };
+    let snapshot_duration_ms = elapsed_ms(snapshot_started);
     let current_mtime_ns = metadata_mtime_ns(&metadata);
-    let mut current_record = job.record.clone();
+    let mut current_record = job.record;
     current_record.size = Some(summary.size.min(i64::MAX as u64) as i64);
     current_record.mtime_ns = current_mtime_ns;
     current_record.content_hash = Some(summary.file_hash.clone());
     #[cfg(unix)]
     {
         current_record.inode = Some(metadata.ino().min(i64::MAX as u64) as i64);
+        current_record.mount_id = Some(metadata.dev().min(i64::MAX as u64) as i64);
         current_record.mode = Some(metadata.mode() as i64);
         current_record.uid = Some(metadata.uid() as i64);
         current_record.gid = Some(metadata.gid() as i64);
@@ -435,12 +441,8 @@ fn hash_one_file(
     let manifest_file = ManifestFile {
         logical_root: job.logical.logical_root.as_token(),
         relative_path: job.logical.relative_path.clone(),
-        source_path_hint: Some(job.record.canonical_path.clone()),
-        file_type: job
-            .record
-            .file_type
-            .clone()
-            .unwrap_or_else(|| "file".into()),
+        source_path_hint: Some(current_record.canonical_path.clone()),
+        file_type: "file".into(),
         size: summary.size,
         file_hash: summary.file_hash.clone(),
         chunks: summary.chunks,
@@ -462,17 +464,22 @@ fn hash_one_file(
     };
     metrics.bytes_hashed = summary.size;
     let mut file_state = file_state_from_manifest(&job.app_id, &manifest_file, &current_record);
-    if job.record.size != Some(metadata.len().min(i64::MAX as u64) as i64)
-        || job.record.mtime_ns != current_mtime_ns
-        || job.record.inode != current_record.inode
-        || !noland_snapshot::same_file_identity(&source_before, &metadata)
-        || view
-            .as_ref()
-            .is_some_and(|view| view.consistency == ConsistencyKind::BestEffort)
+    // Trust is about the bytes and identity just captured, not the age of the
+    // discovery record (which may never have had filesystem metadata).
+    if !noland_snapshot::same_file_identity(&source_before, &metadata)
+        || !noland_snapshot::same_file_identity(&metadata, &source.metadata()?)
+        || !SourcePath::new(&job.source)
+            .and_then(|path| path.metadata())
+            .is_ok_and(|current| noland_snapshot::same_file_identity(&metadata, &current))
+        || consistency == ConsistencyKind::BestEffort
     {
         file_state.trust = FileStateTrust::VerifyRequired;
     }
-    let small_file_chunk_hashes = if noland_cas::is_small_file(summary.size) {
+    let small_file_chunk_hashes = if noland_cas::is_small_file(summary.size)
+        && matches!(
+            manifest_file.semantic_role,
+            SemanticRole::UserState | SemanticRole::Secret
+        ) {
         manifest_file
             .chunks
             .iter()
@@ -483,9 +490,7 @@ fn hash_one_file(
     };
     Ok(HashResult {
         snapshot_duration_ms,
-        consistency: view
-            .as_ref()
-            .map_or(ConsistencyKind::Snapshot, |view| view.consistency),
+        consistency,
         manifest_file,
         file_state,
         new_chunks,
@@ -494,6 +499,63 @@ fn hash_one_file(
         small_file_chunk_hashes,
         metrics,
     })
+}
+
+fn capture_symlink(
+    app_id: &AppId,
+    path: &Path,
+    record: &PathRecord,
+    association: &PathAssociation,
+    logical: &LogicalPath,
+    before: &SourceMetadata,
+) -> Result<(ManifestFile, FileStateRecord)> {
+    let anchored = SourcePath::new(path)?;
+    let target = anchored.read_link()?;
+    let target = target
+        .to_str()
+        .ok_or_else(|| StateError::UnsafePath("non-UTF-8 symlink target".into()))?
+        .to_owned();
+    let after = anchored.metadata()?;
+    // Share restore's bounded link-text contract; never follow the destination.
+    validate_symlink_target_within_root(&logical.relative_path, &target)?;
+    if !before.is_symlink() || !noland_snapshot::same_file_identity(before, &after) {
+        return Err(StateError::Invalid(
+            "symlink changed while capturing".into(),
+        ));
+    }
+    let mut record = record.clone();
+    record.file_type = Some("symlink".into());
+    record.size = Some(target.len() as i64);
+    record.mtime_ns = metadata_mtime_ns(before);
+    #[cfg(unix)]
+    {
+        record.inode = Some(before.ino().min(i64::MAX as u64) as i64);
+        record.mount_id = Some(before.dev().min(i64::MAX as u64) as i64);
+        record.mode = Some(before.mode() as i64);
+        record.uid = Some(before.uid() as i64);
+        record.gid = Some(before.gid() as i64);
+    }
+    let file = ManifestFile {
+        logical_root: logical.logical_root.as_token(),
+        relative_path: logical.relative_path.clone(),
+        source_path_hint: Some(record.canonical_path.clone()),
+        file_type: "symlink".into(),
+        size: target.len() as u64,
+        // This authenticates the link text, never the bytes at its destination.
+        file_hash: noland_cas::blake3_hex(target.as_bytes()),
+        chunks: Vec::new(),
+        mode: record.mode.and_then(|value| u32::try_from(value).ok()),
+        mtime_ns: record.mtime_ns,
+        uid: record.uid.and_then(|value| u32::try_from(value).ok()),
+        gid: record.gid.and_then(|value| u32::try_from(value).ok()),
+        symlink_target: Some(target),
+        persistence_class: association.persistence_class,
+        semantic_role: association.semantic_role,
+        association_confidence: association.confidence,
+        shared_app_ids: Vec::new(),
+    };
+    let state = file_state_from_manifest(app_id, &file, &record);
+    Ok((file, state))
 }
 
 fn hash_files_parallel(
@@ -542,28 +604,39 @@ fn hash_files_parallel(
             let cancelled = Arc::clone(&cancelled);
             let stopped = Arc::clone(&stopped);
             let cas = cas.clone();
-            scope.spawn(move || loop {
-                let job = match job_rx.lock().expect("hash job receiver poisoned").recv() {
-                    Ok(job) => job,
-                    Err(_) => break,
-                };
-                if stopped.load(Ordering::Acquire) {
-                    break;
-                }
-                let result = if cancelled() {
-                    Err(cancellation_error())
-                } else {
-                    hash_one_file(job, &cas, &inherited_hashes, &remote_chunks, observed_at)
-                };
-                let failed = result.is_err();
-                if failed {
-                    stopped.store(true, Ordering::Release);
-                }
-                if result_tx.send(result).is_err() {
-                    break;
-                }
-                if failed || cancelled() {
-                    break;
+            scope.spawn(move || {
+                let mut reader = ChunkFileReader::default();
+                loop {
+                    let job = match job_rx.lock().expect("hash job receiver poisoned").recv() {
+                        Ok(job) => job,
+                        Err(_) => break,
+                    };
+                    if stopped.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let result = if cancelled() {
+                        Err(cancellation_error())
+                    } else {
+                        hash_one_file(
+                            job,
+                            &cas,
+                            &mut reader,
+                            &inherited_hashes,
+                            &remote_chunks,
+                            observed_at,
+                            &cancelled,
+                        )
+                    };
+                    let failed = result.is_err();
+                    if failed {
+                        stopped.store(true, Ordering::Release);
+                    }
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                    if failed || cancelled() {
+                        break;
+                    }
                 }
             });
         }
@@ -587,6 +660,9 @@ fn hash_files_parallel(
     feeder.join().expect("hash job feeder panicked");
     if let Some(error) = first_error {
         return Err(error);
+    }
+    if cancelled() {
+        return Err(cancellation_error());
     }
     Ok(())
 }
@@ -667,6 +743,66 @@ pub async fn run_backup(
     master: &MasterKey,
     operation_id: Option<Uuid>,
 ) -> Result<BundleManifest> {
+    let id = operation_id.unwrap_or_else(Uuid::new_v4);
+    let before = provider.operation_metrics();
+    let repository_guard = crate::repository::acquire(agent, provider, master, id).await?;
+    let mut network = agent
+        .db
+        .get_operation(id)?
+        .as_ref()
+        .map(operation_metrics)
+        .unwrap_or_default();
+    let result = async {
+        let retired = noland_storage::retired_pack_ids(provider, master).await?;
+        if let Some(binding) = repository_cache_binding(provider.storage_identity(), master) {
+            agent.db.invalidate_remote_pack_paths(
+                &binding,
+                &retired.iter().map(|id| pack_key(id)).collect::<Vec<_>>(),
+            )?;
+        }
+        run_backup_inner(agent, app_id, mode, performance, provider, master, Some(id)).await
+    }
+    .await;
+    if let Err(error) = repository_guard.release().await {
+        tracing::warn!(%error, "repository admission cleanup requires owner recovery");
+    }
+    apply_storage_metrics(
+        &mut network,
+        provider.operation_metrics().saturating_sub(before),
+    );
+    let persist = (|| -> Result<()> {
+        let Some(mut operation) = agent.db.get_operation(id)? else {
+            return Ok(());
+        };
+        let mut metrics = operation_metrics(&operation);
+        metrics.bytes_downloaded = network.bytes_downloaded;
+        metrics.bytes_uploaded = network.bytes_uploaded;
+        metrics.num_rclone_invocations = network.num_rclone_invocations;
+        metrics.num_remote_stat_calls = network.num_remote_stat_calls;
+        metrics.num_remote_list_calls = network.num_remote_list_calls;
+        metrics.num_remote_mkdir_calls = network.num_remote_mkdir_calls;
+        metrics.num_remote_upload_calls = network.num_remote_upload_calls;
+        metrics.num_remote_download_calls = network.num_remote_download_calls;
+        operation.detail_json["metrics"] = serde_json::to_value(&metrics)?;
+        agent.db.set_operation_metrics(id, &metrics)?;
+        agent.db.upsert_operation(&operation)
+    })();
+    if let Err(error) = persist {
+        // Never replace the original transfer error with a metrics-write error.
+        tracing::warn!(%error, operation_id = %id, "could not persist complete backup network accounting");
+    }
+    result
+}
+
+async fn run_backup_inner(
+    agent: &StateAgent,
+    app_id: &AppId,
+    mode: BackupMode,
+    performance: BackupPerformanceMode,
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    operation_id: Option<Uuid>,
+) -> Result<BundleManifest> {
     let total_started = Instant::now();
     let op_id = operation_id.unwrap_or_else(Uuid::new_v4);
     let mut op = agent
@@ -685,8 +821,15 @@ pub async fn run_backup(
     if !op.detail_json.is_object() {
         op.detail_json = serde_json::json!({});
     }
+    let cache_policy =
+        RegenerableCachePolicy::from_value(op.detail_json.get("regenerable_caches"))?;
     let mut metrics = operation_metrics(&op);
     if let Some(prepared) = read_prepared_backup(agent, provider, master, op_id, app_id, mode)? {
+        if !cache_policy.matches_parent(&prepared.manifest) {
+            return Err(StateError::Invalid(
+                "backup retry cache policy differs from its captured revision".into(),
+            ));
+        }
         return finish_prepared_backup(agent, provider, master, op, prepared, total_started, true)
             .await;
     }
@@ -724,23 +867,30 @@ pub async fn run_backup(
     metrics.num_dirty_roots = agent.db.list_dirty_roots(Some(app_id))?.len() as u64;
 
     let parent = load_parent(provider, master, agent, app_id).await;
+    if mode == BackupMode::CompleteApplication {
+        let catalog = noland_storage::load_catalog(provider, master).await?;
+        if let Some(current) = catalog.apps.iter().find(|app| app.app_id == *app_id) {
+            if parent
+                .as_ref()
+                .is_none_or(|(manifest, _)| manifest.bundle_id != current.latest_bundle_id)
+            {
+                return Err(StateError::Conflict("cloud application changed on another PC; restore the current bundle before replacing it".into()));
+            }
+        }
+    }
     let parent_scope = parent
         .as_ref()
         .map(|(manifest, _)| (manifest.mode, manifest.files.len()));
-    if parent.is_some()
-        && dirty_state.is_none()
-        && pending_mutations.is_empty()
-        && mode == BackupMode::PersonalState
-        && performance != BackupPerformanceMode::Full
-    {
-        let (parent_manifest, _) = parent.expect("checked parent");
-        metrics.num_candidate_paths = 0;
-        metrics.num_files_skipped_fast_identity = parent_manifest.files.len() as u64;
-        metrics.total_duration_ms =
-            elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
-        mark_noop_completed(agent, &mut op, &mut metrics, &parent_manifest)?;
-        return Ok(parent_manifest);
-    }
+    let scope_changed = parent.as_ref().is_some_and(|(manifest, _)| {
+        manifest.mode != mode
+            || !cache_policy.matches_parent(manifest)
+            || (mode == BackupMode::CompleteApplication
+                && manifest
+                    .environment
+                    .get("capture_scope_version")
+                    .and_then(serde_json::Value::as_u64)
+                    != Some(1))
+    });
 
     let requires_reconciliation = dirty_state
         .as_ref()
@@ -781,17 +931,18 @@ pub async fn run_backup(
     };
     let mut candidates = BTreeMap::<String, (PathRecord, PathAssociation)>::new();
     let full_scope = parent.is_none()
+        || scope_changed
         || mode == BackupMode::CompleteApplication
         || performance == BackupPerformanceMode::Full
-        || requires_reconciliation;
+        || requires_reconciliation
+        || dirty_state
+            .as_ref()
+            .is_none_or(|dirty| dirty.dirty_paths.is_empty());
 
     if full_scope {
-        classifier.reclassify_app(app_id)?;
-        let rows = if mode == BackupMode::CompleteApplication {
-            agent.db.associations_for_app(app_id)?
-        } else {
-            agent.db.likely_backup_associations(app_id)?
-        };
+        // One classification pass below updates both selection and manifest
+        // labels. Filtering on old classes here would miss newly declared saves.
+        let rows = agent.db.associations_for_app(app_id)?;
         for (record, association) in rows {
             if strict_steam_scope
                 .as_ref()
@@ -859,7 +1010,7 @@ pub async fn run_backup(
                 mode,
             );
             next.parent_bundle_id = Some(parent_manifest.bundle_id);
-            next.files = parent_manifest.files;
+            next.files = normalize_parent_files(parent_manifest.files, &roots)?;
             (next, parent_index)
         }
         None => (
@@ -875,6 +1026,10 @@ pub async fn run_backup(
             Vec::new(),
         ),
     };
+    manifest.environment["regenerable_caches"] = serde_json::json!(cache_policy.as_str());
+    if mode == BackupMode::CompleteApplication {
+        manifest.environment["capture_scope_version"] = serde_json::json!(1);
+    }
 
     // One indexed lookup/removal per candidate, rather than find + retain over
     // the entire inherited manifest for each of hundreds of thousands of paths.
@@ -888,6 +1043,21 @@ pub async fn run_backup(
         })
         .collect::<BTreeMap<_, _>>();
     let mut tombstones = BTreeMap::<(String, String), String>::new();
+    let omit_cache = |path: &Path| {
+        cache_policy == RegenerableCachePolicy::Exclude && is_regenerable_game_cache(path)
+    };
+    let mut excluded_caches = BTreeMap::<(String, String), u64>::new();
+    inherited_files.retain(|key, file| {
+        if manifest_source_path(file, &roots)
+            .as_deref()
+            .is_some_and(&omit_cache)
+        {
+            excluded_caches.insert(key.clone(), file.size);
+            false
+        } else {
+            true
+        }
+    });
     if let Some(scope) = strict_steam_scope.as_ref() {
         let previous = std::mem::take(&mut inherited_files);
         for (key, file) in previous {
@@ -896,16 +1066,17 @@ pub async fn run_backup(
                 .is_some_and(|path| scope.contains(path));
             if in_scope {
                 inherited_files.insert(key, file);
-            } else {
-                tombstones.insert(
-                    (file.logical_root, file.relative_path),
-                    "outside strict Steam backup scope".into(),
-                );
             }
         }
     }
+    let omit_tombstone = |path: &Path| {
+        omit_cache(path)
+            || strict_steam_scope
+                .as_ref()
+                .is_some_and(|scope| !scope.contains(path))
+    };
     for mutation in &pending_mutations {
-        if mutation.kind == AppMutationKind::Delete {
+        if mutation.kind == AppMutationKind::Delete && !omit_tombstone(Path::new(&mutation.path)) {
             if let Some(logical) = roots.classify(Path::new(&mutation.path)) {
                 inherited_files.remove(&(
                     logical.logical_root.as_token(),
@@ -918,6 +1089,9 @@ pub async fn run_backup(
             }
         }
         if let Some(previous_path) = &mutation.previous_path {
+            if omit_tombstone(Path::new(previous_path)) {
+                continue;
+            }
             if let Some(logical) = roots.classify(Path::new(previous_path)) {
                 inherited_files.remove(&(
                     logical.logical_root.as_token(),
@@ -931,7 +1105,7 @@ pub async fn run_backup(
         }
     }
 
-    let indexed_states = agent
+    let mut indexed_states = agent
         .db
         .list_file_states(app_id, None)?
         .into_iter()
@@ -943,28 +1117,76 @@ pub async fn run_backup(
         })
         .collect::<HashMap<_, _>>();
     let mut include_paths = Vec::new();
+    let mut captured_links = Vec::new();
+    let mut excluded_host_device_links = 0u64;
+    let mut links_changed = false;
+    let mut metadata_changed = false;
+    let mut trusted_states = Vec::<FileStateRecord>::new();
     let mut changed_files = BTreeMap::<String, (PathRecord, PathAssociation, LogicalPath)>::new();
-    for (canonical, (record, association)) in candidates {
+    let candidate_ids = candidates
+        .values()
+        .map(|(record, _)| record.path_id)
+        .collect::<Vec<_>>();
+    let classification = classifier.begin_pass(app_id, &candidate_ids)?;
+    let mut classification_updates = Vec::with_capacity(512);
+    let mut shared_app_ids_by_path = agent
+        .db
+        .associations_for_paths(&candidate_ids)?
+        .into_iter()
+        .map(|(id, associations)| {
+            let mut others = associations
+                .into_iter()
+                .filter(|other| {
+                    other.app_id != *app_id && other.confidence >= OWNERSHIP_CANDIDATE_MIN
+                })
+                .map(|other| other.app_id)
+                .collect::<Vec<_>>();
+            others.sort();
+            others.dedup();
+            (id, others)
+        })
+        .collect::<HashMap<_, _>>();
+    drop(candidate_ids);
+    for (canonical, (record, mut association)) in candidates {
         let logical = roots.classify(Path::new(&canonical)).unwrap_or_else(|| {
             LogicalPath::new(
                 LogicalRoot::Home,
                 canonical.trim_start_matches('/').to_string(),
             )
         });
+        if omit_cache(Path::new(&canonical)) {
+            let bytes = record
+                .size
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .or_else(|| {
+                    std::fs::symlink_metadata(&canonical)
+                        .ok()
+                        .map(|meta| meta.len())
+                })
+                .unwrap_or(0);
+            excluded_caches.insert(
+                (logical.logical_root.as_token(), logical.relative_path),
+                bytes,
+            );
+            continue;
+        }
         let inherited = inherited_files.remove(&(
             logical.logical_root.as_token(),
             logical.relative_path.clone(),
         ));
-        if !Path::new(&canonical).is_file() {
-            if inherited.is_some() {
-                tombstones.insert(
-                    (logical.logical_root.as_token(), logical.relative_path),
-                    "observed deletion or rename".into(),
-                );
+        let old_classification = (association.persistence_class, association.semantic_role);
+        let decision = classification.classify_and_decide(&record, &mut association, mode)?;
+        if old_classification != (association.persistence_class, association.semantic_role) {
+            classification_updates.push((
+                association.clone(),
+                association.persistence_class,
+                association.semantic_role,
+            ));
+            if classification_updates.len() == 512 {
+                agent.db.update_classifications(&classification_updates)?;
+                classification_updates.clear();
             }
-            continue;
         }
-        let decision = classifier.decide(&record, &association, mode)?;
         let complete_install_content = mode == BackupMode::CompleteApplication
             && install_roots
                 .iter()
@@ -978,19 +1200,86 @@ pub async fn run_backup(
             }
             _ => {}
         }
+        // Policy exclusions (including unreadable diagnostic logs) are lexical
+        // decisions and must not require opening the excluded filesystem entry.
+        let metadata = match SourcePath::new(Path::new(&canonical)).and_then(|path| path.metadata())
+        {
+            Ok(metadata) => Some(metadata),
+            Err(StateError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if metadata
+            .as_ref()
+            .is_none_or(|meta| !meta.is_file() && !meta.is_symlink())
+        {
+            if inherited.is_some() {
+                tombstones.insert(
+                    (logical.logical_root.as_token(), logical.relative_path),
+                    "observed deletion or rename".into(),
+                );
+            }
+            continue;
+        }
         // A delete followed by recreation in the same capture has live content.
         tombstones.remove(&(
             logical.logical_root.as_token(),
             logical.relative_path.clone(),
         ));
 
-        let metadata = std::fs::metadata(&canonical)?;
+        let metadata = metadata.expect("file or symlink metadata");
+        if metadata.is_symlink() {
+            let source = SourcePath::new(Path::new(&canonical))?;
+            let target = source.read_link()?;
+            if crate::backup_policy::is_host_device_mapping(&logical, &target) {
+                if !noland_snapshot::same_file_identity(&metadata, &source.metadata()?) {
+                    return Err(StateError::Invalid(
+                        "device mapping changed while capturing".into(),
+                    ));
+                }
+                excluded_host_device_links += 1;
+                metadata_changed |= inherited.is_some();
+                continue;
+            }
+            let (mut file, state) = capture_symlink(
+                app_id,
+                Path::new(&canonical),
+                &record,
+                &association,
+                &logical,
+                &metadata,
+            )?;
+            file.shared_app_ids = shared_app_ids_by_path
+                .remove(&record.path_id)
+                .unwrap_or_default();
+            links_changed |= inherited.as_ref().is_none_or(|old| {
+                old.file_type != "symlink"
+                    || old.symlink_target != file.symlink_target
+                    || old.file_hash != file.file_hash
+                    || !old.chunks.is_empty()
+                    || old.size != file.size
+                    || old.mode != file.mode
+                    || old.mtime_ns != file.mtime_ns
+                    || old.uid != file.uid
+                    || old.gid != file.gid
+                    || old.persistence_class != file.persistence_class
+                    || old.semantic_role != file.semantic_role
+                    || old.association_confidence != file.association_confidence
+                    || old.shared_app_ids != file.shared_app_ids
+                    || old.source_path_hint != file.source_path_hint
+            });
+            captured_links.push((file, state, record.path_id));
+            continue;
+        }
         let mtime_ns = metadata_mtime_ns(&metadata).unwrap_or(0);
         #[cfg(unix)]
         let inode = Some(metadata.ino());
         #[cfg(not(unix))]
         let inode = None;
-        let indexed = indexed_states.get(&(
+        #[cfg(unix)]
+        let mount_id = Some(metadata.dev());
+        #[cfg(not(unix))]
+        let mount_id = None;
+        let indexed = indexed_states.remove(&(
             logical.logical_root.as_token(),
             logical.relative_path.clone(),
         ));
@@ -998,18 +1287,37 @@ pub async fn run_backup(
             && !requires_reconciliation
             && !dirty_path_ids.contains(&record.path_id)
             && !mutated_paths.contains(canonical.as_str())
-            && indexed.is_some_and(|state| {
-                state.fast_identity_matches(metadata.len(), mtime_ns, inode, None)
+            && indexed.as_ref().is_some_and(|state| {
+                state.fast_identity_matches(metadata.len(), mtime_ns, inode, mount_id)
                     && inherited
                         .as_ref()
                         .is_some_and(|file| state.content_hash.as_ref() == Some(&file.file_hash))
-                    && state.mode == Some(metadata.mode())
+                    && inherited
+                        .as_ref()
+                        .is_some_and(|file| file.file_type == "file")
             })
             && inherited.is_some()
         {
-            manifest
-                .files
-                .push(inherited.expect("checked inherited file"));
+            let mut file = inherited.expect("checked inherited file");
+            let changed = refresh_reused_file(
+                &mut file,
+                &record,
+                &association,
+                &metadata,
+                indexed.as_ref().expect("checked trusted identity"),
+                shared_app_ids_by_path
+                    .remove(&record.path_id)
+                    .unwrap_or_default(),
+            );
+            metadata_changed |= changed;
+            if changed {
+                let mut state = indexed.expect("checked trusted identity");
+                state.mode = file.mode;
+                state.canonical_path = file.source_path_hint.clone();
+                state.last_seen_at = Utc::now();
+                trusted_states.push(state);
+            }
+            manifest.files.push(file);
             metrics.num_files_skipped_fast_identity =
                 metrics.num_files_skipped_fast_identity.saturating_add(1);
             continue;
@@ -1017,29 +1325,23 @@ pub async fn run_backup(
         include_paths.push(PathBuf::from(&canonical));
         changed_files.insert(canonical, (record, association, logical));
     }
-    let changed_path_ids = changed_files
-        .values()
-        .map(|(record, _, _)| record.path_id)
-        .collect::<Vec<_>>();
-    manifest.files.extend(inherited_files.into_values());
-    let shared_app_ids_by_path = agent
-        .db
-        .associations_for_paths(&changed_path_ids)?
-        .into_iter()
-        .map(|(path_id, associations)| {
-            (
-                path_id,
-                associations
-                    .into_iter()
-                    .filter(|other| {
-                        other.app_id != *app_id && other.confidence >= OWNERSHIP_CANDIDATE_MIN
-                    })
-                    .map(|other| other.app_id)
-                    .collect::<Vec<_>>(),
-            )
-        })
-        .collect::<HashMap<_, _>>();
-
+    agent.db.update_classifications(&classification_updates)?;
+    drop(classification_updates);
+    drop(classification);
+    drop(indexed_states);
+    drop(mutated_paths);
+    drop(dirty_path_ids);
+    drop(dirty_state);
+    // A parent from another capture mode is only an identity/chunk reuse hint.
+    // Its unselected files must not silently become personal-state content.
+    // Scope reduction is not a user-file deletion, so it creates no tombstones.
+    if !scope_changed {
+        manifest.files.extend(inherited_files.into_values());
+    }
+    for (file, state, _) in captured_links {
+        manifest.files.push(file);
+        trusted_states.push(state);
+    }
     for ((logical_root, relative_path), reason) in tombstones {
         manifest.tombstones.push(ManifestTombstone {
             logical_root,
@@ -1048,39 +1350,98 @@ pub async fn run_backup(
         });
     }
     metrics.planning_duration_ms = elapsed_ms(planning_started);
+    let excluded_cache_files = excluded_caches.len() as u64;
+    let excluded_cache_bytes = excluded_caches
+        .values()
+        .copied()
+        .fold(0u64, u64::saturating_add);
+    drop(excluded_caches);
+    op.detail_json["regenerable_caches"] = serde_json::json!(cache_policy.as_str());
+    op.detail_json["excluded_regenerable_cache_files"] = serde_json::json!(excluded_cache_files);
+    op.detail_json["excluded_regenerable_cache_bytes"] = serde_json::json!(excluded_cache_bytes);
+    op.detail_json["excluded_host_device_links"] = serde_json::json!(excluded_host_device_links);
+    manifest.environment["excluded_host_device_links"] =
+        serde_json::json!(excluded_host_device_links);
     let mut progress = OperationProgress::new("snapshotting", 0);
     progress.total_units = Some(include_paths.len() as u64);
     progress.detail_json = serde_json::json!({
         "performance_mode": performance.as_str(),
         "files_reused": metrics.num_files_skipped_fast_identity,
+        "regenerable_caches": cache_policy.as_str(),
+        "excluded_regenerable_cache_files": excluded_cache_files,
+        "excluded_regenerable_cache_bytes": excluded_cache_bytes,
+        "excluded_host_device_links": excluded_host_device_links,
     });
     progress.unit = Some("files".into());
     agent.db.set_operation_progress(op_id, Some(&progress))?;
 
     if include_paths.is_empty()
+        && !links_changed
+        && !metadata_changed
         && manifest.tombstones.is_empty()
+        && !scope_changed
         && parent_scope == Some((mode, manifest.files.len()))
     {
         if let Some(parent_bundle_id) = manifest.parent_bundle_id {
-            if let Ok(parent_manifest) =
-                read_committed_manifest(provider, master, app_id, parent_bundle_id).await
-            {
+            let binding = repository_cache_binding(provider.storage_identity(), master);
+            let context = binding
+                .as_ref()
+                .map(|binding| format!("parent:{binding}:{app_id}:{parent_bundle_id}:manifest"));
+            let cached: Option<BundleManifest> =
+                binding
+                    .as_ref()
+                    .zip(context.as_ref())
+                    .and_then(|(binding, context)| {
+                        cache::read_json(
+                            &parent_cache_dir(agent, app_id, parent_bundle_id)
+                                .join(binding)
+                                .join("manifest.json"),
+                            master,
+                            context,
+                        )
+                    });
+            let parent = match cached {
+                Some(parent)
+                    if parent.bundle_id == parent_bundle_id && parent.app.app_id == *app_id =>
+                {
+                    Ok(parent)
+                }
+                _ => read_committed_manifest(provider, master, app_id, parent_bundle_id).await,
+            };
+            if let Ok(parent_manifest) = parent {
+                if !cache_policy.matches_parent(&parent_manifest) {
+                    return Err(StateError::Integrity(
+                        "parent capture policy changed".into(),
+                    ));
+                }
                 metrics.total_duration_ms =
                     elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
                 finish_backup_evidence(agent, app_id, &pending_mutations, captured_generation)?;
+                if mode == BackupMode::CompleteApplication {
+                    noland_storage::converge_application(
+                        provider,
+                        master,
+                        &parent_manifest,
+                        op_id,
+                        &crate::repository::owner(agent, master)?,
+                    )
+                    .await?;
+                }
                 mark_noop_completed(agent, &mut op, &mut metrics, &parent_manifest)?;
                 return Ok(parent_manifest);
             }
         }
     }
 
+    let preparation_budget = preparation::Budget::detect(agent, performance)?;
+    progress.detail_json["preparation_workers"] = serde_json::to_value(preparation_budget)?;
     persist_operation(agent, &mut op, BackupState::Snapshotting, &metrics)?;
     let atomic_view =
         noland_snapshot::create_atomic_view(&agent.config.paths.snapshots, &include_paths)?;
     let atomic_cleanup = atomic_view
         .as_ref()
         .map(|view| SnapshotCleanup(view.root.clone()));
-    let staged_paths = atomic_view
+    let mut staged_paths = atomic_view
         .as_ref()
         .map(|view| {
             view.mappings
@@ -1093,29 +1454,42 @@ pub async fn run_backup(
     // must not be duplicated before hashing starts.
     let sizes = include_paths
         .iter()
-        .map(std::fs::metadata)
-        .collect::<std::io::Result<Vec<_>>>()?;
+        .map(|path| SourcePath::new(path)?.metadata())
+        .collect::<Result<Vec<_>>>()?;
+    if sizes.iter().any(|metadata| !metadata.is_file()) {
+        return Err(StateError::Invalid(
+            "backup source changed file type before snapshot".into(),
+        ));
+    }
     let bytes = sizes.iter().map(|meta| meta.len()).sum::<u64>();
-    let mut snapshot_sizes = sizes.iter().map(|meta| meta.len()).collect::<Vec<_>>();
+    let mut snapshot_sizes = sizes
+        .iter()
+        .map(|meta| meta.len())
+        .filter(|size| !noland_cas::is_small_file(*size))
+        .collect::<Vec<_>>();
     snapshot_sizes.sort_unstable_by(|left, right| right.cmp(left));
-    let snapshot_budget = if atomic_view.is_some() {
+    let snapshot_budget = if atomic_view.is_some() || provider.storage_identity().is_some() {
         0
     } else {
-        snapshot_sizes
-            .iter()
-            .take(hashing_worker_count(performance))
-            .sum()
+        snapshot_sizes.iter().take(preparation_budget.hashing).sum()
     };
-    let _disk_budget = disk::DiskReservation::reserve(&[
+    disk::check_admission(&[
         (agent.config.paths.snapshots.clone(), snapshot_budget),
-        (agent.config.paths.cache.clone(), bytes),
+        (
+            agent.config.paths.cache.clone(),
+            bytes.saturating_add((include_paths.len() as u64).saturating_mul(128)),
+        ),
         (
             agent.config.paths.packs.clone(),
             bytes
                 .saturating_add(bytes / 100)
+                .saturating_add((include_paths.len() as u64).saturating_mul(52))
                 .saturating_add(1024 * 1024),
         ),
     ])?;
+    drop(sizes);
+    drop(snapshot_sizes);
+    drop(include_paths);
     manifest.consistency = ConsistencyKind::Snapshot;
 
     persist_operation(agent, &mut op, BackupState::Hashing, &metrics)?;
@@ -1131,7 +1505,22 @@ pub async fn run_backup(
     };
     let snapshot_time = Utc::now();
     let storage_id = repository_cache_binding(provider.storage_identity(), master);
-    let remote_chunks = load_remote_chunk_index(agent, storage_id.as_deref(), snapshot_time)?;
+    let storage_id = match storage_id {
+        Some(binding)
+            if agent
+                .db
+                .has_remote_content(&binding, ContentObjectKind::Chunk)? =>
+        {
+            Some(binding)
+        }
+        _ => None,
+    };
+    let remote_chunks = RemoteChunkIndex {
+        entries: HashMap::new(),
+        scoped: storage_id.map(|binding| {
+            scoped_index::ScopedIndex::new(agent.db.clone(), binding, master.clone(), snapshot_time)
+        }),
+    };
     let cas_observed_at = snapshot_time;
     let mut cas_observations = Vec::<LocalCasEntry>::new();
     let mut progress_reporter = ProgressReporter::new(op_id);
@@ -1140,27 +1529,72 @@ pub async fn run_backup(
         .map(|entry| entry.chunk_hash.clone())
         .collect::<std::collections::HashSet<_>>();
     let jobs = changed_files
-        .iter()
-        .map(|(source, (record, association, logical))| HashJob {
-            app_id: app_id.clone(),
-            source: PathBuf::from(source),
-            snapshot_root: agent.config.paths.snapshots.clone(),
-            staged: staged_paths.get(&PathBuf::from(source)).cloned(),
-            record: record.clone(),
-            association: association.clone(),
-            logical: logical.clone(),
-            shared_app_ids: shared_app_ids_by_path
-                .get(&record.path_id)
-                .cloned()
-                .unwrap_or_default(),
+        .into_iter()
+        .map(|(source, (record, association, logical))| {
+            let shared_app_ids = shared_app_ids_by_path
+                .remove(&record.path_id)
+                .unwrap_or_default();
+            let source = PathBuf::from(source);
+            HashJob {
+                app_id: app_id.clone(),
+                snapshot_root: agent.config.paths.snapshots.clone(),
+                staged: staged_paths.remove(&source),
+                source,
+                record,
+                association,
+                logical,
+                shared_app_ids,
+            }
         })
         .collect::<Vec<_>>();
-    let mut new_chunk_paths = BTreeMap::<String, PathBuf>::new();
+    drop(shared_app_ids_by_path);
+    drop(staged_paths);
+    if provider.storage_identity().is_some() {
+        // Persist the selected scope before publishing any partial capture. A
+        // retry resumes these jobs and sealed batches, never a fresh discovery.
+        let capture = capture_pipeline::State::new_streaming(
+            jobs,
+            atomic_cleanup.as_ref().map(|v| v.0.clone()),
+            preparation_budget,
+        )?;
+        let prepared = PreparedBackup {
+            version: 3,
+            storage_id: provider
+                .storage_identity()
+                .map(|identity| identity.cache_key()),
+            manifest,
+            pack_index,
+            pack_files: Vec::new(),
+            new_pack_entries: Vec::new(),
+            cas_observations,
+            trusted_states,
+            pending_mutations,
+            captured_generation,
+            incremental: 0,
+            metrics,
+            checksums: BTreeMap::new(),
+            packing: None,
+            release_lease: None,
+            capture: Some(capture),
+            release_capture: None,
+        };
+        if let Some(cleanup) = atomic_cleanup {
+            let path = cleanup.0.clone();
+            // Retain before rename/fsync can fail: a durable partial checkpoint
+            // must never reference a snapshot removed by stack unwinding.
+            std::mem::forget(cleanup);
+            std::fs::File::open(&path)?.sync_all()?;
+            std::fs::File::open(&agent.config.paths.snapshots)?.sync_all()?;
+        }
+        write_prepared_backup(agent, master, op_id, &prepared)?;
+        return finish_prepared_backup(agent, provider, master, op, prepared, total_started, false)
+            .await;
+    }
+    let mut new_chunk_paths = BTreeMap::<String, ChunkSource>::new();
     let mut small_file_chunk_hashes = BTreeSet::<String>::new();
-    let mut trusted_states = Vec::<FileStateRecord>::new();
     hash_files_parallel(
         jobs,
-        hashing_worker_count(performance),
+        preparation_budget.hashing,
         Arc::clone(&cas_lease),
         inherited_hashes,
         remote_chunks,
@@ -1239,9 +1673,11 @@ pub async fn run_backup(
             }
         }
     }
-    // Small state files are deliberately grouped into compact packs so launch-critical
-    // restore does not need to fetch a mostly unrelated 512 MiB pack.
+    // Only small saves/secrets use compact packs. Tiny cold application assets
+    // stay in normal packs, avoiding hundreds of mostly empty state packs.
     let plans = packing::plans(small_chunks, regular_chunks)?;
+    drop(small_file_chunk_hashes);
+    drop(new_chunk_paths);
     pack_index.sort_by(|left, right| left.chunk_hash.cmp(&right.chunk_hash));
     pack_index.dedup_by(|left, right| left.chunk_hash == right.chunk_hash);
     manifest.files.sort_by(|left, right| {
@@ -1283,10 +1719,15 @@ pub async fn run_backup(
         metrics,
         checksums: BTreeMap::new(),
         release_lease: None,
+        capture: None,
+        release_capture: None,
         packing: Some(packing::PackingState {
             plans,
             lease: cas_lease.root().to_path_buf(),
-            workers: pack_worker_count(performance),
+            workers: preparation_budget.packing,
+            receipt_prefix: String::new(),
+            partial_capture: false,
+            upload_slots: None,
         }),
     };
     // Preserve immutable IDs and ciphertext across retries. Upload journal rows
@@ -1297,11 +1738,13 @@ pub async fn run_backup(
         SyncDirection::Upload,
     )?;
     cas_lease.sync_all()?;
+    if cancelled() {
+        return Err(cancellation_error());
+    }
     write_prepared_backup(agent, master, op_id, &prepared)?;
     if prepared.storage_id.is_some() {
         cas_lease.retain_for_retry();
     }
-    drop(_disk_budget);
     finish_prepared_backup(agent, provider, master, op, prepared, total_started, false).await
 }
 
@@ -1325,6 +1768,10 @@ struct PreparedBackup {
     // durable but before its plaintext lease has been released.
     #[serde(default)]
     release_lease: Option<PathBuf>,
+    #[serde(default)]
+    capture: Option<capture_pipeline::State>,
+    #[serde(default)]
+    release_capture: Option<capture_pipeline::Cleanup>,
 }
 
 fn prepared_backup_path(agent: &StateAgent, operation_id: Uuid) -> PathBuf {
@@ -1349,11 +1796,12 @@ fn write_prepared_backup(
     let path = prepared_backup_path(agent, operation_id);
     let parent = path.parent().expect("resume parent");
     std::fs::create_dir_all(parent)?;
-    let encrypted = noland_crypto::wrap_envelope(
+    let encrypted = noland_storage::seal_metadata(
         &noland_crypto::derive_keys(master).manifest,
         format!("backup-resume:{operation_id}").as_bytes(),
-        &serde_json::to_vec(prepared)?,
-    )?;
+        prepared,
+    )?
+    .envelope;
     let temp = path.with_extension("partial");
     disk::ensure_space(parent, encrypted.len() as u64)?;
     let mut file = std::fs::File::create(&temp)?;
@@ -1381,16 +1829,16 @@ fn read_prepared_backup(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let plain = noland_crypto::unwrap_envelope(
+    let prepared: PreparedBackup = noland_storage::open_metadata(
         &noland_crypto::derive_keys(master).manifest,
         format!("backup-resume:{operation_id}").as_bytes(),
-        &bytes,
+        bytes,
     )?;
-    let prepared: PreparedBackup = serde_json::from_slice(&plain)?;
     let storage_id = provider
         .storage_identity()
         .map(|identity| identity.cache_key());
-    if prepared.version != 1
+    if !matches!(prepared.version, 1 | 2 | 3)
+        || (prepared.version == 1 && prepared.capture.is_some())
         || storage_id.is_none()
         || prepared.storage_id != storage_id
         || prepared.manifest.app.app_id != *app_id
@@ -1437,7 +1885,41 @@ async fn finish_prepared_backup(
     if agent.operations.cancel_requested(op.operation_id) {
         return Err(cancellation_error());
     }
-    let storage_before = provider.operation_metrics();
+    if noland_storage::bundle_is_deleted(provider, master, prepared.manifest.bundle_id).await? {
+        return Err(StateError::Conflict(
+            "this captured revision was deleted and cannot be retried".into(),
+        ));
+    }
+    let retired = noland_storage::retired_pack_ids(provider, master).await?;
+    if prepared
+        .pack_index
+        .iter()
+        .any(|entry| retired.contains(&entry.pack_id))
+        || prepared
+            .pack_files
+            .iter()
+            .any(|(id, _)| retired.contains(id))
+    {
+        return Err(StateError::Conflict(
+            "captured data was deleted; start a fresh backup instead of reuploading retired packs"
+                .into(),
+        ));
+    }
+    if prepared.manifest.mode == BackupMode::CompleteApplication {
+        let catalog = noland_storage::load_catalog(provider, master).await?;
+        if let Some(current) = catalog
+            .apps
+            .iter()
+            .find(|app| app.app_id == prepared.manifest.app.app_id)
+        {
+            if Some(current.latest_bundle_id) != prepared.manifest.parent_bundle_id
+                && current.latest_bundle_id != prepared.manifest.bundle_id
+            {
+                return Err(StateError::Conflict("cloud application advanced since this capture; frozen retry cannot overwrite its newer bundle".into()));
+            }
+        }
+    }
+    capture_pipeline::run(agent, provider, master, op.operation_id, &mut prepared).await?;
     packing::pack_and_upload(
         agent,
         provider,
@@ -1472,30 +1954,17 @@ async fn finish_prepared_backup(
             .packs
             .join(manifest.bundle_id.to_string()),
     );
-    let mut progress = OperationProgress::new("uploading", 0);
-
-    let transfer_bytes = pack_files
-        .iter()
-        .filter_map(|(_, path)| std::fs::metadata(path).ok().map(|metadata| metadata.len()))
-        .sum::<u64>();
-    persist_operation(agent, &mut op, BackupState::Uploading, &metrics)?;
-    progress.phase = "uploading".into();
-    progress.completed_units = 0;
-    progress.total_units = Some(transfer_bytes);
-    progress.unit = Some("bytes".into());
-    progress.message = Some(format!(
-        "Uploading {transfer_bytes} bytes in encrypted packs"
-    ));
-    progress.detail_json = serde_json::json!({
-        "bytes_to_upload": transfer_bytes,
-        "total_packs": pack_files.len(),
-        "completed_pack_bytes": 0,
-        "bytes_transferred": 0,
-        "total_transfer_bytes": transfer_bytes,
-    });
-    progress.updated_at = Utc::now();
-    progress.detail_json["resumed"] = serde_json::json!(resumed);
-    agent.db.set_operation_progress(op_id, Some(&progress))?;
+    let payloads_complete = report_commit_progress(agent, op_id, &pack_files, resumed)?;
+    persist_operation(
+        agent,
+        &mut op,
+        if payloads_complete {
+            BackupState::Committing
+        } else {
+            BackupState::Uploading
+        },
+        &metrics,
+    )?;
     let upload_started = Instant::now();
     agent.db.record_commit(
         manifest.commit_id,
@@ -1505,7 +1974,6 @@ async fn finish_prepared_backup(
         None,
         CommitVisibility::Uploading,
     )?;
-    let index_json = serde_json::to_vec(&pack_index)?;
     let committed_key = noland_storage::RemoteKey::new(format!(
         "{}/{}",
         bundle_dir(app_id, manifest.bundle_id),
@@ -1515,17 +1983,16 @@ async fn finish_prepared_backup(
         let existing =
             read_committed_manifest(provider, master, app_id, manifest.bundle_id).await?;
         let existing_index = read_pack_index(provider, master, app_id, manifest.bundle_id).await?;
-        if serde_json::to_vec(&existing)? != serde_json::to_vec(&manifest)?
-            || serde_json::to_vec(&existing_index)? != index_json
+        if noland_storage::compact_json_hash(&existing)?
+            != noland_storage::compact_json_hash(&manifest)?
+            || noland_storage::compact_json_hash(&existing_index)?
+                != noland_storage::compact_json_hash(&pack_index)?
         {
             return Err(StateError::Integrity(
                 "committed revision differs from retry checkpoint".into(),
             ));
         }
-        let hash = format!(
-            "blake3:{}",
-            blake3::hash(&serde_json::to_vec(&manifest)?).to_hex()
-        );
+        let hash = noland_storage::compact_json_hash(&manifest)?;
         agent.db.record_commit(
             manifest.commit_id,
             app_id,
@@ -1539,12 +2006,12 @@ async fn finish_prepared_backup(
         false
     };
     if !already_committed {
-        commit_bundle_with_index_for_operation(
+        commit_bundle_with_pack_index_for_operation(
             provider,
             master,
             &manifest,
             &pack_files,
-            Some(&index_json),
+            Some(&pack_index),
             Some(&agent.db),
             Some(op_id),
         )
@@ -1556,13 +2023,28 @@ async fn finish_prepared_backup(
     metrics.num_manifest_writes = 1;
 
     persist_operation(agent, &mut op, BackupState::Committing, &metrics)?;
+    report_commit_progress(agent, op_id, &pack_files, resumed)?;
     let commit_started = Instant::now();
     update_catalog_with_bundle(provider, master, &manifest, incremental).await?;
+    if manifest.mode == BackupMode::CompleteApplication {
+        noland_storage::converge_application(
+            provider,
+            master,
+            &manifest,
+            op_id,
+            &crate::repository::owner(agent, master)?,
+        )
+        .await?;
+    }
     let cache_binding = repository_cache_binding(provider.storage_identity(), master);
-    cache_parent(agent, &manifest, &pack_index, cache_binding.as_deref())?;
+    cache_parent(
+        agent,
+        &manifest,
+        &pack_index,
+        cache_binding.as_deref(),
+        master,
+    )?;
     metrics.commit_duration_ms = elapsed_ms(commit_started);
-    let storage_metrics = provider.operation_metrics().saturating_sub(storage_before);
-    apply_storage_metrics(&mut metrics, storage_metrics);
 
     let chunk_rows = new_pack_entries
         .iter()
@@ -1575,7 +2057,12 @@ async fn finish_prepared_backup(
         })
         .collect::<Vec<_>>();
     agent.db.remember_chunks_bulk(&chunk_rows)?;
-    remember_remote_pack_index(agent, provider.storage_identity(), master, &pack_index)?;
+    remember_remote_pack_index(
+        agent,
+        provider.storage_identity(),
+        master,
+        &new_pack_entries,
+    )?;
     agent.db.upsert_local_cas_entries(
         &cas_observations
             .into_iter()
@@ -1609,6 +2096,16 @@ async fn finish_prepared_backup(
 
     metrics.total_duration_ms =
         elapsed_ms(total_started).saturating_add(metrics.discovery_duration_ms);
+    if let Some(pipeline) = agent
+        .db
+        .get_operation_progress(op_id)?
+        .and_then(|progress| progress.detail_json.get("streaming_pipeline").cloned())
+    {
+        // Live progress is cleared on completion; retain credential-free
+        // diagnostics for completed-operation inspection and later benchmarks.
+        op.detail_json["streaming_pipeline"] = pipeline;
+        op.detail_json["streaming_pipeline"]["waiting_on"] = serde_json::json!("complete");
+    }
     let detail = op
         .detail_json
         .as_object_mut()
@@ -1629,6 +2126,54 @@ async fn finish_prepared_backup(
     Ok(manifest)
 }
 
+fn report_commit_progress(
+    agent: &StateAgent,
+    operation: Uuid,
+    packs: &[(String, PathBuf)],
+    resumed: bool,
+) -> Result<bool> {
+    let summary = agent
+        .db
+        .sync_journal_summary_for_kind(operation, ContentObjectKind::Pack)?;
+    let complete = summary.completed_items == packs.len() as u64
+        && summary.pending_items == 0
+        && summary.in_progress_items == 0
+        && summary.failed_items == 0
+        && summary.retry_scheduled_items == 0;
+    let mut progress = agent
+        .db
+        .get_operation_progress(operation)?
+        .unwrap_or_else(|| OperationProgress::new("uploading", 0));
+    let total = summary.total_bytes.max(
+        packs
+            .iter()
+            .filter_map(|(_, path)| std::fs::metadata(path).ok().map(|meta| meta.len()))
+            .fold(0u64, u64::saturating_add),
+    );
+    progress.phase = if complete { "committing" } else { "uploading" }.into();
+    progress.completed_units = summary.completed_bytes;
+    progress.total_units = Some(total);
+    progress.unit = Some("bytes".into());
+    progress.message = Some(if complete {
+        "Encrypted packs uploaded; committing backup metadata".into()
+    } else {
+        "Uploading remaining encrypted packs".into()
+    });
+    progress.detail_json["completed_packs"] = serde_json::json!(summary.completed_items);
+    progress.detail_json["total_packs"] = serde_json::json!(packs.len());
+    progress.detail_json["completed_pack_bytes"] = serde_json::json!(summary.completed_bytes);
+    progress.detail_json["bytes_transferred"] = serde_json::json!(summary.bytes_transferred);
+    progress.detail_json["total_transfer_bytes"] = serde_json::json!(total);
+    progress.detail_json["bytes_to_upload"] =
+        serde_json::json!(total.saturating_sub(summary.completed_bytes));
+    progress.detail_json["resumed"] = serde_json::json!(resumed);
+    progress.updated_at = Utc::now();
+    agent
+        .db
+        .set_operation_progress(operation, Some(&progress))?;
+    Ok(complete)
+}
+
 async fn load_parent(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
@@ -1636,8 +2181,15 @@ async fn load_parent(
     app_id: &AppId,
 ) -> Option<(BundleManifest, Vec<PackIndexEntry>)> {
     let (_, bundle_id, _) = agent.db.latest_commit(app_id).ok().flatten()?;
+    // Authenticated caches cannot override a later explicit cloud deletion.
+    if noland_storage::bundle_is_deleted(provider, master, bundle_id)
+        .await
+        .ok()?
+    {
+        return None;
+    }
     let binding = repository_cache_binding(provider.storage_identity(), master);
-    if let Some(cached) = read_cached_parent(agent, app_id, bundle_id, binding.as_deref()) {
+    if let Some(cached) = read_cached_parent(agent, app_id, bundle_id, binding.as_deref(), master) {
         let _ = remember_remote_pack_index(agent, provider.storage_identity(), master, &cached.1);
         return Some(cached);
     }
@@ -1647,7 +2199,7 @@ async fn load_parent(
     let index = read_pack_index(provider, master, app_id, bundle_id)
         .await
         .ok()?;
-    cache_parent(agent, &manifest, &index, binding.as_deref()).ok()?;
+    cache_parent(agent, &manifest, &index, binding.as_deref(), master).ok()?;
     let _ = remember_remote_pack_index(agent, provider.storage_identity(), master, &index);
     Some((manifest, index))
 }
@@ -1669,6 +2221,30 @@ fn repository_cache_binding(
     )
 }
 
+/// Seed a completely restored revision only after its filesystem commit. The
+/// restore caller owns selection completeness and restored file-state trust.
+/// The sole caller also ingests the authenticated pack index before restoring
+/// (including partial restores); recording a parent must not ingest it again.
+pub(crate) fn remember_restored_parent(
+    agent: &StateAgent,
+    identity: Option<ProviderRootIdentity>,
+    master: &MasterKey,
+    manifest: &BundleManifest,
+    index: &[PackIndexEntry],
+) -> Result<()> {
+    let binding = repository_cache_binding(identity, master);
+    cache_parent(agent, manifest, index, binding.as_deref(), master)?;
+    let hash = noland_storage::compact_json_hash(manifest)?;
+    agent.db.record_commit(
+        manifest.commit_id,
+        &manifest.app.app_id,
+        manifest.bundle_id,
+        &hash,
+        Some(&bundle_dir(&manifest.app.app_id, manifest.bundle_id)),
+        CommitVisibility::Committed,
+    )
+}
+
 fn parent_cache_dir(agent: &StateAgent, app_id: &AppId, bundle_id: Uuid) -> PathBuf {
     let app_key = blake3::hash(app_id.as_str().as_bytes())
         .to_hex()
@@ -1687,20 +2263,28 @@ fn read_cached_parent(
     app_id: &AppId,
     bundle_id: Uuid,
     binding: Option<&str>,
+    master: &MasterKey,
 ) -> Option<(BundleManifest, Vec<PackIndexEntry>)> {
-    let dir = parent_cache_dir(agent, app_id, bundle_id).join(binding?);
-    let manifest: BundleManifest =
-        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    let binding = binding?;
+    let dir = parent_cache_dir(agent, app_id, bundle_id).join(binding);
+    let context = format!("parent:{binding}:{app_id}:{bundle_id}");
+    let manifest: BundleManifest = cache::read_json(
+        &dir.join("manifest.json"),
+        master,
+        &format!("{context}:manifest"),
+    )?;
     if manifest.bundle_id != bundle_id || manifest.app.app_id != *app_id {
         return None;
     }
-    let index = serde_json::from_slice(&std::fs::read(dir.join("index.json")).ok()?).ok()?;
+    let index = cache::read_json(&dir.join("index.json"), master, &format!("{context}:index"))?;
     Some((manifest, index))
 }
 
+#[cfg(test)]
 fn load_remote_chunk_index(
     agent: &StateAgent,
     storage_id: Option<&str>,
+    master: &MasterKey,
     observed_at: chrono::DateTime<Utc>,
 ) -> Result<RemoteChunkIndex> {
     let Some(storage_id) = storage_id else {
@@ -1717,11 +2301,19 @@ fn load_remote_chunk_index(
         let Some(payload) = entry.etag else {
             continue;
         };
-        if let Ok(pack_entry) = serde_json::from_str::<PackIndexEntry>(&payload) {
-            entries.insert(entry.content_hash, pack_entry);
+        if let Some(pack_entry) = cache::read_index_receipt(master, storage_id, &payload) {
+            if pack_entry.chunk_hash == entry.content_hash
+                && entry.remote_path == pack_key(&pack_entry.pack_id)
+                && entry.size == Some(u64::from(pack_entry.plaintext_len))
+            {
+                entries.insert(entry.content_hash, pack_entry);
+            }
         }
     }
-    Ok(RemoteChunkIndex { entries })
+    Ok(RemoteChunkIndex {
+        entries,
+        scoped: None,
+    })
 }
 
 pub(crate) fn remember_remote_pack_index(
@@ -1733,24 +2325,59 @@ pub(crate) fn remember_remote_pack_index(
     let Some(storage_id) = repository_cache_binding(identity, master) else {
         return Ok(());
     };
+    if index.is_empty() {
+        return Ok(());
+    }
     let now = Utc::now();
-    let entries = index
-        .iter()
-        .map(|entry| {
-            Ok(RemoteContentEntry {
+    // A receipt proves observation of a chunk in an authenticated immutable
+    // index in this repository/key scope. Plain old etags are not receipts.
+    // Compare the current DB contents, so a fresh/reset/partially evicted cache
+    // is seeded even when an authenticated parent file is still on disk.
+    let mut digest = None;
+    let mut entries = Vec::with_capacity(512);
+    for batch in index.chunks(512) {
+        let hashes = batch
+            .iter()
+            .map(|entry| entry.chunk_hash.as_str())
+            .collect::<Vec<_>>();
+        let existing = scoped_index::read_entries(&agent.db, &storage_id, master, now, &hashes)?;
+        for entry in batch {
+            if existing.get(&entry.chunk_hash).is_some_and(|cached| {
+                cached.pack_id == entry.pack_id
+                    && cached.offset == entry.offset
+                    && cached.ciphertext_len == entry.ciphertext_len
+                    && cached.plaintext_len == entry.plaintext_len
+                    && cached.compression == entry.compression
+                    && cached.nonce == entry.nonce
+            }) {
+                continue;
+            }
+            if digest.is_none() {
+                digest = Some(cache::index_hash(index)?);
+            }
+            entries.push(RemoteContentEntry {
                 storage_id: storage_id.clone(),
                 object_kind: ContentObjectKind::Chunk,
                 content_hash: entry.chunk_hash.clone(),
                 remote_path: noland_state_core::pack_key(&entry.pack_id),
                 size: Some(u64::from(entry.plaintext_len)),
-                etag: Some(serde_json::to_string(entry)?),
+                etag: Some(cache::index_receipt(
+                    master,
+                    &storage_id,
+                    digest.as_deref().expect("missing index receipt"),
+                    entry,
+                )?),
                 state: RemoteContentState::Present,
                 observed_at: now,
                 expires_at: None,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    agent.db.upsert_remote_content_entries(&entries)
+            });
+            if entries.len() == 512 {
+                agent.db.ingest_remote_content_entries(&entries)?;
+                entries.clear();
+            }
+        }
+    }
+    agent.db.ingest_remote_content_entries(&entries)
 }
 
 fn cache_parent(
@@ -1758,31 +2385,78 @@ fn cache_parent(
     manifest: &BundleManifest,
     index: &[PackIndexEntry],
     binding: Option<&str>,
+    master: &MasterKey,
 ) -> Result<()> {
     let Some(binding) = binding else {
         return Ok(());
     };
     let dir = parent_cache_dir(agent, &manifest.app.app_id, manifest.bundle_id).join(binding);
     std::fs::create_dir_all(&dir)?;
-    let manifest_temp = dir.join("manifest.json.tmp");
-    let index_temp = dir.join("index.json.tmp");
-    std::fs::write(&manifest_temp, serde_json::to_vec(manifest)?)?;
-    std::fs::write(&index_temp, serde_json::to_vec(index)?)?;
-    std::fs::rename(manifest_temp, dir.join("manifest.json"))?;
-    std::fs::rename(index_temp, dir.join("index.json"))?;
+    let context = format!(
+        "parent:{binding}:{}:{}",
+        manifest.app.app_id, manifest.bundle_id
+    );
+    cache::write_json(
+        &dir.join("manifest.json"),
+        manifest,
+        master,
+        &format!("{context}:manifest"),
+    )?;
+    cache::write_json(
+        &dir.join("index.json"),
+        &index,
+        master,
+        &format!("{context}:index"),
+    )?;
     Ok(())
 }
 
 fn manifest_source_path(file: &ManifestFile, roots: &LogicalRootMap) -> Option<PathBuf> {
-    file.source_path_hint
-        .as_ref()
-        .map(PathBuf::from)
-        .or_else(|| {
-            let root = file.logical_root_parsed()?;
+    // A restored parent can carry another PC's absolute path hint. Its logical
+    // location, resolved on this instance, governs scope and inherited identity.
+    file.logical_root_parsed()
+        .and_then(|root| {
             roots
                 .resolve(&root)
                 .map(|base| base.join(&file.relative_path))
         })
+        .or_else(|| file.source_path_hint.as_ref().map(PathBuf::from))
+}
+
+fn normalize_parent_files(
+    files: Vec<ManifestFile>,
+    roots: &LogicalRootMap,
+) -> Result<Vec<ManifestFile>> {
+    let mut normalized = BTreeMap::<PathBuf, ManifestFile>::new();
+    let mut unresolved = Vec::new();
+    for mut file in files {
+        let Some(destination) = manifest_source_path(&file, roots) else {
+            unresolved.push(file);
+            continue;
+        };
+        if let Some(logical) = roots.classify(&destination) {
+            file.logical_root = logical.logical_root.as_token();
+            file.relative_path = logical.relative_path;
+        }
+        file.source_path_hint = Some(
+            destination
+                .to_str()
+                .ok_or_else(|| StateError::UnsafePath("non-UTF-8 parent destination".into()))?
+                .into(),
+        );
+        if let Some(previous) = normalized.get(&destination) {
+            if serde_json::to_value(previous)? != serde_json::to_value(&file)? {
+                return Err(StateError::Integrity(format!(
+                    "conflicting parent files resolve to {}",
+                    destination.display()
+                )));
+            }
+        } else {
+            normalized.insert(destination, file);
+        }
+    }
+    unresolved.extend(normalized.into_values());
+    Ok(unresolved)
 }
 
 fn file_state_from_manifest(
@@ -1811,6 +2485,61 @@ fn file_state_from_manifest(
         last_seen_at: Utc::now(),
         last_hashed_at: Some(Utc::now()),
     }
+}
+
+/// Fast identity proves content reuse only. Ownership, classification and
+/// filesystem metadata belong to the current planning pass, not the parent.
+fn refresh_reused_file(
+    file: &mut ManifestFile,
+    record: &PathRecord,
+    association: &PathAssociation,
+    metadata: &SourceMetadata,
+    indexed: &FileStateRecord,
+    shared_app_ids: Vec<AppId>,
+) -> bool {
+    #[cfg(unix)]
+    let (mode, uid, gid) = (
+        Some(metadata.mode()),
+        Some(metadata.uid()),
+        Some(metadata.gid()),
+    );
+    #[cfg(not(unix))]
+    let (mode, uid, gid) = (file.mode, file.uid, file.gid);
+    let mtime_ns = metadata_mtime_ns(metadata);
+    // Restore deliberately indexes the destination's actual timestamp rather
+    // than the source PC's timestamp. The caller has already matched this
+    // trusted identity and content hash. Use that local timestamp as the
+    // baseline for restored content; a later touch fails fast identity and is
+    // captured normally. Classification and other metadata still compare to
+    // the parent, so genuine metadata-only revisions remain visible.
+    let previous_mtime = if association
+        .evidence
+        .iter()
+        .any(|evidence| evidence.kind == EvidenceKind::RestoredFromCommittedBundle)
+    {
+        Some(indexed.mtime_ns)
+    } else {
+        file.mtime_ns
+    };
+    let changed = file.mode != mode
+        || file.uid != uid
+        || file.gid != gid
+        || previous_mtime != mtime_ns
+        || file.source_path_hint.as_deref() != Some(record.canonical_path.as_str())
+        || file.persistence_class != association.persistence_class
+        || file.semantic_role != association.semantic_role
+        || file.association_confidence != association.confidence
+        || file.shared_app_ids != shared_app_ids;
+    file.mode = mode;
+    file.uid = uid;
+    file.gid = gid;
+    file.mtime_ns = mtime_ns;
+    file.source_path_hint = Some(record.canonical_path.clone());
+    file.persistence_class = association.persistence_class;
+    file.semantic_role = association.semantic_role;
+    file.association_confidence = association.confidence;
+    file.shared_app_ids = shared_app_ids;
+    changed
 }
 
 fn finish_backup_evidence(
@@ -1871,13 +2600,8 @@ fn apply_storage_metrics(
         .saturating_add(storage_metrics.remote_download_calls);
 }
 
-fn metadata_mtime_ns(metadata: &std::fs::Metadata) -> Option<i64> {
-    metadata
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|duration| duration.as_nanos().min(i64::MAX as u128) as i64)
+fn metadata_mtime_ns(metadata: impl Into<SourceMetadata>) -> Option<i64> {
+    metadata.into().mtime_ns()
 }
 
 fn track_steam_appmanifest(
@@ -1898,7 +2622,7 @@ fn track_steam_appmanifest(
     let Some(path) = steam_appmanifest_path(steam_app_id, roots, install_roots) else {
         return Ok(None);
     };
-    let metadata = std::fs::metadata(&path)?;
+    let metadata = std::fs::symlink_metadata(&path)?;
     let canonical_path = path.to_string_lossy().into_owned();
     let logical = roots
         .classify(&path)
@@ -1914,11 +2638,21 @@ fn track_steam_appmanifest(
         canonical_path,
         logical_root: Some(logical.logical_root.as_token()),
         relative_path: Some(logical.relative_path),
-        file_type: Some("file".into()),
+        file_type: Some(
+            if metadata.file_type().is_symlink() {
+                "symlink"
+            } else {
+                "file"
+            }
+            .into(),
+        ),
         #[cfg(unix)]
         inode: Some(metadata.ino() as i64),
         #[cfg(not(unix))]
         inode: None,
+        #[cfg(unix)]
+        mount_id: Some(metadata.dev().min(i64::MAX as u64) as i64),
+        #[cfg(not(unix))]
         mount_id: None,
         size: Some(metadata.len() as i64),
         mtime_ns: metadata
@@ -2067,24 +2801,26 @@ async fn run_backup_all(
     master: &MasterKey,
     operation_id: Option<Uuid>,
 ) -> Result<Vec<BundleManifest>> {
-    let dirty = agent.db.list_dirty_apps()?;
-    let portable: std::collections::HashSet<String> =
-        noland_discovery::filter_backup_candidates(agent.db.list_apps()?)
-            .into_iter()
-            .map(|a| a.app_id.as_str().to_string())
-            .collect();
-    let mut targets: Vec<AppId> = dirty
-        .into_iter()
-        .map(|d| d.app_id)
-        .filter(|id| portable.contains(id.as_str()))
-        .collect();
-    if targets.is_empty() {
-        targets = portable.into_iter().map(AppId).collect();
-    }
+    let parent_options = operation_id
+        .map(|id| agent.db.get_operation(id))
+        .transpose()?
+        .flatten();
+    let cache_policy = RegenerableCachePolicy::from_value(
+        parent_options
+            .as_ref()
+            .and_then(|operation| operation.detail_json.get("regenerable_caches")),
+    )?;
+    // Persist the selection and child IDs before the first child's side effects.
+    // Dirty flags and discovered apps may change before the parent is retried.
+    let targets = group::plan(agent, operation_id, cache_policy)?;
     let mut out: Vec<BundleManifest> = Vec::new();
     provider.ensure_root().await?;
     let total = targets.len() as u64;
-    for (index, app_id) in targets.iter().enumerate() {
+    for (index, child) in targets.iter().enumerate() {
+        let app_id = &child.app_id;
+        if operation_id.is_some_and(|id| agent.operations.cancel_requested(id)) {
+            return Err(cancellation_error());
+        }
         if let Some(operation_id) = operation_id {
             let mut progress = OperationProgress::new("backing_up_apps", index as u64);
             progress.total_units = Some(total);
@@ -2109,7 +2845,56 @@ async fn run_backup_all(
                 .db
                 .set_operation_progress(operation_id, Some(&progress))?;
         }
-        match run_backup(agent, app_id, mode, performance, provider, master, None).await {
+        let child_operation = if let Some(parent_id) = operation_id {
+            let child_id = child.operation_id;
+            let now = Utc::now();
+            if agent.db.get_operation(child_id)?.is_none() {
+                agent.db.upsert_operation(&OperationRecord {
+                    operation_id: child_id,
+                    kind: "backup".into(),
+                    app_id: Some(app_id.clone()),
+                    state: BackupState::Queued.as_str().into(),
+                    created_at: now,
+                    updated_at: now,
+                    last_error: None,
+                    detail_json: serde_json::json!({
+                        "parent_operation_id": parent_id,
+                        "regenerable_caches": cache_policy.as_str(),
+                    }),
+                })?;
+            }
+            Some(child_id)
+        } else {
+            None
+        };
+        let _cancellation = operation_id
+            .zip(child_operation)
+            .map(|(parent, child)| agent.operations.child_scope(parent, child));
+        if let Some(completed) = group::completed(
+            agent,
+            provider,
+            master,
+            child_operation,
+            app_id,
+            mode,
+            cache_policy,
+        )
+        .await?
+        {
+            out.push(completed);
+            continue;
+        }
+        match run_backup(
+            agent,
+            app_id,
+            mode,
+            performance,
+            provider,
+            master,
+            child_operation,
+        )
+        .await
+        {
             Ok(manifest) => out.push(manifest),
             Err(StateError::NotFound(_)) => continue,
             Err(err) => return Err(err),
@@ -2132,20 +2917,34 @@ fn transfer_tuning(
     session: &EphemeralRcloneSession,
 ) -> TransferTuning {
     let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
-    if agent
-        .db
-        .open_session_app_ids()
-        .is_ok_and(|sessions| !sessions.is_empty())
-    {
-        let tuning = TransferTuning::automatic(provider, TransferWorkload::GameplaySafe);
-        log_transfer_tuning(provider, TransferWorkload::GameplaySafe, &tuning);
-        return tuning;
-    }
-    let workload = match performance {
-        BackupPerformanceMode::Fast | BackupPerformanceMode::Full => TransferWorkload::Throughput,
-        BackupPerformanceMode::Balanced => TransferWorkload::Balanced,
+    let workload = if agent.has_latency_sensitive_sessions().unwrap_or(true) {
+        TransferWorkload::GameplaySafe
+    } else {
+        match performance {
+            BackupPerformanceMode::Automatic
+            | BackupPerformanceMode::Fast
+            | BackupPerformanceMode::Full => TransferWorkload::Throughput,
+            BackupPerformanceMode::Balanced => TransferWorkload::Balanced,
+        }
     };
-    let tuning = TransferTuning::automatic(provider, workload);
+    let cpus = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(4);
+    let mut tuning = TransferTuning::for_resources(
+        provider,
+        workload,
+        cpus,
+        Some(TransferTuning::preparation_memory_bytes().unwrap_or(512 * 1024 * 1024) / 2),
+    );
+    // Conservative starting range; optional benchmark overrides only lower it.
+    tuning.max_parallel_uploads = tuning.max_parallel_uploads.min(8);
+    if let Ok(limit) = std::env::var("NOLAND_UPLOAD_WORKERS")
+        .unwrap_or_default()
+        .parse::<usize>()
+    {
+        tuning.max_parallel_uploads = limit.clamp(1, tuning.max_parallel_uploads);
+    }
+    tuning.rclone_transfers = tuning.max_parallel_uploads;
     log_transfer_tuning(provider, workload, &tuning);
     tuning
 }
@@ -2171,6 +2970,595 @@ mod tests {
     use super::*;
     use crate::AgentConfig;
     use noland_storage::{read_pack_index, LocalStorage};
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_alias_normalization_is_lexical_and_rejects_conflicts_and_symlink_ancestors() {
+        let root = test_root("alias-and-parent-safety");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("alias-fixture");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Alias Fixture"))
+            .unwrap();
+        let (path, id) = tracked_save(&agent, &app, "save.link", b"placeholder");
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink("target", &path).unwrap();
+        let record = agent.db.get_path_by_id(id).unwrap().unwrap();
+        let association = agent.db.associations_for_path(id).unwrap().remove(0);
+        let logical = LogicalPath::new(LogicalRoot::SteamLibrary { id: "1".into() }, "save.link");
+        let (file, _) = capture_symlink(
+            &app,
+            &path,
+            &record,
+            &association,
+            &logical,
+            &SourceMetadata::from(&std::fs::symlink_metadata(&path).unwrap()),
+        )
+        .unwrap();
+        let mut roots = LogicalRootMap::from_home(&agent.config.home);
+        for alias in ["0", "1"] {
+            roots
+                .steam_libraries
+                .insert(alias.into(), path.parent().unwrap().to_path_buf());
+        }
+        std::fs::remove_file(&path).unwrap();
+        let mut alias = file.clone();
+        alias.logical_root = "$STEAM_LIBRARY:0".into();
+        let normalized = normalize_parent_files(vec![file.clone(), alias.clone()], &roots).unwrap();
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].logical_root, "$STEAM_LIBRARY:0");
+        assert_eq!(file.logical_root, "$STEAM_LIBRARY:1");
+        alias.symlink_target = Some("conflicting-target".into());
+        assert!(normalize_parent_files(vec![file, alias], &roots).is_err());
+        let external = root.join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let directory_link = agent.config.home.join("linked-parent");
+        std::os::unix::fs::symlink(external, &directory_link).unwrap();
+        assert!(matches!(
+            SourcePath::new(&directory_link.join("unowned-file")),
+            Err(StateError::UnsafePath(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_hash_workers_join_before_snapshot_and_capture_cleanup() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = test_root("capture-cancel");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("capture-cancel");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Cancel fixture"))
+            .unwrap();
+        let mut jobs = Vec::new();
+        let mut sources = Vec::new();
+        for index in 0..32 {
+            let (source, id) = tracked_save(&agent, &app, &format!("save-{index}"), &[index; 4096]);
+            jobs.push(HashJob {
+                app_id: app.clone(),
+                logical: agent.roots.lock().classify(&source).unwrap(),
+                record: agent.db.get_path_by_id(id).unwrap().unwrap(),
+                association: agent.db.associations_for_path(id).unwrap().remove(0),
+                source: source.clone(),
+                snapshot_root: agent.config.paths.snapshots.clone(),
+                staged: None,
+                shared_app_ids: Vec::new(),
+            });
+            sources.push(source);
+        }
+        let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks")).unwrap();
+        let lease = Arc::new(cas.lease().unwrap());
+        let lease_root = lease.root().to_path_buf();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let flag = stopped.clone();
+        let result = hash_files_parallel(
+            jobs,
+            4,
+            lease.clone(),
+            Default::default(),
+            RemoteChunkIndex::empty(),
+            Utc::now(),
+            Arc::new(move || flag.load(Ordering::Acquire)),
+            |_| {
+                stopped.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(Arc::strong_count(&lease), 1, "all workers must have joined");
+        assert_eq!(
+            std::fs::read_dir(&agent.config.paths.snapshots)
+                .unwrap()
+                .count(),
+            0
+        );
+        drop(lease);
+        assert!(!lease_root.exists());
+        assert!(sources.iter().all(|path| path.is_file()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mode_switch_full_personal_full_rechecks_scope_without_losing_install_content() {
+        let root = test_root("mode-roundtrip");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("mode-roundtrip");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Mode fixture"))
+            .unwrap();
+        let install = agent.config.home.join("Games/ModeFixture");
+        std::fs::create_dir_all(&install).unwrap();
+        let asset = install.join("assets.pak");
+        std::fs::write(&asset, b"installed assets").unwrap();
+        agent
+            .db
+            .add_known_root(&app, "install", &install.to_string_lossy())
+            .unwrap();
+        let (save, _) = tracked_save(&agent, &app, "progress.sav", b"saved progress");
+        let storage = LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let mut captures = Vec::new();
+        let mut original_index = None;
+        for mode in [
+            BackupMode::CompleteApplication,
+            BackupMode::PersonalState,
+            BackupMode::CompleteApplication,
+        ] {
+            captures.push(
+                run_backup(
+                    &agent,
+                    &app,
+                    mode,
+                    BackupPerformanceMode::Balanced,
+                    &storage,
+                    &master,
+                    None,
+                )
+                .await
+                .unwrap(),
+            );
+            if original_index.is_none() {
+                original_index = Some(
+                    read_pack_index(&storage, &master, &app, captures[0].bundle_id)
+                        .await
+                        .unwrap(),
+                );
+            }
+        }
+        assert_eq!(
+            captures
+                .iter()
+                .map(|capture| capture.files.len())
+                .collect::<Vec<_>>(),
+            [2, 1, 2]
+        );
+        assert_eq!(captures[1].mode, BackupMode::PersonalState);
+        assert_eq!(
+            captures[1].files[0].source_path_hint.as_deref(),
+            Some(save.to_string_lossy().as_ref())
+        );
+        assert_ne!(captures[0].bundle_id, captures[1].bundle_id);
+        assert_ne!(captures[1].bundle_id, captures[2].bundle_id);
+        assert_eq!(captures[1].parent_bundle_id, Some(captures[0].bundle_id));
+        assert_eq!(captures[2].parent_bundle_id, Some(captures[1].bundle_id));
+        let original_index = original_index.unwrap();
+        assert!(
+            read_committed_manifest(&storage, &master, &app, captures[0].bundle_id)
+                .await
+                .is_err(),
+            "superseded generation is retired"
+        );
+        let final_index = read_pack_index(&storage, &master, &app, captures[2].bundle_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(original_index).unwrap(),
+            serde_json::to_value(final_index).unwrap()
+        );
+        assert_eq!(std::fs::read(asset).unwrap(), b"installed assets");
+        assert_eq!(std::fs::read(save).unwrap(), b"saved progress");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn policy_operation(agent: &StateAgent, app: Option<AppId>, policy: &str) -> Uuid {
+        let operation = Uuid::new_v4();
+        agent
+            .db
+            .upsert_operation(&OperationRecord {
+                operation_id: operation,
+                kind: "backup".into(),
+                app_id: app,
+                state: BackupState::Queued.as_str().into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                last_error: None,
+                detail_json: serde_json::json!({"regenerable_caches": policy}),
+            })
+            .unwrap();
+        operation
+    }
+
+    #[tokio::test]
+    async fn cache_policy_include_exclude_include_roundtrip_preserves_sources_and_state() {
+        let root = test_root("cache-policy-roundtrip");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("hookshot-policy");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Hookshot"))
+            .unwrap();
+        let install = agent.config.home.join("Games/Hookshot");
+        let names = [
+            "hookshot_programs.bin",
+            "mkw_vk_pipelines_play_123.bin",
+            "romfs/assets.bin",
+            "user/save/progress.sav",
+        ];
+        for name in names {
+            let path = install.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, name.as_bytes()).unwrap();
+        }
+        agent
+            .db
+            .add_known_root(&app, "install", &install.to_string_lossy())
+            .unwrap();
+        let storage = LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let included = run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(included.files.len(), 4);
+        assert_eq!(included.environment["regenerable_caches"], "include");
+        let operation = policy_operation(&agent, Some(app.clone()), "exclude");
+        let excluded = run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_ne!(included.bundle_id, excluded.bundle_id);
+        assert_eq!(excluded.files.len(), 2);
+        assert!(excluded
+            .files
+            .iter()
+            .all(|file| !is_regenerable_game_cache(Path::new(
+                file.source_path_hint.as_ref().unwrap()
+            ))));
+        assert!(
+            excluded.tombstones.is_empty(),
+            "policy omission must not delete destination caches"
+        );
+        let op = agent.db.get_operation(operation).unwrap().unwrap();
+        assert_eq!(op.detail_json["excluded_regenerable_cache_files"], 2);
+        assert_eq!(
+            op.detail_json["excluded_regenerable_cache_bytes"],
+            names[..2].iter().map(|name| name.len() as u64).sum::<u64>()
+        );
+        assert_eq!(operation_metrics(&op).num_files_rehashed, 0);
+        let operation = policy_operation(&agent, Some(app.clone()), "exclude");
+        let repeated = run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(repeated.bundle_id, excluded.bundle_id);
+        let parent_operation = policy_operation(&agent, None, "exclude");
+        let all = run_backup_all(
+            &agent,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(parent_operation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].bundle_id, excluded.bundle_id);
+        assert!(agent
+            .db
+            .recent_operations(20)
+            .unwrap()
+            .iter()
+            .any(|operation| operation.detail_json["parent_operation_id"]
+                == serde_json::json!(parent_operation)
+                && operation.detail_json["regenerable_caches"] == "exclude"));
+        let operation = policy_operation(&agent, Some(app.clone()), "include");
+        let included_again = run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_ne!(included_again.bundle_id, excluded.bundle_id);
+        assert_eq!(included_again.files.len(), 4);
+        assert_eq!(
+            operation_metrics(&agent.db.get_operation(operation).unwrap().unwrap())
+                .num_files_rehashed,
+            2
+        );
+        for name in names {
+            assert_eq!(std::fs::read(install.join(name)).unwrap(), name.as_bytes());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tiny_assets_use_one_regular_pack_while_small_saves_stay_separate() {
+        let root = test_root("asset-pack-locality");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppId::desktop("asset-pack-locality");
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "Asset fixture"))
+            .unwrap();
+        let install = agent.config.home.join("Games/AssetFixture");
+        std::fs::create_dir_all(&install).unwrap();
+        // >32 MiB of individually small assets formerly needed three compact
+        // packs. They now share one normal pack, apart from the compact save.
+        for index in 0..132u8 {
+            std::fs::write(
+                install.join(format!("asset-{index}.bin")),
+                vec![index; 256 * 1024],
+            )
+            .unwrap();
+        }
+        agent
+            .db
+            .add_known_root(&app, "install", &install.to_string_lossy())
+            .unwrap();
+        tracked_save(&agent, &app, "progress.sav", b"save-locality");
+        let storage = LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let manifest = run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            None,
+        )
+        .await
+        .unwrap();
+        let index = read_pack_index(&storage, &master, &app, manifest.bundle_id)
+            .await
+            .unwrap();
+        let by_hash = noland_pack::index_by_hash(&index);
+        let mut asset_packs = BTreeSet::new();
+        let mut save_packs = BTreeSet::new();
+        for file in &manifest.files {
+            let target = if file.semantic_role == SemanticRole::AppContent {
+                &mut asset_packs
+            } else {
+                &mut save_packs
+            };
+            for chunk in &file.chunks {
+                target.insert(by_hash[&chunk.hash].pack_id.clone());
+            }
+        }
+        assert_eq!(manifest.files.len(), 133);
+        assert_eq!(asset_packs.len(), 1);
+        assert_eq!(save_packs.len(), 1);
+        assert!(asset_packs.is_disjoint(&save_packs));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn completely_restored_parent_reuses_destination_identity_with_repository_and_key_scope()
+    {
+        let root = test_root("restored-parent");
+        let source = StateAgent::boot(AgentConfig::isolated(root.join("source"))).unwrap();
+        let app = AppId::desktop("restored-parent");
+        let identity = AppIdentity::new(app.clone(), "Restored fixture");
+        source.db.upsert_app(&identity).unwrap();
+        let tracked_library_save = |agent: &StateAgent| {
+            let path = agent
+                .config
+                .home
+                .join("SteamLibrary/steamapps/common/RestoredFixture/user/save/progress.sav");
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"restored progress").unwrap();
+            let id = associate_path(agent, &app, &path, EvidenceKind::ExplicitUserBinding);
+            (path, id)
+        };
+        source.roots.lock().steam_libraries.insert(
+            "1".into(),
+            source.config.home.join("SteamLibrary/steamapps"),
+        );
+        tracked_library_save(&source);
+        let storage = LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let manifest = run_backup(
+            &source,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            None,
+        )
+        .await
+        .unwrap();
+        let index = read_pack_index(&storage, &master, &app, manifest.bundle_id)
+            .await
+            .unwrap();
+        assert_eq!(manifest.files.len(), 1);
+        assert_eq!(manifest.files[0].logical_root, "$STEAM_LIBRARY:1");
+        let destination =
+            StateAgent::boot(AgentConfig::isolated(root.join("destination"))).unwrap();
+        destination.db.upsert_app(&identity).unwrap();
+        for alias in ["0", "1"] {
+            destination.roots.lock().steam_libraries.insert(
+                alias.into(),
+                destination.config.home.join("SteamLibrary/steamapps"),
+            );
+        }
+        let (path, id) = tracked_library_save(&destination);
+        let restored_time = std::time::UNIX_EPOCH + Duration::from_secs(123_456_789);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(restored_time))
+            .unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert_ne!(metadata_mtime_ns(&metadata), manifest.files[0].mtime_ns);
+        let record = destination.db.get_path_by_id(id).unwrap().unwrap();
+        let mut state = file_state_from_manifest(&app, &manifest.files[0], &record);
+        state.canonical_path = Some(path.to_string_lossy().into_owned());
+        let logical = destination.roots.lock().classify(&path).unwrap();
+        assert_eq!(logical.logical_root.as_token(), "$STEAM_LIBRARY:0");
+        state.logical_root = logical.logical_root.as_token();
+        state.relative_path = logical.relative_path;
+        state.mtime_ns = metadata_mtime_ns(&metadata).unwrap();
+        state.mode = Some(metadata.mode());
+        state.inode = Some(metadata.ino());
+        state.mount_id = Some(metadata.dev());
+        destination
+            .db
+            .commit_restored_paths(
+                &app,
+                &[noland_state_db::RestoredPathAssociationInput {
+                    canonical_path: path.to_string_lossy().into_owned(),
+                    persistence_class: manifest.files[0].persistence_class,
+                    semantic_role: manifest.files[0].semantic_role,
+                }],
+                &[state],
+                Some(destination.db.capture_generation(&app).unwrap()),
+                |_| true,
+            )
+            .unwrap();
+        remember_restored_parent(
+            &destination,
+            storage.storage_identity(),
+            &master,
+            &manifest,
+            &index,
+        )
+        .unwrap();
+        assert_eq!(
+            destination.db.latest_commit(&app).unwrap().unwrap().1,
+            manifest.bundle_id
+        );
+        assert!(load_parent(
+            &LocalStorage::new(root.join("other-cloud")),
+            &master,
+            &destination,
+            &app
+        )
+        .await
+        .is_none());
+        assert!(
+            load_parent(&storage, &MasterKey::generate(), &destination, &app)
+                .await
+                .is_none()
+        );
+        let operation = Uuid::new_v4();
+        let unchanged = run_backup(
+            &destination,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(operation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unchanged.bundle_id, manifest.bundle_id);
+        let metrics = operation_metrics(&destination.db.get_operation(operation).unwrap().unwrap());
+        assert_eq!(metrics.num_files_rehashed, 0);
+        assert_eq!(metrics.num_files_skipped_fast_identity, 1);
+        assert_eq!(manifest.files[0].logical_root, "$STEAM_LIBRARY:1");
+        assert_eq!(
+            load_parent(&storage, &master, &destination, &app)
+                .await
+                .unwrap()
+                .0
+                .files[0]
+                .logical_root,
+            "$STEAM_LIBRARY:1",
+            "normalization must not rewrite authenticated source/cache manifests"
+        );
+        // The restore timestamp is only a baseline, never a blanket exemption
+        // for future timestamp-only changes without observer/dirty evidence.
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(restored_time + Duration::from_secs(1)),
+            )
+            .unwrap();
+        let touched_operation = Uuid::new_v4();
+        let touched = run_backup(
+            &destination,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(touched_operation),
+        )
+        .await
+        .unwrap();
+        assert_ne!(touched.bundle_id, manifest.bundle_id);
+        assert_eq!(touched.files[0].file_hash, manifest.files[0].file_hash);
+        assert_eq!(
+            touched.files[0].mtime_ns,
+            metadata_mtime_ns(&std::fs::metadata(&path).unwrap())
+        );
+        assert_eq!(
+            operation_metrics(
+                &destination
+                    .db
+                    .get_operation(touched_operation)
+                    .unwrap()
+                    .unwrap()
+            )
+            .num_files_rehashed,
+            1
+        );
+        let personal = run_backup(
+            &destination,
+            &app,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(personal.files.len(), 1);
+        assert_eq!(personal.files[0].logical_root, "$STEAM_LIBRARY:0");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[tokio::test]
     async fn complete_backup_skips_unchanged_content_and_revalidates_observer_gaps() {
@@ -2297,6 +3685,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SharedStorageProvider for InterruptedUpload {
+        async fn delete_object(&self, key: &noland_storage::RemoteKey) -> Result<()> {
+            self.inner.delete_object(key).await
+        }
+        async fn remove_empty_bundle(&self, app: &AppId, id: Uuid) -> Result<()> {
+            self.inner.remove_empty_bundle(app, id).await
+        }
         async fn health_check(&self) -> Result<noland_storage::Health> {
             self.inner.health_check().await
         }
@@ -2408,13 +3802,40 @@ mod tests {
         .unwrap();
         let uploaded = storage.uploads.load(std::sync::atomic::Ordering::SeqCst);
         assert!(uploaded > 0);
+        let mut options = agent.db.get_operation(operation_id).unwrap().unwrap();
+        options.detail_json["regenerable_caches"] = serde_json::json!("exclude");
+        agent.db.upsert_operation(&options).unwrap();
+        let error = run_backup(
+            &agent,
+            &app_id,
+            BackupMode::PersonalState,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(operation_id),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("cache policy differs"));
+        assert_eq!(
+            storage.uploads.load(std::sync::atomic::Ordering::SeqCst),
+            uploaded
+        );
+        options.detail_json["regenerable_caches"] = serde_json::json!("include");
+        agent.db.upsert_operation(&options).unwrap();
         // Emulate a crash after persisting the sealed checkpoint, before removing
         // its lease. An independent capture must remain pinned during recovery.
         let cas = LocalCas::new(agent.config.paths.cache.join("cas/chunks")).unwrap();
         let active = cas.lease().unwrap();
         let hash = noland_cas::blake3_hex(b"captured save");
         let active_chunk = active.put_prehashed(&hash, b"captured save").unwrap();
-        let retired_lease = prepared.release_lease.as_ref().unwrap();
+        let retired_lease = prepared
+            .release_capture
+            .as_ref()
+            .unwrap()
+            .leases
+            .first()
+            .unwrap();
         std::fs::create_dir_all(retired_lease).unwrap();
         std::fs::hard_link(
             &active_chunk.path,
@@ -2642,7 +4063,8 @@ mod tests {
         .unwrap()
         .unwrap();
         let checkpoint = prepared_backup_path(&agent, operation);
-        let receipt = checkpoint.with_extension("packs").join("0.enc");
+        let receipt = checkpoint.with_extension("stream").join("sealed/0.enc");
+        let capture_receipt = checkpoint.with_extension("stream").join("capture/0/0.enc");
         let directory = agent
             .config
             .paths
@@ -2658,7 +4080,7 @@ mod tests {
             .join("cloud")
             .join(bundle_dir(&app, prepared.manifest.bundle_id))
             .join(COMMITTED_MARKER);
-        for artifact in [checkpoint, receipt, pack] {
+        for artifact in [checkpoint, capture_receipt, receipt, pack] {
             let bytes = std::fs::read(&artifact).unwrap();
             let mut corrupted = bytes.clone();
             let middle = corrupted.len() / 2;
@@ -2768,14 +4190,9 @@ mod tests {
             )
             .unwrap()
             .unwrap();
-            assert_eq!(prepared.packing.is_some(), fail_pack);
-            let expected_packs = prepared
-                .packing
-                .as_ref()
-                .map_or(prepared.pack_files.len(), |packing| packing.plans.len());
-            if fail_pack {
-                assert!(expected_packs > 1);
-            }
+            assert_eq!(prepared.capture.is_some(), fail_pack);
+            // Streaming has no final pack total before capture completes.
+            let expected_packs = (!fail_pack).then_some(prepared.pack_files.len());
             let sealed_before = std::fs::read_dir(
                 agent
                     .config
@@ -2785,6 +4202,7 @@ mod tests {
             )
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
+            .filter(|name| Path::new(name).extension().is_some_and(|ext| ext == "pack"))
             .collect::<BTreeSet<_>>();
             let remote = root.join("cloud");
             let packs_before = storage
@@ -2831,7 +4249,11 @@ mod tests {
                 sealed_before.is_subset(&remote_names),
                 "retry must keep locally sealed pack IDs too"
             );
-            assert_eq!(packs_after.len(), expected_packs);
+            if let Some(expected) = expected_packs {
+                assert_eq!(packs_after.len(), expected);
+            } else {
+                assert!(packs_after.len() > 1);
+            }
             if let Some(before) = previous_ciphertext {
                 assert_eq!(std::fs::read(manifest_path).unwrap(), before);
             }
@@ -3161,7 +4583,7 @@ mod tests {
             .find(|operation| operation.detail_json["no_op"] == true)
             .unwrap();
         let metrics = operation_metrics(&operation);
-        assert_eq!(metrics.num_candidate_paths, 0);
+        assert_eq!(metrics.num_candidate_paths, 2);
         assert_eq!(metrics.num_files_rehashed, 0);
         assert_eq!(operation.detail_json["no_op"], true);
         std::fs::remove_dir_all(root).ok();
@@ -3354,7 +4776,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn steam_complete_backup_includes_only_install_and_explicit_state() {
+    async fn steam_complete_backup_includes_owned_prefix_and_shaders_without_other_games() {
         let root = test_root("steam-strict-scope");
         let cloud = root.join("cloud");
         let home = root.join("home");
@@ -3470,6 +4892,8 @@ mod tests {
         let expected = [
             install_file.to_string_lossy().into_owned(),
             deep_install_file.to_string_lossy().into_owned(),
+            compatdata_file.to_string_lossy().into_owned(),
+            shader_file.to_string_lossy().into_owned(),
             explicit_save.to_string_lossy().into_owned(),
             explicit_config_file.to_string_lossy().into_owned(),
             appmanifest.to_string_lossy().into_owned(),
@@ -3537,7 +4961,7 @@ mod tests {
             &agent,
             &app_id,
             BackupMode::CompleteApplication,
-            cloud,
+            cloud.clone(),
             &master,
         )
         .await
@@ -3546,10 +4970,88 @@ mod tests {
         assert!(!strict.files.iter().any(|file| {
             file.source_path_hint.as_deref() == Some(leaked_runtime.to_string_lossy().as_ref())
         }));
-        assert!(strict.tombstones.iter().any(|tombstone| {
-            tombstone.reason == "outside strict Steam backup scope"
-                && tombstone.relative_path.ends_with("drive_c/runtime.dll")
-        }));
+        assert!(
+            !strict
+                .tombstones
+                .iter()
+                .any(|tombstone| tombstone.relative_path.ends_with("drive_c/runtime.dll")),
+            "scope exclusion is not observed deletion"
+        );
+        let fresh_home = root.join("restored-home");
+        let excluded_destination =
+            fresh_home.join(leaked_runtime.strip_prefix(&agent.config.home).unwrap());
+        std::fs::create_dir_all(excluded_destination.parent().unwrap()).unwrap();
+        std::fs::write(&excluded_destination, b"independent restored state").unwrap();
+        let provider = LocalStorage::new(cloud);
+        let plan = noland_restore::prepare_restore(
+            &provider,
+            &master,
+            &agent.config.paths,
+            &app_id,
+            strict.bundle_id,
+            RestoreMode::CompleteApplication,
+        )
+        .await
+        .unwrap();
+        let index = read_pack_index(&provider, &master, &app_id, strict.bundle_id)
+            .await
+            .unwrap();
+        noland_restore::restore_pipelined(
+            &provider,
+            &master,
+            &plan,
+            &index,
+            &LogicalRootMap::from_home(&fresh_home),
+            None,
+            None,
+            noland_restore::PipelineOptions::default(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(excluded_destination).unwrap(),
+            b"independent restored state"
+        );
+
+        // Queued deletion/rename evidence outside the active scope must not
+        // turn a later strict backup into a request to delete excluded state.
+        std::fs::remove_file(&leaked_runtime).unwrap();
+        agent
+            .db
+            .append_app_mutation(&AppMutationRecord::new(
+                app_id.clone(),
+                leaked_runtime.to_string_lossy(),
+                AppMutationKind::Delete,
+            ))
+            .unwrap();
+        let mut renamed = AppMutationRecord::new(
+            app_id.clone(),
+            leaked_runtime
+                .with_file_name("renamed.dll")
+                .to_string_lossy(),
+            AppMutationKind::Rename,
+        );
+        renamed.previous_path = Some(leaked_runtime.to_string_lossy().into_owned());
+        agent.db.append_app_mutation(&renamed).unwrap();
+        let successor = run_backup(
+            &agent,
+            &app_id,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &provider,
+            &master,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(successor.tombstones.is_empty());
+        assert_eq!(successor.bundle_id, strict.bundle_id);
+        assert!(agent
+            .db
+            .pending_app_mutations(&app_id, 10)
+            .unwrap()
+            .is_empty());
 
         std::fs::remove_dir_all(root).ok();
     }
@@ -3564,7 +5066,7 @@ mod tests {
         for index in 0..4 {
             let path = chunks_dir.join(format!("chunk-{index}"));
             std::fs::write(&path, [index as u8; 10]).unwrap();
-            chunks.push((format!("chunk-hash-{index}"), path));
+            chunks.push((noland_cas::blake3_hex(&[index as u8; 10]), path));
         }
 
         let packs = build_packs_parallel(
@@ -3698,9 +5200,16 @@ mod tests {
         let other_scope =
             repository_cache_binding(second_storage.storage_identity(), &other_key).unwrap();
         assert_ne!(original_scope, other_scope);
-        assert!(read_cached_parent(&agent, &app, second.bundle_id, Some(&other_scope)).is_none());
+        assert!(read_cached_parent(
+            &agent,
+            &app,
+            second.bundle_id,
+            Some(&other_scope),
+            &other_key
+        )
+        .is_none());
         assert!(
-            load_remote_chunk_index(&agent, Some(&other_scope), Utc::now())
+            load_remote_chunk_index(&agent, Some(&other_scope), &other_key, Utc::now())
                 .unwrap()
                 .entries
                 .is_empty()

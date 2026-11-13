@@ -109,6 +109,14 @@ const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../runtime-agent/src/session.rs"),
     ),
     (
+        "runtime-agent/src/elf.rs",
+        include_bytes!("../../../runtime-agent/src/elf.rs"),
+    ),
+    (
+        "runtime-agent/src/maintenance.rs",
+        include_bytes!("../../../runtime-agent/src/maintenance.rs"),
+    ),
+    (
         "runtime-agent/src/store.rs",
         include_bytes!("../../../runtime-agent/src/store.rs"),
     ),
@@ -131,6 +139,14 @@ const SOURCES: &[(&str, &[u8])] = &[
     (
         "runtime-images/ubuntu24/packages.txt",
         include_bytes!("../../../runtime-images/ubuntu24/packages.txt"),
+    ),
+    (
+        "runtime-images/ubuntu24/prerequisites.json",
+        include_bytes!("../../../runtime-images/ubuntu24/prerequisites.json"),
+    ),
+    (
+        "scripts/runtime/maintain-runtime.py",
+        include_bytes!("../../../scripts/runtime/maintain-runtime.py"),
     ),
     (
         "runtime-images/ubuntu24/glibc-probe.c",

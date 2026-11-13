@@ -3,7 +3,7 @@ use noland_state_core::*;
 use rusqlite::{params, OptionalExtension};
 use uuid::Uuid;
 
-use crate::StateDb;
+use crate::{RestoredPathAssociationInput, StateDb};
 
 pub(crate) fn bump_capture_generation(conn: &rusqlite::Connection, app_id: &AppId) -> Result<()> {
     conn.execute("INSERT INTO capture_generations(app_id, generation) VALUES (?1, 1) ON CONFLICT(app_id) DO UPDATE SET generation=generation+1", [app_id.as_str()]).map_err(db_err)?;
@@ -11,6 +11,32 @@ pub(crate) fn bump_capture_generation(conn: &rusqlite::Connection, app_id: &AppI
 }
 
 impl StateDb {
+    /// Publish restore associations, destination metadata and verified hashes in
+    /// one transaction. The caller must have made its filesystem commit decision
+    /// durable first. `still_verified` runs under the DB write lock and must only
+    /// inspect the filesystem (it must not call back into StateDb).
+    ///
+    /// Generation changes and newer dirty records fail closed. We never consume
+    /// mutation events or clear dirty roots here: restore is not a backup of any
+    /// other local changes. Changed destinations remain reconciliation candidates.
+    pub fn commit_restored_paths(
+        &self,
+        app_id: &AppId,
+        entries: &[RestoredPathAssociationInput],
+        states: &[FileStateRecord],
+        observed_generation: Option<i64>,
+        mut still_verified: impl FnMut(&FileStateRecord) -> bool,
+    ) -> Result<usize> {
+        crate::restore::commit_restored_paths(
+            self,
+            app_id,
+            entries,
+            states,
+            observed_generation,
+            &mut still_verified,
+        )
+    }
+
     pub fn capture_generation(&self, app_id: &AppId) -> Result<i64> {
         Ok(self
             .lock()?
@@ -358,43 +384,63 @@ impl StateDb {
                            last_hashed_at_ms=excluded.last_hashed_at_ms"#,
                 )
                 .map_err(db_err)?;
+            let mut previous = tx
+                .prepare(
+                    "SELECT content_hash, last_hashed_at_ms FROM file_state_index
+                 WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3
+                   AND trust_state='TRUSTED' AND content_hash IS NOT NULL
+                   AND size=?4 AND mtime_ns=?5 AND inode IS ?6 AND mount_id IS ?7
+                   AND file_type=?8 AND mode IS ?9",
+                )
+                .map_err(db_err)?;
             for state in states {
-                let mut state = state.clone();
-                if preserve_trusted {
-                    let previous = tx.query_row(
-                        "SELECT app_id, logical_root, relative_path, canonical_path, file_type, size, mtime_ns, inode, mount_id, mode, content_hash, trust_state, last_seen_at_ms, last_hashed_at_ms FROM file_state_index WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3",
-                        params![state.app_id.as_str(), state.logical_root, state.relative_path],
-                        row_to_file_state,
-                    ).optional().map_err(db_err)?;
-                    if let Some(previous) = previous.filter(|previous| {
-                        previous.fast_identity_matches(
-                            state.size,
-                            state.mtime_ns,
-                            state.inode,
-                            state.mount_id,
-                        ) && previous.file_type == state.file_type
-                            && previous.mode == state.mode
-                    }) {
-                        state.content_hash = previous.content_hash;
-                        state.trust = previous.trust;
-                        state.last_hashed_at = previous.last_hashed_at;
-                    }
-                }
+                let size = to_i64(state.size, "file size")?;
+                let inode = opt_u64_to_i64(state.inode, "inode")?;
+                let mount_id = opt_u64_to_i64(state.mount_id, "mount id")?;
+                let retained: Option<(String, Option<i64>)> = if preserve_trusted {
+                    previous
+                        .query_row(
+                            params![
+                                state.app_id.as_str(),
+                                state.logical_root,
+                                state.relative_path,
+                                size,
+                                state.mtime_ns,
+                                inode,
+                                mount_id,
+                                state.file_type.as_str(),
+                                state.mode.map(i64::from),
+                            ],
+                            |row| Ok((row.get(0)?, row.get(1)?)),
+                        )
+                        .optional()
+                        .map_err(db_err)?
+                } else {
+                    None
+                };
+                let (hash, trust, hashed_at) = match &retained {
+                    Some((hash, at)) => (Some(hash.as_str()), FileStateTrust::Trusted, *at),
+                    None => (
+                        state.content_hash.as_deref(),
+                        state.trust,
+                        state.last_hashed_at.map(|at| at.timestamp_millis()),
+                    ),
+                };
                 stmt.execute(params![
                     state.app_id.as_str(),
                     state.logical_root,
                     state.relative_path,
                     state.canonical_path,
                     state.file_type.as_str(),
-                    to_i64(state.size, "file size")?,
+                    size,
                     state.mtime_ns,
-                    opt_u64_to_i64(state.inode, "inode")?,
-                    opt_u64_to_i64(state.mount_id, "mount id")?,
+                    inode,
+                    mount_id,
                     state.mode.map(i64::from),
-                    state.content_hash,
-                    state.trust.as_str(),
+                    hash,
+                    trust.as_str(),
                     state.last_seen_at.timestamp_millis(),
-                    state.last_hashed_at.map(|at| at.timestamp_millis()),
+                    hashed_at,
                 ])
                 .map_err(db_err)?;
             }
@@ -475,14 +521,21 @@ impl StateDb {
         relative_path: &str,
         trust: FileStateTrust,
     ) -> Result<bool> {
-        let changed = self
-            .lock()?
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        let changed = tx
             .execute(
                 r#"UPDATE file_state_index SET trust_state=?4
-                   WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3"#,
+                    WHERE app_id=?1 AND logical_root=?2 AND relative_path=?3"#,
                 params![app_id.as_str(), logical_root, relative_path, trust.as_str()],
             )
             .map_err(db_err)?;
+        if changed != 0 && trust != FileStateTrust::Trusted {
+            // Standalone invalidations must also defeat a restore/capture that
+            // began before this observation, even without a mutation-journal row.
+            bump_capture_generation(&tx, app_id)?;
+        }
+        tx.commit().map_err(db_err)?;
         Ok(changed != 0)
     }
 
@@ -597,6 +650,22 @@ impl StateDb {
     }
 
     pub fn upsert_remote_content_entries(&self, entries: &[RemoteContentEntry]) -> Result<()> {
+        self.write_remote_content_entries(entries, false)
+    }
+
+    /// Ingest authenticated, immutable cache mappings without renewing their
+    /// observation time when the exact PRESENT, non-expiring mapping is already
+    /// present. This is NOT a remote freshness observation. A changed pack/path,
+    /// payload, size, state or expiration still replaces the mapping normally.
+    pub fn ingest_remote_content_entries(&self, entries: &[RemoteContentEntry]) -> Result<()> {
+        self.write_remote_content_entries(entries, true)
+    }
+
+    fn write_remote_content_entries(
+        &self,
+        entries: &[RemoteContentEntry],
+        cache_ingest: bool,
+    ) -> Result<()> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -615,7 +684,14 @@ impl StateDb {
                            etag=excluded.etag,
                            state=excluded.state,
                            observed_at_ms=excluded.observed_at_ms,
-                           expires_at_ms=excluded.expires_at_ms"#,
+                            expires_at_ms=excluded.expires_at_ms
+                        WHERE remote_content_index.remote_path IS NOT excluded.remote_path
+                           OR remote_content_index.size IS NOT excluded.size
+                           OR remote_content_index.etag IS NOT excluded.etag
+                           OR remote_content_index.state IS NOT excluded.state
+                           OR remote_content_index.expires_at_ms IS NOT excluded.expires_at_ms
+                           OR (remote_content_index.observed_at_ms IS NOT excluded.observed_at_ms
+                               AND NOT (?10 AND excluded.state='PRESENT' AND excluded.expires_at_ms IS NULL))"#,
                 )
                 .map_err(db_err)?;
             for entry in entries {
@@ -629,6 +705,7 @@ impl StateDb {
                     entry.state.as_str(),
                     entry.observed_at.timestamp_millis(),
                     entry.expires_at.map(|at| at.timestamp_millis()),
+                    cache_ingest,
                 ])
                 .map_err(db_err)?;
             }
@@ -685,6 +762,40 @@ impl StateDb {
             .map_err(db_err)
     }
 
+    /// Indexed, bounded lookups; unrelated repository history is never loaded.
+    pub fn remote_content_for_hashes(
+        &self,
+        storage_id: &str,
+        object_kind: ContentObjectKind,
+        hashes: &[&str],
+    ) -> Result<Vec<RemoteContentEntry>> {
+        let conn = self.lock()?;
+        let mut output = Vec::new();
+        for batch in hashes.chunks(256) {
+            let placeholders = (0..batch.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!(
+                "SELECT storage_id, object_kind, content_hash, remote_path, size, etag,
+                state, observed_at_ms, expires_at_ms FROM remote_content_index
+                WHERE storage_id=? AND object_kind=? AND content_hash IN ({placeholders})"
+            );
+            let mut values = vec![storage_id, object_kind.as_str()];
+            values.extend_from_slice(batch);
+            let mut stmt = conn.prepare_cached(&sql).map_err(db_err)?;
+            output.extend(
+                stmt.query_map(rusqlite::params_from_iter(values), row_to_remote_content)
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?,
+            );
+        }
+        Ok(output)
+    }
+
+    pub fn has_remote_content(&self, storage_id: &str, kind: ContentObjectKind) -> Result<bool> {
+        self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM remote_content_index WHERE storage_id=?1 AND object_kind=?2)",
+            params![storage_id, kind.as_str()], |row| row.get(0)).map_err(db_err)
+    }
+
     pub fn get_remote_content_by_path(
         &self,
         storage_id: &str,
@@ -719,6 +830,32 @@ impl StateDb {
             )
             .map_err(db_err)?;
         Ok(changed != 0)
+    }
+
+    /// A repository deletion receipt invalidates every cached chunk in its pack,
+    /// including hashes learned by another PC or an older backup generation.
+    pub fn invalidate_remote_pack_paths(
+        &self,
+        storage_id: &str,
+        paths: &[String],
+    ) -> Result<usize> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction().map_err(db_err)?;
+        let mut changed = 0;
+        {
+            let mut statement = tx
+                .prepare_cached(
+                    "DELETE FROM remote_content_index WHERE storage_id=?1 AND remote_path=?2",
+                )
+                .map_err(db_err)?;
+            for path in paths {
+                changed += statement
+                    .execute(params![storage_id, path])
+                    .map_err(db_err)?;
+            }
+        }
+        tx.commit().map_err(db_err)?;
+        Ok(changed)
     }
 
     /// Upserts the complete journal entry without implicit state transitions.
@@ -894,6 +1031,34 @@ impl StateDb {
             .is_some_and(|entry| entry.state == SyncJournalState::Completed))
     }
 
+    /// Store progress and bounded credential-free timings together, preserving
+    /// other detail fields and monotonic logical byte progress across retries.
+    pub fn update_sync_journal_stream_progress(
+        &self,
+        operation_id: Uuid,
+        item_key: &str,
+        bytes_transferred: u64,
+        diagnostics: &serde_json::Value,
+    ) -> Result<bool> {
+        let changed = self
+            .lock()?
+            .execute(
+                r#"UPDATE sync_journal_items
+               SET bytes_transferred=MAX(bytes_transferred, ?3), updated_at_ms=?4,
+                   detail_json=json_set(detail_json, '$.stream', json(?5))
+               WHERE operation_id=?1 AND item_key=?2"#,
+                params![
+                    operation_id.to_string(),
+                    item_key,
+                    to_i64(bytes_transferred, "transferred byte count")?,
+                    Utc::now().timestamp_millis(),
+                    serde_json::to_string(diagnostics)?
+                ],
+            )
+            .map_err(db_err)?;
+        Ok(changed != 0)
+    }
+
     pub fn start_sync_journal_item(
         &self,
         operation_id: Uuid,
@@ -958,25 +1123,62 @@ impl StateDb {
         size: u64,
         bytes_transferred: u64,
     ) -> Result<()> {
-        self.update_sync_journal_progress(operation_id, item_key, bytes_transferred)?;
-        self.lock()?
-            .execute(
-                "UPDATE sync_journal_items SET size=COALESCE(size, ?3) WHERE operation_id=?1 AND item_key=?2",
-                params![
-                    operation_id.to_string(),
-                    item_key,
-                    to_i64(size, "sync item size")?
-                ],
-            )
-            .map_err(db_err)?;
-        self.set_sync_journal_state(
+        self.complete_sync_journal_items(
             operation_id,
-            item_key,
-            SyncJournalState::Completed,
-            None,
-            None,
+            &[(item_key.to_owned(), size, bytes_transferred)],
         )?;
         Ok(())
+    }
+
+    /// Completion and byte accounting are one durable transaction, including
+    /// grouped upload receipts. Repeated callbacks cannot regress prior traffic.
+    pub fn complete_sync_journal_items(
+        &self,
+        operation_id: Uuid,
+        entries: &[(String, u64, u64)],
+    ) -> Result<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_err)?;
+        {
+            let mut statement = transaction.prepare_cached("UPDATE sync_journal_items SET size=COALESCE(size, ?3), bytes_transferred=MAX(bytes_transferred, ?4), state='COMPLETED', last_error=NULL, next_retry_at_ms=NULL, updated_at_ms=?5, completed_at_ms=COALESCE(completed_at_ms, ?5) WHERE operation_id=?1 AND item_key=?2").map_err(db_err)?;
+            let operation = operation_id.to_string();
+            let now = Utc::now().timestamp_millis();
+            for (key, size, bytes) in entries {
+                statement
+                    .execute(params![
+                        operation,
+                        key,
+                        to_i64(*size, "sync size")?,
+                        to_i64(*bytes, "sync bytes")?,
+                        now
+                    ])
+                    .map_err(db_err)?;
+            }
+        }
+        transaction.commit().map_err(db_err)
+    }
+
+    pub fn update_upload_diagnostics(
+        &self,
+        operation_id: Uuid,
+        keys: &[String],
+        attempt: u32,
+        diagnostics: &serde_json::Value,
+    ) -> Result<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction().map_err(db_err)?;
+        {
+            let mut statement = transaction.prepare_cached("UPDATE sync_journal_items SET attempts=CASE WHEN state='COMPLETED' THEN attempts ELSE MAX(attempts, ?3) END, detail_json=json_set(detail_json, '$.upload', json(?4)), updated_at_ms=?5 WHERE operation_id=?1 AND item_key=?2").map_err(db_err)?;
+            let operation = operation_id.to_string();
+            let json = serde_json::to_string(diagnostics)?;
+            let now = Utc::now().timestamp_millis();
+            for key in keys {
+                statement
+                    .execute(params![operation, key, attempt, json, now])
+                    .map_err(db_err)?;
+            }
+        }
+        transaction.commit().map_err(db_err)
     }
 
     pub fn delete_sync_journal_entries_for_kind_direction(
@@ -1361,6 +1563,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grouped_upload_completion_rolls_back_atomically_and_preserves_diagnostics() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation = Uuid::new_v4();
+        for key in ["packs/a", "packs/b"] {
+            let mut entry = SyncJournalEntry::pending(
+                operation,
+                key,
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+            );
+            entry.detail_json = serde_json::json!({"retained": true});
+            db.upsert_sync_journal_entry(&entry).unwrap();
+        }
+        db.lock().unwrap().execute_batch("CREATE TRIGGER fail_second_receipt BEFORE UPDATE ON sync_journal_items WHEN NEW.item_key='packs/b' AND NEW.state='COMPLETED' BEGIN SELECT RAISE(ABORT, 'fixture interruption'); END;").unwrap();
+        let receipts = vec![("packs/a".into(), 10, 10), ("packs/b".into(), 20, 0)];
+        assert!(db
+            .complete_sync_journal_items(operation, &receipts)
+            .is_err());
+        assert!(!db.sync_journal_completed(operation, "packs/a").unwrap());
+        assert_eq!(
+            db.get_sync_journal_entry(operation, "packs/a")
+                .unwrap()
+                .unwrap()
+                .bytes_transferred,
+            0
+        );
+        db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_second_receipt;")
+            .unwrap();
+        db.update_upload_diagnostics(
+            operation,
+            &["packs/a".into(), "packs/b".into()],
+            2,
+            &serde_json::json!({"group_id": "fixture", "sent_bytes": 17}),
+        )
+        .unwrap();
+        db.complete_sync_journal_items(operation, &receipts)
+            .unwrap();
+        db.complete_sync_journal_items(operation, &[("packs/a".into(), 10, 0)])
+            .unwrap();
+        let a = db
+            .get_sync_journal_entry(operation, "packs/a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(a.bytes_transferred, 10);
+        assert_eq!(a.attempts, 2);
+        assert_eq!(a.detail_json["retained"], true);
+        assert_eq!(a.detail_json["upload"]["sent_bytes"], 17);
+        assert_eq!(
+            db.sync_journal_summary_for_kind(operation, ContentObjectKind::Pack)
+                .unwrap()
+                .completed_bytes,
+            30
+        );
+    }
+
+    #[test]
     fn captured_mutations_do_not_acknowledge_later_writes_or_observer_gaps() {
         let (db, app_id) = test_db_with_app();
         let mutation =
@@ -1393,6 +1653,110 @@ mod tests {
         let app = AppIdentity::new(AppId::steam(42), "Test Game");
         db.upsert_app(&app).unwrap();
         (db, app.app_id)
+    }
+
+    #[test]
+    fn restoration_does_not_overwrite_a_later_dirty_identity_or_acknowledge_events() {
+        let (db, app) = test_db_with_app();
+        let canonical = "/home/user/save";
+        let association = RestoredPathAssociationInput {
+            canonical_path: canonical.into(),
+            persistence_class: PersistenceClass::PersistentState,
+            semantic_role: SemanticRole::UserState,
+        };
+        let mut restored = FileStateRecord {
+            app_id: app.clone(),
+            logical_root: "$HOME".into(),
+            relative_path: "save".into(),
+            canonical_path: Some(canonical.into()),
+            file_type: FileType::File,
+            size: 4,
+            mtime_ns: 1,
+            inode: Some(2),
+            mount_id: Some(3),
+            mode: Some(0o100600),
+            content_hash: Some("verified-restored-hash".into()),
+            trust: FileStateTrust::Trusted,
+            last_seen_at: Utc::now(),
+            last_hashed_at: Some(Utc::now()),
+        };
+        let generation = db.capture_generation(&app).unwrap();
+        let mut newer = restored.clone();
+        newer.inode = Some(99);
+        newer.content_hash = Some("newer-local-content".into());
+        newer.trust = FileStateTrust::Dirty;
+        db.upsert_file_state(&newer).unwrap();
+        db.append_app_mutation(&AppMutationRecord::new(
+            app.clone(),
+            canonical,
+            AppMutationKind::Modify,
+        ))
+        .unwrap();
+        assert_eq!(
+            db.commit_restored_paths(
+                &app,
+                std::slice::from_ref(&association),
+                std::slice::from_ref(&restored),
+                Some(generation),
+                |_| true
+            )
+            .unwrap(),
+            0
+        );
+        let stored = db.get_file_state(&app, "$HOME", "save").unwrap().unwrap();
+        assert_eq!(stored.trust, FileStateTrust::Dirty);
+        assert_eq!(stored.inode, Some(99));
+        assert_eq!(stored.content_hash, newer.content_hash);
+        assert_eq!(db.count_pending_app_mutations(&app).unwrap(), 1);
+
+        db.upsert_file_state(&restored).unwrap();
+        let generation = db.capture_generation(&app).unwrap();
+        db.set_file_state_trust(&app, "$HOME", "save", FileStateTrust::VerifyRequired)
+            .unwrap();
+        assert_eq!(
+            db.commit_restored_paths(
+                &app,
+                std::slice::from_ref(&association),
+                std::slice::from_ref(&restored),
+                Some(generation),
+                |_| true
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.get_file_state(&app, "$HOME", "save")
+                .unwrap()
+                .unwrap()
+                .trust,
+            FileStateTrust::VerifyRequired
+        );
+
+        // All paths, associations and states roll back on a malformed later row.
+        let before = db.associations_for_app(&app).unwrap().len();
+        let other_association = RestoredPathAssociationInput {
+            canonical_path: "/home/user/other".into(),
+            ..association
+        };
+        restored.canonical_path = Some(other_association.canonical_path.clone());
+        restored.relative_path = "other".into();
+        restored.size = u64::MAX;
+        let generation = db.capture_generation(&app).unwrap();
+        assert!(db
+            .commit_restored_paths(
+                &app,
+                &[other_association],
+                &[restored],
+                Some(generation),
+                |_| true
+            )
+            .is_err());
+        assert_eq!(db.associations_for_app(&app).unwrap().len(), before);
+        assert!(db
+            .get_path_by_canonical("/home/user/other")
+            .unwrap()
+            .is_none());
+        assert!(db.get_file_state(&app, "$HOME", "other").unwrap().is_none());
     }
 
     #[test]
@@ -1601,6 +1965,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_diagnostics_preserve_other_detail_and_monotonic_progress() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation = Uuid::new_v4();
+        let mut entry = SyncJournalEntry::pending(
+            operation,
+            "packs/test",
+            ContentObjectKind::Pack,
+            SyncDirection::Download,
+        );
+        entry.detail_json = serde_json::json!({"retained": 42});
+        db.upsert_sync_journal_entry(&entry).unwrap();
+        db.update_sync_journal_stream_progress(
+            operation,
+            "packs/test",
+            7,
+            &serde_json::json!({"network_wait_us": 10, "consumer_us": 90}),
+        )
+        .unwrap();
+        db.update_sync_journal_stream_progress(
+            operation,
+            "packs/test",
+            3,
+            &serde_json::json!({"attempt": 2}),
+        )
+        .unwrap();
+        let stored = db
+            .get_sync_journal_entry(operation, "packs/test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.bytes_transferred, 7);
+        assert_eq!(stored.detail_json["retained"], 42);
+        assert_eq!(stored.detail_json["stream"]["attempt"], 2);
+    }
+
+    #[test]
     fn sync_journal_transitions_track_attempts_and_monotonic_progress() {
         let db = StateDb::open_in_memory().unwrap();
         let operation_id = Uuid::new_v4();
@@ -1657,6 +2056,84 @@ mod tests {
         assert_eq!(summary.total_bytes, 10);
         assert_eq!(summary.completed_bytes, 10);
         assert_eq!(summary.bytes_transferred, 7);
+    }
+
+    #[test]
+    fn remote_cache_ingest_skips_identical_mappings_but_observations_and_new_packs_update() {
+        let db = StateDb::open_in_memory().unwrap();
+        let mut entry = RemoteContentEntry {
+            storage_id: "repository".into(),
+            object_kind: ContentObjectKind::Chunk,
+            content_hash: "chunk".into(),
+            remote_path: "packs/one".into(),
+            size: Some(8),
+            etag: Some("authenticated-location-one".into()),
+            state: RemoteContentState::Present,
+            observed_at: Utc::now(),
+            expires_at: None,
+        };
+        // Instrument writes with a DB trigger rather than inferring from time.
+        db.lock().unwrap().execute_batch("CREATE TABLE remote_writes (n INTEGER); INSERT INTO remote_writes VALUES (0);
+            CREATE TRIGGER count_remote_writes AFTER UPDATE ON remote_content_index BEGIN UPDATE remote_writes SET n=n+1; END;").unwrap();
+        let writes = || {
+            db.lock()
+                .unwrap()
+                .query_row("SELECT n FROM remote_writes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        db.ingest_remote_content_entries(std::slice::from_ref(&entry))
+            .unwrap();
+        let first_seen = entry.observed_at.timestamp_millis();
+        entry.observed_at += Duration::seconds(1);
+        db.ingest_remote_content_entries(std::slice::from_ref(&entry))
+            .unwrap();
+        assert_eq!(writes(), 0);
+        assert_eq!(
+            db.get_remote_content_by_hash("repository", ContentObjectKind::Chunk, "chunk")
+                .unwrap()
+                .unwrap()
+                .observed_at
+                .timestamp_millis(),
+            first_seen
+        );
+        db.upsert_remote_content_entry(&entry).unwrap();
+        assert_eq!(writes(), 1);
+        db.upsert_remote_content_entry(&entry).unwrap();
+        assert_eq!(writes(), 1);
+        entry.remote_path = "packs/two".into();
+        entry.etag = Some("authenticated-location-two".into());
+        db.ingest_remote_content_entries(std::slice::from_ref(&entry))
+            .unwrap();
+        assert_eq!(writes(), 2);
+        assert_eq!(
+            db.get_remote_content_by_hash("repository", ContentObjectKind::Chunk, "chunk")
+                .unwrap()
+                .unwrap()
+                .remote_path,
+            "packs/two"
+        );
+        entry.expires_at = Some(entry.observed_at + Duration::minutes(1));
+        db.ingest_remote_content_entries(std::slice::from_ref(&entry))
+            .unwrap();
+        entry.observed_at += Duration::seconds(1);
+        db.ingest_remote_content_entries(std::slice::from_ref(&entry))
+            .unwrap();
+        assert_eq!(writes(), 4); // Expiring observations must renew their timestamp.
+        let mut invalid = entry.clone();
+        invalid.content_hash = "invalid".into();
+        invalid.size = Some(u64::MAX);
+        entry.remote_path = "packs/rolled-back".into();
+        assert!(db.ingest_remote_content_entries(&[entry, invalid]).is_err());
+        assert_eq!(writes(), 4);
+        assert_eq!(
+            db.get_remote_content_by_hash("repository", ContentObjectKind::Chunk, "chunk")
+                .unwrap()
+                .unwrap()
+                .remote_path,
+            "packs/two"
+        );
     }
 
     #[test]

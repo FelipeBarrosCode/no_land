@@ -29,6 +29,7 @@ authors = ["Noland"]
 rust-version = "1.89"
 
 [workspace.dependencies]
+aes = "0.8"
 async-trait = "0.1"
 base64 = "0.22"
 blake3 = "1.5"

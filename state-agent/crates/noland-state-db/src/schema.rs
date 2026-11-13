@@ -205,6 +205,21 @@ CREATE TABLE IF NOT EXISTS capture_generations (
 );
 "#;
 
+pub const MIGRATION_V4: &str = include_str!("schema_v4.sql");
+
+pub const MIGRATION_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS operation_projections (
+    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id) ON DELETE CASCADE,
+    detail_json TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS invalidate_operation_projection
+AFTER UPDATE OF detail_json ON operations
+WHEN NEW.detail_json IS NOT OLD.detail_json
+BEGIN
+    DELETE FROM operation_projections WHERE operation_id=NEW.operation_id;
+END;
+"#;
+
 pub const MIGRATION_V2: &str = r#"
 CREATE TABLE IF NOT EXISTS app_mutation_journal (
     mutation_id TEXT PRIMARY KEY,

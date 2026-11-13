@@ -13,6 +13,7 @@ const posixOnly = new Set([
   'scripts/platform-credentials.test.mjs',
   'scripts/provisioning-packages.test.mjs',
   'scripts/remote-agent-artifacts.test.mjs',
+  'scripts/shared-storage-rclone.test.mjs',
   'scripts/sunshine-auth.test.mjs',
 ]);
 const files = ['scripts', 'scripts/ci'].flatMap(directory =>

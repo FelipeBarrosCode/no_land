@@ -1,6 +1,20 @@
 name: Reusable signed six-platform build
 
 on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semver from the original release run
+        type: string
+        required: true
+      linux-retry-run-id:
+        description: Rebuild only Linux using this run's verified remote-agent artifacts
+        type: string
+        required: true
+      retain-artifacts:
+        description: Retain the two Linux build outputs
+        type: boolean
+        default: true
   workflow_call:
     inputs:
       version:
@@ -14,6 +28,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -25,6 +40,7 @@ env:
 
 jobs:
   remote-agents:
+    if: inputs.linux-retry-run-id == ''
     name: remote-agents-${{ matrix.arch }}
     strategy:
       fail-fast: false
@@ -61,34 +77,42 @@ jobs:
 
   build-unix:
     needs: remote-agents
+    if: >-
+      !cancelled() && (needs.remote-agents.result == 'success' ||
+      (needs.remote-agents.result == 'skipped' && inputs.linux-retry-run-id != ''))
     name: build-${{ matrix.platform }}-${{ matrix.arch }}
     environment: Secrets
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-latest
-            platform: macos
-            arch: arm64
-            target: aarch64-apple-darwin
-          - os: macos-15-intel
-            platform: macos
-            arch: x64
-            target: x86_64-apple-darwin
-          # Build on the oldest supported glibc baseline. AppImages built on
-          # Ubuntu 24.04 require GLIBC_2.39 and cannot run on Ubuntu 22.04,
-          # Debian 12, or equivalent distributions.
-          - os: ubuntu-22.04
-            platform: linux
-            arch: x64
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04-arm
-            platform: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
+        # Keep Linux on the Ubuntu 22.04 glibc baseline in both modes.
+        include: >-
+          ${{ inputs.linux-retry-run-id != '' && fromJSON('[
+            {"os":"ubuntu-22.04","platform":"linux","arch":"x64","target":"x86_64-unknown-linux-gnu"},
+            {"os":"ubuntu-22.04-arm","platform":"linux","arch":"arm64","target":"aarch64-unknown-linux-gnu"}
+          ]') || fromJSON('[
+            {"os":"macos-latest","platform":"macos","arch":"arm64","target":"aarch64-apple-darwin"},
+            {"os":"macos-15-intel","platform":"macos","arch":"x64","target":"x86_64-apple-darwin"},
+            {"os":"ubuntu-22.04","platform":"linux","arch":"x64","target":"x86_64-unknown-linux-gnu"},
+            {"os":"ubuntu-22.04-arm","platform":"linux","arch":"arm64","target":"aarch64-unknown-linux-gnu"}
+          ]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Verify reused remote-agent source revision
+        if: inputs.linux-retry-run-id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.linux-retry-run-id }}
+        run: |
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          agent_sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" --jq .head_sha)
+          [[ "$agent_sha" =~ ^[0-9a-f]{40}$ ]]
+          git fetch --no-tags --depth=1 origin "$agent_sha"
+          if ! git diff --quiet "$agent_sha" HEAD -- state-agent network-agent network-contracts vm-cloud-mic-agent scripts/ci/build-remote-agents.sh; then
+            echo 'Remote-agent sources differ from the artifact-producing run.' >&2
+            exit 1
+          fi
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
@@ -180,13 +204,21 @@ jobs:
         with:
           name: remote-agents-x86_64
           path: state-agent/prebuilt/x86_64
+          run-id: ${{ inputs.linux-retry-run-id || github.run_id }}
+          github-token: ${{ inputs.linux-retry-run-id != '' && github.token || '' }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: remote-agents-aarch64
           path: state-agent/prebuilt/aarch64
+          run-id: ${{ inputs.linux-retry-run-id || github.run_id }}
+          github-token: ${{ inputs.linux-retry-run-id != '' && github.token || '' }}
 
       - name: Prepare and verify immutable Linux remote-agent resources
         run: node scripts/prepare-remote-agent-resources.mjs
+
+      - name: Test Linux net-helper bundle contract
+        if: matrix.platform == 'linux'
+        run: node --test scripts/net-helper-bundle.test.mjs scripts/bundle-resources.test.mjs
 
       - name: Build signed/notarized Tauri application
         shell: bash
@@ -252,7 +284,7 @@ jobs:
           rm -rf "$extract_dir" "$updater_dir"
 
       - name: Verify bundled sidecars and runtime
-        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}" --require-distributables
 
       - name: Validate Debian package
         if: matrix.platform == 'linux'
@@ -288,6 +320,7 @@ jobs:
           rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle"
 
   build-windows:
+    if: inputs.linux-retry-run-id == ''
     needs: remote-agents
     name: build-windows-${{ matrix.arch }}
     environment: Secrets
@@ -331,7 +364,7 @@ jobs:
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/ci/release-signatures.test.mjs
+          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/net-helper-bundle.test.mjs scripts/ci/release-signatures.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -491,7 +524,7 @@ jobs:
           if ($count -eq 0) { throw 'No Windows updater signature was regenerated.' }
 
       - name: Verify bundled sidecars and runtime
-        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}" --require-distributables
 
       - name: Generate local artifact checksums
         run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-windows-${{ matrix.arch }}"

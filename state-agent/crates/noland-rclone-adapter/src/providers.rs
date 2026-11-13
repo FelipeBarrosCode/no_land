@@ -2,6 +2,15 @@ use crate::{
     AdapterCredential, AdapterError, AdapterInput, ProviderKind, RcloneProviderAdapter,
     RcloneRemoteConfig, Result,
 };
+use aes::cipher::{BlockEncrypt, KeyInit};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use rand::RngCore;
+
+// Public compatibility key from rclone's obscure format, not a repository key.
+const RCLONE_OBSCURE_KEY: [u8; 32] = [
+    0x9c, 0x93, 0x5b, 0x48, 0x73, 0x0a, 0x55, 0x4d, 0x6b, 0xfd, 0x7c, 0x63, 0xc8, 0x86, 0xa9, 0x2b,
+    0xd3, 0x90, 0x19, 0x8e, 0xb8, 0x12, 0x8a, 0xfb, 0xf4, 0xde, 0x16, 0x2b, 0x8b, 0x95, 0xf6, 0x38,
+];
 
 pub fn adapter_for(kind: ProviderKind) -> Box<dyn RcloneProviderAdapter> {
     Box::new(Dispatcher(kind))
@@ -152,7 +161,12 @@ impl RcloneProviderAdapter for Dispatcher {
                 oauth_config(name, "drive", input)
             }
             (ProviderKind::MicrosoftOneDrive, AdapterCredential::OAuth2 { .. }) => {
-                oauth_config(name, "onedrive", input)
+                let drive_id = required_config_field(fields, "drive_id", "OneDrive drive ID")?;
+                let drive_type =
+                    required_config_field(fields, "drive_type", "OneDrive drive type")?;
+                Ok(oauth_config(name, "onedrive", input)?
+                    .entry("drive_id", drive_id)
+                    .entry("drive_type", drive_type))
             }
             (ProviderKind::Dropbox, AdapterCredential::OAuth2 { .. }) => {
                 oauth_config(name, "dropbox", input)
@@ -161,6 +175,13 @@ impl RcloneProviderAdapter for Dispatcher {
                 oauth_config(name, "box", input)
             }
             (ProviderKind::GoogleCloudStorage, AdapterCredential::ServiceAccount { json }) => {
+                let json = serde_json::from_str::<serde_json::Value>(json)
+                    .map_err(|error| {
+                        AdapterError::Invalid(format!(
+                            "Invalid Google Cloud service account JSON: {error}"
+                        ))
+                    })?
+                    .to_string();
                 Ok(RcloneRemoteConfig::new(name, "google cloud storage")
                     .entry("service_account_credentials", json))
             }
@@ -178,9 +199,39 @@ impl RcloneProviderAdapter for Dispatcher {
                 let mut cfg = RcloneRemoteConfig::new(name, "sftp")
                     .entry("host", host)
                     .entry("user", username)
-                    .entry("pass", password);
+                    .entry("pass", obscure_password(password)?);
                 if let Some(port) = fields.get("port").filter(|v| !v.trim().is_empty()) {
                     cfg = cfg.entry("port", port);
+                }
+                if let Some(host_keys) = fields.get("host_keys").filter(|v| !v.trim().is_empty()) {
+                    cfg = cfg.entry("host_keys", host_keys);
+                }
+                Ok(cfg)
+            }
+            (
+                ProviderKind::Sftp,
+                AdapterCredential::SshKey {
+                    username,
+                    private_key,
+                    passphrase,
+                },
+            ) => {
+                let host = required_config_field(fields, "host", "SFTP host")?;
+                let mut cfg = RcloneRemoteConfig::new(name, "sftp")
+                    .entry("host", host)
+                    .entry("user", username)
+                    .entry(
+                        "key_pem",
+                        private_key.replace("\r\n", "\\n").replace('\n', "\\n"),
+                    );
+                if let Some(port) = fields.get("port").filter(|v| !v.trim().is_empty()) {
+                    cfg = cfg.entry("port", port);
+                }
+                if let Some(passphrase) = passphrase.as_ref().filter(|v| !v.is_empty()) {
+                    cfg = cfg.entry("key_file_pass", obscure_password(passphrase)?);
+                }
+                if let Some(host_keys) = fields.get("host_keys").filter(|v| !v.trim().is_empty()) {
+                    cfg = cfg.entry("host_keys", host_keys);
                 }
                 Ok(cfg)
             }
@@ -197,7 +248,7 @@ impl RcloneProviderAdapter for Dispatcher {
                     .entry("url", url)
                     .entry("vendor", &vendor)
                     .entry("user", username)
-                    .entry("pass", password);
+                    .entry("pass", obscure_password(password)?);
                 if vendor == "nextcloud" {
                     config = config.entry("nextcloud_chunk_size", "64M");
                 }
@@ -212,6 +263,47 @@ impl RcloneProviderAdapter for Dispatcher {
             ))),
         }
     }
+}
+
+fn required_config_field(
+    fields: &std::collections::BTreeMap<String, String>,
+    key: &str,
+    label: &str,
+) -> Result<String> {
+    fields
+        .get(key)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AdapterError::Invalid(format!("{label} is missing.")))
+}
+
+/// rclone-compatible obscuring, not encryption. The config stays operation-scoped.
+fn obscure_password(password: &str) -> Result<String> {
+    let mut iv = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut iv);
+    obscure_password_with_iv(password, iv)
+}
+
+fn obscure_password_with_iv(password: &str, iv: [u8; 16]) -> Result<String> {
+    let cipher = aes::Aes256::new_from_slice(&RCLONE_OBSCURE_KEY).map_err(|error| {
+        AdapterError::Invalid(format!("Initialize rclone password encoder: {error}"))
+    })?;
+    let mut output = Vec::with_capacity(iv.len() + password.len());
+    output.extend_from_slice(&iv);
+    let mut counter = u128::from_be_bytes(iv);
+    for chunk in password.as_bytes().chunks(16) {
+        let mut stream_block = aes::cipher::Block::<aes::Aes256>::from(counter.to_be_bytes());
+        cipher.encrypt_block(&mut stream_block);
+        output.extend(
+            chunk
+                .iter()
+                .zip(stream_block.iter())
+                .map(|(plain, key)| plain ^ key),
+        );
+        counter = counter.wrapping_add(1);
+    }
+    Ok(URL_SAFE_NO_PAD.encode(output))
 }
 
 fn oauth_config(name: String, backend: &str, input: &AdapterInput) -> Result<RcloneRemoteConfig> {
@@ -251,6 +343,7 @@ fn oauth_token_json(access_token: &str, refresh_token: Option<&str>, expires_at:
         .to_rfc3339();
     let mut value = serde_json::json!({
         "access_token": access_token,
+        "token_type": "Bearer",
         "expiry": expiry,
     });
     if let Some(refresh) = refresh_token {
@@ -264,6 +357,85 @@ mod tests {
     use super::*;
     use crate::{session_from_input, TokenMode};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn password_encoding_matches_upstream_rclone_vectors() {
+        // https://github.com/rclone/rclone/blob/master/fs/config/obscure/obscure_test.go
+        assert_eq!(
+            obscure_password_with_iv("", [b'a'; 16]).unwrap(),
+            "YWFhYWFhYWFhYWFhYWFhYQ"
+        );
+        assert_eq!(
+            obscure_password_with_iv("potato", [b'a'; 16]).unwrap(),
+            "YWFhYWFhYWFhYWFhYWFhYXMaGgIlEQ"
+        );
+        assert_eq!(
+            obscure_password_with_iv("potato", [b'b'; 16]).unwrap(),
+            "YmJiYmJiYmJiYmJiYmJiYp3gcEWbAw"
+        );
+    }
+
+    #[test]
+    fn sftp_preserves_absolute_root_and_obscures_passwords() {
+        let mut input = AdapterInput {
+            provider: ProviderKind::Sftp,
+            remote_name: "sftp".into(),
+            credentials: AdapterCredential::UsernamePassword {
+                username: "user".into(),
+                password: "test-password".into(),
+            },
+            fields: BTreeMap::from([
+                ("host".into(), "example.test".into()),
+                ("remote_path".into(), "/srv/backups".into()),
+            ]),
+            bucket: None,
+            prefix: None,
+        };
+        for (root, expected) in [
+            ("/srv/backups/", "/srv/backups"),
+            ("srv/backups/", "srv/backups"),
+            ("/", "/"),
+            ("///", "/"),
+            ("", ""),
+        ] {
+            for use_prefix in [false, true] {
+                input.prefix = use_prefix.then(|| root.into());
+                input.fields.insert(
+                    "remote_path".into(),
+                    if use_prefix { "ignored" } else { root }.into(),
+                );
+                let session = session_from_input(&input, "test", TokenMode::Operation).unwrap();
+                assert_eq!(session.root, expected);
+                assert!(!session.config_ini.contains("test-password"));
+                assert!(session.config_ini.contains("pass = "));
+            }
+        }
+    }
+
+    #[test]
+    fn onedrive_requires_drive_identity_for_noninteractive_transfers() {
+        let mut input = AdapterInput {
+            provider: ProviderKind::MicrosoftOneDrive,
+            remote_name: "drive".into(),
+            credentials: AdapterCredential::OAuth2 {
+                access_token: "test-token".into(),
+                refresh_token: None,
+                expires_at: 1_900_000_000,
+            },
+            fields: BTreeMap::new(),
+            bucket: None,
+            prefix: None,
+        };
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_id".into(), "test-drive".into());
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_type".into(), " ".into());
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_type".into(), "personal".into());
+        let session = session_from_input(&input, "test", TokenMode::Operation).unwrap();
+        assert!(session.config_ini.contains("drive_id = test-drive"));
+        assert!(session.config_ini.contains("drive_type = personal"));
+    }
 
     fn b2_input() -> AdapterInput {
         AdapterInput {
@@ -332,6 +504,7 @@ mod tests {
         let ephemeral = session_from_input(&input, "op", TokenMode::Ephemeral).unwrap();
         assert!(ephemeral.config_ini.contains("type = drive"));
         assert!(ephemeral.config_ini.contains("ya29.access"));
+        assert!(ephemeral.config_ini.contains("\"token_type\":\"Bearer\""));
         assert!(
             !ephemeral.config_ini.contains("1//refresh"),
             "ephemeral session must not contain the refresh token"

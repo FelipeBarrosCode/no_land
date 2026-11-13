@@ -23,6 +23,13 @@ fn status_works_before_runtime_download_without_touching_parent_os() {
 fn rejects_unapproved_install_and_arbitrary_app_ids() {
     let home = tempfile::tempdir().unwrap();
     assert!(!cli(home.path(), &["ensure"]).status.success());
+    assert!(!cli(home.path(), &["update"]).status.success());
+    assert!(!cli(
+        home.path(),
+        &["install-prerequisites", "--app-id", "fixture"]
+    )
+    .status
+    .success());
     assert!(
         !cli(home.path(), &["launch", "--app-id", "../../etc/passwd"])
             .status

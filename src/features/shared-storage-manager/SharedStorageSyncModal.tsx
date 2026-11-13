@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { StorageDeleteAction } from "./StorageDeleteAction";
 import type { SharedStorageObjectEntry } from "../../lib/types";
 
 interface Props {
@@ -114,6 +115,14 @@ export function SharedStorageSyncModal({
   };
 
   const renderNode = (entry: SharedStorageObjectEntry, depth: number) => {
+    const entryName = entry.path.startsWith("/pending-deletions")
+      ? translate("storage.delete.resume")
+      : entry.path === "/retained-backups"
+        ? translate("storage.retainedBackups")
+        : entry.isDir ? entry.name
+          : entry.path.startsWith("/retained-backups/")
+            ? translate("storage.retainedBundle", { id: entry.path.split("/").slice(-1)[0] ?? "" })
+            : translate("storage.currentBundle");
     const isChecked = selectedPaths.includes(entry.path);
     const children = childrenMap.get(entry.path) ?? [];
     const isExpanded = expanded[entry.path] ?? depth < 1;
@@ -144,12 +153,12 @@ export function SharedStorageSyncModal({
               checked={isChecked}
               onChange={() => toggleSelected(entry.path)}
               className="h-4 w-4"
-              aria-label={translate("storage.select.entry", { name: entry.name })}
+              aria-label={translate("storage.select.entry", { name: entryName })}
             />
           )}
 
           <span className="truncate text-[1.15rem] text-[#d7e8ff]">
-            {entry.name}
+            {entryName}
             {entry.isDir ? "/" : ""}
           </span>
         </div>
@@ -191,11 +200,16 @@ export function SharedStorageSyncModal({
         <div className="shrink-0 flex items-center justify-between border-t-2 border-[#3e4270] px-5 py-4">
           <p className="text-[1.1rem] text-[#9ec0e4]">{translate("generated.4c74fbd5d0a2bd1b")} {selectedPaths.length}</p>
           <div className="flex items-center gap-2">
+            <StorageDeleteAction instanceId={instanceId} target="cloud" selectedPaths={selectedPaths}
+              disabled={busy || loading} onBusyChange={setLoading} onDeleted={async () => {
+                if (instanceId !== null) setEntries(await onLoadObjects(instanceId) ?? []);
+                setSelectedPaths([]);
+              }} />
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>
               {translate("generated.19766ed6ccb2f4a3")}
             </Button>
             <Button
-              disabled={busy || loading || selectedPaths.length === 0}
+              disabled={busy || loading || selectedPaths.length === 0 || selectedPaths.some(path => !path.startsWith("/catalog/"))}
               loading={busy}
               loadingText={translate("generated.1567e1dadfa15b87")}
               onClick={async () => {

@@ -72,6 +72,7 @@ docker run --rm \
     test -n "$package"
     pacman -Qip "$package"
     pacman -Qlp "$package" | grep -Eq "usr/bin/noland-connect$"
+    pacman -Qlp "$package" | grep -Eq "(usr/bin|usr/lib/(noland-connect|Noland Connect)(/resources)?)/noland-net-helper(-[a-z0-9_-]+)?$"
     chown -R "$HOST_UID:$HOST_GID" /build
   '
 

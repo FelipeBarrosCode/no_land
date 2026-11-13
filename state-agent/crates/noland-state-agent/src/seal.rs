@@ -87,29 +87,52 @@ pub async fn run_seal(
         }
     }
 
-    op.state = SealState::Checkpointing.as_str().into();
-    agent.db.upsert_operation(&op)?;
-    let checkpoint = write_local_checkpoint(agent)?;
-    commit_checkpoint(provider, master, &checkpoint).await?;
+    // Child transfers release admission between apps. Protect final validation
+    // and seal publication as one repository operation: a delete in that gap
+    // must make the seal fail, never authorize destroying its last local copy.
+    let guard = crate::repository::acquire(agent, provider, master, op_id).await?;
+    let result = async {
+        for commit in &commits {
+            let manifest = noland_storage::read_committed_manifest(
+                provider,
+                master,
+                &commit.app_id,
+                commit.bundle_id,
+            )
+            .await?;
+            if manifest.commit_id != commit.commit_id {
+                return Err(StateError::Conflict(
+                    "a seal backup changed before final publication".into(),
+                ));
+            }
+        }
+        op.state = SealState::Checkpointing.as_str().into();
+        agent.db.upsert_operation(&op)?;
+        let checkpoint = write_local_checkpoint(agent)?;
+        commit_checkpoint(provider, master, &checkpoint).await?;
 
-    let seal = SealRecord {
-        seal_id: Uuid::new_v4(),
-        instance_id: agent.config.instance_id,
-        image_id: agent.config.image_id.clone(),
-        sealed_at: Utc::now(),
-        app_bundle_commits: commits,
-        checkpoint_id: Some(checkpoint.checkpoint_id),
-        state: "complete".into(),
-    };
-    op.state = SealState::UploadingSeal.as_str().into();
-    agent.db.upsert_operation(&op)?;
-    commit_seal(provider, master, &seal).await?;
-    op.state = SealState::CommittingSeal.as_str().into();
-    agent.db.upsert_operation(&op)?;
-    agent.db.record_seal(&seal, SealState::Sealed)?;
-    op.state = SealState::Sealed.as_str().into();
-    agent.db.upsert_operation(&op)?;
-    Ok(seal)
+        let seal = SealRecord {
+            seal_id: Uuid::new_v4(),
+            instance_id: agent.config.instance_id,
+            image_id: agent.config.image_id.clone(),
+            sealed_at: Utc::now(),
+            app_bundle_commits: commits,
+            checkpoint_id: Some(checkpoint.checkpoint_id),
+            state: "complete".into(),
+        };
+        op.state = SealState::UploadingSeal.as_str().into();
+        agent.db.upsert_operation(&op)?;
+        commit_seal(provider, master, &seal).await?;
+        op.state = SealState::CommittingSeal.as_str().into();
+        agent.db.upsert_operation(&op)?;
+        agent.db.record_seal(&seal, SealState::Sealed)?;
+        op.state = SealState::Sealed.as_str().into();
+        agent.db.upsert_operation(&op)?;
+        Ok(seal)
+    }
+    .await;
+    guard.release().await?;
+    result
 }
 
 pub async fn run_seal_with_session(
@@ -122,4 +145,68 @@ pub async fn run_seal_with_session(
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let storage = RcloneStorage::try_from_session(session, &config_path)?;
     run_seal(agent, &storage, master, mode).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn deletion_of_a_clean_app_backup_prevents_seal_publication() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!("target/seal-delete-{}", Uuid::new_v4()));
+        let agent = StateAgent::boot(crate::AgentConfig::isolated(root.clone())).unwrap();
+        let app = AppIdentity::new(AppId::desktop("fixture"), "Fixture");
+        agent.db.upsert_app(&app).unwrap();
+        let storage = noland_storage::LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let manifest = BundleManifest::new(
+            ManifestApp::from(&app),
+            ManifestSource {
+                instance_id: agent.config.instance_id,
+                image_id: "fixture".into(),
+                captured_at: Utc::now(),
+            },
+            BackupMode::CompleteApplication,
+        );
+        noland_storage::commit_bundle(&storage, &master, &manifest, &[], None)
+            .await
+            .unwrap();
+        agent
+            .db
+            .record_commit(
+                manifest.commit_id,
+                &app.app_id,
+                manifest.bundle_id,
+                "fixture",
+                None,
+                CommitVisibility::Committed,
+            )
+            .unwrap();
+        noland_storage::delete_bundle(
+            &storage,
+            &master,
+            &noland_storage::BundleDeletion {
+                app_id: app.app_id.clone(),
+                bundle_id: manifest.bundle_id,
+                commit_id: manifest.commit_id,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            run_seal(&agent, &storage, &master, BackupMode::CompleteApplication)
+                .await
+                .is_err()
+        );
+        assert!(
+            agent.db.latest_seal().unwrap().is_none(),
+            "an absent/deleted clean backup can never authorize automatic destruction"
+        );
+        assert!(noland_storage::repository_activities(&storage, &master)
+            .await
+            .unwrap()
+            .is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

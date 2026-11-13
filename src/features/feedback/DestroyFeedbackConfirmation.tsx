@@ -75,7 +75,7 @@ export function DestroyFeedbackConfirmation({ instanceId, disabled, onDestroy, o
     <div id={`destroy-confirm-${instanceId}`} role="group" aria-label={translate("feedback.destroy.confirmLabel")}
       className="min-w-0 space-y-3 rounded border border-red-500/40 bg-red-900/20 p-3 text-[1.05rem] leading-snug text-red-200 [overflow-wrap:anywhere] [&_button]:max-w-full [&_button>span]:min-w-0 [&_button>span]:flex-wrap"
       onKeyDown={(event) => { if (event.key === "Escape" && !started.current) { event.stopPropagation(); onCancel(); } }}>
-      <p><strong>{translate("feedback.destroy.title", { instanceId })}</strong> {translate("feedback.destroy.description")}</p>
+      <p><strong>{translate("feedback.destroy.title", { instanceId })}</strong> {translate("instance.destroy.noBackup")}</p>
       {checking && <p role="status" className="text-[#9ec4df]">{translate("feedback.destroy.checking")}</p>}
       {showReview && <fieldset disabled={running || disabled} className="space-y-3 border border-[#495188] p-3 text-[#c6dbf4]">
         <legend>{translate("feedback.destroy.legend")}</legend>

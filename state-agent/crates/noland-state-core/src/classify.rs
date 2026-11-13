@@ -105,8 +105,9 @@ impl BackupMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupPerformanceMode {
-    Fast,
     #[default]
+    Automatic,
+    Fast,
     Balanced,
     Full,
 }
@@ -114,6 +115,7 @@ pub enum BackupPerformanceMode {
 impl BackupPerformanceMode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Automatic => "automatic",
             Self::Fast => "fast",
             Self::Balanced => "balanced",
             Self::Full => "full",
@@ -123,8 +125,9 @@ impl BackupPerformanceMode {
     pub fn parse(raw: &str) -> Self {
         match raw {
             "fast" => Self::Fast,
+            "balanced" => Self::Balanced,
             "full" => Self::Full,
-            _ => Self::Balanced,
+            _ => Self::Automatic,
         }
     }
 }

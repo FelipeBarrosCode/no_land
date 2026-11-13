@@ -45,6 +45,26 @@ test('all six platforms have a required, unprivileged no-build regression lane',
   }
 });
 
+test('manual Linux retries select exactly two architectures and reuse matching agent artifacts', () => {
+  const build = workflow('_build');
+  const unix = job(build, 'build-unix');
+  const matrices = [...unix.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)].map(match => JSON.parse(match[1]));
+  assert.equal(matrices.length, 2);
+  assert.deepEqual(matrices[0].map(entry => [entry.platform, entry.arch, entry.os]), [
+    ['linux', 'x64', 'ubuntu-22.04'], ['linux', 'arm64', 'ubuntu-22.04-arm'],
+  ]);
+  assert.equal(matrices[1].length, 4, 'ordinary builds retain both macOS and both Linux targets');
+  for (const name of ['remote-agents', 'build-windows']) {
+    assert.match(job(build, name), /if: inputs\.linux-retry-run-id == ''/u);
+  }
+  assert.match(unix, /!cancelled\(\).*needs\.remote-agents\.result == 'success'/u);
+  assert.match(unix, /needs\.remote-agents\.result == 'skipped' && inputs\.linux-retry-run-id != ''/u);
+  assert.equal([...unix.matchAll(/run-id: \$\{\{ inputs\.linux-retry-run-id \|\| github\.run_id \}\}/gu)].length, 2);
+  const verify = step(unix, 'Verify reused remote-agent source revision');
+  assert.match(verify, /git diff --quiet "\$agent_sha" HEAD -- state-agent network-agent network-contracts vm-cloud-mic-agent scripts\/ci\/build-remote-agents\.sh/u);
+  assert.ok(unix.indexOf('Verify reused remote-agent source revision') < unix.indexOf('Install dependencies and stage managed tools'));
+});
+
 test('runtime code and contracts are covered by formatting, linting and dependency security', () => {
   const ci = workflow('ci');
   const formatting = job(ci, 'rust-format');
@@ -83,4 +103,29 @@ test('Windows native setup failures stop before staging or changing the release 
   const credentials = step(windows, 'Require Artifact Signing credentials');
   assert.match(credentials, /TAURI_SIGNING_PRIVATE_KEY/u);
   assert.ok(windows.indexOf('Require Artifact Signing credentials') < windows.indexOf('Build Windows Tauri application'));
+});
+
+test('Windows and Linux net-helper tests gate real native bundles before artifact publication', () => {
+  const build = workflow('_build');
+  const unix = job(build, 'build-unix');
+  const windows = job(build, 'build-windows');
+  assert.match(step(unix, 'Test Linux net-helper bundle contract'), /matrix\.platform == 'linux'/u);
+  assert.match(step(unix, 'Test Linux net-helper bundle contract'), /node --test scripts\/net-helper-bundle\.test\.mjs/u);
+  assert.match(step(windows, 'Install dependencies and stage managed tools'), /scripts\/net-helper-bundle\.test\.mjs/u);
+  for (const [source, publish] of [[unix, 'Upload production build artifacts'], [windows, 'Upload signed production artifacts']]) {
+    const verify = step(source, 'Verify bundled sidecars and runtime');
+    assert.match(verify, /verify-bundled-sidecars\.mjs --target "\$\{\{ matrix\.target \}\}" --require-distributables/u);
+    assert.doesNotMatch(verify, /continue-on-error|\|\| true/u);
+    assert.ok(source.indexOf('Verify bundled sidecars and runtime') < source.indexOf(publish));
+  }
+  const unixMatrices = [...unix.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)].map(match => JSON.parse(match[1]));
+  assert.equal(unixMatrices.length, 2, 'verify both the ordinary and Linux-retry matrices');
+  for (const matrix of unixMatrices) {
+    for (const target of ['x86_64-unknown-linux-gnu', 'aarch64-unknown-linux-gnu']) {
+      assert.ok(matrix.some(entry => entry.platform === 'linux' && entry.target === target), target);
+    }
+  }
+  for (const target of ['x86_64-pc-windows-msvc', 'aarch64-pc-windows-msvc']) assert.ok(windows.includes(`target: ${target}`));
+  const arch = readFileSync(new URL('../build-arch-package.sh', import.meta.url), 'utf8');
+  assert.match(arch, /pacman -Qlp "\$package" \| grep -Eq .*noland-net-helper/u);
 });

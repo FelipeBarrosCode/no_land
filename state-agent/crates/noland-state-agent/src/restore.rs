@@ -1,5 +1,4 @@
 use std::{
-    fs,
     path::{Path, PathBuf},
     time::Instant,
 };
@@ -9,7 +8,8 @@ use noland_rclone_adapter::{
     EphemeralRcloneSession, ProviderKind, TransferTuning, TransferWorkload,
 };
 use noland_restore::{
-    prepare_restore, restore_pipelined, DownloadJournal, PipelineOptions, RestoreTarget,
+    prepare_restore, restore_pipelined, DownloadJournal, PipelineOptions, RestorePrerequisite,
+    RestoreTarget,
 };
 use noland_state_core::*;
 use noland_storage::{
@@ -93,6 +93,35 @@ pub async fn run_restore_with_session(
     master: &MasterKey,
     operation_id: uuid::Uuid,
 ) -> Result<()> {
+    let (config, _session_guard) =
+        write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
+    let provider = RcloneStorage::try_from_session(session, &config)?;
+    let guard = crate::repository::acquire(agent, &provider, master, operation_id).await?;
+    let result = run_restore_inner(
+        agent,
+        app_id,
+        bundle_id,
+        mode,
+        session,
+        master,
+        operation_id,
+    )
+    .await;
+    if let Err(error) = guard.release().await {
+        tracing::warn!(%error,"restore repository admission cleanup requires owner recovery");
+    }
+    result
+}
+
+async fn run_restore_inner(
+    agent: &StateAgent,
+    app_id: &AppId,
+    bundle_id: uuid::Uuid,
+    mode: RestoreMode,
+    session: &EphemeralRcloneSession,
+    master: &MasterKey,
+    operation_id: uuid::Uuid,
+) -> Result<()> {
     let total_started = Instant::now();
     let mut metrics = OperationMetrics::default();
     let mut progress = OperationProgress::new(RestoreState::FetchingManifest.as_str(), 0);
@@ -119,10 +148,10 @@ pub async fn run_restore_with_session(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
-    let workload = if agent.db.open_session_app_ids()?.is_empty() {
-        TransferWorkload::Throughput
-    } else {
+    let workload = if agent.has_latency_sensitive_sessions()? {
         TransferWorkload::GameplaySafe
+    } else {
+        TransferWorkload::Throughput
     };
     let tuning = TransferTuning::automatic(provider, workload);
     tracing::info!(
@@ -143,6 +172,14 @@ pub async fn run_restore_with_session(
         },
         ..PipelineOptions::default()
     };
+    let transfer_plan = serde_json::json!({
+        "workload": format!("{workload:?}"),
+        "logical_cpus": std::thread::available_parallelism().map_or(1, usize::from),
+        "max_parallel_packs": pipeline_options.max_parallel_packs,
+        "verification_workers": pipeline_options.reconstruction_workers,
+        "buffered_chunks": pipeline_options.buffered_chunks,
+        "max_inflight_pack_bytes": pipeline_options.max_inflight_pack_bytes,
+    });
     let storage =
         RcloneStorage::try_from_session(session, &config_path)?.with_transfer_tuning(tuning);
     let storage_before = storage.operation_metrics();
@@ -168,6 +205,7 @@ pub async fn run_restore_with_session(
     metrics.manifest_duration_ms = elapsed_ms(manifest_started);
     let result = match plan {
         Ok(plan) => {
+            let plan = plan.into_shared();
             if plan.manifest.files.is_empty()
                 && (mode == RestoreMode::CompleteApplication || plan.manifest.tombstones.is_empty())
             {
@@ -192,6 +230,7 @@ pub async fn run_restore_with_session(
                 "ready_to_launch_reached": false,
                 "milestones": [],
                 "target": "READY_TO_LAUNCH",
+                "transfer_plan": transfer_plan,
             });
             persist_restore_operation(
                 agent,
@@ -210,7 +249,7 @@ pub async fn run_restore_with_session(
 
             let restore_result = async {
                 let roots = prepare_restore_roots(agent, &plan.manifest)?;
-                remove_steam_appmanifest_before_restore(&plan.manifest, &roots)?;
+                let local_plan = plan.clone().with_prerequisites(steam_restore_prerequisites(&plan.manifest, &roots, mode));
                 let manifest_app = &plan.manifest.app;
                 agent.db.upsert_app(&AppIdentity {
                     app_id: manifest_app.app_id.clone(),
@@ -233,12 +272,14 @@ pub async fn run_restore_with_session(
                     Some(operation_id),
                 )
                 .await?;
+                let index_cache_started = Instant::now();
                 crate::backup::remember_remote_pack_index(
                     agent,
                     storage.storage_identity(),
                     master,
                     &index,
                 )?;
+                progress.detail_json["remote_index_cache_us"] = serde_json::json!(index_cache_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
                 // Restore retries reuse verified local pack/chunk caches directly. Their old
                 // journal rows are not needed for resume and would pollute this attempt's totals.
                 agent.db.delete_sync_journal_entries_for_kind_direction(
@@ -255,7 +296,7 @@ pub async fn run_restore_with_session(
                 let report = restore_pipelined(
                     &storage,
                     master,
-                    &plan,
+                    &local_plan,
                     &index,
                     &roots,
                     Some(&agent.db),
@@ -266,14 +307,15 @@ pub async fn run_restore_with_session(
                         progress.unit = Some("files".into());
                         progress.detail_json["ready_to_launch_reached"] =
                             serde_json::json!(sample.ready_to_launch);
-                            progress.detail_json["pipeline"] = serde_json::json!({
-                                "phase": sample.phase,
-                                "checked_files": sample.checked_entries,
-                                "rollback_files": sample.rollback_entries,
-                                "preflight_duration_ms": sample.preflight_duration_ms,
-                                "rollback_duration_ms": sample.rollback_duration_ms,
-                            "version": 1,
+                        progress.detail_json["pipeline"] = serde_json::json!({
+                            "phase": sample.phase,
+                            "checked_files": sample.checked_entries,
+                            "rollback_files": sample.rollback_entries,
+                            "preflight_duration_ms": sample.preflight_duration_ms,
+                            "rollback_duration_ms": sample.rollback_duration_ms,
+                            "version": 2,
                             "assembled_bytes": sample.assembled_bytes,
+                            "verified_bytes": sample.verified_bytes,
                             "readback_bytes": sample.readback_bytes,
                             "published_bytes": sample.published_bytes,
                             "total_bytes": sample.total_bytes,
@@ -281,6 +323,7 @@ pub async fn run_restore_with_session(
                             "elapsed_ms": sample.elapsed_ms,
                             "files_per_second": sample.completed_entries as f64 * 1000.0 / sample.elapsed_ms.max(1) as f64,
                             "assembled_bytes_per_second": sample.assembled_bytes as f64 * 1000.0 / sample.elapsed_ms.max(1) as f64,
+                            "io": sample.io,
                         });
                         if sample.ready_to_launch {
                             progress.detail_json["milestones"] =
@@ -292,14 +335,18 @@ pub async fn run_restore_with_session(
                             &mut progress,
                             RestoreState::Applying.as_str(),
                             sample.completed_entries,
-                            &format!("{} · {:.1} MiB assembled · {:.1} MiB read-back verified", sample.phase,
-                                sample.assembled_bytes as f64 / 1_048_576.0, sample.readback_bytes as f64 / 1_048_576.0),
+                            &format!("{} · {:.1} MiB assembled · {:.1} MiB verified · {:.1} MiB extra read-back", sample.phase,
+                                sample.assembled_bytes as f64 / 1_048_576.0,
+                                sample.verified_bytes as f64 / 1_048_576.0,
+                                sample.readback_bytes as f64 / 1_048_576.0),
                         )
                     },
                 )
                 .await?;
                 metrics.restore_apply_duration_ms = report.apply_duration_ms;
                 metrics.download_duration_ms = report.pipeline_duration_ms;
+                progress.detail_json["pipeline"]["io"] = serde_json::to_value(&report.io)?;
+                progress.detail_json["pipeline"]["elapsed_ms"] = serde_json::json!(report.pipeline_duration_ms);
                 progress.detail_json["total_packs"] = serde_json::json!(report.packs_downloaded);
                 progress.detail_json["complete_published_files"] =
                     serde_json::json!(report.restore.published_entries);
@@ -307,9 +354,33 @@ pub async fn run_restore_with_session(
                     serde_json::json!(report.restore.reused_entries);
                 progress.detail_json["milestones"] =
                     serde_json::json!(["READY_TO_LAUNCH", "COMPLETE"]);
-                if mode == RestoreMode::CompleteApplication {
-                    ensure_steam_appmanifest_after_commit(agent, &plan.manifest)?;
+                // A personal-state selection from a complete bundle is not a
+                // complete local parent. Only a successful, fully selected
+                // publication may enable backup's unchanged-parent shortcut.
+                let restored_all_files = priority_plan.entries.len() == plan.manifest.files.len()
+                    && report.restore.published_entries + report.restore.reused_entries
+                        == plan.manifest.files.len();
+                let cache_started = Instant::now();
+                let cache_result = if restored_all_files {
+                    crate::backup::remember_restored_parent(
+                        agent,
+                        storage.storage_identity(),
+                        master,
+                        &plan.manifest,
+                        &index,
+                    )
+                } else {
+                    Ok(())
+                };
+                progress.detail_json["post_commit_cache_us"] = serde_json::json!(cache_started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64);
+                if let Err(error) = cache_result {
+                        // The filesystem and index already committed. Cache
+                        // failure must not relabel that durable restore failed.
+                        tracing::warn!(%error, %bundle_id, "restored backup parent cache unavailable");
+                        progress.detail_json["incremental_parent_cache_error"] =
+                            serde_json::json!(error.to_string());
                 }
+                progress.detail_json["restored_all_manifest_files"] = serde_json::json!(restored_all_files);
                 Ok(())
             }
             .await;
@@ -394,10 +465,14 @@ pub async fn run_restore_with_session(
     result
 }
 
-fn remove_steam_appmanifest_before_restore(
+fn steam_restore_prerequisites(
     bundle: &BundleManifest,
     roots: &LogicalRootMap,
-) -> Result<()> {
+    mode: RestoreMode,
+) -> Vec<RestorePrerequisite> {
+    if mode != RestoreMode::CompleteApplication {
+        return Vec::new();
+    }
     let Some(steam_app_id) = bundle.app.steam_app_id.or_else(|| {
         bundle
             .app
@@ -406,52 +481,22 @@ fn remove_steam_appmanifest_before_restore(
             .strip_prefix("steam:")
             .and_then(|value| value.parse::<u32>().ok())
     }) else {
-        return Ok(());
+        return Vec::new();
     };
-    let Some((target_dir, _)) = steam_install_location_from_manifest(bundle, roots) else {
-        return Ok(());
-    };
-    match fs::remove_file(target_dir.join(format!("appmanifest_{steam_app_id}.acf"))) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn ensure_steam_appmanifest_after_commit(
-    agent: &StateAgent,
-    bundle: &BundleManifest,
-) -> Result<()> {
-    let manifest_app = &bundle.app;
-    let Some(steam_app_id) = manifest_app.steam_app_id.or_else(|| {
-        manifest_app
-            .app_id
-            .as_str()
-            .strip_prefix("steam:")
-            .and_then(|value| value.parse::<u32>().ok())
-    }) else {
-        return Ok(());
-    };
-
-    let roots = agent.roots.lock().clone();
-    let filename = format!("appmanifest_{steam_app_id}.acf");
-    let Some((target_dir, install_dir)) = steam_install_location_from_manifest(bundle, &roots)
+    let Some((target_dir, install_dir)) = steam_install_location_from_manifest(bundle, roots)
     else {
-        return Ok(());
+        return Vec::new();
     };
-    let manifest_path = target_dir.join(&filename);
-    if manifest_path.is_file() {
-        return Ok(());
-    }
-
-    fs::create_dir_all(&target_dir)?;
     let manifest = format!(
         "\"AppState\"\n{{\n\t\"appid\"\t\t\"{steam_app_id}\"\n\t\"name\"\t\t\"{}\"\n\t\"StateFlags\"\t\t\"4\"\n\t\"installdir\"\t\t\"{}\"\n}}\n",
-        escape_acf_value(&manifest_app.display_name),
+        escape_acf_value(&bundle.app.display_name),
         escape_acf_value(&install_dir),
     );
-    fs::write(manifest_path, manifest)?;
-    Ok(())
+    vec![RestorePrerequisite {
+        root: target_dir,
+        relative_path: format!("appmanifest_{steam_app_id}.acf"),
+        contents: manifest.into_bytes(),
+    }]
 }
 
 fn prepare_restore_roots(agent: &StateAgent, bundle: &BundleManifest) -> Result<LogicalRootMap> {
@@ -580,13 +625,14 @@ fn escape_acf_value(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_steam_appmanifest_after_commit, preferred_steamapps_dir, prepare_restore_roots,
-        remove_steam_appmanifest_before_restore, steam_install_dir_from_path,
+        preferred_steamapps_dir, prepare_restore_roots, steam_install_dir_from_path,
+        steam_restore_prerequisites,
     };
     use crate::{AgentConfig, StateAgent};
     use chrono::Utc;
     use noland_state_core::{
-        AppId, AppIdentity, BackupMode, BundleManifest, LogicalRootMap, ManifestApp, ManifestSource,
+        AppId, AppIdentity, BackupMode, BundleManifest, LogicalRootMap, ManifestApp,
+        ManifestSource, RestoreMode,
     };
     use std::path::{Path, PathBuf};
     use uuid::Uuid;
@@ -615,6 +661,310 @@ mod tests {
             steam_install_dir_from_path(Path::new("common/RepoInstall_3241660/game.bin")),
             Some("RepoInstall_3241660".into())
         );
+    }
+
+    #[tokio::test]
+    async fn restored_external_steam_save_survives_complete_backup_and_library_remapping() {
+        use noland_crypto::MasterKey;
+        use noland_restore::{prepare_restore, restore_pipelined, PipelineOptions};
+        use noland_state_core::*;
+        use noland_storage::{
+            commit_bundle_with_index, read_committed_manifest, read_pack_index, LocalStorage,
+            SharedStorageProvider,
+        };
+        let root = std::fs::canonicalize(std::env::current_dir().unwrap())
+            .unwrap()
+            .join(format!("target/noland-restore-parent-{}", Uuid::new_v4()));
+        let agent = StateAgent::boot(AgentConfig::isolated(root.join("target"))).unwrap();
+        let storage = LocalStorage::new(root.join("cloud"));
+        let master = MasterKey::generate();
+        let mut source = steam_bundle("TestGame");
+        source.environment["capture_scope_version"] = serde_json::json!(1);
+        let app = source.app.app_id.clone();
+        agent
+            .db
+            .upsert_app(&AppIdentity::new(app.clone(), "TestGame"))
+            .unwrap();
+        let library = agent.config.home.join("SteamLibrary/steamapps");
+        agent.roots.lock().steam_libraries.clear();
+        agent
+            .roots
+            .lock()
+            .steam_libraries
+            .insert("0".into(), library.clone());
+        let chunks = [
+            (
+                "$STEAM_LIBRARY:1",
+                "common/TestGame/game.bin",
+                b"game".as_slice(),
+            ),
+            (
+                "$XDG_CONFIG_HOME",
+                "external-save/save.dat",
+                b"save".as_slice(),
+            ),
+        ];
+        for (logical_root, relative_path, bytes) in chunks {
+            let hash = noland_cas::blake3_hex(bytes);
+            source.files.push(ManifestFile {
+                logical_root: logical_root.into(),
+                relative_path: relative_path.into(),
+                source_path_hint: Some(format!("/source-pc/{relative_path}")),
+                file_type: "file".into(),
+                size: bytes.len() as u64,
+                file_hash: hash.clone(),
+                chunks: vec![ChunkRef {
+                    hash,
+                    size: bytes.len() as u64,
+                }],
+                mode: Some(0o600),
+                mtime_ns: Some(1),
+                uid: None,
+                gid: None,
+                symlink_target: None,
+                persistence_class: if logical_root.starts_with("$STEAM") {
+                    PersistenceClass::ReconstructableApp
+                } else {
+                    PersistenceClass::PersistentState
+                },
+                semantic_role: if logical_root.starts_with("$STEAM") {
+                    SemanticRole::AppContent
+                } else {
+                    SemanticRole::UserState
+                },
+                association_confidence: 1.0,
+                shared_app_ids: Vec::new(),
+            });
+        }
+        let packs = noland_pack::pack_chunks(
+            &root.join("packs"),
+            &master,
+            chunks
+                .into_iter()
+                .map(|(_, _, bytes)| (noland_cas::blake3_hex(bytes), bytes.to_vec())),
+            |_| false,
+        )
+        .unwrap();
+        let index = packs
+            .iter()
+            .flat_map(|pack| pack.entries.clone())
+            .collect::<Vec<_>>();
+        let pack_files = packs
+            .iter()
+            .map(|pack| (pack.pack_id.clone(), pack.path.clone()))
+            .collect::<Vec<_>>();
+        commit_bundle_with_index(
+            &storage,
+            &master,
+            &source,
+            &pack_files,
+            Some(&serde_json::to_vec(&index).unwrap()),
+            None,
+        )
+        .await
+        .unwrap();
+        let destination = agent.config.home.join(".config/external-save/save.dat");
+        let path_id = agent.db.upsert_path(destination.to_str().unwrap()).unwrap();
+        agent
+            .db
+            .upsert_association(&PathAssociation {
+                app_id: app.clone(),
+                path_id,
+                confidence: 0.5,
+                evidence: vec![Evidence::new(EvidenceKind::NameHeuristic)
+                    .with_detail("preserve existing evidence")],
+                persistence_class: PersistenceClass::PersistentState,
+                semantic_role: SemanticRole::UserState,
+                first_seen_at: Utc::now(),
+                last_seen_at: Utc::now(),
+            })
+            .unwrap();
+        let roots = prepare_restore_roots(&agent, &source).unwrap();
+        let plan = prepare_restore(
+            &storage,
+            &master,
+            &agent.config.paths,
+            &app,
+            source.bundle_id,
+            RestoreMode::CompleteApplication,
+        )
+        .await
+        .unwrap()
+        .into_shared();
+        restore_pipelined(
+            &storage,
+            &master,
+            &plan,
+            &index,
+            &roots,
+            Some(&agent.db),
+            None,
+            PipelineOptions::default(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        crate::backup::remember_remote_pack_index(
+            &agent,
+            storage.storage_identity(),
+            &master,
+            &index,
+        )
+        .unwrap();
+        crate::backup::remember_restored_parent(
+            &agent,
+            storage.storage_identity(),
+            &master,
+            &source,
+            &index,
+        )
+        .unwrap();
+        let associations = agent.db.associations_for_app(&app).unwrap();
+        let evidence = &associations
+            .iter()
+            .find(|(path, _)| Path::new(&path.canonical_path) == destination)
+            .unwrap()
+            .1
+            .evidence;
+        assert!(evidence
+            .iter()
+            .any(|item| item.kind == EvidenceKind::ExplicitUserBinding));
+        assert!(evidence
+            .iter()
+            .any(|item| item.detail.as_deref() == Some("preserve existing evidence")));
+        assert!(agent
+            .db
+            .get_file_state(&app, "$STEAM_LIBRARY:0", "common/TestGame/game.bin")
+            .unwrap()
+            .is_some());
+        assert!(agent
+            .db
+            .get_file_state(&app, "$STEAM_LIBRARY:1", "common/TestGame/game.bin")
+            .unwrap()
+            .is_none());
+        let unchanged_operation = Uuid::new_v4();
+        let unchanged = crate::backup::run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(unchanged_operation),
+        )
+        .await
+        .unwrap();
+        assert_eq!(unchanged.files.len(), 2);
+        assert!(unchanged.tombstones.is_empty());
+        let metrics = agent
+            .db
+            .get_operation_metrics(unchanged_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(metrics.num_files_rehashed, 0);
+        assert_eq!(metrics.num_files_skipped_fast_identity, 2);
+        assert_eq!(metrics.bytes_uploaded, 0);
+        std::fs::write(&destination, b"changed save").unwrap();
+        agent
+            .db
+            .append_app_mutation(&AppMutationRecord::new(
+                app.clone(),
+                destination.to_str().unwrap(),
+                AppMutationKind::Modify,
+            ))
+            .unwrap();
+        agent.db.mark_dirty(&app, Some(path_id), false).unwrap();
+        let changed_operation = Uuid::new_v4();
+        let next = crate::backup::run_backup(
+            &agent,
+            &app,
+            BackupMode::CompleteApplication,
+            BackupPerformanceMode::Balanced,
+            &storage,
+            &master,
+            Some(changed_operation),
+        )
+        .await
+        .unwrap();
+        let metrics = agent
+            .db
+            .get_operation_metrics(changed_operation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(metrics.num_files_rehashed, 1);
+        assert_eq!(metrics.num_files_skipped_fast_identity, 1);
+        assert_eq!(next.files.len(), 2);
+        assert!(
+            next.tombstones.is_empty(),
+            "scope selection must not synthesize deletions"
+        );
+        assert!(next
+            .files
+            .iter()
+            .any(|file| file.logical_root == "$STEAM_LIBRARY:0"));
+        assert!(!next
+            .files
+            .iter()
+            .any(|file| file.logical_root == "$STEAM_LIBRARY:1"));
+        assert!(
+            read_committed_manifest(&storage, &master, &app, source.bundle_id)
+                .await
+                .is_err(),
+            "replacement retires the old cloud generation, not live saves"
+        );
+        assert!(
+            read_committed_manifest(&storage, &master, &app, next.bundle_id)
+                .await
+                .is_ok()
+        );
+        let second = StateAgent::boot(AgentConfig::isolated(root.join("second"))).unwrap();
+        second.roots.lock().steam_libraries.clear();
+        second.roots.lock().steam_libraries.insert(
+            "0".into(),
+            second.config.home.join("SteamLibrary/steamapps"),
+        );
+        let second_roots = prepare_restore_roots(&second, &next).unwrap();
+        let next_index = read_pack_index(&storage, &master, &app, next.bundle_id)
+            .await
+            .unwrap();
+        let plan = prepare_restore(
+            &storage,
+            &master,
+            &second.config.paths,
+            &app,
+            next.bundle_id,
+            RestoreMode::CompleteApplication,
+        )
+        .await
+        .unwrap();
+        restore_pipelined(
+            &storage,
+            &master,
+            &plan,
+            &next_index,
+            &second_roots,
+            None,
+            None,
+            PipelineOptions::default(),
+            |_| Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read(second.config.home.join(".config/external-save/save.dat")).unwrap(),
+            b"changed save"
+        );
+        assert_eq!(
+            std::fs::read(
+                second
+                    .config
+                    .home
+                    .join("SteamLibrary/steamapps/common/TestGame/game.bin")
+            )
+            .unwrap(),
+            b"game"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -681,14 +1031,19 @@ mod tests {
             .insert("0".into(), steamapps.clone());
         let bundle = steam_bundle("Display Name Is Not The Install Directory");
 
-        ensure_steam_appmanifest_after_commit(&agent, &bundle).unwrap();
+        assert!(steam_restore_prerequisites(
+            &bundle,
+            &agent.roots.lock(),
+            RestoreMode::CompleteApplication
+        )
+        .is_empty());
 
         assert!(!steamapps.join("appmanifest_3241660.acf").exists());
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn pre_restore_removes_existing_steam_appmanifest() {
+    fn prerequisite_planning_preserves_original_steam_manifest_and_personal_state() {
         let home = std::env::temp_dir().join(format!(
             "noland-restore-steam-pre-manifest-{}-{}",
             std::process::id(),
@@ -713,14 +1068,19 @@ mod tests {
         std::fs::write(&manifest_path, "old manifest").unwrap();
 
         let roots = prepare_restore_roots(&agent, &bundle).unwrap();
-        remove_steam_appmanifest_before_restore(&bundle, &roots).unwrap();
+        let prerequisites =
+            steam_restore_prerequisites(&bundle, &roots, RestoreMode::CompleteApplication);
+        assert_eq!(prerequisites.len(), 1);
+        assert!(
+            steam_restore_prerequisites(&bundle, &roots, RestoreMode::PersonalState).is_empty()
+        );
 
-        assert!(!manifest_path.exists());
+        assert_eq!(std::fs::read(&manifest_path).unwrap(), b"old manifest");
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn post_commit_fallback_uses_source_install_directory() {
+    fn transaction_prerequisite_uses_source_install_directory() {
         let home = std::env::temp_dir().join(format!(
             "noland-restore-steam-source-manifest-{}-{}",
             std::process::id(),
@@ -743,9 +1103,13 @@ mod tests {
             "/source/steamapps/common/ActualInstallDirectory/bin/game.exe",
         ));
 
-        ensure_steam_appmanifest_after_commit(&agent, &bundle).unwrap();
+        let prerequisites = steam_restore_prerequisites(
+            &bundle,
+            &agent.roots.lock(),
+            RestoreMode::CompleteApplication,
+        );
 
-        let manifest = std::fs::read_to_string(steamapps.join("appmanifest_3241660.acf")).unwrap();
+        let manifest = std::str::from_utf8(&prerequisites[0].contents).unwrap();
         assert!(manifest.contains("\"installdir\"\t\t\"ActualInstallDirectory\""));
         assert!(!manifest.contains("\"installdir\"\t\t\"Unrelated Display Name\""));
         std::fs::remove_dir_all(home).unwrap();

@@ -17,6 +17,8 @@ const plain = (value) => JSON.parse(JSON.stringify(value));
 function loader(mocks = {}, globals = {}) {
   const modules = new Map();
   function load(relative) {
+    // Imported local paths use backslashes on Windows; mock keys are portable.
+    relative = relative.replace(/\\/gu, '/');
     const filename = path.resolve(root, relative);
     if (mocks[relative]) return mocks[relative];
     if (modules.has(filename)) return modules.get(filename).exports;
@@ -43,6 +45,12 @@ function loader(mocks = {}, globals = {}) {
   }
   return load;
 }
+
+test('the fixture loader normalizes Windows module paths before applying native mocks', () => {
+  const native = { invokeSafe: async () => 'mocked' };
+  assert.equal(loader({ 'src/lib/tauri.ts': native })(String.raw`src\lib\tauri.ts`), native);
+});
+
 const model = loader()('src/lib/feedbackModel.ts');
 const dataModule = loader()('src/lib/feedbackData.ts');
 const idA = '00000000-0000-4000-8000-000000000001';

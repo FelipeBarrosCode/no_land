@@ -1,13 +1,17 @@
 //! Noland remote state agent: always-on tracking, backup, restore, seal.
 
 pub mod backup;
+mod backup_policy;
 pub mod checkpoint;
+mod deletion;
 pub mod observer;
 pub mod operation_manager;
 pub mod reconcile;
+mod repository;
 pub mod restore;
 pub mod rpc_handler;
 pub mod seal;
+mod transfer_workload;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +90,7 @@ pub struct StateAgent {
     pub roots: Mutex<LogicalRootMap>,
     pub steam: Mutex<Option<SteamDiscovery>>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
+    pub(crate) deletion_plan: Mutex<Option<deletion::DeletionPlan>>,
 }
 
 impl StateAgent {
@@ -105,6 +110,7 @@ impl StateAgent {
             roots: Mutex::new(roots),
             steam: Mutex::new(None),
             master_key: Mutex::new(None),
+            deletion_plan: Mutex::new(None),
         })
     }
 
@@ -130,7 +136,7 @@ impl StateAgent {
         }
         for mut op in self.db.unfinished_operations()? {
             let journal = self.db.sync_journal_summary(op.operation_id)?;
-            let has_retry = matches!(op.kind.as_str(), "backup" | "restore");
+            let has_retry = matches!(op.kind.as_str(), "backup" | "restore" | "seal");
             let resume_mode = if journal.completed_items > 0 && op.kind == "backup" {
                 "UPLOAD_JOURNAL"
             } else {
@@ -214,6 +220,7 @@ impl StateAgent {
         if let Some(steam) = &scan.steam {
             let mut roots = self.roots.lock();
             roots.steam_root = Some(steam.root.clone());
+            roots.steam_userdata = Some(steam.root.join("userdata"));
             for (id, lib) in &steam.libraries {
                 roots.steam_libraries.insert(id.clone(), lib.clone());
             }
@@ -313,16 +320,22 @@ impl StateAgent {
         };
         let mut engine = self.attribution_engine();
         for event in events {
-            let had_session = self.db.session_for_pid(event.pid)?.is_some();
-            let session = engine.ingest_process(&event)?;
-            if session.is_none() {
+            let previous_session = self
+                .db
+                .session_for_pid(event.pid)?
+                .map(|session| session.session_id);
+            let Some(session) = engine.ingest_process(&event)? else {
                 continue;
-            }
-            if had_session {
+            };
+            if previous_session == Some(session.session_id) {
                 continue;
             }
             recovery.sessions_recovered = recovery.sessions_recovered.saturating_add(1);
-            for path in noland_observer::open_files_from_procfs(event.pid) {
+            let open_files = noland_observer::recover_open_files_from_procfs(event.pid);
+            if open_files.requires_reconciliation {
+                engine.mark_filesystem_gap(event.pid)?;
+            }
+            for path in open_files.paths {
                 let fact = FilesystemEvent {
                     kind: FsEventKind::Open,
                     pid: event.pid,
@@ -770,6 +783,51 @@ mod tests {
         assert!(files
             .iter()
             .any(|(path, _)| PathBuf::from(&path.canonical_path) == game.join("game.data")));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn manual_refresh_scans_runtime_host_root_despite_stale_dirty_paths() {
+        let root = test_root("runtime-manual-refresh");
+        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let game = agent
+            .config
+            .home
+            .join(".local/share/noland-runtime/app-data/private-app/Games/Hookshot");
+        let nested = game.join("romfs/a/b/c/d/e/f/g/asset.bin");
+        let save = game.join("user/save/slot_00/progress.sav");
+        for path in [&nested, &save, &game.join("bin/hookshot")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"preserve").unwrap();
+        }
+        let identity = noland_discovery::fallback_exe_identity(std::path::Path::new(
+            "/home/runtime/Games/Hookshot/bin/hookshot",
+        ));
+        agent.db.upsert_app(&identity).unwrap();
+        agent.discover().unwrap();
+        agent
+            .db
+            .mark_dirty_root(
+                &identity.app_id,
+                "/home/runtime/Games/Hookshot/user/save",
+                None,
+                true,
+            )
+            .unwrap();
+        agent.db.mark_dirty(&identity.app_id, None, true).unwrap();
+        assert!(reconcile::reconcile_app_for_refresh(&agent, &identity.app_id).unwrap() >= 3);
+        let files = agent.db.associations_for_app(&identity.app_id).unwrap();
+        for expected in [&nested, &save] {
+            let (record, _) = files
+                .iter()
+                .find(|(record, _)| {
+                    std::path::Path::new(&record.canonical_path) == expected.as_path()
+                })
+                .expect("refresh must inventory deep assets and saves at durable host paths");
+            assert_eq!(record.size, Some(8));
+            assert!(record.last_scanned_at.is_some());
+            assert_eq!(std::fs::read(expected).unwrap(), b"preserve");
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -393,6 +393,25 @@ All data is encrypted before upload and can only be decrypted with your reposito
             />
 
             {staticCredentialFields.map((field) => {
+              if (field.key === "private_key") {
+                return (
+                  <label key={field.key} className="flex flex-col gap-2 text-base">
+                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{translateSource(field.label)}</span>
+                    <textarea
+                      className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 font-mono text-sm text-[#dff8ff] outline-none focus:border-neon-cyan"
+                      rows={6}
+                      value={formValues[field.key] || ""}
+                      onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                      placeholder={field.placeholder || ""}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                    {field.helpText && <span className="text-xs text-gray-400">{translateSource(field.helpText)}</span>}
+                  </label>
+                );
+              }
               if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
                 return (
                   <label key={field.key} className="flex flex-col gap-2 text-base">

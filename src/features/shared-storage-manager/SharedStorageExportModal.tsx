@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { StorageDeleteAction } from "./StorageDeleteAction";
 import type {
-  BackupPerformanceMode,
   SharedStorageObjectEntry,
 } from "../../lib/types";
 
@@ -16,7 +16,6 @@ interface Props {
   onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onConfirmExport: (
     selectedPaths: string[],
-    performanceMode: BackupPerformanceMode,
   ) => Promise<void>;
   onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
@@ -50,8 +49,6 @@ export function SharedStorageExportModal({
   const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  const [performanceMode, setPerformanceMode] =
-    useState<BackupPerformanceMode>("balanced");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
   const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
@@ -68,7 +65,6 @@ export function SharedStorageExportModal({
       startedAt: Date.now()
     });
     setSelectedPaths([]);
-    setPerformanceMode("balanced");
     void onLoadObjects(instanceId)
       .then((result) => {
         if (!active) return;
@@ -126,8 +122,8 @@ export function SharedStorageExportModal({
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">{translate("generated.0dceb770d4a955fe")}</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.38d2e6068bcfc7ab")}</p>
+            <h2 className="font-display text-base text-white">{translate("storage.backup.title")}</h2>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("storage.backup.select")}</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>{translate("generated.7d9eb7acb13e2462")}</Button>
         </div>
@@ -139,31 +135,20 @@ export function SharedStorageExportModal({
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
+          <p className="mt-4 text-[1.1rem] text-[#9ec0e4]">{translate("storage.backup.completeHelp")}</p>
         </ModalBody>
         <div className="shrink-0 flex flex-wrap items-end justify-between gap-3 border-t-2 border-[#3e4270] px-5 py-4">
           <div className="flex items-end gap-4">
-            <label className="flex flex-col gap-1">
-              <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                {translate("generated.71ed8028334c4e88")}
-              </span>
-              <select
-                className="h-10 border border-[#3f476c] bg-[#0b0f23] px-3 text-[1.15rem] text-[#dff8ff] outline-none focus:border-neon-cyan"
-                value={performanceMode}
-                disabled={busy || loading}
-                onChange={(event) =>
-                  setPerformanceMode(event.target.value as BackupPerformanceMode)
-                }
-              >
-                <option value="fast">{translate("generated.ca85e53c44cd9df6")}</option>
-                <option value="balanced">{translate("generated.0637fc5e37f3ded2")}</option>
-                <option value="full">{translate("generated.0746b3ba22bbfa4f")}</option>
-              </select>
-            </label>
             <p className="pb-2 text-[1.1rem] text-[#9ec0e4]">
               {translate("generated.bef9d85df8ea13fe")} {selectedPaths.length}
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <StorageDeleteAction instanceId={instanceId} target="remote_pc" selectedPaths={selectedPaths}
+              disabled={busy || loading} onBusyChange={setLoading} onDeleted={async () => {
+                if (instanceId !== null) setEntries(await onLoadObjects(instanceId) ?? []);
+                setSelectedPaths([]);
+              }} />
             {onRefreshIndexing && (
               <Button
                 variant="ghost"
@@ -198,21 +183,21 @@ export function SharedStorageExportModal({
             <Button
               disabled={busy || loading || selectedPaths.length === 0}
               loading={busy}
-              loadingText={translate("generated.639e45361badf069")}
+              loadingText={translate("storage.backup.inProgress")}
               onClick={async () => {
                 setPendingAction({
                   key: "export-modal.run",
-                  label: "Exporting selected files",
-                  detail: "Backing up selected application state through the state agent.",
+                  label: translate("storage.backup.inProgress"),
+                  detail: translate("storage.backup.completeHelp"),
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()
                 });
-                await onConfirmExport(selectedPaths, performanceMode);
+                await onConfirmExport(selectedPaths);
                 setPendingAction(null);
               }}
             >
-              {translate("generated.7065bfb98240f7ba")}
+              {translate("storage.backup.button")}
             </Button>
           </div>
         </div>

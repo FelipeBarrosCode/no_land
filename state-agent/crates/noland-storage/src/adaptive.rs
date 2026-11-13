@@ -1,30 +1,52 @@
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use noland_rclone_adapter::{RemoteErrorClass, TransferTuning};
-use noland_state_core::{Result, StateError};
-use tokio::sync::{Notify, Semaphore};
+use noland_state_core::Result;
+use tokio::sync::Notify;
 
-/// Raises and lowers in-flight transfer slots from observed latency and errors.
+/// Raises and lowers in-flight transfer slots from byte-normalized successful
+/// throughput and remote backpressure. Pack size alone is not a congestion signal.
 ///
-/// The underlying semaphore is sized to the profile maximum. Logical concurrency
-/// sits between that maximum and a floor of 1 (or the gameplay-safe cap).
+/// Weighted reservations account for all transfers inside a bulk rclone process,
+/// as well as individual copyto processes, against the same budget.
 pub struct AdaptiveConcurrency {
     min: usize,
     max: usize,
     current: AtomicUsize,
     active: AtomicUsize,
-    samples: AtomicU32,
-    consecutive_errors: AtomicU32,
-    ewma_latency_ms: std::sync::Mutex<f64>,
+    backpressured: AtomicBool,
+    feedback: std::sync::Mutex<Feedback>,
     notify: Notify,
-    semaphore: Semaphore,
+}
+
+#[derive(Default)]
+struct Feedback {
+    bytes_per_second: f64,
+    healthy: u32,
+    slow: u32,
 }
 
 pub struct AdaptivePermit<'a> {
     limiter: &'a AdaptiveConcurrency,
-    _permit: tokio::sync::SemaphorePermit<'a>,
+    slots: usize,
+}
+
+impl AdaptivePermit<'_> {
+    pub fn slots(&self) -> usize {
+        self.slots
+    }
+
+    pub(crate) fn retain_slots(&mut self, remaining: usize) {
+        // Retain a process slot until exit; only completed objects release capacity.
+        let next = self.slots.min(remaining.max(1));
+        self.limiter
+            .active
+            .fetch_sub(self.slots - next, Ordering::SeqCst);
+        self.slots = next;
+        self.limiter.notify.notify_waiters();
+    }
 }
 
 impl AdaptiveConcurrency {
@@ -61,11 +83,9 @@ impl AdaptiveConcurrency {
             max,
             current: AtomicUsize::new(initial),
             active: AtomicUsize::new(0),
-            samples: AtomicU32::new(0),
-            consecutive_errors: AtomicU32::new(0),
-            ewma_latency_ms: std::sync::Mutex::new(0.0),
+            backpressured: AtomicBool::new(false),
+            feedback: std::sync::Mutex::new(Feedback::default()),
             notify: Notify::new(),
-            semaphore: Semaphore::new(max),
         })
     }
 
@@ -82,62 +102,88 @@ impl AdaptiveConcurrency {
     }
 
     pub async fn acquire(&self) -> Result<AdaptivePermit<'_>> {
+        self.acquire_slots(1).await
+    }
+
+    pub async fn acquire_slots(&self, requested: usize) -> Result<AdaptivePermit<'_>> {
         loop {
+            // Register before checking capacity, so a release between the check
+            // and await cannot be lost. No capacity is held across an await.
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             let current = self.current();
+            let slots = requested.max(1).min(current);
             let active = self.active.load(Ordering::SeqCst);
-            if active < current {
+            if active.saturating_add(slots) <= current {
                 if self
                     .active
-                    .compare_exchange(active, active + 1, Ordering::SeqCst, Ordering::SeqCst)
+                    .compare_exchange(active, active + slots, Ordering::SeqCst, Ordering::SeqCst)
                     .is_ok()
                 {
-                    let permit = self
-                        .semaphore
-                        .acquire()
-                        .await
-                        .map_err(|error| StateError::Storage(error.to_string()))?;
                     return Ok(AdaptivePermit {
                         limiter: self,
-                        _permit: permit,
+                        slots,
                     });
                 }
             } else {
-                self.notify.notified().await;
+                self.backpressured.store(true, Ordering::SeqCst);
+                notified.await;
             }
         }
     }
 
-    pub fn record_success(&self, latency: Duration) {
-        self.consecutive_errors.store(0, Ordering::SeqCst);
-        let latency_ms = latency.as_secs_f64() * 1_000.0;
-        let samples = self
-            .samples
-            .fetch_add(1, Ordering::SeqCst)
-            .saturating_add(1);
-        let ewma = {
-            let mut ewma = self
-                .ewma_latency_ms
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *ewma <= 0.0 {
-                *ewma = latency_ms;
-            } else {
-                *ewma = (0.2 * latency_ms) + (0.8 * *ewma);
-            }
-            *ewma
-        };
-        if samples < 4 {
+    /// Elapsed time covers the successful attempt only, excluding pacing,
+    /// retries and cooldown. Empty/control requests don't train the controller.
+    pub fn record_success(&self, bytes: u64, elapsed: Duration) {
+        if bytes == 0 || elapsed.is_zero() {
             return;
         }
-        if latency_ms < ewma * 0.5 {
-            self.adjust(1);
-        } else if latency_ms > ewma * 2.5 {
-            self.adjust(-1);
+        let rate = bytes as f64 / elapsed.as_secs_f64();
+        let saturated = self.active.load(Ordering::SeqCst) >= self.current()
+            || self.backpressured.swap(false, Ordering::SeqCst);
+        let mut feedback = self
+            .feedback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let baseline = feedback.bytes_per_second;
+        feedback.bytes_per_second = if baseline == 0.0 {
+            rate
+        } else {
+            baseline * 0.8 + rate * 0.2
+        };
+        if !saturated {
+            feedback.healthy = 0;
+            feedback.slow = 0;
+            return;
+        }
+        if baseline > 0.0 && rate < baseline * 0.6 {
+            feedback.healthy = 0;
+            feedback.slow += 1;
+            if feedback.slow >= 4 {
+                self.adjust(-1);
+                feedback.slow = 0;
+            }
+        } else if baseline == 0.0 || rate >= baseline * 0.85 {
+            feedback.slow = 0;
+            feedback.healthy += 1;
+            if feedback.healthy >= 4 {
+                self.adjust(1);
+                feedback.healthy = 0;
+            }
+        } else {
+            feedback.healthy = 0;
+            feedback.slow = 0;
         }
     }
 
     pub fn record_error(&self, class: RemoteErrorClass) {
-        self.consecutive_errors.fetch_add(1, Ordering::SeqCst);
+        let mut feedback = self
+            .feedback
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        feedback.healthy = 0;
+        feedback.slow = 0;
         if class.is_rate_limited() {
             let current = self.current();
             self.set_current((current / 2).max(self.min));
@@ -161,7 +207,7 @@ impl AdaptiveConcurrency {
 
 impl Drop for AdaptivePermit<'_> {
     fn drop(&mut self) {
-        self.limiter.active.fetch_sub(1, Ordering::SeqCst);
+        self.limiter.active.fetch_sub(self.slots, Ordering::SeqCst);
         self.limiter.notify.notify_waiters();
     }
 }
@@ -191,17 +237,49 @@ mod tests {
         assert_eq!(limiter.current(), 1);
     }
 
-    #[test]
-    fn healthy_low_latency_raises_workers_after_warmup() {
+    #[tokio::test]
+    async fn healthy_saturated_throughput_recovers_after_backpressure() {
         let limiter = AdaptiveConcurrency::new(1, 1, 4);
         for _ in 0..4 {
-            limiter.record_success(Duration::from_millis(200));
+            let _permit = limiter.acquire().await.unwrap();
+            limiter.record_success(1024, Duration::from_millis(200));
         }
+        assert_eq!(limiter.current(), 2);
+        limiter.record_error(RemoteErrorClass::RateLimited);
+        assert_eq!(limiter.current(), 1);
+        let _permit = limiter.acquire().await.unwrap();
+        limiter.record_success(1024, Duration::from_millis(200));
+        assert_eq!(limiter.current(), 1); // One success cannot undo a cooldown.
+    }
+
+    #[tokio::test]
+    async fn variable_pack_durations_at_equal_throughput_do_not_reduce_slots() {
+        let limiter = AdaptiveConcurrency::new(4, 1, 4);
+        let _permit = limiter.acquire_slots(4).await.unwrap();
         for _ in 0..8 {
-            limiter.record_success(Duration::from_millis(10));
+            limiter.record_success(1024, Duration::from_millis(1));
+            limiter.record_success(1024 * 1024, Duration::from_millis(1024));
         }
-        assert!(limiter.current() > 1);
-        assert!(limiter.current() <= limiter.max());
+        assert_eq!(limiter.current(), 4);
+    }
+
+    #[tokio::test]
+    async fn bulk_and_single_uploads_share_slots_and_cancelled_waiters_do_not_leak() {
+        let limiter = AdaptiveConcurrency::new(4, 1, 4);
+        let bulk = limiter.acquire_slots(3).await.unwrap();
+        let single = limiter.acquire().await.unwrap();
+        assert_eq!(bulk.slots() + single.slots(), 4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), limiter.acquire())
+                .await
+                .is_err()
+        );
+        drop(bulk);
+        let replacement = limiter.acquire_slots(3).await.unwrap();
+        assert_eq!(replacement.slots(), 3);
+        drop(single);
+        drop(replacement);
+        assert_eq!(limiter.acquire_slots(4).await.unwrap().slots(), 4);
     }
 
     #[test]

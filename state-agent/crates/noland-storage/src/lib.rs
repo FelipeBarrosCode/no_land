@@ -1,28 +1,51 @@
-//! Shared Storage providers. Backup uses copy/additive semantics only.
+//! Shared Storage providers. Pack uploads are immutable and additive. Explicit
+//! full deletion and post-commit generation retirement use a separate protocol.
 
 mod adaptive;
 mod commit;
+mod deletion;
 mod local;
+mod maintenance;
+mod metadata;
 mod rclone;
+mod reclamation;
+mod rolling;
+mod stream;
 mod transfer;
 
 pub use adaptive::AdaptiveConcurrency;
 pub use commit::{
     commit_bundle, commit_bundle_with_index, commit_bundle_with_index_for_operation,
-    commit_checkpoint, commit_seal, load_catalog, read_committed_manifest, read_pack_index,
-    read_pack_index_for_operation, update_catalog_with_bundle, upload_packs_for_operation,
-    CatalogStore,
+    commit_bundle_with_pack_index_for_operation, commit_checkpoint, commit_seal, load_catalog,
+    read_committed_manifest, read_pack_index, read_pack_index_for_operation,
+    update_catalog_with_bundle, upload_packs_for_operation, CatalogStore, PackUploadSession,
 };
+pub use deletion::{bundle_is_deleted, delete_bundle, BundleDeletion};
 pub use local::LocalStorage;
+pub use maintenance::{
+    clear_repository_activity, repository_activities, RepositoryActivity, RepositoryGuard,
+};
+pub use metadata::{
+    compact_json_hash, open_metadata, open_metadata_with_limit, seal_metadata, seal_metadata_json,
+    SealedMetadata, MAX_METADATA_BYTES,
+};
 pub use noland_rclone_adapter::{
     classify_remote_error, GoogleDriveTransferOptions, ProviderCapabilities, ProviderKind,
     ProviderOptions, ProviderRootIdentity, ProviderTransferConfig, RemoteErrorClass,
     TransferProfile, TransferTuning, TransferWorkload,
 };
+pub use rclone::upload::UploadTransferDiagnostics;
 pub use rclone::{
     shred_all_ephemeral_sessions, shred_ephemeral_session, write_ephemeral_session,
     write_guarded_ephemeral_session, EphemeralSessionGuard, RcloneCommandBuilder, RcloneStorage,
 };
+pub use reclamation::{
+    converge_application, execute_full_deletion, execute_full_deletion_observed,
+    load_full_deletion, pending_deletions, prepare_full_deletion, prepare_full_deletion_selected,
+    retired_pack_ids, DeletionObserver, DeletionProgress, FullDeletionPlan, PrevalidatedDeletion,
+};
+pub use rolling::{RollingUploadWindow, UploadReservation};
+pub use stream::StreamTransferDiagnostics;
 pub use transfer::{
     compare_remote_known, download_bounded, list_remote_known, upload_immutable_bounded,
     DownloadBatchReport, DownloadRequest, ImmutableUpload, MetadataBatch, MetadataWrite,
@@ -138,6 +161,10 @@ pub trait ImmutableUploadObserver: Send + Sync {
         Ok(())
     }
 
+    fn transfer_diagnostics(&self, diagnostics: &UploadTransferDiagnostics) -> Result<()> {
+        self.transfer_progress(diagnostics.attempt_bytes)
+    }
+
     fn completed(
         &self,
         uploads: &[ImmutableUpload],
@@ -150,8 +177,20 @@ pub trait DownloadObserver: Send + Sync {
         Ok(())
     }
 
+    fn transfer_retrying(&self, _reason: &str) -> Result<()> {
+        Ok(())
+    }
+
     fn transfer_progress(&self, _bytes_transferred: u64) -> Result<()> {
         Ok(())
+    }
+
+    fn transfer_progress_with_diagnostics(
+        &self,
+        bytes_transferred: u64,
+        _diagnostics: &StreamTransferDiagnostics,
+    ) -> Result<()> {
+        self.transfer_progress(bytes_transferred)
     }
 }
 
@@ -159,7 +198,7 @@ pub trait DownloadObserver: Send + Sync {
 /// from an interrupted attempt may already have been accepted by the restore.
 #[async_trait]
 pub trait DownloadStreamConsumer: Send + Sync {
-    fn restart(&self) -> Result<()>;
+    async fn restart(&self) -> Result<()>;
     async fn write(&self, bytes: &[u8]) -> Result<()>;
     async fn finish(&self) -> Result<()>;
 }
@@ -186,7 +225,7 @@ pub trait SharedStorageProvider: Send + Sync {
         observer: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
         self.download_observed(key, scratch, observer).await?;
-        consumer.restart()?;
+        consumer.restart().await?;
         let mut file = std::fs::File::open(scratch)?;
         let mut buffer = vec![0; 256 * 1024];
         use std::io::Read;
@@ -218,6 +257,38 @@ pub trait SharedStorageProvider: Send + Sync {
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>>;
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta>;
 
+    /// Explicit deletion only. Never called by capture, upload, or restore.
+    /// Implementations must delete exactly one object, and tolerate absence.
+    /// Fail before tombstones if the installed adapter cannot perform the
+    /// provider's permanent-removal operation (rather than trash/hide).
+    async fn check_full_deletion_support(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn delete_object(&self, _key: &RemoteKey) -> Result<()> {
+        Err(StateError::Storage(
+            "provider does not support explicit deletion".into(),
+        ))
+    }
+    /// Only the full-deletion executor can construct this capability, after its
+    /// preflight barrier. It must still verify absence before counting completion.
+    async fn delete_prevalidated(&self, object: &PrevalidatedDeletion) -> Result<()> {
+        self.delete_object(object.key()).await
+    }
+    async fn stat_for_deletion(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>> {
+        self.stat(key).await
+    }
+    fn deletion_concurrency(&self) -> usize {
+        4
+    }
+    async fn remove_empty_bundle(
+        &self,
+        _app: &noland_state_core::AppId,
+        _bundle: uuid::Uuid,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     async fn upload_immutable_bulk(&self, uploads: &[ImmutableUpload]) -> Result<Vec<RemoteMeta>> {
         self.upload_immutable_bulk_observed(uploads, None).await
     }
@@ -229,7 +300,17 @@ pub trait SharedStorageProvider: Send + Sync {
     ) -> Result<Vec<RemoteMeta>> {
         let mut uploaded = Vec::with_capacity(uploads.len());
         for upload in uploads {
-            uploaded.push(self.upload_immutable(&upload.local, &upload.key).await?);
+            if let Some(observer) = observer {
+                observer.transfer_started()?;
+            }
+            let meta = self.upload_immutable(&upload.local, &upload.key).await?;
+            if meta.key != upload.key || meta.size != std::fs::metadata(&upload.local)?.len() {
+                return Err(StateError::Conflict(format!(
+                    "immutable upload result differs for {}",
+                    upload.key.as_str()
+                )));
+            }
+            uploaded.push(meta);
             if let Some(observer) = observer {
                 observer.completed(
                     std::slice::from_ref(upload),
@@ -238,6 +319,58 @@ pub trait SharedStorageProvider: Send + Sync {
             }
         }
         Ok(uploaded)
+    }
+
+    /// Reuses a caller-owned, operation-scoped inventory. A missing key is only
+    /// a hint: the actual write must still enforce immutable semantics against
+    /// concurrent writers. Providers overriding bulk transfers should override
+    /// this too to avoid doing a second prefix listing.
+    async fn upload_immutable_bulk_known_observed(
+        &self,
+        uploads: &[ImmutableUpload],
+        known: &RemoteKnownSet,
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<Vec<RemoteMeta>> {
+        let comparison = known.compare(uploads)?;
+        comparison.ensure_immutable()?;
+        if let Some(observer) = observer {
+            let known_keys = comparison
+                .known
+                .iter()
+                .map(|meta| &meta.key)
+                .collect::<std::collections::HashSet<_>>();
+            let reused = uploads
+                .iter()
+                .filter(|upload| known_keys.contains(&upload.key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !reused.is_empty() {
+                observer.completed(&reused, ImmutableUploadCompletion::ReusedRemote)?;
+            }
+        }
+        let mut result = comparison.known;
+        result.extend(
+            self.upload_immutable_bulk_observed(&comparison.missing, observer)
+                .await?,
+        );
+        Ok(result)
+    }
+
+    /// Group only when the backend preserves intra-group parallelism. The
+    /// sequential fallback must not serialize an otherwise rolling window.
+    fn supports_parallel_upload_groups(&self) -> bool {
+        false
+    }
+
+    /// Targeted immutable checks scale with this request, not repository history.
+    fn supports_targeted_uploads(&self) -> bool {
+        false
+    }
+
+    /// One transfer budget for the entire operation, independent of compression
+    /// workers. Bulk implementations must reserve all of their internal slots.
+    fn transfer_tuning(&self) -> TransferTuning {
+        TransferTuning::default()
     }
 
     /// Writes ordinary metadata first and the visibility marker last.
