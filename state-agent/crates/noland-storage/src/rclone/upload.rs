@@ -34,6 +34,8 @@ pub(super) struct UploadPolicy {
     pub exit: Duration,
     pub slow_window: Duration,
     pub tick: Duration,
+    /// Production samples kernel pressure; fixtures must not depend on host load.
+    pub io_pressure: fn() -> bool,
 }
 
 impl Default for UploadPolicy {
@@ -44,6 +46,7 @@ impl Default for UploadPolicy {
             exit: Duration::from_secs(30),
             slow_window: Duration::from_secs(30),
             tick: Duration::from_millis(500),
+            io_pressure,
         }
     }
 }
@@ -232,7 +235,7 @@ impl RcloneStorage {
                             let now = Instant::now();
                             let elapsed = stream::micros(now.saturating_duration_since(last_tick));
                             last_tick = now;
-                            let local_io = io_pressure();
+                            let local_io = (policy.io_pressure)();
                             diagnostics.phase = if exit_since.is_some() {
                                 diagnostics.process_exit_wait_us += elapsed; "waiting_exit"
                             } else if finalizing_since.is_some() {
@@ -330,7 +333,7 @@ impl RcloneStorage {
                 observer.transfer_diagnostics(&diagnostics)?;
             }
             let elapsed = started.elapsed();
-            if !io_pressure() {
+            if !(policy.io_pressure)() {
                 let transfer = finalizing_since
                     .unwrap_or_else(Instant::now)
                     .saturating_duration_since(started)
@@ -412,6 +415,7 @@ mod tests {
             exit: Duration::from_millis(80),
             slow_window: Duration::from_millis(50),
             tick: Duration::from_millis(10),
+            io_pressure: || false,
         }
     }
     async fn run(
@@ -487,6 +491,36 @@ echo '{"level":"info","object":"packs/test.pack","msg":"Copied (new)"}' >&2
             assert!(snapshots.last().unwrap().observer_us > 0);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn local_io_pressure_suppresses_idle_and_slow_peer_restarts() {
+        let (root, storage, objects) = fixture(
+            r#"
+echo '{"stats":{"bytes":1}}' >&2
+sleep 0.16
+echo '{"stats":{"bytes":8}}' >&2
+echo '{"level":"info","object":"packs/test.pack","msg":"Copied (new)"}' >&2
+"#,
+            1,
+        );
+        for _ in 0..3 {
+            storage
+                .upload_peers
+                .record(8 * 1024 * 1024, Duration::from_secs(1), Duration::ZERO);
+        }
+        let observer = Observer::default();
+        let pressured = UploadPolicy {
+            io_pressure: || true,
+            ..policy()
+        };
+        run(&storage, &objects, &observer, pressured).await.unwrap();
+        let snapshots = observer.snapshots.lock().unwrap();
+        assert!(snapshots.iter().any(|d| d.local_io_wait_us > 0));
+        let last = snapshots.last().unwrap();
+        assert_eq!((last.idle_restarts, last.slow_restarts), (0, 0));
+        assert_eq!(last.sent_bytes, 8);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
