@@ -53,6 +53,9 @@ impl Default for TransferTuning {
 }
 
 impl TransferTuning {
+    pub fn preparation_memory_bytes() -> Option<u64> {
+        available_memory_bytes()
+    }
     /// Resolves a hidden, provider-aware transfer budget on the machine doing
     /// the work. The desktop never needs to ask the user for a worker count.
     pub fn automatic(provider: ProviderKind, workload: TransferWorkload) -> Self {
@@ -226,11 +229,26 @@ impl ProviderRootIdentity {
         remote_name: impl Into<String>,
         root: impl Into<String>,
     ) -> Self {
+        let provider = provider.into();
+        let backend_type = backend_type.into();
+        let root = root.into();
+        // Absolute and home-relative SFTP/local roots are different repositories.
+        // Preserve the historical normalization for object-store prefixes.
+        let root = if matches!(backend_type.as_str(), "sftp" | "local") {
+            let root = root.trim();
+            if !root.is_empty() && root.chars().all(|ch| ch == '/') {
+                "/".into()
+            } else {
+                root.trim_end_matches('/').to_string()
+            }
+        } else {
+            normalize_root(&root)
+        };
         Self {
-            provider: provider.into(),
-            backend_type: backend_type.into(),
+            provider,
+            backend_type,
             remote_name: remote_name.into(),
-            root: normalize_root(&root.into()),
+            root,
         }
     }
 
@@ -492,6 +510,18 @@ mod tests {
         assert_eq!(
             classify_remote_error(Some(1), "immutable file modified"),
             RemoteErrorClass::ImmutableConflict
+        );
+    }
+}
+#[test]
+fn filesystem_repository_identity_preserves_absolute_roots() {
+    for backend in ["sftp", "local"] {
+        let absolute = ProviderRootIdentity::new(backend, backend, "store", "/data");
+        let relative = ProviderRootIdentity::new(backend, backend, "store", "data");
+        assert_ne!(absolute.cache_key(), relative.cache_key());
+        assert_ne!(
+            ProviderRootIdentity::new(backend, backend, "store", "/").cache_key(),
+            ProviderRootIdentity::new(backend, backend, "store", "").cache_key()
         );
     }
 }

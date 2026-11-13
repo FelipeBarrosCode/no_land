@@ -1,5 +1,6 @@
 use std::{
     fs,
+    future::Future,
     path::{Path, PathBuf},
     sync::atomic::Ordering,
     time::Duration,
@@ -33,7 +34,7 @@ use super::{
     nvidia_headless::NvidiaHeadlessService,
     package_manager::prepare_provisioning_packages,
     post_wireguard_setup::initialize_post_wireguard_flow,
-    provisioning::{join_lanes, measure},
+    provisioning::{boxed_stage, join_lanes, measure},
     remote_exec::RemoteExec,
     shared_storage::agent_runtime::ensure_state_agent,
     ssh_keys::SshKeyService,
@@ -1185,7 +1186,7 @@ async fn run_orchestration(
     measure("packages_after_gpu", prepare_provisioning_packages(&remote)).await?;
     let display_instance = instance.clone();
     let display_remote = remote.clone();
-    let display_setup = Box::pin(async {
+    let display_setup = boxed_stage(|| async {
         let instance = &display_instance;
         let remote = &display_remote;
         let sunshine = SunshineService {
@@ -1380,7 +1381,7 @@ async fn run_orchestration(
 
         Ok::<(), AppError>(())
     });
-    let network_setup = Box::pin(async {
+    let network_setup = boxed_stage(|| async {
         match vast.get_instance(instance.id).await {
             Ok(refreshed_instance) => {
                 instance.public_ip = refreshed_instance.public_ip;
@@ -2223,7 +2224,7 @@ async fn run_existing_instance_orchestration(
     measure("packages_after_gpu", prepare_provisioning_packages(&remote)).await?;
     let display_instance = instance.clone();
     let display_remote = remote.clone();
-    let display_setup = Box::pin(async {
+    let display_setup = boxed_stage(|| async {
         let instance = &display_instance;
         let remote = &display_remote;
         let sunshine = SunshineService {
@@ -2418,7 +2419,7 @@ async fn run_existing_instance_orchestration(
 
         Ok::<(), AppError>(())
     });
-    let network_setup = Box::pin(async {
+    let network_setup = boxed_stage(|| async {
         match vast.get_instance(instance.id).await {
             Ok(refreshed_instance) => {
                 instance.public_ip = refreshed_instance.public_ip;
@@ -4057,7 +4058,26 @@ async fn server_step_is_completed(
         .unwrap_or(false)
 }
 
-pub(crate) async fn mark_server_step_completed(
+// These checkpoints are awaited many times inside the large provisioning
+// state machines. Keep their futures out of every caller's debug poll frame.
+pub(crate) fn mark_server_step_completed<'a>(
+    context: &'a AppContext,
+    instance_id: u64,
+    step: ProvisionStepMarker,
+    state: OrchestrationState,
+    status: &'a str,
+    ssh_host: &'a str,
+    ssh_port: u16,
+    offer_id: Option<u64>,
+) -> impl Future<Output = AppResult<()>> + 'a {
+    boxed_stage(move || {
+        mark_server_step_completed_inner(
+            context, instance_id, step, state, status, ssh_host, ssh_port, offer_id,
+        )
+    })
+}
+
+async fn mark_server_step_completed_inner(
     context: &AppContext,
     instance_id: u64,
     step: ProvisionStepMarker,
@@ -4177,7 +4197,18 @@ fn sanitize_ssh_user(value: &str) -> String {
         .to_string()
 }
 
-async fn emit_transition(
+fn emit_transition<'a>(
+    app: &'a AppHandle,
+    context: &'a AppContext,
+    state: OrchestrationState,
+    message: &'a str,
+    details: Option<String>,
+    is_error: bool,
+) -> impl Future<Output = ()> + 'a {
+    boxed_stage(move || emit_transition_inner(app, context, state, message, details, is_error))
+}
+
+async fn emit_transition_inner(
     app: &AppHandle,
     context: &AppContext,
     state: OrchestrationState,
@@ -4227,4 +4258,48 @@ async fn emit_transition(
     };
 
     context.emit_progress(app, event).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transition_checkpoints_do_not_embed_state_snapshots() {
+        fn future_size<F: Future>(
+            _: impl FnOnce(
+                &'static AppHandle,
+                &'static AppContext,
+                OrchestrationState,
+                &'static str,
+                Option<String>,
+                bool,
+            ) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+
+        // Inspect the return type without constructing an app or loading state.
+        assert!(future_size(emit_transition) < 1024);
+    }
+
+    #[test]
+    fn server_step_checkpoints_do_not_embed_state_snapshots() {
+        fn future_size<F: Future>(
+            _: impl FnOnce(
+                &'static AppContext,
+                u64,
+                ProvisionStepMarker,
+                OrchestrationState,
+                &'static str,
+                &'static str,
+                u16,
+                Option<u64>,
+            ) -> F,
+        ) -> usize {
+            std::mem::size_of::<F>()
+        }
+
+        assert!(future_size(mark_server_step_completed) < 1024);
+    }
 }

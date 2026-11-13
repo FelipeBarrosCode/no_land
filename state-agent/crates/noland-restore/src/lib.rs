@@ -1,9 +1,14 @@
 //! Storage-efficient restore: prioritize, verify, atomically publish, and roll back.
 
 mod download;
+mod identity;
 mod journal;
+mod leaf;
 mod pipeline;
 mod planner;
+mod prerequisite;
+#[cfg(test)]
+mod safety_tests;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -11,7 +16,11 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::time::Instant;
 
+use identity::VerifiedIdentity;
+#[cfg(test)]
 use noland_cas::blake3_file;
 use noland_crypto::MasterKey;
 use noland_pack::PackIndexEntry;
@@ -33,6 +42,7 @@ pub use planner::{
     embed_restore_plan, plan_restore_priorities, restore_priority, RestorePlanEntry,
     RestorePriority, RestorePriorityPlan, RestoreTarget, READY_TO_LAUNCH,
 };
+pub use prerequisite::RestorePrerequisite;
 
 #[derive(Debug, Clone)]
 pub struct RestorePlan {
@@ -44,7 +54,67 @@ pub struct RestorePlan {
     pub mode: RestoreMode,
 }
 
+/// Immutable restore metadata shared by the async coordinator and owned worker.
+/// Moving a fetched plan here avoids cloning a potentially hundreds-of-MiB
+/// manifest, and computes the priority ordering just once for the whole restore.
+#[derive(Debug, Clone)]
+pub struct SharedRestorePlan {
+    plan: Arc<RestorePlan>,
+    priorities: Arc<RestorePriorityPlan>,
+    prerequisites: Arc<Vec<RestorePrerequisite>>,
+}
+
+impl std::ops::Deref for SharedRestorePlan {
+    type Target = RestorePlan;
+
+    fn deref(&self) -> &Self::Target {
+        &self.plan
+    }
+}
+
+impl SharedRestorePlan {
+    pub fn priority_plan(&self) -> Arc<RestorePriorityPlan> {
+        Arc::clone(&self.priorities)
+    }
+
+    /// Local launcher metadata is published before the durable restore commit,
+    /// without altering the immutable remote manifest or its parent-cache identity.
+    pub fn with_prerequisites(mut self, prerequisites: Vec<RestorePrerequisite>) -> Self {
+        self.prerequisites = Arc::new(prerequisites);
+        self
+    }
+}
+
+impl From<RestorePlan> for SharedRestorePlan {
+    fn from(plan: RestorePlan) -> Self {
+        let priorities = Arc::new(plan.priority_plan());
+        Self {
+            plan: Arc::new(plan),
+            priorities,
+            prerequisites: Arc::new(Vec::new()),
+        }
+    }
+}
+
+impl From<&SharedRestorePlan> for SharedRestorePlan {
+    fn from(plan: &SharedRestorePlan) -> Self {
+        plan.clone()
+    }
+}
+
+// Preserve the existing borrowed-plan API for compatibility. Large restores
+// should pass an owned plan or `&plan.into_shared()` to avoid this legacy copy.
+impl From<&RestorePlan> for SharedRestorePlan {
+    fn from(plan: &RestorePlan) -> Self {
+        plan.clone().into()
+    }
+}
+
 impl RestorePlan {
+    pub fn into_shared(self) -> SharedRestorePlan {
+        self.into()
+    }
+
     pub fn priority_plan(&self) -> RestorePriorityPlan {
         plan_restore_priorities(&self.manifest, self.mode)
     }
@@ -130,20 +200,10 @@ pub async fn prepare_restore(
     let restore_id = Uuid::new_v4();
     let staging = paths.restore_dir(&restore_id.to_string());
     let mut staging_cleanup = DirectoryCleanupGuard::new(staging.clone());
-    for child in [
-        "manifest",
-        "packs",
-        "materialized/.chunks",
-        "pre_restore",
-        "logs",
-    ] {
+    for child in ["packs", "materialized/.chunks", "pre_restore", "logs"] {
         fs::create_dir_all(staging.join(child))?;
     }
     let manifest = read_committed_manifest(provider, master, app_id, bundle_id).await?;
-    fs::write(
-        staging.join("manifest/manifest.json"),
-        serde_json::to_vec_pretty(&manifest)?,
-    )?;
     staging_cleanup.disarm();
     Ok(RestorePlan {
         restore_id,
@@ -184,6 +244,16 @@ pub struct RestoreReport {
     pub reused_entries: usize,
 }
 
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RestoreCommitMetrics {
+    pub prepare_us: u64,
+    pub cache_cleanup_us: u64,
+    pub journal_us: u64,
+    pub database_us: u64,
+    pub workspace_cleanup_us: u64,
+    pub elapsed_us: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TransactionState {
     Active,
@@ -197,13 +267,16 @@ struct PlannedDestination {
     root: PathBuf,
     destination: PathBuf,
     identical: bool,
+    verified: Option<VerifiedIdentity>,
     existed: bool,
+    prior_identity: Option<VerifiedIdentity>,
 }
 
 #[derive(Debug)]
 struct PlannedTombstone {
     root: PathBuf,
     destination: PathBuf,
+    observation: leaf::Observation,
 }
 
 #[derive(Debug, Clone)]
@@ -213,8 +286,8 @@ struct SymlinkRollback {
 }
 
 const TRANSACTION_JOURNAL_FILE: &str = "restore-transaction.json";
-// Older agents must refuse (not silently mis-recover) journals with intent logs.
-const TRANSACTION_JOURNAL_VERSION: u32 = 2;
+// Older agents must refuse journals requiring intent logs or tombstone guards.
+const TRANSACTION_JOURNAL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -236,6 +309,12 @@ struct JournalSymlinkRollback {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct JournalTombstoneGuard {
+    destination: PathBuf,
+    observation: leaf::Observation,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct RestoreTransactionJournal {
     version: u32,
     restore_id: Uuid,
@@ -246,6 +325,8 @@ struct RestoreTransactionJournal {
     created_paths: Vec<PathBuf>,
     created_directories: Vec<PathBuf>,
     partial_paths: Vec<PathBuf>,
+    #[serde(default)]
+    tombstone_guards: Vec<JournalTombstoneGuard>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -273,33 +354,51 @@ pub struct RestoreTransaction<'a> {
     db: Option<&'a StateDb>,
     rollback_views: Vec<SnapshotView>,
     symlink_rollbacks: Vec<SymlinkRollback>,
+    tombstone_guards: Vec<JournalTombstoneGuard>,
     created_paths: BTreeSet<PathBuf>,
     created_directories: BTreeSet<PathBuf>,
     active_partials: BTreeSet<PathBuf>,
     published_entries: BTreeSet<usize>,
-    pending_associations: BTreeSet<usize>,
+    verified_files: BTreeMap<usize, VerifiedIdentity>,
+    // Cache lexical resolution only. Parent safety and file identities are still
+    // checked at every mutation and again inside the database commit.
+    resolved_roots: BTreeMap<String, PathBuf>,
+    index_generation: Option<i64>,
     allowed_roots: BTreeSet<PathBuf>,
     remaining_chunk_refs: BTreeMap<String, usize>,
     chunk_eviction_enabled: bool,
     tombstones_applied: bool,
     state: TransactionState,
-    priorities: RestorePriorityPlan,
+    priorities: Arc<RestorePriorityPlan>,
     uses_legacy_pack_cache: bool,
     disk_reservations: Vec<disk::DiskReservation>,
 }
 
 impl<'a> RestoreTransaction<'a> {
     pub fn new(plan: &'a RestorePlan, roots: &'a LogicalRootMap, db: Option<&'a StateDb>) -> Self {
-        let priorities = plan.priority_plan();
+        Self::with_priorities(plan, roots, db, Arc::new(plan.priority_plan()), true)
+    }
+
+    fn with_priorities(
+        plan: &'a RestorePlan,
+        roots: &'a LogicalRootMap,
+        db: Option<&'a StateDb>,
+        priorities: Arc<RestorePriorityPlan>,
+        uses_legacy_pack_cache: bool,
+    ) -> Self {
         let mut remaining_chunk_refs = BTreeMap::new();
-        for entry in &priorities.entries {
-            let unique_chunks = plan.manifest.files[entry.manifest_index]
-                .chunks
-                .iter()
-                .map(|chunk| chunk.hash.clone())
-                .collect::<BTreeSet<_>>();
-            for hash in unique_chunks {
-                *remaining_chunk_refs.entry(hash).or_insert(0) += 1;
+        // Streaming has no decrypted chunk cache to evict. Its placement table
+        // and the published-entry check at commit already prove completeness.
+        if uses_legacy_pack_cache {
+            for entry in &priorities.entries {
+                let unique_chunks = plan.manifest.files[entry.manifest_index]
+                    .chunks
+                    .iter()
+                    .map(|chunk| chunk.hash.clone())
+                    .collect::<BTreeSet<_>>();
+                for hash in unique_chunks {
+                    *remaining_chunk_refs.entry(hash).or_insert(0) += 1;
+                }
             }
         }
         Self {
@@ -308,18 +407,21 @@ impl<'a> RestoreTransaction<'a> {
             db,
             rollback_views: Vec::new(),
             symlink_rollbacks: Vec::new(),
+            tombstone_guards: Vec::new(),
             created_paths: BTreeSet::new(),
             created_directories: BTreeSet::new(),
             active_partials: BTreeSet::new(),
             published_entries: BTreeSet::new(),
-            pending_associations: BTreeSet::new(),
+            verified_files: BTreeMap::new(),
+            resolved_roots: BTreeMap::new(),
+            index_generation: None,
             allowed_roots: BTreeSet::new(),
             remaining_chunk_refs,
             chunk_eviction_enabled: false,
             tombstones_applied: false,
             state: TransactionState::Active,
             priorities,
-            uses_legacy_pack_cache: true,
+            uses_legacy_pack_cache,
             disk_reservations: Vec::new(),
         }
     }
@@ -333,6 +435,7 @@ impl<'a> RestoreTransaction<'a> {
             ));
         }
 
+        self.begin_index_observation()?;
         let (planned, tombstones) = self.preflight(target)?;
         self.prepare_rollback(&planned, &tombstones)?;
 
@@ -340,11 +443,13 @@ impl<'a> RestoreTransaction<'a> {
         for planned in planned {
             report.destinations.push(planned.destination.clone());
             if planned.identical {
+                if let Some(identity) = planned.verified {
+                    self.verified_files.insert(planned.manifest_index, identity);
+                }
                 self.release_entry_chunks(planned.manifest_index)?;
                 self.published_entries.insert(planned.manifest_index);
                 // A retry after a crash may find the destination already published while the
                 // prior process died before committing its database association.
-                self.pending_associations.insert(planned.manifest_index);
                 report.reused_entries += 1;
                 continue;
             }
@@ -364,15 +469,12 @@ impl<'a> RestoreTransaction<'a> {
             }
             self.release_entry_chunks(planned.manifest_index)?;
             self.published_entries.insert(planned.manifest_index);
-            self.pending_associations.insert(planned.manifest_index);
             report.published_entries += 1;
         }
 
         if target == RestoreTarget::Complete && !self.tombstones_applied {
             for tombstone in tombstones {
-                if remove_path_if_present(&tombstone.destination)? {
-                    sync_parent_directory(&tombstone.destination)?;
-                }
+                tombstone.apply()?;
             }
             self.tombstones_applied = true;
         }
@@ -417,54 +519,145 @@ impl<'a> RestoreTransaction<'a> {
         self.plan.prune_restore_pack_cache()
     }
 
+    fn begin_index_observation(&mut self) -> Result<()> {
+        if self.index_generation.is_none() {
+            if let Some(db) = self.db {
+                self.index_generation =
+                    Some(db.capture_generation(&self.plan.manifest.app.app_id)?);
+            }
+        }
+        Ok(())
+    }
+
     /// Persists deferred associations and removes all restore-local staging and rollback data.
-    pub fn commit(mut self) -> Result<()> {
+    pub fn commit(self) -> Result<()> {
+        self.commit_with_metrics().map(|_| ())
+    }
+
+    pub fn commit_with_metrics(mut self) -> Result<RestoreCommitMetrics> {
+        let started = Instant::now();
+        let mut metrics = RestoreCommitMetrics::default();
         if self.state != TransactionState::Active {
             return Err(StateError::Invalid(
                 "restore transaction is not active".into(),
             ));
         }
 
-        if self
-            .remaining_chunk_refs
-            .values()
-            .any(|references| *references != 0)
+        if self.published_entries.len() != self.priorities.entries.len()
+            || (!self.plan.manifest.tombstones.is_empty() && !self.tombstones_applied)
+            || self
+                .remaining_chunk_refs
+                .values()
+                .any(|references| *references != 0)
         {
             return Err(StateError::Invalid(
                 "cannot commit restore before every selected file is published".into(),
             ));
         }
-        let associations = if self.db.is_some() {
-            self.pending_associations
-                .iter()
-                .map(|manifest_index| {
-                    let file = &self.plan.manifest.files[*manifest_index];
-                    let (_, destination) = resolve_destination(self.roots, file)?;
-                    Ok(RestoredPathAssociationInput {
-                        canonical_path: destination.to_string_lossy().into_owned(),
-                        persistence_class: file.persistence_class,
-                        semantic_role: file.semantic_role,
-                    })
-                })
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            Vec::new()
-        };
+        let now = chrono::Utc::now();
+        let mut associations = Vec::new();
+        let mut states = Vec::new();
+        if self.db.is_some() {
+            associations.reserve(self.published_entries.len());
+            states.reserve(self.verified_files.len());
+            for &index in &self.published_entries {
+                let file = &self.plan.manifest.files[index];
+                let root = &self.resolved_roots[&file.logical_root];
+                let destination = join_validated(root, &file.relative_path)?;
+                let canonical = destination.to_string_lossy().into_owned();
+                associations.push(RestoredPathAssociationInput {
+                    canonical_path: canonical.clone(),
+                    persistence_class: file.persistence_class,
+                    semantic_role: file.semantic_role,
+                });
+                let Some(&identity) = self.verified_files.get(&index) else {
+                    continue;
+                };
+                let logical = self
+                    .roots
+                    .classify(&destination)
+                    .unwrap_or(LogicalPath::new(
+                        file.logical_root_parsed()
+                            .ok_or_else(|| StateError::UnsafePath(file.logical_root.clone()))?,
+                        &file.relative_path,
+                    ));
+                states.push(FileStateRecord {
+                    app_id: self.plan.manifest.app.app_id.clone(),
+                    logical_root: logical.logical_root.as_token(),
+                    relative_path: logical.relative_path,
+                    canonical_path: Some(canonical),
+                    file_type: FileType::File,
+                    size: identity.size,
+                    mtime_ns: identity.mtime_ns,
+                    inode: Some(identity.inode),
+                    mount_id: Some(identity.device),
+                    mode: Some(identity.mode),
+                    content_hash: Some(file.file_hash.clone()),
+                    trust: FileStateTrust::Trusted,
+                    last_seen_at: now,
+                    last_hashed_at: Some(now),
+                });
+            }
+        }
 
+        // Borrow the strings required by the existing DB API instead of retaining
+        // another full set of canonical strings and destination PathBufs.
+        let guards = self
+            .published_entries
+            .iter()
+            .zip(&associations)
+            .filter_map(|(&index, association)| {
+                self.verified_files.get(&index).map(|&identity| {
+                    let root = &self.resolved_roots[&self.plan.manifest.files[index].logical_root];
+                    (
+                        association.canonical_path.as_str(),
+                        (root.as_path(), identity),
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        metrics.prepare_us = pipeline::elapsed_us(started);
+
+        let cache_started = Instant::now();
         self.release_staged_pack_links()?;
         if self.uses_legacy_pack_cache {
             self.prune_restore_pack_cache()?;
         }
+        metrics.cache_cleanup_us = pipeline::elapsed_us(cache_started);
 
         // Persist the filesystem commit decision before the SQLite commit. A crash after SQLite
         // commits can never leave an active journal that startup recovery would roll back.
+        let journal_started = Instant::now();
         self.persist_journal(JournalState::Committed)?;
+        metrics.journal_us = pipeline::elapsed_us(journal_started);
         self.state = TransactionState::Committed;
 
         if let Some(db) = self.db {
-            if let Err(database_error) =
-                db.upsert_restored_path_associations(&self.plan.manifest.app.app_id, &associations)
-            {
+            let database_started = Instant::now();
+            let result = db.commit_restored_paths(
+                &self.plan.manifest.app.app_id,
+                &associations,
+                &states,
+                self.index_generation,
+                |state| {
+                    state
+                        .canonical_path
+                        .as_deref()
+                        .and_then(|path| guards.get(path))
+                        .is_some_and(|(root, identity)| {
+                            let destination =
+                                Path::new(state.canonical_path.as_deref().expect("guarded path"));
+                            validate_parent_chain(root, destination).is_ok()
+                                && identity.matches_path(destination)
+                        })
+                },
+            );
+            metrics.database_us = pipeline::elapsed_us(database_started);
+            tracing::debug!(
+                database_commit_us = metrics.database_us,
+                "restore database commit finished"
+            );
+            if let Err(database_error) = result {
                 // A returned database error is rollback-safe only after the durable journal has
                 // been re-armed. If that write fails, retain the committed decision and destinations.
                 if let Err(journal_error) = self.persist_journal(JournalState::Active) {
@@ -477,10 +670,18 @@ impl<'a> RestoreTransaction<'a> {
             }
         }
 
+        let cleanup_started = Instant::now();
         if self.plan.staging.exists() {
-            remove_directory_tree_durable(&self.plan.staging)?;
+            // The durable decision and database transaction have committed.
+            // Cleanup failure is recoverable at startup, not a failed restore
+            // whose trusted state could misleadingly appear to have survived.
+            if let Err(error) = remove_directory_tree_durable(&self.plan.staging) {
+                tracing::warn!(%error, restore_id = %self.plan.restore_id, "committed restore workspace cleanup deferred");
+            }
         }
-        Ok(())
+        metrics.workspace_cleanup_us = pipeline::elapsed_us(cleanup_started);
+        metrics.elapsed_us = pipeline::elapsed_us(started);
+        Ok(metrics)
     }
 
     /// Reverts every path changed by this restore and removes staging after rollback succeeds.
@@ -518,14 +719,14 @@ impl<'a> RestoreTransaction<'a> {
     }
 
     fn preflight(
-        &self,
+        &mut self,
         target: RestoreTarget,
     ) -> Result<(Vec<PlannedDestination>, Vec<PlannedTombstone>)> {
         self.preflight_observed(target, |_| Ok(()))
     }
 
     fn preflight_observed(
-        &self,
+        &mut self,
         target: RestoreTarget,
         mut on_checked: impl FnMut(u64) -> Result<()>,
     ) -> Result<(Vec<PlannedDestination>, Vec<PlannedTombstone>)> {
@@ -540,7 +741,16 @@ impl<'a> RestoreTransaction<'a> {
                 continue;
             }
             let file = &self.plan.manifest.files[entry.manifest_index];
-            let (root, destination) = resolve_destination(self.roots, file)?;
+            let root = match self.resolved_roots.get(&file.logical_root) {
+                Some(root) => root.clone(),
+                None => {
+                    let (root, _) = resolve_destination(self.roots, file)?;
+                    self.resolved_roots
+                        .insert(file.logical_root.clone(), root.clone());
+                    root
+                }
+            };
+            let destination = join_validated(&root, &file.relative_path)?;
             if !destinations.insert(destination.clone()) {
                 return Err(StateError::Invalid(format!(
                     "multiple manifest entries resolve to {}",
@@ -549,18 +759,20 @@ impl<'a> RestoreTransaction<'a> {
             }
             validate_parent_chain(&root, &destination)?;
             let metadata = symlink_metadata_if_present(&destination)?;
+            let verified = if file.file_type == "file" {
+                identity::verify_existing(&destination, file, metadata.as_ref())?
+            } else {
+                None
+            };
             let identical = match file.file_type.as_str() {
-                "file" => target_file_is_identical(&destination, file),
+                "file" => verified.is_some(),
                 "directory" => metadata.as_ref().is_some_and(|value| value.is_dir()),
                 "symlink" => {
                     let target = file
                         .symlink_target
                         .as_deref()
                         .ok_or_else(|| StateError::Invalid("symlink missing target".into()))?;
-                    let logical = file
-                        .logical_root_parsed()
-                        .ok_or_else(|| StateError::UnsafePath(file.logical_root.clone()))?;
-                    validate_symlink_target(target, self.roots, &logical)?;
+                    validate_symlink_target_within_root(&file.relative_path, target)?;
                     fs::read_link(&destination)
                         .map(|existing| existing == Path::new(target))
                         .unwrap_or(false)
@@ -589,7 +801,9 @@ impl<'a> RestoreTransaction<'a> {
                 root,
                 destination,
                 identical,
+                verified,
                 existed: metadata.is_some(),
+                prior_identity: metadata.as_ref().map(VerifiedIdentity::from_metadata),
             });
         }
 
@@ -613,13 +827,18 @@ impl<'a> RestoreTransaction<'a> {
                         destination.display()
                     )));
                 }
-                if symlink_metadata_if_present(&destination)?
-                    .as_ref()
-                    .is_some_and(|metadata| metadata.is_dir())
+                let observation = leaf::observe(&destination)?;
+                if observation
+                    .identity
+                    .is_some_and(|identity| identity.is_directory())
                 {
                     continue;
                 }
-                tombstones.push(PlannedTombstone { root, destination });
+                tombstones.push(PlannedTombstone {
+                    root,
+                    destination,
+                    observation,
+                });
             }
         }
         Ok((planned, tombstones))
@@ -662,13 +881,23 @@ impl<'a> RestoreTransaction<'a> {
         }
         let mut rollback_bytes = 0u64;
         let mut recovery_peaks = BTreeMap::<u64, (PathBuf, u64)>::new();
-        for destination in planned
+        for (destination, expected) in planned
             .iter()
             .filter(|planned| !planned.identical)
-            .map(|planned| &planned.destination)
-            .chain(tombstones.iter().map(|tombstone| &tombstone.destination))
+            .map(|planned| (&planned.destination, planned.prior_identity))
+            .chain(
+                tombstones
+                    .iter()
+                    .map(|tombstone| (&tombstone.destination, tombstone.observation.identity)),
+            )
         {
-            let Some(metadata) = symlink_metadata_if_present(destination)? else {
+            let metadata = symlink_metadata_if_present(destination)?;
+            if metadata.as_ref().map(VerifiedIdentity::from_metadata) != expected {
+                return Err(StateError::Integrity(
+                    "restore destination changed before rollback capture".into(),
+                ));
+            }
+            let Some(metadata) = metadata else {
                 continue;
             };
             if metadata.file_type().is_symlink() {
@@ -704,15 +933,33 @@ impl<'a> RestoreTransaction<'a> {
                 false,
                 on_file,
             )?;
-            if view.mappings.len() != regular_files.len() {
-                return Err(StateError::Invalid(
-                    "failed to capture every regular restore rollback path".into(),
-                ));
+            validate_rollback_view(&view, &regular_files)?;
+            // A copy may be internally stable yet newer than preflight, or an
+            // earlier source may change while a later source is being copied.
+            for entry in planned.iter().filter(|entry| !entry.identical) {
+                validate_parent_chain(&entry.root, &entry.destination)?;
+                if symlink_metadata_if_present(&entry.destination)?
+                    .as_ref()
+                    .map(VerifiedIdentity::from_metadata)
+                    != entry.prior_identity
+                {
+                    return Err(StateError::Integrity(
+                        "restore destination changed during rollback capture".into(),
+                    ));
+                }
+            }
+            for tombstone in tombstones {
+                tombstone.validate()?;
             }
             sync_snapshot_view(&rollback_root, &view)?;
             self.rollback_views.push(view);
         }
         self.symlink_rollbacks.extend(symlinks);
+        self.tombstone_guards
+            .extend(tombstones.iter().map(|tombstone| JournalTombstoneGuard {
+                destination: tombstone.destination.clone(),
+                observation: tombstone.observation,
+            }));
         self.persist_journal(JournalState::Active)
     }
 
@@ -742,6 +989,7 @@ impl<'a> RestoreTransaction<'a> {
             created_paths: self.created_paths.iter().cloned().collect(),
             created_directories: self.created_directories.iter().cloned().collect(),
             partial_paths: self.active_partials.iter().cloned().collect(),
+            tombstone_guards: self.tombstone_guards.clone(),
         }
     }
 
@@ -792,6 +1040,9 @@ impl<'a> RestoreTransaction<'a> {
     }
 
     fn release_entry_chunks(&mut self, manifest_index: usize) -> Result<()> {
+        if !self.uses_legacy_pack_cache {
+            return Ok(());
+        }
         let unique_chunks = self.plan.manifest.files[manifest_index]
             .chunks
             .iter()
@@ -876,13 +1127,33 @@ impl<'a> RestoreTransaction<'a> {
             output.set_permissions(fs::Permissions::from_mode(mode))?;
         }
         output.sync_all()?;
+        let verified = VerifiedIdentity::from_metadata(&output.metadata()?);
         drop(output);
         validate_parent_chain(&planned.root, &planned.destination)?;
+        if !verified.matches_path(&partial) {
+            return Err(StateError::Integrity(
+                "restore partial changed before publication".into(),
+            ));
+        }
         if !planned.existed {
             self.track_created_path(&planned.destination)?;
         }
         fs::rename(&partial, &planned.destination)?;
+        let published = fs::symlink_metadata(&planned.destination)?;
+        let published_identity = VerifiedIdentity::from_metadata(&published);
+        if !published.is_file() || !verified.matches_after_rename(published_identity) {
+            return Err(StateError::Integrity(
+                "restored file changed during publication".into(),
+            ));
+        }
         sync_parent_directory(&planned.destination)?;
+        if !published_identity.matches_path(&planned.destination) {
+            return Err(StateError::Integrity(
+                "restored file changed during publication".into(),
+            ));
+        }
+        self.verified_files
+            .insert(planned.manifest_index, published_identity);
         self.clear_partial(&partial)?;
         Ok(())
     }
@@ -892,10 +1163,7 @@ impl<'a> RestoreTransaction<'a> {
             .symlink_target
             .as_deref()
             .ok_or_else(|| StateError::Invalid("symlink missing target".into()))?;
-        let logical = file
-            .logical_root_parsed()
-            .ok_or_else(|| StateError::UnsafePath(file.logical_root.clone()))?;
-        validate_symlink_target(target, self.roots, &logical)?;
+        validate_symlink_target_within_root(&file.relative_path, target)?;
         let parent = planned.destination.parent().ok_or_else(|| {
             StateError::UnsafePath(format!(
                 "destination has no parent: {}",
@@ -1064,6 +1332,34 @@ fn persist_transaction_journal(
     drop(file);
     fs::rename(&temporary, &path)?;
     fs::File::open(workspace)?.sync_all()?;
+    // fsync(workspace) persists its children, not the workspace's own name.
+    // Include every ancestor: prepare_restore/create_view may have just created
+    // the restore root or state root as well. This precedes all destination writes.
+    for parent in fs::canonicalize(workspace)?.ancestors().skip(1) {
+        let directory = fs::File::open(parent)?;
+        // An existing mount boundary cannot have been created by this restore.
+        // In particular, do not fsync macOS's read-only system-volume ancestors.
+        if directory.metadata()?.dev() != workspace_metadata.dev() {
+            break;
+        }
+        directory.sync_all()?;
+    }
+    Ok(())
+}
+
+fn validate_rollback_view(view: &SnapshotView, sources: &[PathBuf]) -> Result<()> {
+    if view.consistency != ConsistencyKind::Snapshot
+        || view.mappings.len() != sources.len()
+        || view
+            .mappings
+            .iter()
+            .zip(sources)
+            .any(|(mapping, source)| &mapping.source != source)
+    {
+        return Err(StateError::Integrity(
+            "restore requires a complete stable rollback snapshot".into(),
+        ));
+    }
     Ok(())
 }
 
@@ -1148,6 +1444,9 @@ fn validate_recovery_journal(workspace: &Path, journal: &RestoreTransactionJourn
     for rollback in &journal.prior_symlinks {
         validate_recovery_destination(journal, &rollback.destination)?;
     }
+    for guard in &journal.tombstone_guards {
+        validate_recovery_destination(journal, &guard.destination)?;
+    }
     for path in journal
         .created_paths
         .iter()
@@ -1194,6 +1493,9 @@ fn validate_recovery_destination(
 
 fn rollback_from_journal(workspace: &Path, journal: &RestoreTransactionJournal) -> Result<()> {
     validate_recovery_journal(workspace, journal)?;
+    for guard in &journal.tombstone_guards {
+        validate_tombstone_recovery(journal, guard)?;
+    }
     let mut first_error = None;
     for partial in &journal.partial_paths {
         record_cleanup_error(remove_recovery_leaf_durable(partial), &mut first_error);
@@ -1213,7 +1515,7 @@ fn rollback_from_journal(workspace: &Path, journal: &RestoreTransactionJournal) 
         match fs::remove_dir(&directory) {
             Ok(()) => record_cleanup_error(sync_parent_directory(&directory), &mut first_error),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                record_cleanup_error(sync_parent_directory(&directory), &mut first_error);
+                record_cleanup_error(sync_existing_ancestor(&directory), &mut first_error);
             }
             Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {}
             Err(error) => record_cleanup_error(Err(error.into()), &mut first_error),
@@ -1223,6 +1525,52 @@ fn rollback_from_journal(workspace: &Path, journal: &RestoreTransactionJournal) 
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+fn validate_tombstone_recovery(
+    journal: &RestoreTransactionJournal,
+    guard: &JournalTombstoneGuard,
+) -> Result<()> {
+    let current = leaf::observe(&guard.destination)?;
+    if guard.observation.same_parent(current) {
+        if current.identity.is_none() || current.identity == guard.observation.identity {
+            return Ok(());
+        }
+        // Recovery itself installs a new inode. Accept already-restored bytes
+        // on a repeated pass, while refusing to overwrite a swapped-in leaf.
+        if let Some(mapping) = journal
+            .rollback_mappings
+            .iter()
+            .find(|mapping| mapping.source == guard.destination)
+        {
+            let staged = fs::symlink_metadata(&mapping.staged)?;
+            let metadata = symlink_metadata_if_present(&guard.destination)?;
+            if identity::verify_contents(
+                &guard.destination,
+                &noland_cas::blake3_file(&mapping.staged)?,
+                staged.len(),
+                Some(staged.mode()),
+                metadata.as_ref(),
+            )?
+            .is_some()
+            {
+                return Ok(());
+            }
+        } else if let Some(rollback) = journal
+            .prior_symlinks
+            .iter()
+            .find(|rollback| rollback.destination == guard.destination)
+        {
+            if fs::read_link(&guard.destination).is_ok_and(|target| target == rollback.target)
+                && leaf::observe(&guard.destination)? == current
+            {
+                return Ok(());
+            }
+        }
+    }
+    Err(StateError::UnsafePath(
+        "tombstone replacement prevents safe rollback; retaining recovery workspace".into(),
+    ))
 }
 
 fn restore_regular_mapping(
@@ -1337,26 +1685,25 @@ fn validate_parent_chain(root: &Path, destination: &Path) -> Result<()> {
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component.as_os_str());
-        validate_directory_component(&current)?;
-        if !current.exists() {
+        if !validate_directory_component(&current)? {
             break;
         }
     }
     Ok(())
 }
 
-fn validate_directory_component(path: &Path) -> Result<()> {
+fn validate_directory_component(path: &Path) -> Result<bool> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(StateError::UnsafePath(format!(
             "destination parent is a symlink: {}",
             path.display()
         ))),
-        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(metadata) if metadata.is_dir() => Ok(true),
         Ok(_) => Err(StateError::Invalid(format!(
             "destination parent is not a directory: {}",
             path.display()
         ))),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error.into()),
     }
 }
@@ -1492,19 +1839,19 @@ fn remove_recovery_leaf(path: &Path) -> Result<()> {
 
 fn remove_recovery_leaf_durable(path: &Path) -> Result<()> {
     remove_recovery_leaf(path)?;
-    sync_parent_directory(path)
+    sync_existing_ancestor(path)
 }
 
-fn remove_path_if_present(path: &Path) -> Result<bool> {
-    let Some(metadata) = symlink_metadata_if_present(path)? else {
-        return Ok(false);
-    };
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        fs::remove_dir_all(path)?;
-    } else {
-        fs::remove_file(path)?;
+// On a second recovery pass a previously removed parent may itself be absent.
+// Flush the surviving ancestry instead of making successful rollback non-idempotent.
+fn sync_existing_ancestor(path: &Path) -> Result<()> {
+    for parent in path.ancestors().skip(1) {
+        if validate_directory_component(parent)? {
+            fs::File::open(parent)?.sync_all()?;
+            break;
+        }
     }
-    Ok(true)
+    Ok(())
 }
 
 fn sync_parent_directory(path: &Path) -> Result<()> {
@@ -1528,23 +1875,6 @@ fn record_cleanup_error(result: Result<()>, first_error: &mut Option<StateError>
     }
 }
 
-fn target_file_is_identical(path: &Path, file: &ManifestFile) -> bool {
-    file.file_type == "file"
-        && fs::symlink_metadata(path)
-            .map(|metadata| {
-                metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.len() == file.size
-                    && file
-                        .mode
-                        .is_none_or(|mode| metadata.permissions().mode() & 0o7777 == mode & 0o7777)
-            })
-            .unwrap_or(false)
-        && blake3_file(path)
-            .map(|hash| hash == file.file_hash)
-            .unwrap_or(false)
-}
-
 pub(crate) fn include_file(mode: RestoreMode, file: &ManifestFile) -> bool {
     match mode {
         RestoreMode::CompleteApplication | RestoreMode::Custom => true,
@@ -1556,23 +1886,6 @@ pub(crate) fn include_file(mode: RestoreMode, file: &ManifestFile) -> bool {
                 || file.semantic_role == SemanticRole::Secret
         }
     }
-}
-
-fn validate_symlink_target(
-    target: &str,
-    _roots: &LogicalRootMap,
-    _root: &LogicalRoot,
-) -> Result<()> {
-    if target.starts_with("/proc")
-        || target.starts_with("/sys")
-        || target.starts_with("/dev")
-        || target.contains("..")
-    {
-        return Err(StateError::UnsafePath(format!(
-            "symlink target rejected: {target}"
-        )));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

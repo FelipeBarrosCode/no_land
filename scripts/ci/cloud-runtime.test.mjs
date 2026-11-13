@@ -31,9 +31,20 @@ test('cloud installer validates downloads and does not replace host graphics or 
 
 test('launcher source is embedded in the app instead of depending on external release settings', () => {
   const source = read('src-tauri/src/services/runtime_manager.rs');
-  for (const file of ['gui.py', 'Cargo.lock', 'install-cloud-runtime.sh', 'packages.txt']) assert.ok(source.includes(file));
+  for (const file of ['gui.py', 'Cargo.lock', 'install-cloud-runtime.sh', 'packages.txt', 'elf.rs', 'maintenance.rs', 'maintain-runtime.py', 'prerequisites.json']) assert.ok(source.includes(file));
   assert.match(source, /ssh_with_stdin/);
   assert.doesNotMatch(source, /option_env!|NOLAND_RUNTIME_AGENT_URL|release_settings/);
+});
+
+test('runtime maintenance is restricted to isolated Ubuntu images and approved packages', () => {
+  const helper = read('scripts/runtime/maintain-runtime.py');
+  assert.match(helper, /allowed = set\(catalog\['libraries'\]\.values\(\)\)/);
+  assert.match(helper, /'\/usr\/sbin\/chroot', str\(stage\), '\/usr\/bin\/apt-get'/);
+  assert.doesNotMatch(helper, /--allow-unauthenticated|--allow-insecure-repositories|shell=True/);
+  const gui = read('runtime-agent/src/gui.py');
+  assert.match(gui, /Update Runtime/);
+  assert.match(gui, /"--expected-plan", plan\["approvalDigest"\]/);
+  assert.match(gui, /Install app prerequisites\?/);
 });
 
 test('provisioned images contain the Wayland server ABI needed by NVIDIA EGL', () => {
@@ -45,4 +56,17 @@ test('host config overlay targets are materialized before activating a read-only
   assert.match(source, /for name in hosts resolv\.conf localtime; do/);
   assert.match(source, /mv -f -- "\$image_stage\/etc\/\$name\.noland-new" "\$image_stage\/etc\/\$name"/);
   assert.ok(source.indexOf('for name in hosts resolv.conf localtime; do') < source.indexOf('mv -- "$image_stage" "$image"'));
+});
+
+test('runtime does not introduce CPU/GPU quotas, pinning or rendering/thread caps', () => {
+  const engine = read('runtime-agent/src/engine.rs');
+  const launch = engine.slice(engine.indexOf('fn bwrap('), engine.indexOf('fn check('));
+  assert.doesNotMatch(launch, /"(?:taskset|nice|renice|cpulimit|systemd-run)"|CPUQuota=|CPUWeight=|CPUAffinity=|--cpus|--cpu-quota|--cpuset-cpus/);
+  assert.doesNotMatch(launch, /"(?:OMP_NUM_THREADS|OPENBLAS_NUM_THREADS|GOMP_CPU_AFFINITY|CUDA_VISIBLE_DEVICES|CUDA_MPS_ACTIVE_THREAD_PERCENTAGE|LIBGL_ALWAYS_SOFTWARE|MESA_LOADER_DRIVER_OVERRIDE|DXVK_FRAME_RATE|__GL_MaxFramesAllowed)"/);
+  assert.match(launch, /"--clearenv"/);
+  assert.match(launch, /bind_gpu_devices\(&mut c, &gpu.devices\)/);
+  assert.match(engine, /"cpu-access"/);
+  for (const path of ['scripts/runtime/install-cloud-runtime.sh', 'scripts/runtime/maintain-runtime.py', 'src-tauri/src/services/runtime_manager.rs']) {
+    assert.doesNotMatch(read(path), /CPUQuota=|CPUWeight=|CPUAffinity=|--cpu-quota|--cpuset-cpus|nvidia-smi\s+(?:-pl|--power-limit|-lgc|--lock-gpu-clocks)/);
+  }
 });

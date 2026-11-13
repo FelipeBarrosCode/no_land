@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use noland_state_core::{ManifestFile, Result, StateError};
 
 use super::{elapsed_us, open_partial, PendingFile, PipelineProgress, MAX_UNPUBLISHED_FILES};
+use crate::identity::VerifiedIdentity;
 
 pub(super) struct VerificationTask {
     pub pending: PendingFile,
@@ -34,7 +35,7 @@ impl VerificationTask {
 
 pub(super) struct VerifiedFile {
     pub pending: PendingFile,
-    pub identity: (u64, u64),
+    pub identity: VerifiedIdentity,
 }
 
 #[derive(Default)]
@@ -51,18 +52,47 @@ pub(super) fn verify_file(
     stats: &VerificationStats,
     stopped: &AtomicBool,
     buffer: &mut [u8],
-) -> Result<(u64, u64)> {
+) -> Result<VerifiedIdentity> {
     let started = Instant::now();
     let pending = &task.pending;
     super::validate_parent_chain(&pending.planned.root, &pending.partial)?;
-    let mut output = open_partial(pending)?;
-    let metadata = output.metadata()?;
+    let (mut output, metadata) = open_partial(pending)?;
+    let assembled = VerifiedIdentity::from_metadata(&metadata);
+    if pending
+        .last_write
+        .is_some_and(|last_write| last_write != assembled)
+    {
+        return Err(StateError::Integrity(
+            "restore partial changed before verification".into(),
+        ));
+    }
     if pending.received != task.size || metadata.len() != task.size {
         return Err(StateError::Integrity(
             "reconstructed file size mismatch".into(),
         ));
     }
-    let digest = if pending.out_of_order {
+    let changed_mode = task
+        .mode
+        .filter(|mode| metadata.mode() & 0o7777 != mode & 0o7777);
+    if let Some(mode) = changed_mode {
+        output.set_permissions(fs::Permissions::from_mode(mode))?;
+    }
+    let before = if changed_mode.is_some() {
+        VerifiedIdentity::from_metadata(&output.metadata()?)
+    } else {
+        assembled
+    };
+    // Permission application is the only intended change before hashing.
+    if (changed_mode.is_none() && assembled != before)
+        || !assembled
+            .with_mode(before.mode)
+            .matches_after_rename(before)
+    {
+        return Err(StateError::Integrity(
+            "restore partial changed while setting permissions".into(),
+        ));
+    }
+    let digest = if pending.readback || (pending.received != 0 && pending.hasher.is_none()) {
         let mut hasher = blake3::Hasher::new();
         loop {
             if stopped.load(Ordering::Acquire) {
@@ -89,9 +119,6 @@ pub(super) fn verify_file(
             "reconstructed file hash mismatch".into(),
         ));
     }
-    if let Some(mode) = task.mode {
-        output.set_permissions(fs::Permissions::from_mode(mode))?;
-    }
     stats
         .verify_us
         .fetch_add(elapsed_us(started), Ordering::Relaxed);
@@ -102,12 +129,18 @@ pub(super) fn verify_file(
     // A directory flush does not make file contents durable. Keep the file
     // barrier, but overlap it with assembly of the bounded next window.
     output.sync_all()?;
+    let after = VerifiedIdentity::from_metadata(&output.metadata()?);
+    if before != after || !after.matches_path(&pending.partial) {
+        return Err(StateError::Integrity(
+            "restore partial changed during verification".into(),
+        ));
+    }
     stats
         .sync_us
         .fetch_add(elapsed_us(sync_started), Ordering::Relaxed);
     stats.verified_bytes.fetch_add(task.size, Ordering::Relaxed);
     stats.verified_files.fetch_add(1, Ordering::Relaxed);
-    Ok((metadata.dev(), metadata.ino()))
+    Ok(after)
 }
 
 pub(super) struct VerificationPool {
@@ -125,7 +158,12 @@ impl VerificationPool {
 
     pub fn start(
         workers: usize,
-        verify: impl Fn(&VerificationTask, &VerificationStats, &AtomicBool, &mut [u8]) -> Result<(u64, u64)>
+        verify: impl Fn(
+                &VerificationTask,
+                &VerificationStats,
+                &AtomicBool,
+                &mut [u8],
+            ) -> Result<VerifiedIdentity>
             + Send
             + Sync
             + 'static,

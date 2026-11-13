@@ -38,13 +38,17 @@ pub async fn save_static_provider_credentials(
     prefix: Option<String>,
     display_name: String,
 ) -> Result<SharedStorageProfile, FrontendError> {
-    clear_pending_oauth_sessions(context.inner()).await?;
-    let provider: StorageProvider = serde_json::from_str(&format!(r#"\"{}\""#, provider))
-        .map_err(|e| AppError::InvalidInput(format!("Unknown provider: {e}")))?;
+    let provider = parse_storage_provider(&provider)?;
 
-    let raw_fields: HashMap<String, String> = serde_json::from_str(&credentials_json)
+    let mut raw_fields: HashMap<String, String> = serde_json::from_str(&credentials_json)
         .map_err(|e| AppError::InvalidInput(format!("Invalid credentials payload: {e}")))?;
+    if let Some(bucket) = bucket.as_ref().filter(|value| !value.trim().is_empty()) {
+        raw_fields.insert("bucket".into(), bucket.clone());
+    }
+    normalize_provider_fields(&provider, &mut raw_fields)?;
+    validate_required_provider_fields(&provider, &raw_fields)?;
     let credentials = build_storage_credentials(&provider, &raw_fields)?;
+    clear_pending_oauth_sessions(context.inner()).await?;
 
     let manager = get_profile_manager();
     let profile = manager
@@ -217,6 +221,11 @@ pub async fn disconnect_shared_storage_profile(
     Ok(())
 }
 
+fn parse_storage_provider(provider: &str) -> Result<StorageProvider, FrontendError> {
+    serde_json::from_value(serde_json::Value::String(provider.trim().to_owned()))
+        .map_err(|_| AppError::InvalidInput("Unknown storage provider".into()).into())
+}
+
 fn required_field<'a>(
     raw_fields: &'a HashMap<String, String>,
     key: &str,
@@ -233,6 +242,13 @@ fn optional_field(raw_fields: &HashMap<String, String>, key: &str) -> Option<Str
         .get(key)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn optional_secret(raw_fields: &HashMap<String, String>, key: &str) -> Option<String> {
+    raw_fields
+        .get(key)
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
 }
 
 fn build_storage_credentials(
@@ -260,12 +276,29 @@ fn build_storage_credentials(
             username: required_field(raw_fields, "account_name")?.to_string(),
             password: required_field(raw_fields, "account_key")?.to_string(),
         }),
-        StorageProvider::Sftp | StorageProvider::Webdav => {
-            Ok(StorageCredential::UsernamePassword {
-                username: required_field(raw_fields, "username")?.to_string(),
-                password: required_field(raw_fields, "password")?.to_string(),
-            })
+        StorageProvider::Sftp => {
+            let username = required_field(raw_fields, "username")?.to_string();
+            let password = optional_secret(raw_fields, "password");
+            let private_key = optional_secret(raw_fields, "private_key");
+            let passphrase = optional_secret(raw_fields, "passphrase");
+            match (password, private_key) {
+                (Some(password), None) if passphrase.is_none() => {
+                    Ok(StorageCredential::UsernamePassword { username, password })
+                }
+                (None, Some(private_key)) => Ok(StorageCredential::SshKey {
+                    username,
+                    private_key,
+                    passphrase,
+                }),
+                _ => Err(AppError::InvalidInput(
+                    "SFTP requires either a password or a PEM private key; a passphrase is only valid with a private key.".into(),
+                ).into()),
+            }
         }
+        StorageProvider::Webdav => Ok(StorageCredential::UsernamePassword {
+            username: required_field(raw_fields, "username")?.to_string(),
+            password: required_field(raw_fields, "password")?.to_string(),
+        }),
         StorageProvider::GoogleDrive
         | StorageProvider::MicrosoftOneDrive
         | StorageProvider::Dropbox
@@ -275,6 +308,84 @@ fn build_storage_credentials(
         ))
         .into()),
     }
+}
+
+fn normalize_provider_fields(
+    provider: &StorageProvider,
+    raw_fields: &mut HashMap<String, String>,
+) -> Result<(), FrontendError> {
+    // The form displays the first select option before an onChange is emitted.
+    for field in provider.definition().fields {
+        if let crate::models::application_bundle::ProviderFieldType::Select { options } =
+            field.field_type
+        {
+            if let Some(default) = options.first() {
+                raw_fields
+                    .entry(field.key)
+                    .or_insert_with(|| default.value.clone());
+            }
+        }
+    }
+    if provider != &StorageProvider::Sftp {
+        return Ok(());
+    }
+    let legacy = optional_field(raw_fields, "host_key");
+    let current = optional_field(raw_fields, "host_keys");
+    if let (Some(legacy), Some(current)) = (&legacy, &current) {
+        if legacy != current {
+            return Err(AppError::InvalidInput("Conflicting SFTP host key fields".into()).into());
+        }
+    }
+    if let Some(host_keys) = current.or(legacy) {
+        // rclone accepts full public keys, not SHA256/MD5 fingerprints. Do not
+        // silently ignore the older UI's singular field when a pin was supplied.
+        if host_keys.contains(['\r', '\n'])
+            || host_keys.split(',').any(|key| {
+                let mut parts = key.split_whitespace();
+                !parts.next().is_some_and(|kind| {
+                    kind.starts_with("ssh-")
+                        || kind.starts_with("ecdsa-")
+                        || kind.starts_with("sk-")
+                }) || parts.next().is_none()
+            })
+        {
+            return Err(AppError::InvalidInput(
+                "SFTP host_keys must contain complete SSH public keys, separated by commas, not fingerprints.".into(),
+            ).into());
+        }
+        raw_fields.insert("host_keys".into(), host_keys);
+    }
+    raw_fields.remove("host_key");
+    Ok(())
+}
+
+fn validate_required_provider_fields(
+    provider: &StorageProvider,
+    raw_fields: &HashMap<String, String>,
+) -> Result<(), FrontendError> {
+    for field in provider.definition().fields {
+        if field.required {
+            if matches!(field.key.as_str(), "container" | "space_name")
+                && optional_field(raw_fields, "bucket").is_some()
+            {
+                continue;
+            }
+            required_field(raw_fields, &field.key)?;
+        }
+    }
+    if provider == &StorageProvider::Sftp {
+        if let Some(port) = optional_field(raw_fields, "port") {
+            if port.parse::<u16>().ok().filter(|port| *port != 0).is_none() {
+                return Err(
+                    AppError::InvalidInput("SFTP port must be between 1 and 65535".into()).into(),
+                );
+            }
+        }
+        // Credential alternatives are validated by the same constructor used to
+        // write the existing secure credential store.
+        build_storage_credentials(provider, raw_fields)?;
+    }
+    Ok(())
 }
 
 fn failed_test_result(error: String) -> SharedStorageTestResult {
@@ -457,8 +568,7 @@ pub async fn begin_oauth_authorization(
     locale: Option<String>,
 ) -> Result<OAuthBeginResponse, FrontendError> {
     clear_pending_oauth_sessions(context.inner()).await?;
-    let provider: StorageProvider = serde_json::from_str(&format!("\"{}\"", provider))
-        .map_err(|e| AppError::InvalidInput(format!("Unknown provider: {e}")))?;
+    let provider = parse_storage_provider(&provider)?;
 
     let config = crate::services::shared_storage::oauth_flow::get_oauth_config(
         &provider,
@@ -793,38 +903,24 @@ async fn run_loopback_server(
                                 s.status = OAuthSessionStatus::Failed(outcome_message.clone());
                             }
                         } else {
-                            let now = chrono::Utc::now().timestamp();
-                            let credentials = StorageCredential::OAuth2 {
-                                access_token: token.access_token.clone(),
+                            match finish_oauth_session(
+                                &context,
+                                &session_id,
+                                &provider,
+                                token,
                                 refresh_token,
-                                expires_at: now + token.expires_in.unwrap_or(3600),
-                            };
-
-                            get_profile_manager()
-                                .store_oauth_session_credentials(
-                                    &context,
-                                    &session_id,
-                                    &credentials,
-                                )
-                                .await
-                                .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
-
-                            let verify: Option<StorageCredential> = get_profile_manager()
-                                .retrieve_oauth_session_credentials(&context, &session_id)
-                                .await
-                                .map_err(|e| {
-                                    format!("Verify persisted OAuth session credentials: {e}")
-                                })?;
-                            tracing::info!(
-                                "OAuth tokens stored for session {session_id}, verified: {}",
-                                verify.is_some()
-                            );
-
-                            let mut sessions = get_oauth_sessions().write().await;
-                            if let Some(s) = sessions.get_mut(&session_id) {
-                                s.status = OAuthSessionStatus::Completed;
+                            )
+                            .await
+                            {
+                                Ok(()) => outcome_ok = true,
+                                Err(error) => {
+                                    outcome_message = error.clone();
+                                    let mut sessions = get_oauth_sessions().write().await;
+                                    if let Some(session) = sessions.get_mut(&session_id) {
+                                        session.status = OAuthSessionStatus::Failed(error);
+                                    }
+                                }
                             }
-                            outcome_ok = true;
                         }
                     }
                     Err(e) => {
@@ -880,6 +976,53 @@ async fn run_loopback_server(
     Ok(())
 }
 
+async fn finish_oauth_session(
+    context: &AppContext,
+    session_id: &str,
+    provider: &StorageProvider,
+    token: crate::services::shared_storage::oauth_flow::OAuthTokenResponse,
+    refresh_token: Option<String>,
+) -> Result<(), String> {
+    let drive = if provider == &StorageProvider::MicrosoftOneDrive {
+        Some(
+            crate::services::shared_storage::oauth_flow::discover_onedrive_drive(
+                &token.access_token,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let credentials = StorageCredential::OAuth2 {
+        access_token: token.access_token,
+        refresh_token,
+        expires_at: chrono::Utc::now().timestamp() + token.expires_in.unwrap_or(3600),
+    };
+    get_profile_manager()
+        .store_oauth_session_credentials(context, session_id, &credentials)
+        .await
+        .map_err(|_| "Could not persist OAuth session credentials".to_string())?;
+
+    let mut sessions = get_oauth_sessions().write().await;
+    let Some(session) = sessions.get_mut(session_id) else {
+        drop(sessions);
+        get_profile_manager()
+            .delete_oauth_session_credentials(context, session_id)
+            .await
+            .map_err(|_| "Could not clear cancelled OAuth session credentials".to_string())?;
+        return Err("OAuth session was cancelled; authorize again.".into());
+    };
+    if let Some((drive_id, drive_type)) = drive {
+        session.oauth_fields.insert("drive_id".into(), drive_id);
+        session.oauth_fields.insert("drive_type".into(), drive_type);
+    }
+    // Completion is visible only after both drive metadata and credentials are
+    // available. complete_oauth_authorization persists these provider fields in
+    // the existing secure profile store.
+    session.status = OAuthSessionStatus::Completed;
+    Ok(())
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -899,4 +1042,130 @@ fn extract_query_param(path: &str, param: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn static_s3_fields_accept_separate_bucket_and_displayed_default_region() {
+        let mut fields = HashMap::from([
+            ("bucket".into(), "synthetic-bucket".into()),
+            ("access_key_id".into(), "synthetic-id".into()),
+            ("secret_access_key".into(), "synthetic-secret".into()),
+        ]);
+        normalize_provider_fields(&StorageProvider::AmazonS3, &mut fields).unwrap();
+        validate_required_provider_fields(&StorageProvider::AmazonS3, &fields).unwrap();
+        assert_eq!(fields["region"], "us-east-1");
+        assert!(matches!(
+            build_storage_credentials(&StorageProvider::AmazonS3, &fields).unwrap(),
+            StorageCredential::S3 { .. }
+        ));
+    }
+
+    #[test]
+    fn provider_names_are_deserialized_as_data_not_json_fragments() {
+        for definition in crate::services::shared_storage::object_storage::list_all_providers() {
+            let value = serde_json::to_value(&definition.provider).unwrap();
+            let name = value.as_str().unwrap();
+            assert_eq!(parse_storage_provider(name).unwrap(), definition.provider);
+            assert_eq!(
+                parse_storage_provider(&format!("  {name}  ")).unwrap(),
+                definition.provider
+            );
+        }
+        for name in ["", "sftp\"", "\"sftp\"", "sftp\\n", "unknown_provider"] {
+            assert!(parse_storage_provider(name).is_err());
+        }
+    }
+
+    fn sftp_fields() -> HashMap<String, String> {
+        HashMap::from([
+            ("host".into(), "synthetic.example".into()),
+            ("username".into(), "synthetic-user".into()),
+            ("remote_path".into(), "/synthetic-backups".into()),
+        ])
+    }
+
+    #[test]
+    fn sftp_accepts_either_credential_mode_and_preserves_secret_bytes() {
+        let mut fields = sftp_fields();
+        assert!(build_storage_credentials(&StorageProvider::Sftp, &fields).is_err());
+        fields.insert("password".into(), " synthetic password ".into());
+        validate_required_provider_fields(&StorageProvider::Sftp, &fields).unwrap();
+        let StorageCredential::UsernamePassword { password, .. } =
+            build_storage_credentials(&StorageProvider::Sftp, &fields).unwrap()
+        else {
+            panic!("password credential expected")
+        };
+        assert_eq!(password, " synthetic password ");
+        fields.insert(
+            "private_key".into(),
+            "-----BEGIN PRIVATE KEY-----\nsynthetic-only\n-----END PRIVATE KEY-----\n".into(),
+        );
+        assert!(build_storage_credentials(&StorageProvider::Sftp, &fields).is_err());
+        fields.remove("password");
+        fields.insert("passphrase".into(), " synthetic passphrase ".into());
+        validate_required_provider_fields(&StorageProvider::Sftp, &fields).unwrap();
+        let StorageCredential::SshKey {
+            private_key,
+            passphrase,
+            ..
+        } = build_storage_credentials(&StorageProvider::Sftp, &fields).unwrap()
+        else {
+            panic!("key credential expected")
+        };
+        assert_eq!(&private_key, fields.get("private_key").unwrap());
+        assert_eq!(passphrase.as_deref(), Some(" synthetic passphrase "));
+        fields.remove("private_key");
+        fields.insert("password".into(), "synthetic-password".into());
+        assert!(build_storage_credentials(&StorageProvider::Sftp, &fields).is_err());
+    }
+
+    #[test]
+    fn sftp_public_key_pins_use_adapter_field_and_reject_fingerprint_only_input() {
+        let mut fields = sftp_fields();
+        fields.insert("host_key".into(), "ssh-ed25519 SYNTHETIC_PUBLIC_KEY".into());
+        normalize_provider_fields(&StorageProvider::Sftp, &mut fields).unwrap();
+        assert!(!fields.contains_key("host_key"));
+        assert_eq!(fields["host_keys"], "ssh-ed25519 SYNTHETIC_PUBLIC_KEY");
+        fields.insert(
+            "host_key".into(),
+            "ssh-ed25519 DIFFERENT_SYNTHETIC_KEY".into(),
+        );
+        assert!(normalize_provider_fields(&StorageProvider::Sftp, &mut fields).is_err());
+        fields.remove("host_key");
+        for invalid in [
+            "SHA256:synthetic",
+            "MD5:synthetic",
+            "ssh-ed25519",
+            "ssh-ed25519 synthetic\nextra = value",
+        ] {
+            fields.insert("host_keys".into(), invalid.into());
+            assert!(normalize_provider_fields(&StorageProvider::Sftp, &mut fields).is_err());
+        }
+    }
+
+    #[test]
+    fn sftp_requires_destination_and_valid_port_and_oauth_rejects_static_secrets() {
+        let mut fields = sftp_fields();
+        fields.insert("password".into(), "synthetic-password".into());
+        for port in ["0", "65536", "invalid"] {
+            fields.insert("port".into(), port.into());
+            assert!(validate_required_provider_fields(&StorageProvider::Sftp, &fields).is_err());
+        }
+        fields.insert("port".into(), "2222".into());
+        validate_required_provider_fields(&StorageProvider::Sftp, &fields).unwrap();
+        fields.remove("host");
+        assert!(validate_required_provider_fields(&StorageProvider::Sftp, &fields).is_err());
+        for provider in [
+            StorageProvider::GoogleDrive,
+            StorageProvider::MicrosoftOneDrive,
+            StorageProvider::Dropbox,
+            StorageProvider::Box,
+        ] {
+            assert!(build_storage_credentials(&provider, &fields).is_err());
+        }
+    }
 }

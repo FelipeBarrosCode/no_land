@@ -299,6 +299,14 @@ fn bind_input_devices(command: &mut Command, input: &Path, udev: &Path, sys: &Pa
     }
 }
 
+fn bind_gpu_devices(command: &mut Command, devices: &[PathBuf]) {
+    // Direct access to every GPU node the parent grants us. No GPU scheduler,
+    // VRAM quota, power/clock adjustment, or software-rendering layer is added.
+    for device in devices {
+        command.arg("--dev-bind").arg(device).arg(device);
+    }
+}
+
 fn bwrap(
     store: &Store,
     session: &Session,
@@ -358,6 +366,8 @@ fn bwrap(
         "--unshare-user",
         "--unshare-pid",
         "--unshare-uts",
+        // A cgroup namespace changes visibility, not membership or capacity.
+        // Keep the parent's CPU affinity/quotas; never add a runtime-only cap.
         "--unshare-cgroup-try",
         "--cap-drop",
         "ALL",
@@ -399,9 +409,7 @@ fn bwrap(
     .arg("--ro-bind")
     .arg(&gpu.directory)
     .arg("/opt/noland-driver");
-    for device in &gpu.devices {
-        c.arg("--dev-bind").arg(device).arg(device);
-    }
+    bind_gpu_devices(&mut c, &gpu.devices);
     bind_input_devices(
         &mut c,
         Path::new("/dev/input"),
@@ -496,6 +504,32 @@ fn check(name: &str, result: Result<String>) -> Check {
     }
 }
 
+fn cpu_access(parent_status: &str, runtime_status: &str) -> Result<String> {
+    fn allowed(status: &str) -> Result<&str> {
+        let list = status
+            .lines()
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .map(str::trim)
+            .filter(|list| !list.is_empty())
+            .context("CPU affinity is unavailable")?;
+        anyhow::ensure!(
+            list.bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b',' | b'-')),
+            "Invalid CPU affinity"
+        );
+        Ok(list)
+    }
+    let parent = allowed(parent_status)?;
+    let runtime = allowed(runtime_status)?;
+    anyhow::ensure!(
+        parent == runtime,
+        "Runtime CPU affinity ({runtime}) differs from the parent ({parent}); CPU access must not be narrowed by the runtime"
+    );
+    Ok(format!(
+        "Runtime and parent allow the same CPUs: {parent}. Provider/parent quotas and scheduling still apply."
+    ))
+}
+
 pub fn doctor(store: &Store) -> Result<Status> {
     let mut report = status(store)?;
     let probe = (|| -> Result<Vec<Check>> {
@@ -504,7 +538,20 @@ pub fn doctor(store: &Store) -> Result<Status> {
         let gpu = Gpu::discover(&session)?;
         let home = session.dir.join("probe-home");
         private_dir(&home)?;
-        let mut checks = Vec::new();
+        let mut checks = vec![check(
+            "cpu-access",
+            (|| -> Result<String> {
+                let parent = fs::read_to_string("/proc/self/status")?;
+                let output = bwrap(store, &session, &gpu, &home, &home)?
+                    .args(["/bin/cat", "/proc/self/status"])
+                    .output()?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "Cannot inspect runtime CPU affinity"
+                );
+                cpu_access(&parent, &String::from_utf8(output.stdout)?)
+            })(),
+        )];
         for (name, args, expected) in [
             (
                 "namespace-glibc",
@@ -652,6 +699,47 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
     let gpu = Gpu::discover(&session)?;
     let data = store.data.join("app-data").join(id);
     private_dir(&data)?;
+    let (app_directory, executable) = materialize_application(store, &app, &session, &gpu)?;
+    let c = bwrap(store, &session, &gpu, &data, &app_directory)?;
+    let mut args = c.get_args().map(|s| s.to_os_string()).collect::<Vec<_>>();
+    let index = args
+        .iter()
+        .position(|a| a == "bwrap")
+        .context("Missing backend")?;
+    args.drain(..=index);
+    let status = clean_command("bwrap").args(args).arg(executable).status()?;
+    anyhow::ensure!(
+        status.success(),
+        "Application exited unsuccessfully ({status}); consult the launch log"
+    );
+    Ok(())
+}
+
+/// AppImage extraction still runs only as the approved desktop user, never in
+/// the elevated package helper. Native ELF inspection does not execute the app.
+pub(crate) fn dependency_files(store: &Store, app: &App) -> Result<(PathBuf, PathBuf)> {
+    if !app.appimage {
+        let directory = app
+            .file
+            .parent()
+            .context("Missing application directory")?
+            .to_owned();
+        return Ok((directory, app.file.clone()));
+    }
+    let session = Session::discover(store)?;
+    session.refresh_authority()?;
+    let gpu = Gpu::discover(&session)?;
+    let (directory, executable) = materialize_application(store, app, &session, &gpu)?;
+    let relative = executable.strip_prefix("/app")?;
+    Ok((directory.clone(), directory.join(relative)))
+}
+
+fn materialize_application(
+    store: &Store,
+    app: &App,
+    session: &Session,
+    gpu: &Gpu,
+) -> Result<(PathBuf, PathBuf)> {
     let directory = app.file.parent().context("Missing application directory")?;
     let name = app.file.file_name().context("Missing application name")?;
     let mut executable = PathBuf::from("/app").join(name);
@@ -666,7 +754,7 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
                 .join("cache")
                 .join(format!("extract-{}", uuid::Uuid::new_v4()));
             private_dir(&staging)?;
-            let mut c = bwrap(store, &session, &gpu, &staging, directory)?;
+            let mut c = bwrap(store, session, gpu, &staging, directory)?;
             c.arg(executable).arg("--appimage-extract");
             // Extraction happens in the writable HOME, as the real desktop UID.
             let args = c.get_args().map(|s| s.to_os_string()).collect::<Vec<_>>();
@@ -698,20 +786,7 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
         app_directory = cache.join("squashfs-root");
         executable = "/app/AppRun".into();
     }
-    let c = bwrap(store, &session, &gpu, &data, &app_directory)?;
-    let mut args = c.get_args().map(|s| s.to_os_string()).collect::<Vec<_>>();
-    // Remove the outer probe timeout. Bubblewrap itself is supervised to completion.
-    let index = args
-        .iter()
-        .position(|a| a == "bwrap")
-        .context("Missing backend")?;
-    args.drain(..=index);
-    let status = clean_command("bwrap").args(args).arg(executable).status()?;
-    anyhow::ensure!(
-        status.success(),
-        "Application exited unsuccessfully ({status}); consult the launch log"
-    );
-    Ok(())
+    Ok((app_directory, executable))
 }
 
 pub fn create_shortcut(store: &Store, id: Option<&str>) -> Result<PathBuf> {
@@ -766,6 +841,56 @@ pub fn create_shortcut(store: &Store, id: Option<&str>) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod driver_tests {
+    #[test]
+    fn gpu_nodes_are_bound_directly_without_reducing_the_parent_device_set() {
+        let devices = [
+            "/dev/nvidia0",
+            "/dev/nvidia1",
+            "/dev/nvidiactl",
+            "/dev/nvidia-modeset",
+            "/dev/nvidia-uvm",
+            "/dev/nvidia-uvm-tools",
+            "/dev/dri/renderD128",
+        ]
+        .map(std::path::PathBuf::from);
+        let mut command = std::process::Command::new("bwrap");
+        super::bind_gpu_devices(&mut command, &devices);
+        let expected = devices
+            .iter()
+            .flat_map(|device| {
+                [
+                    std::ffi::OsStr::new("--dev-bind"),
+                    device.as_os_str(),
+                    device.as_os_str(),
+                ]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(command.get_args().collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn cpu_access_keeps_sparse_and_large_parent_allocations_intact() {
+        for list in ["0", "0-14", "0-3,8,10-12", "0-255"] {
+            let parent = format!("Name:\tlauncher\nCpus_allowed_list:\t{list}\n");
+            let runtime = format!("Name:\tcat\nCpus_allowed_list:\t{list}\n");
+            assert!(super::cpu_access(&parent, &runtime).unwrap().contains(list));
+        }
+    }
+
+    #[test]
+    fn cpu_access_reports_narrowed_missing_or_invalid_affinity() {
+        let parent = "Cpus_allowed_list:\t0-14\n";
+        let narrowed = "Cpus_allowed_list:\t0-3\n";
+        assert!(super::cpu_access(parent, narrowed)
+            .unwrap_err()
+            .to_string()
+            .contains("differs from the parent"));
+        for invalid in ["", "Cpus_allowed_list:\n", "Cpus_allowed_list:\tunknown\n"] {
+            assert!(super::cpu_access(parent, invalid).is_err());
+            assert!(super::cpu_access(invalid, parent).is_err());
+        }
+    }
+
     #[test]
     fn input_devices_and_optional_udev_metadata_are_shared() {
         let temp = tempfile::tempdir().unwrap();

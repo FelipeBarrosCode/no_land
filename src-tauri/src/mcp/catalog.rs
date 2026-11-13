@@ -86,6 +86,7 @@ pub fn specs() -> Vec<Spec> {
         tool("settings_get","Read non-secret stream/server settings; authentication settings are never exposed",Read,false,false,false,json!({}),&[]),
         tool("settings_update","Update allowlisted stream settings, with explicit human approval",Control,false,true,true,json!({"patch":{"type":"object"}}),&["patch"]),
         tool("storage_status","Inspect backup state",Read,true,false,true,json!({}),&[]),
+        tool("storage_operation_status","Read one storage operation's progress, confirmed-absent object counts and last successful request. Available during deletion; never starts or retries work. Omit operation_id to inspect this PC's tracked active operation.",Read,true,false,true,json!({"operation_id":text()}),&[]),
         tool("storage_backup","Back up selected remote objects through the normal storage service",Control,true,false,true,json!({"object_ids":{"type":"array"}}),&["object_ids"]),
         tool("storage_restore","Restore selected remote objects; human approval required",Control,true,true,true,json!({"object_ids":{"type":"array"}}),&["object_ids"]),
         tool("ui_snapshot","Inspect the main app's registered actions and dialogs, not the entire local computer",Read,false,false,false,json!({}),&[]),
@@ -101,6 +102,20 @@ pub fn specs() -> Vec<Spec> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn storage_progress_remains_available_with_only_a_read_only_instance_grant() {
+        use noland_mcp::policy::{Config, Scope};
+        let specs = super::specs();
+        let spec = specs.iter().find(|spec| spec.name == "storage_operation_status").unwrap();
+        assert!(spec.scope == Scope::Read);
+        assert!(!spec.approval);
+        assert!(spec.machine);
+        let config = Config { enabled:true, instances:vec![42], ..Config::default() };
+        let arguments = |id| serde_json::json!({"instance_id":id}).as_object().unwrap().clone();
+        assert!(spec.authorize(&config, &arguments(42)).is_ok());
+        assert!(spec.authorize(&config, &arguments(43)).is_err());
+    }
+
     #[test]
     fn tools_are_unique_and_dangerous_operations_require_approval() {
         let specs = super::specs();

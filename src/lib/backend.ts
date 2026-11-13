@@ -25,7 +25,6 @@ import type {
   SharedStorageTestResult,
   ProviderDefinition,
   ProfileReference,
-  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
@@ -858,6 +857,29 @@ export async function listInstanceExportableStorageObjects(instanceId: number) {
   );
 }
 
+export interface StorageDeletionPreview {
+  planId: string;
+  target: "remote_pc" | "cloud";
+  names: string[];
+  items: number;
+  bytes: number;
+  skipped: number;
+  retainsSharedPacks: boolean;
+  fullDeletion?: boolean;
+  physicalBytes?: number;
+  packCount?: number;
+  dependentBundles?: number;
+  samplePaths: string[];
+}
+
+export async function prepareStorageDeletion(instanceId: number, target: StorageDeletionPreview["target"], selectedPaths: string[]) {
+  return invokeSafe<StorageDeletionPreview>("prepare_storage_deletion", { instanceId, target, selectedPaths });
+}
+
+export async function confirmStorageDeletion(instanceId: number, preview: StorageDeletionPreview) {
+  return invokeSafe<unknown>("confirm_storage_deletion", { instanceId, target: preview.target, planId: preview.planId });
+}
+
 export async function subscribeSharedStorageRestoreCompleted(
   callback: (event: SharedStorageRestoreCompletedEvent) => void,
 ): Promise<() => void> {
@@ -888,18 +910,18 @@ export async function subscribeSharedStorageProgress(
 
 export async function cancelSharedStorageOperation(
   instanceId: number,
+  operationId?: string | null,
 ): Promise<string> {
-  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId });
+  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId, operationId });
 }
 
 export async function saveInstanceToSharedStorageSelected(
   instanceId: number,
   selectedPaths: string[],
-  performanceMode: BackupPerformanceMode = "balanced",
 ): Promise<string> {
   return invokeSafe<string>("save_instance_to_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths, performanceMode },
+    payload: { selectedPaths },
   });
 }
 

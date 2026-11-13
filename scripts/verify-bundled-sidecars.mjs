@@ -6,6 +6,8 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { cleanWindowsEnvironment, smokeTestOpenSsh, verifyOpenSshRuntime } from './windows-openssh.mjs';
+import { verifyPackagedNetHelper } from './net-helper-bundle.mjs';
+import { verifyMacNetHelperTrust } from './net-helper-trust.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
@@ -13,6 +15,7 @@ const productName = 'Noland Connect';
 const target = readTarget(process.argv.slice(2)) ?? defaultHostTarget();
 const releaseDir = chooseTargetReleaseDir(target);
 const bundleDir = join(releaseDir, 'bundle');
+const requireDistributables = process.argv.includes('--require-distributables');
 
 if (!target) {
   fail('Unable to determine target triple. Pass --target <triple>.');
@@ -61,6 +64,9 @@ function verifyMacBundles(targetTriple, bundleRoot) {
 }
 
 function verifyLinuxBundles(targetTriple, bundleRoot) {
+  if (requireDistributables && !findFirstPath(bundleRoot, path => /\.(AppImage|deb|rpm)$/u.test(path))) {
+    fail(`Missing Linux distributable: an AppDir/build-tree helper alone cannot prove bundle inclusion under ${bundleRoot}`);
+  }
   const appDir = findFirstPath(bundleRoot, (path) => path.endsWith('.AppDir'));
   if (appDir) {
     verifyBundleTree(appDir, targetTriple, 'linux AppDir');
@@ -95,9 +101,10 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
     withExtractedTemp('linux-deb-', (extractRoot) => {
       run('dpkg-deb', ['-x', deb, extractRoot]);
       const label = `deb package ${basename(deb)}`;
-      verifyBundleTree(extractRoot, targetTriple, label);
+      const { helper } = verifyBundleTree(extractRoot, targetTriple, label);
       verifyDebSystemRuntimeDependencies(deb, label);
       verifyLinuxLinkage(extractRoot, targetTriple, label);
+      verifyNetHelperConfiguration(helper, cleanLinuxRuntimeEnv());
     });
   }
 
@@ -107,8 +114,9 @@ function verifyLinuxBundles(targetTriple, bundleRoot) {
     withExtractedTemp('linux-rpm-', (extractRoot) => {
       runShell(`rpm2cpio '${escapeForSingleQuotes(rpm)}' | cpio -idm --quiet`, extractRoot);
       const label = `rpm package ${basename(rpm)}`;
-      verifyBundleTree(extractRoot, targetTriple, label);
+      const { helper } = verifyBundleTree(extractRoot, targetTriple, label);
       verifyLinuxLinkage(extractRoot, targetTriple, label);
+      verifyNetHelperConfiguration(helper, cleanLinuxRuntimeEnv());
     });
   }
 
@@ -144,12 +152,18 @@ function verifyWindowsBundles(targetTriple, bundleRoot) {
     return;
   }
 
+  if (requireDistributables) {
+    fail(`Missing Windows installer: a build-tree helper alone cannot prove bundle inclusion under ${bundleRoot}`);
+  }
+
   verifyBundleTree(bundleRoot, targetTriple, 'Windows bundle output');
   console.log(`Verified bundled Windows sidecars/runtime/resources in bundle output for ${targetTriple}`);
 }
 
 function verifyMacBundleTree(root, targetTriple, label) {
   verifyRequiredSidecars(root, targetTriple, label);
+  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
+  verifyMacNetHelperTrust(root, helper);
 
   const frameworkFound = findFirstPath(root, (path) => basename(path) === 'GStreamer.framework');
   if (!frameworkFound) {
@@ -161,10 +175,12 @@ function verifyMacBundleTree(root, targetTriple, label) {
 }
 
 function verifyBundleTree(root, targetTriple, label) {
+  const netHelper = verifyPackagedNetHelper(root, targetTriple, label);
   verifyRequiredSidecars(root, targetTriple, label);
   verifyRequiredRuntimeFiles(root, targetTriple, label);
   verifyBundledMicReceiverSource(root, label);
   verifyBundledNetworkAgentSource(root, label);
+  return netHelper;
 }
 
 function verifyMacExecutableSmokeTests(appBundle, targetTriple, label) {
@@ -227,24 +243,8 @@ function verifyLinuxExecutableSmokeTests(root, targetTriple, label) {
   verifyLinuxSystemToolWrapper(ssh, 'ssh', label);
   run(ssh, ['-V'], { env: cleanEnv });
 
-  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
-  withExtractedTemp('noland-helper-check-', (tempRoot) => {
-    const configPath = join(tempRoot, 'wg.conf');
-    writeFileSync(configPath, [
-      '[Interface]',
-      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'Address = 10.66.66.2/32',
-      'MTU = 1280',
-      '',
-      '[Peer]',
-      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
-      'AllowedIPs = 10.66.66.1/32',
-      'Endpoint = 127.0.0.1:51820',
-      'PersistentKeepalive = 25',
-      '',
-    ].join('\n'));
-    run(helper, ['check', '--config', configPath], { env: cleanEnv });
-  });
+  const { helper } = verifyPackagedNetHelper(root, targetTriple, label);
+  verifyNetHelperConfiguration(helper, cleanEnv);
 
   const appRun = join(root, 'AppRun');
   const executable = isExecutableFile(appRun) ? appRun : findLinuxAppExecutable(root);
@@ -628,24 +628,8 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   if (!runtime) fail(`Missing private OpenSSH distribution in ${label}`);
   withExtractedTemp('noland windows ssh ', (tempRoot) => smokeTestOpenSsh(runtime, tempRoot));
 
-  const helper = findRequiredSidecar(root, targetTriple, 'noland-net-helper');
-  withExtractedTemp('noland windows helper ', (tempRoot) => {
-    const configPath = join(tempRoot, 'tunnel config.conf');
-    writeFileSync(configPath, [
-      '[Interface]',
-      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
-      'Address = 10.66.66.2/32',
-      'MTU = 1280',
-      '',
-      '[Peer]',
-      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
-      'AllowedIPs = 10.66.66.1/32',
-      'Endpoint = 127.0.0.1:51820',
-      'PersistentKeepalive = 25',
-      '',
-    ].join('\n'));
-    run(helper, ['check', '--config', configPath], { env: cleanWindowsEnvironment() });
-  });
+  const { helper } = verifyPackagedNetHelper(root, targetTriple, label);
+  verifyNetHelperConfiguration(helper, cleanWindowsEnvironment());
 
   const expectedAppExecutableNames = new Set([
     'noland-connect.exe',
@@ -717,6 +701,30 @@ function verifyWindowsExecutableSmokeTests(root, targetTriple, label) {
   ].join('; ');
   run(join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
     ['-NoProfile', '-NonInteractive', '-Command', script], { env: cleanWindowsEnvironment() });
+}
+
+function verifyNetHelperConfiguration(helper, environment) {
+  withExtractedTemp('noland packaged helper ', tempRoot => {
+    const configPath = join(tempRoot, 'tunnel config.conf');
+    writeFileSync(configPath, [
+      '[Interface]',
+      'PrivateKey = AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      'Address = 10.66.66.2/32',
+      'MTU = 1280',
+      '',
+      '[Peer]',
+      'PublicKey = AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=',
+      'AllowedIPs = 10.66.66.1/32',
+      'Endpoint = 127.0.0.1:51820',
+      'PersistentKeepalive = 25',
+      '',
+    ].join('\n'));
+    const env = { ...environment };
+    delete env.NOLAND_NET_HELPER_BIN;
+    // Read-only validation: no tunnel, driver installation or privilege change.
+    // Use this exact extracted helper, never a source-tree/PATH replacement.
+    run(helper, ['check', '--config', configPath], { env });
+  });
 }
 
 function verifyRequiredSidecars(root, targetTriple, label) {

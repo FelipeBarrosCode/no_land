@@ -359,6 +359,7 @@ struct PausedStream {
     local: noland_storage::LocalStorage,
     bytes: Vec<u8>,
     resume: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    replay: bool,
 }
 
 #[async_trait::async_trait]
@@ -403,8 +404,14 @@ impl SharedStorageProvider for PausedStream {
         consumer: &dyn DownloadStreamConsumer,
         _: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
-        consumer.restart()?;
+        consumer.restart().await?;
         consumer.write(&self.bytes).await?;
+        if self.replay {
+            // A stalled process can be restarted after a full authenticated
+            // record was already accepted, but before process EOF.
+            consumer.restart().await?;
+            consumer.write(&self.bytes).await?;
+        }
         if let Some(resume) = self.resume.lock().await.take() {
             tokio::time::timeout(Duration::from_secs(5), resume)
                 .await
@@ -433,6 +440,7 @@ async fn streaming_publishes_during_idle_download_and_reports_final_hash_failure
         local: noland_storage::LocalStorage::new(root.join("unused-remote")),
         bytes: fs::read(&packs[0].path).unwrap(),
         resume: tokio::sync::Mutex::new(Some(resume)),
+        replay: false,
     };
     let roots = LogicalRootMap::from_home(root.join("home"));
     let destination = root.join("home/.local/share/game/save");
@@ -492,5 +500,57 @@ async fn streaming_publishes_during_idle_download_and_reports_final_hash_failure
     );
     assert_eq!(fs::read(&destination).unwrap(), payload);
     assert!(!bad_plan.staging.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn restarted_authenticated_stream_never_rewrites_or_double_counts_accepted_files() {
+    let root = test_dir("pipeline-restarted-stream");
+    let master = MasterKey::generate();
+    let payload = b"restored save";
+    let packs = noland_pack::pack_chunks(
+        &root.join("built"),
+        &master,
+        vec![(noland_cas::blake3_hex(payload), payload.to_vec())],
+        |_| false,
+    )
+    .unwrap();
+    let storage = PausedStream {
+        local: noland_storage::LocalStorage::new(root.join("unused-remote")),
+        bytes: fs::read(&packs[0].path).unwrap(),
+        resume: tokio::sync::Mutex::new(None),
+        replay: true,
+    };
+    let roots = LogicalRootMap::from_home(root.join("home"));
+    let plan = test_plan(
+        &root.join("restore"),
+        test_manifest(vec![file("game/save", payload)]),
+    );
+    let mut verified = 0;
+    let report = restore_pipelined(
+        &storage,
+        &master,
+        &plan,
+        &packs[0].entries,
+        &roots,
+        None,
+        None,
+        PipelineOptions::default(),
+        |sample| {
+            verified = sample.verified_bytes;
+            assert!(sample.completed_entries <= 1);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.restore.published_entries, 1);
+    assert_eq!(report.io.file_syncs, 1);
+    assert_eq!(report.io.assembly_opens, 1);
+    assert_eq!(verified, payload.len() as u64);
+    assert_eq!(
+        fs::read(root.join("home/.local/share/game/save")).unwrap(),
+        payload
+    );
     fs::remove_dir_all(root).unwrap();
 }

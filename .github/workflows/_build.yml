@@ -188,6 +188,10 @@ jobs:
       - name: Prepare and verify immutable Linux remote-agent resources
         run: node scripts/prepare-remote-agent-resources.mjs
 
+      - name: Test Linux net-helper bundle contract
+        if: matrix.platform == 'linux'
+        run: node --test scripts/net-helper-bundle.test.mjs scripts/bundle-resources.test.mjs
+
       - name: Build signed/notarized Tauri application
         shell: bash
         timeout-minutes: 60
@@ -252,7 +256,7 @@ jobs:
           rm -rf "$extract_dir" "$updater_dir"
 
       - name: Verify bundled sidecars and runtime
-        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}" --require-distributables
 
       - name: Validate Debian package
         if: matrix.platform == 'linux'
@@ -331,7 +335,7 @@ jobs:
         run: |
           npm ci
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/ci/release-signatures.test.mjs
+          node --test scripts/windows-openssh.test.mjs scripts/bundle-resources.test.mjs scripts/net-helper-bundle.test.mjs scripts/ci/release-signatures.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -491,7 +495,7 @@ jobs:
           if ($count -eq 0) { throw 'No Windows updater signature was regenerated.' }
 
       - name: Verify bundled sidecars and runtime
-        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}"
+        run: node scripts/verify-bundled-sidecars.mjs --target "${{ matrix.target }}" --require-distributables
 
       - name: Generate local artifact checksums
         run: node scripts/ci/hash-artifacts.mjs "src-tauri/target/${{ matrix.target }}/release/bundle" "${{ runner.temp }}/SHA256SUMS-windows-${{ matrix.arch }}"

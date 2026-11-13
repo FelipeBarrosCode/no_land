@@ -47,6 +47,7 @@ pub struct OperationManager {
 #[derive(Default)]
 struct ManagerState {
     running: HashMap<Uuid, RunningOperation>,
+    parents: HashMap<Uuid, Uuid>,
     retry_descriptors: HashMap<Uuid, RetryDescriptor>,
     retry_order: VecDeque<Uuid>,
 }
@@ -190,11 +191,30 @@ impl OperationManager {
     }
 
     pub fn cancel_requested(&self, operation_id: Uuid) -> bool {
-        self.state
-            .lock()
-            .running
-            .get(&operation_id)
-            .is_some_and(|operation| operation.cancel_requested)
+        let state = self.state.lock();
+        let mut id = operation_id;
+        for _ in 0..8 {
+            if state
+                .running
+                .get(&id)
+                .is_some_and(|operation| operation.cancel_requested)
+            {
+                return true;
+            }
+            let Some(parent) = state.parents.get(&id) else {
+                return false;
+            };
+            id = *parent;
+        }
+        true // Fail closed for a corrupt/cyclic relationship.
+    }
+
+    pub(crate) fn child_scope(&self, parent: Uuid, child: Uuid) -> ChildScope {
+        self.state.lock().parents.insert(child, parent);
+        ChildScope {
+            state: self.state.clone(),
+            child,
+        }
     }
 
     pub fn running_snapshots(&self) -> Vec<ManagedOperationSnapshot> {
@@ -246,6 +266,21 @@ impl OperationManager {
         let _permit = self.control_gate.lock().await;
         future.await
     }
+
+    pub(crate) fn try_transfer_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.transfer_gate.clone().try_lock_owned().ok()
+    }
+}
+
+pub(crate) struct ChildScope {
+    state: Arc<Mutex<ManagerState>>,
+    child: Uuid,
+}
+
+impl Drop for ChildScope {
+    fn drop(&mut self) {
+        self.state.lock().parents.remove(&self.child);
+    }
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -288,6 +323,20 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[tokio::test]
+    async fn nested_child_work_observes_parent_cancellation_until_joined() {
+        let manager = OperationManager::default();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        assert!(manager.spawn_cancellable(parent, std::future::pending::<()>(), || {}, |_| {}));
+        let scope = manager.child_scope(parent, child);
+        assert!(!manager.cancel_requested(child));
+        assert_eq!(manager.cancel(parent), CancelOutcome::Requested);
+        assert!(manager.cancel_requested(child));
+        drop(scope);
+        assert!(!manager.cancel_requested(child));
+    }
 
     #[tokio::test]
     async fn serializes_catalog_mutating_operations() {

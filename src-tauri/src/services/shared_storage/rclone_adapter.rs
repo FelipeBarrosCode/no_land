@@ -134,10 +134,88 @@ fn map_credential(credential: &StorageCredential) -> AppResult<AdapterCredential
         StorageCredential::ServiceAccount { json } => {
             AdapterCredential::ServiceAccount { json: json.clone() }
         }
-        StorageCredential::SshKey { username, .. } => {
-            return Err(AppError::InvalidInput(format!(
-                "SSH key credentials for user {username} are not mapped to rclone yet."
-            )));
-        }
+        StorageCredential::SshKey {
+            username,
+            private_key,
+            passphrase,
+        } => AdapterCredential::SshKey {
+            username: username.clone(),
+            private_key: private_key.clone(),
+            passphrase: passphrase.clone(),
+        },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_key_profiles_mint_sessions_and_configs() {
+        for passphrase in [None, Some(""), Some("test-passphrase")] {
+            let credentials = StorageCredential::SshKey {
+                username: "test-user".into(),
+                private_key: "test key line one\r\ntest key line two\n".into(),
+                passphrase: passphrase.map(str::to_string),
+            };
+            let fields = HashMap::from([
+                ("host".into(), "sftp.example.test".into()),
+                ("remote_path".into(), "/srv/backups/".into()),
+            ]);
+            let session = mint_ephemeral_session(
+                &StorageProvider::Sftp,
+                &credentials,
+                &fields,
+                None,
+                None,
+                "noland_sftp",
+                "ssh-key-test",
+            )
+            .unwrap();
+            assert_eq!(session.provider, "sftp");
+            assert_eq!(session.root, "/srv/backups");
+            assert_eq!(session.operation_id, "ssh-key-test");
+            let config = mint_config_ini(
+                &StorageProvider::Sftp,
+                &credentials,
+                &fields,
+                None,
+                None,
+                "noland_sftp",
+                TokenMode::Durable,
+            )
+            .unwrap();
+            for config in [&session.config_ini, &config] {
+                let entries: BTreeMap<_, _> = config
+                    .lines()
+                    .filter_map(|line| line.split_once(" = "))
+                    .collect();
+                assert_eq!(entries["type"], "sftp");
+                assert_eq!(entries["host"], "sftp.example.test");
+                assert_eq!(entries["user"], "test-user");
+                assert_eq!(
+                    entries["key_pem"],
+                    "test key line one\\ntest key line two\\n"
+                );
+                assert!(!entries.contains_key("pass"));
+                if let Some(passphrase) = passphrase.filter(|value| !value.is_empty()) {
+                    assert_ne!(entries["key_file_pass"], passphrase);
+                } else {
+                    assert!(!entries.contains_key("key_file_pass"));
+                }
+            }
+            assert_eq!(
+                storage_source(
+                    &StorageProvider::Sftp,
+                    &credentials,
+                    &fields,
+                    None,
+                    Some("/"),
+                    "noland_sftp",
+                )
+                .unwrap(),
+                "noland_sftp:/"
+            );
+        }
+    }
 }

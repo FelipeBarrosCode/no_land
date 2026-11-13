@@ -24,6 +24,23 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Update Ubuntu libraries in a new isolated image; never upgrade the host.
+    Update {
+        #[arg(long)]
+        approve: bool,
+    },
+    InspectApp {
+        #[arg(long)]
+        app_id: String,
+    },
+    InstallPrerequisites {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        approve: bool,
+        #[arg(long)]
+        expected_plan: Option<String>,
+    },
     Plan {
         #[arg(long, default_value = PROFILE)]
         profile: String,
@@ -79,6 +96,22 @@ fn run() -> Result<()> {
         Action::Gui => gui(&store),
         Action::Status { .. } => print_json(&engine::status(&store)?),
         Action::Doctor { .. } => print_json(&engine::doctor(&store)?),
+        Action::Update { approve } => {
+            print_json(&noland_runtime::maintenance::update(&store, approve)?)
+        }
+        Action::InspectApp { app_id } => {
+            print_json(&noland_runtime::maintenance::inspect(&store, &app_id)?)
+        }
+        Action::InstallPrerequisites {
+            app_id,
+            approve,
+            expected_plan,
+        } => print_json(&noland_runtime::maintenance::install_prerequisites(
+            &store,
+            &app_id,
+            approve,
+            expected_plan.as_deref(),
+        )?),
         Action::Plan { profile } => {
             anyhow::ensure!(profile == PROFILE, "Unsupported runtime profile");
             print_json(&serde_json::json!({

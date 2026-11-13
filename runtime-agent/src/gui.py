@@ -23,8 +23,8 @@ def dropped_paths(uris):
     return paths
 
 
-def engine_call(engine, *args):
-    result = subprocess.run([engine, *args], capture_output=True, text=True, timeout=240)
+def engine_call(engine, *args, timeout=240):
+    result = subprocess.run([engine, *args], capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         try:
             message = json.loads(result.stderr).get("error", result.stderr)
@@ -83,7 +83,7 @@ def main(engine):
             warning.set_line_wrap(True)
             box.pack_start(warning, False, False, 0)
             tools = Gtk.ButtonBox()
-            for label, callback in [("Diagnostics", self.diagnostics), ("Refresh", self.refresh)]:
+            for label, callback in [("Update Runtime", self.update_runtime), ("Roll Back", self.rollback), ("Diagnostics", self.diagnostics), ("Refresh", self.refresh)]:
                 button = Gtk.Button(label=label)
                 button.connect("clicked", callback)
                 tools.add(button)
@@ -187,12 +187,74 @@ def main(engine):
                 # Validate/register before making any permission changes. The CLI
                 # only grants the owner's executable bit for a selected ELF file.
                 app = engine_call(engine, "register", "--file", path, "--make-executable")
-                return engine_call(engine, "launch", "--app-id", app["id"])
-            self.work("Checking graphics, audio and runtime; starting app…", run, self.launched)
+                return engine_call(engine, "inspect-app", "--app-id", app["id"])
+            self.work("Inspecting app prerequisites without running its dependency scripts…", run, self.prepared)
 
         def launch(self, app):
-            self.work("Checking runtime; starting app…",
-                lambda: engine_call(engine, "launch", "--app-id", app["id"]), self.launched)
+            self.work("Checking app prerequisites…",
+                lambda: engine_call(engine, "inspect-app", "--app-id", app["id"]), self.prepared)
+
+        def confirm(self, title, text):
+            dialog = Gtk.MessageDialog(transient_for=self, modal=True,
+                message_type=Gtk.MessageType.QUESTION, buttons=Gtk.ButtonsType.OK_CANCEL, text=title)
+            dialog.format_secondary_text(text)
+            approved = dialog.run() == Gtk.ResponseType.OK
+            dialog.destroy()
+            return approved
+
+        def prepared(self, plan):
+            app_id = plan["appId"]
+            unsupported = plan.get("unsupportedLibraries", [])
+            packages = plan.get("packages", [])
+            if unsupported:
+                text = ("These libraries are not in the approved Ubuntu prerequisite catalog:\n" +
+                    "\n".join(unsupported) + "\n\nNo packages will be installed. "
+                    "This may require an app-specific plugin, bundled library, or NVIDIA driver. Try launching anyway?")
+                if not self.confirm("Some prerequisites need manual attention", text):
+                    return
+            elif packages:
+                text = ("Download and install these official Ubuntu packages into a new isolated runtime image?\n\n" +
+                    "\n".join(packages) + "\n\nThe parent system, running apps and saves are not changed. "
+                    "The previous image is retained for rollback.")
+                if not self.confirm("Install app prerequisites?", text):
+                    return
+                def installed(result):
+                    if result.get("missingLibraries"):
+                        self.message("Some dependencies remain unresolved after installation:\n" +
+                            "\n".join(result["missingLibraries"]), error=True)
+                        return
+                    self.start_app(app_id)
+                self.work("Downloading prerequisites and validating the new runtime image…",
+                    lambda: engine_call(engine, "install-prerequisites", "--app-id", app_id,
+                        "--approve", "--expected-plan", plan["approvalDigest"], timeout=7200), installed)
+                return
+            self.start_app(app_id)
+
+        def start_app(self, app_id):
+            self.work("Checking graphics, audio and runtime; starting app…",
+                lambda: engine_call(engine, "launch", "--app-id", app_id), self.launched)
+
+        def update_runtime(self, *_):
+            if self.busy:
+                return
+            if not self.confirm("Update Runtime libraries?",
+                    "Download official Ubuntu 24.04 updates into a new isolated runtime image? "
+                    "Running apps keep their existing image. The previous image and all app data are preserved. "
+                    "This does not update the Noland launcher or the host OS."):
+                return
+            def updated(result):
+                self.last_launch = ("Runtime updated. " if result.get("changed") else "Runtime libraries are already up to date. ") + "Apps and saves preserved."
+                self.refresh()
+            self.work("Downloading and validating runtime library updates…",
+                lambda: engine_call(engine, "update", "--approve", timeout=7200), updated)
+
+        def rollback(self, *_):
+            if self.busy:
+                return
+            if not self.confirm("Use the previous runtime image?", "New launches will use the previous image. Running apps and saves are not changed."):
+                return
+            self.work("Activating previous runtime image…",
+                lambda: engine_call(engine, "rollback"), lambda _: self.refresh())
 
         def launched(self, result):
             self.last_launch = f"Launch requested. Log: {result.get('log', 'see diagnostics')}"

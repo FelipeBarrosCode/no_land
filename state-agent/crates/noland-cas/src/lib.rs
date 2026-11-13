@@ -11,6 +11,9 @@ use noland_state_core::constants::{FASTCDC_AVG, FASTCDC_MAX, FASTCDC_MIN};
 use noland_state_core::{ChunkRef, Result, StateError};
 use serde::{Deserialize, Serialize};
 
+mod capture;
+pub use capture::{CapturePut, ChunkSource, ChunkSourceReader, CAPTURE_SEGMENT_MAX};
+
 /// Files at or below this size can be grouped by callers without changing
 /// their normal one-chunk manifest representation.
 pub const SMALL_FILE_THRESHOLD: u64 = 256 * 1024;
@@ -121,17 +124,22 @@ pub fn blake3_hex(data: &[u8]) -> String {
 }
 
 pub fn blake3_file(path: &Path) -> Result<String> {
-    let mut hasher = blake3::Hasher::new();
-    let mut file = File::open(path)?;
-    let mut buf = vec![0u8; 1024 * 1024];
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
+    thread_local! {
+        static BUFFER: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(vec![0; 64 * 1024]);
     }
-    Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+    BUFFER.with(|buffer| {
+        let mut buffer = buffer.borrow_mut();
+        let mut hasher = blake3::Hasher::new();
+        let mut file = File::open(path)?;
+        loop {
+            let n = file.read(&mut buffer)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
+        Ok(format!("blake3:{}", hasher.finalize().to_hex()))
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -224,7 +232,157 @@ pub fn chunk_file_streaming(
     path: &Path,
     on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
 ) -> Result<ChunkStreamResult> {
-    chunk_reader(File::open(path)?, on_chunk)
+    ChunkFileReader::default().chunk_file(path, on_chunk)
+}
+
+/// One reusable workspace per hashing worker. Small files allocate only their
+/// actual size and hash once: their full-file hash is also their sole chunk hash.
+/// The FastCDC workspace is allocated lazily and reused for larger files.
+#[derive(Default)]
+pub struct ChunkFileReader {
+    buffer: Vec<u8>,
+}
+
+impl ChunkFileReader {
+    /// Replay captured bytes and continue a descriptor using a reusable workspace.
+    pub fn chunk_reader(
+        &mut self,
+        reader: impl Read,
+        on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+    ) -> Result<ChunkStreamResult> {
+        chunk_reader_buffered(
+            reader,
+            FASTCDC_MIN as usize,
+            FASTCDC_AVG as usize,
+            FASTCDC_MAX as usize,
+            &mut self.buffer,
+            on_chunk,
+        )
+    }
+
+    pub fn chunk_file(
+        &mut self,
+        path: &Path,
+        on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+    ) -> Result<ChunkStreamResult> {
+        let mut file = noland_snapshot::open_regular_nofollow(path)?;
+        self.chunk_open_file(&mut file, on_chunk)
+    }
+
+    /// Consume an already anchored, immutable snapshot without reopening its name.
+    pub fn chunk_open_file(
+        &mut self,
+        file: &mut File,
+        mut on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+    ) -> Result<ChunkStreamResult> {
+        let size = file.metadata()?.len();
+        if is_small_file(size) {
+            if self.buffer.len() < size as usize {
+                self.buffer.resize(size as usize, 0);
+            }
+            let payload = &mut self.buffer[..size as usize];
+            file.read_exact(payload)?;
+            if file.read(&mut [0u8; 1])? != 0 {
+                return Err(StateError::Integrity(
+                    "small capture source grew while reading".into(),
+                ));
+            }
+            let file_hash = blake3_hex(payload);
+            let mut chunks = Vec::new();
+            if size != 0 {
+                let chunk = ChunkRef {
+                    hash: file_hash.clone(),
+                    size,
+                };
+                on_chunk(&chunk, payload)?;
+                chunks.push(chunk);
+            }
+            return Ok(ChunkStreamResult {
+                file_hash,
+                size,
+                chunks,
+            });
+        }
+        chunk_reader_buffered(
+            file,
+            FASTCDC_MIN as usize,
+            FASTCDC_AVG as usize,
+            FASTCDC_MAX as usize,
+            &mut self.buffer,
+            on_chunk,
+        )
+    }
+
+    /// Capture a live small regular file into this worker's bounded workspace.
+    /// Nothing is published to the callback until a stable descriptor read has
+    /// succeeded. The callback must retain bytes in immutable operation storage,
+    /// never as offsets into this source. Growth beyond the bound selects staging.
+    pub fn capture_small_file(
+        &mut self,
+        file: &mut File,
+        on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+    ) -> Result<Option<(ChunkStreamResult, std::fs::Metadata)>> {
+        self.capture_small_file_observed(file, on_chunk, |_| Ok(()))
+    }
+
+    fn capture_small_file_observed(
+        &mut self,
+        file: &mut File,
+        mut on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+        mut after_read: impl FnMut(usize) -> Result<()>,
+    ) -> Result<Option<(ChunkStreamResult, std::fs::Metadata)>> {
+        use std::io::{Seek, SeekFrom};
+        for attempt in 0..2 {
+            let before = file.metadata()?;
+            if !before.is_file() {
+                return Err(StateError::UnsafePath(
+                    "small capture source is not a regular file".into(),
+                ));
+            }
+            if !is_small_file(before.len()) {
+                return Ok(None);
+            }
+            let size = before.len() as usize;
+            if self.buffer.len() < size {
+                self.buffer.resize(size, 0);
+            }
+            file.seek(SeekFrom::Start(0))?;
+            let payload = &mut self.buffer[..size];
+            let read = file.read_exact(payload);
+            if let Err(error) = &read {
+                if error.kind() != std::io::ErrorKind::UnexpectedEof {
+                    return Err(read.unwrap_err().into());
+                }
+            }
+            let eof = read.is_ok() && file.read(&mut [0u8; 1])? == 0;
+            after_read(attempt)?;
+            let after = file.metadata()?;
+            if !eof || !noland_snapshot::same_file_identity(&before, &after) {
+                continue;
+            }
+            let file_hash = blake3_hex(payload);
+            let mut chunks = Vec::new();
+            if size != 0 {
+                let chunk = ChunkRef {
+                    hash: file_hash.clone(),
+                    size: size as u64,
+                };
+                on_chunk(&chunk, payload)?;
+                chunks.push(chunk);
+            }
+            return Ok(Some((
+                ChunkStreamResult {
+                    file_hash,
+                    size: size as u64,
+                    chunks,
+                },
+                before,
+            )));
+        }
+        Err(StateError::Integrity(
+            "small source changed during both capture attempts".into(),
+        ))
+    }
 }
 
 /// Streams any reader using the manifest FastCDC parameters.
@@ -244,16 +402,27 @@ pub fn chunk_reader(
 /// Parameterized streaming FastCDC, primarily useful for tests and specialized
 /// callers. Boundaries are byte-for-byte equivalent to [`fastcdc_offsets`].
 pub fn chunk_reader_with(
+    reader: impl Read,
+    min: usize,
+    avg: usize,
+    max: usize,
+    on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
+) -> Result<ChunkStreamResult> {
+    chunk_reader_buffered(reader, min, avg, max, &mut Vec::new(), on_chunk)
+}
+
+fn chunk_reader_buffered(
     mut reader: impl Read,
     min: usize,
     avg: usize,
     max: usize,
+    buffer: &mut Vec<u8>,
     mut on_chunk: impl FnMut(&ChunkRef, &[u8]) -> Result<()>,
 ) -> Result<ChunkStreamResult> {
     validate_chunk_sizes(min, avg, max)?;
 
     let mask = mask_for(avg);
-    let mut buffer = vec![0u8; max];
+    buffer.resize(max, 0);
     let mut buffered = 0usize;
     let mut eof = false;
     let mut file_hasher = blake3::Hasher::new();
@@ -411,24 +580,55 @@ pub struct CasLease {
     cas: LocalCas,
     root: PathBuf,
     retained: AtomicBool,
+    capture: std::sync::Mutex<capture::CaptureSegments>,
 }
 
 impl CasLease {
+    /// Publish an immutable prefix without closing admission for later chunks.
+    pub fn checkpoint(&self) -> Result<()> {
+        self.capture
+            .lock()
+            .map_err(|_| StateError::Storage("capture lock poisoned".into()))?
+            .checkpoint()?;
+        for path in [
+            self.root.as_path(),
+            self.root.parent().unwrap(),
+            self.cas.root(),
+            self.cas.root().parent().unwrap(),
+        ] {
+            File::open(path)?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    pub fn capture_streaming_prehashed(&self, hash: &str, data: &[u8]) -> Result<CapturePut> {
+        self.capture
+            .lock()
+            .map_err(|_| StateError::Storage("capture lock poisoned".into()))?
+            .put_streaming(&self.root, hash, data)
+    }
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     /// Make lease names durable before a retry checkpoint references them.
     pub fn sync_all(&self) -> Result<()> {
+        // Sealing appends a footer, flushes buffered payloads and fsyncs every
+        // segment before its name can enter an authenticated retry checkpoint.
+        self.capture
+            .lock()
+            .map_err(|_| StateError::Storage("capture lock poisoned".into()))?
+            .finish()?;
         for directory in [
             Some(self.root.as_path()),
             self.root.parent(),
             Some(self.cas.root()),
             self.cas.root().parent(),
-        ] {
-            if let Some(directory) = directory {
-                File::open(directory)?.sync_all()?;
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            File::open(directory)?.sync_all()?;
         }
         Ok(())
     }
@@ -441,6 +641,25 @@ impl CasLease {
 
     pub fn cache_path(&self, hash: &str) -> Result<PathBuf> {
         self.cas.path_for_hash(hash)
+    }
+
+    /// Tiny new chunks share bounded append-only containers owned by this lease.
+    /// Larger chunks retain the existing independently leased CAS behavior.
+    pub fn capture_prehashed(&self, hash: &str, data: &[u8]) -> Result<CapturePut> {
+        if !data.is_empty() && is_small_file(data.len() as u64) {
+            return self
+                .capture
+                .lock()
+                .map_err(|_| StateError::Storage("capture lock poisoned".into()))?
+                .put(&self.root, hash, data);
+        }
+        let stored = self.put_prehashed(hash, data)?;
+        Ok(CapturePut {
+            source: stored.path.into(),
+            bytes: stored.bytes,
+            reused: stored.reused,
+            cache_path: Some(self.cache_path(hash)?),
+        })
     }
 
     pub fn put_prehashed(&self, hash: &str, data: &[u8]) -> Result<CasPut> {
@@ -464,6 +683,11 @@ impl Drop for CasLease {
         if self.retained.load(Ordering::Acquire) {
             return;
         }
+        // Close buffered writers before removing their directory, including on
+        // cancellation. The owning hashing scope joins all users before Drop.
+        if let Ok(capture) = self.capture.get_mut() {
+            capture.abort();
+        }
         let _ = std::fs::remove_dir_all(&self.root);
         let max = std::env::var("NOLAND_CAS_CACHE_BYTES")
             .ok()
@@ -474,6 +698,29 @@ impl Drop for CasLease {
 }
 
 impl LocalCas {
+    /// Reopen an authenticated operation-owned lease. Uncheckpointed trailing
+    /// segments are never reused or overwritten; new segments get fresh names.
+    pub fn resume_lease(&self, root: &Path) -> Result<CasLease> {
+        if root.parent() != Some(self.root.join(".leases").as_path())
+            || root
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(StateError::UnsafePath("invalid resumed CAS lease".into()));
+        }
+        for path in root.ancestors().filter(|p| !p.as_os_str().is_empty()) {
+            let meta = std::fs::symlink_metadata(path)?;
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                return Err(StateError::UnsafePath("unsafe resumed CAS lease".into()));
+            }
+        }
+        Ok(CasLease {
+            cas: self.clone(),
+            root: root.to_owned(),
+            retained: AtomicBool::new(true),
+            capture: std::sync::Mutex::new(capture::CaptureSegments::resume(root)?),
+        })
+    }
     pub fn lease(&self) -> Result<CasLease> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let base = self.root.join(".leases");
@@ -492,6 +739,7 @@ impl LocalCas {
             cas: self.clone(),
             root,
             retained: AtomicBool::new(false),
+            capture: std::sync::Mutex::new(capture::CaptureSegments::default()),
         })
     }
 
@@ -575,13 +823,15 @@ impl LocalCas {
         }
 
         let temp = self.temp_path(object_name(hash)?);
-        noland_state_core::disk::ensure_space(&self.root, data.len() as u64)?;
+        let mut budget =
+            noland_state_core::disk::DiskWriteBudget::reserve(&self.root, data.len() as u64)?;
         let write_result = (|| -> Result<()> {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)?;
             file.write_all(data)?;
+            budget.consume_allocated(data.len() as u64)?;
             file.sync_all()?;
             match std::fs::hard_link(&temp, &path) {
                 Ok(()) => Ok(()),
@@ -870,6 +1120,133 @@ mod tests {
     }
 
     #[test]
+    fn reusable_small_file_fast_path_preserves_all_hash_and_chunk_boundaries() {
+        let root = temp_test_dir("reusable-chunker");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("input");
+        let mut reader = ChunkFileReader::default();
+        for length in [
+            0,
+            1,
+            4096,
+            65536,
+            SMALL_FILE_THRESHOLD as usize,
+            SMALL_FILE_THRESHOLD as usize + 1,
+            FASTCDC_MIN as usize,
+            FASTCDC_MIN as usize + 1,
+            FASTCDC_MAX as usize + 17,
+            97,
+        ] {
+            let data = deterministic_bytes(length);
+            std::fs::write(&path, &data).unwrap();
+            let expected = chunk_bytes(&data);
+            let mut payloads = Vec::new();
+            let actual = reader
+                .chunk_file(&path, |_, bytes| {
+                    payloads.push(bytes.to_vec());
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(actual.file_hash, expected.file_hash, "length {length}");
+            assert_eq!(actual.chunks, expected.chunks, "length {length}");
+            assert_eq!(payloads, expected.payloads, "length {length}");
+            if length <= SMALL_FILE_THRESHOLD as usize && length != 97 {
+                assert!(reader.buffer.len() <= SMALL_FILE_THRESHOLD as usize);
+            }
+        }
+        let allocation = reader.buffer.as_ptr();
+        let capacity = reader.buffer.capacity();
+        reader.chunk_file(&path, |_, _| Ok(())).unwrap();
+        assert_eq!(reader.buffer.as_ptr(), allocation);
+        assert_eq!(reader.buffer.capacity(), capacity);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn direct_capture_retries_before_publishing_and_keeps_retry_bytes_off_the_live_source() {
+        let root = temp_test_dir("direct-retry");
+        let cas = LocalCas::new(root.join("cas")).unwrap();
+        let lease = cas.lease().unwrap();
+        let path = root.join("live");
+        std::fs::write(&path, b"before").unwrap();
+        let mut file = noland_snapshot::open_regular_nofollow(&path).unwrap();
+        let mut reader = ChunkFileReader::default();
+        let mut captured = Vec::new();
+        let (summary, _) = reader
+            .capture_small_file_observed(
+                &mut file,
+                |chunk, bytes| {
+                    captured.push(lease.capture_prehashed(&chunk.hash, bytes)?.source);
+                    Ok(())
+                },
+                |attempt| {
+                    if attempt == 0 {
+                        std::fs::write(&path, b"stable retry bytes")?;
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "the rejected attempt must not publish chunks"
+        );
+        assert_eq!(summary.file_hash, blake3_hex(b"stable retry bytes"));
+        std::fs::write(&path, b"later live bytes").unwrap();
+        reader.chunk_file(&path, |_, _| Ok(())).unwrap(); // Reuse the workspace.
+        lease.sync_all().unwrap();
+        lease.retain_for_retry();
+        let lease_path = lease.root().to_path_buf();
+        drop(lease);
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(captured[0].read().unwrap(), b"stable retry bytes");
+        captured[0].verify(&summary.file_hash).unwrap();
+        cas.release_lease(&lease_path).unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unstable_or_growing_direct_capture_never_publishes_a_partial_attempt() {
+        let root = temp_test_dir("direct-unstable");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("live");
+        std::fs::write(&path, b"a").unwrap();
+        let mut file = noland_snapshot::open_regular_nofollow(&path).unwrap();
+        let mut reader = ChunkFileReader::default();
+        let mut attempts = 0;
+        assert!(reader
+            .capture_small_file_observed(
+                &mut file,
+                |_, _| panic!("unstable bytes published"),
+                |attempt| {
+                    attempts += 1;
+                    std::fs::write(&path, vec![b'a'; attempt + 2])?;
+                    Ok(())
+                }
+            )
+            .is_err());
+        assert_eq!(attempts, 2);
+        assert!(reader
+            .capture_small_file_observed(
+                &mut file,
+                |_, _| panic!("grown bytes published"),
+                |_| {
+                    std::fs::OpenOptions::new()
+                        .write(true)
+                        .open(&path)?
+                        .set_len(SMALL_FILE_THRESHOLD + 1)?;
+                    Ok(())
+                }
+            )
+            .unwrap()
+            .is_none());
+        assert!(reader.buffer.len() <= SMALL_FILE_THRESHOLD as usize);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn streaming_reader_keeps_working_set_bounded_by_max_chunk() {
         use std::cell::Cell;
         use std::rc::Rc;
@@ -1018,9 +1395,11 @@ mod tests {
             .collect()
     }
 
-    fn temp_test_dir(label: &str) -> PathBuf {
+    pub(crate) fn temp_test_dir(label: &str) -> PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("noland-{label}-{}-{sequence}", std::process::id()))
+        std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("noland-{label}-{}-{sequence}", std::process::id()))
     }
 }

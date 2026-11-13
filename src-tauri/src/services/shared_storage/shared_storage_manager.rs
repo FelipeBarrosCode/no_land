@@ -8,12 +8,14 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::errors::{AppError, AppResult};
-use crate::models::app_state::BackupPerformanceMode;
 use crate::models::application_bundle::{
     SharedStorageProfile, SharedStorageStatus, StorageProvider,
 };
 
-use crate::services::{app_context::AppContext, remote_exec::RemoteExec};
+use crate::services::{
+    app_context::{ActiveAgentOperation, AppContext},
+    remote_exec::RemoteExec,
+};
 
 use super::agent_handoff::AgentCatalogAppRecord;
 
@@ -63,7 +65,6 @@ impl SharedStorageManager {
         instance_id: u64,
         target_user: &str,
         selected_paths: &[String],
-        performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
         let app_ids = selected_app_ids(selected_paths);
         let ids: Vec<String> = if app_ids.is_empty() {
@@ -71,16 +72,7 @@ impl SharedStorageManager {
         } else {
             app_ids
         };
-        Self::trigger_backup(
-            context,
-            remote,
-            instance_id,
-            target_user,
-            &ids,
-            "manual",
-            performance_mode,
-        )
-        .await?;
+        Self::trigger_backup(context, remote, instance_id, target_user, &ids, "manual").await?;
         Ok("Application-state backup completed".to_string())
     }
     pub async fn list_remote_objects(
@@ -417,7 +409,6 @@ impl SharedStorageManager {
             target_user,
             &["*".to_string()],
             "manual",
-            BackupPerformanceMode::Balanced,
         )
         .await
     }
@@ -428,14 +419,12 @@ impl SharedStorageManager {
         target_user: &str,
         app_ids: &[String],
         trigger: &str,
-        performance_mode: BackupPerformanceMode,
     ) -> AppResult<()> {
         info!(
             event = "shared_storage_backup_start",
             instance_id = instance_id,
             target_user = target_user,
             trigger = trigger,
-            performance_mode = ?performance_mode,
             "Shared storage backup started"
         );
         // Concurrency guard
@@ -456,14 +445,19 @@ impl SharedStorageManager {
         }
 
         // Update state to running
-        context
+        if let Err(error) = context
             .update_state(|state| {
                 state.shared_storage.last_backup_started_at = Some(started_at.clone());
+                state.shared_storage.last_backup_finished_at = None;
                 state.shared_storage.last_backup_status = "running".to_string();
                 state.shared_storage.last_backup_trigger = trigger.to_string();
                 state.shared_storage.last_backup_error = None;
             })
-            .await?;
+            .await
+        {
+            get_running_backups().write().await.remove(&instance_id);
+            return Err(error);
+        }
 
         // Route the actual work through the live state-agent RPC path. An empty
         // list or "*" backs up every discovered app; otherwise each selected
@@ -479,7 +473,6 @@ impl SharedStorageManager {
                 target_user,
                 "*",
                 backup_mode,
-                performance_mode,
                 None,
             )
             .await
@@ -494,7 +487,6 @@ impl SharedStorageManager {
                     target_user,
                     app_id,
                     backup_mode,
-                    performance_mode,
                     None,
                 )
                 .await
@@ -506,7 +498,15 @@ impl SharedStorageManager {
             outcome
         };
 
-        // Mark backup as no longer running
+        let active_operation = if matches!(&result, Err(AppError::Timeout(_))) {
+            context
+                .active_agent_operation(instance_id, Some("backup"))
+                .await
+        } else {
+            None
+        };
+        // The local monitor has stopped, even if remote work is still running.
+        // Release this guard so a retry can reattach through the retained handle.
         {
             let mut running = get_running_backups().write().await;
             running.remove(&instance_id);
@@ -532,23 +532,41 @@ impl SharedStorageManager {
                 Ok(())
             }
             Err(e) => {
-                let err_msg = format!("{e}");
+                let report = backup_error_report(
+                    instance_id,
+                    active_operation.as_ref(),
+                    &e.to_string(),
+                    finished_at,
+                );
                 context
                     .update_state(|state| {
-                        state.shared_storage.last_backup_finished_at = Some(finished_at);
-                        state.shared_storage.last_backup_status = "failed".to_string();
-                        state.shared_storage.last_backup_error = Some(err_msg.clone());
+                        state.shared_storage.last_backup_finished_at = report.finished_at.clone();
+                        state.shared_storage.last_backup_status = report.status.to_string();
+                        state.shared_storage.last_backup_error = Some(report.message.clone());
                     })
                     .await?;
-                error!(
-                    event = "shared_storage_backup_failure",
-                    instance_id = instance_id,
-                    target_user = target_user,
-                    trigger = trigger,
-                    error = %err_msg,
-                    "Backup failed"
-                );
-                Err(e)
+                if let Some(operation_id) = report.operation_id.as_deref() {
+                    warn!(
+                        event = "shared_storage_backup_monitoring_paused",
+                        instance_id = instance_id,
+                        operation_id = operation_id,
+                        target_user = target_user,
+                        trigger = trigger,
+                        error = %report.message,
+                        "Backup monitoring paused; operation remains resumable"
+                    );
+                    Err(AppError::Timeout(report.message))
+                } else {
+                    error!(
+                        event = "shared_storage_backup_failure",
+                        instance_id = instance_id,
+                        target_user = target_user,
+                        trigger = trigger,
+                        error = %report.message,
+                        "Backup failed"
+                    );
+                    Err(e)
+                }
             }
         }
     }
@@ -908,75 +926,39 @@ impl SharedStorageManager {
         .unwrap_or_else(|_| format!("{}:", active_profile.remote_name))
     }
 
-    /// Ensure rclone is installed on the VM and accessible through sudo's PATH.
+    /// Require a compatible rclone, not merely a distro package on sudo's PATH.
     pub(crate) async fn ensure_rclone_installed(remote: &RemoteExec) -> AppResult<()> {
-        let check_cmd = if remote.is_root() {
-            "if command -v rclone >/dev/null 2>&1; then echo 'RCLONE_SUDO_OK'; else echo 'RCLONE_MISSING'; fi".to_string()
+        let script = include_str!("../../../scripts/ensure_shared_storage_rclone.py");
+        let prefix = if remote.is_root() {
+            ""
         } else {
-            format!(
-                "if {}command -v rclone >/dev/null 2>&1; then echo 'RCLONE_SUDO_OK'; elif command -v rclone >/dev/null 2>&1; then echo 'RCLONE_USER_ONLY'; else echo 'RCLONE_MISSING'; fi",
-                remote.sudo_prefix()
-            )
+            "sudo -S -p '' "
         };
-        let check = {
-            let remote = remote.clone();
-            tokio::task::spawn_blocking(move || remote.ssh(&check_cmd, Duration::from_secs(15)))
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
+        let command = format!("{}python3 -c '{}'", prefix, shell_escape(script));
+        // Passwords go only to sudo's stdin, never into logged SSH arguments.
+        let input = if remote.is_root() {
+            Vec::new()
+        } else {
+            format!("{}\n", remote.ssh_password).into_bytes()
         };
-
-        if check.stdout.contains("RCLONE_SUDO_OK") {
-            return Ok(());
-        }
-
-        if check.stdout.contains("RCLONE_USER_ONLY") {
-            let fix_path = {
-                let remote = remote.clone();
-                tokio::task::spawn_blocking(move || {
-                    remote.ssh(
-                        &format!(
-                            "RCLONE_PATH=$(command -v rclone); if [ -n \"$RCLONE_PATH\" ] && [ ! -e /usr/bin/rclone ]; then {}ln -s \"$RCLONE_PATH\" /usr/bin/rclone; fi; {}command -v rclone >/dev/null 2>&1 && echo 'RCLONE_SUDO_OK' || echo 'RCLONE_STILL_MISSING'",
-                            remote.sudo_prefix(),
-                            remote.sudo_prefix(),
-                        ),
-                        Duration::from_secs(30),
-                    )
-                })
-                .await
-                .map_err(|e| AppError::Command(format!("join failure: {e}")))??
-            };
-            if fix_path.stdout.contains("RCLONE_SUDO_OK") {
-                info!("rclone already existed but required a sudo PATH compatibility symlink");
-                return Ok(());
-            }
-        }
-
-        info!("rclone not found for sudo, installing...");
-
         let install = {
             let remote = remote.clone();
             tokio::task::spawn_blocking(move || {
-                remote.ssh(
-                    &format!(
-                        "if command -v apt-get >/dev/null 2>&1; then {sudo}DEBIAN_FRONTEND=noninteractive apt-get update >/dev/null 2>&1 && {sudo}DEBIAN_FRONTEND=noninteractive apt-get install -y rclone >/dev/null 2>&1; else curl -fsSL https://rclone.org/install.sh | {sudo}bash >/dev/null 2>&1; fi; RCLONE_PATH=$(command -v rclone || true); if [ -n \"$RCLONE_PATH\" ] && [ ! -e /usr/bin/rclone ]; then {sudo}ln -s \"$RCLONE_PATH\" /usr/bin/rclone; fi; {sudo}command -v rclone >/dev/null 2>&1 && echo 'RCLONE_INSTALLED' || echo 'RCLONE_INSTALL_FAILED'",
-                        sudo = remote.sudo_prefix(),
-                    ),
-                    Duration::from_secs(180),
-                )
+                remote.ssh_with_stdin(&command, input, Duration::from_secs(240))
             })
             .await
             .map_err(|e| AppError::Command(format!("join failure: {e}")))??
         };
 
-        if install.status_code != 0 || !install.stdout.contains("RCLONE_INSTALLED") {
+        if install.status_code != 0 || !install.stdout.lines().any(|line| line == "RCLONE_READY") {
             return Err(AppError::Provisioning(format!(
-                "Failed to install rclone for sudo: stdout: {} | stderr: {}",
+                "Failed to prepare a compatible rclone for Shared Storage: stdout: {} | stderr: {}",
                 install.stdout.trim(),
                 install.stderr.trim()
             )));
         }
 
-        info!("rclone installed successfully");
+        info!("Shared Storage rclone version and required listing capabilities verified");
         Ok(())
     }
 
@@ -1098,12 +1080,44 @@ fn restore_mode_for_catalog_selection() -> &'static str {
     "complete_application"
 }
 
-fn backup_mode_for_selection(run_all: bool) -> &'static str {
-    if run_all {
-        "personal_state"
+struct BackupErrorReport {
+    status: &'static str,
+    finished_at: Option<String>,
+    message: String,
+    operation_id: Option<String>,
+}
+
+fn backup_error_report(
+    instance_id: u64,
+    active_operation: Option<&ActiveAgentOperation>,
+    error: &str,
+    finished_at: String,
+) -> BackupErrorReport {
+    // The monitor retains this handle only while the execution result is unknown.
+    if let Some(operation) = active_operation
+        .filter(|operation| operation.instance_id == instance_id && operation.kind == "backup")
+    {
+        BackupErrorReport {
+            status: "monitoring_paused",
+            finished_at: None,
+            message: format!(
+                "Monitoring paused for backup operation {}. Remote work may still be running; retry the same backup request to resume monitoring or cancel this operation. {error}",
+                operation.operation_id
+            ),
+            operation_id: Some(operation.operation_id.clone()),
+        }
     } else {
-        "complete_application"
+        BackupErrorReport {
+            status: "failed",
+            finished_at: Some(finished_at),
+            message: error.to_string(),
+            operation_id: None,
+        }
     }
+}
+
+fn backup_mode_for_selection(_run_all: bool) -> &'static str {
+    "complete_application"
 }
 
 fn selected_app_ids(paths: &[String]) -> Vec<String> {
@@ -1438,14 +1452,66 @@ fn redact_profile_secrets(input: &str, active_profile: &ActiveSharedStorageProfi
 #[cfg(test)]
 mod tests {
     use super::{
-        backup_mode_for_selection, infer_steam_app_id_from_catalog, parse_catalog_selection,
-        restore_mode_for_catalog_selection, AgentCatalogAppRecord,
+        backup_error_report, backup_mode_for_selection, infer_steam_app_id_from_catalog,
+        parse_catalog_selection, restore_mode_for_catalog_selection, ActiveAgentOperation,
+        AgentCatalogAppRecord,
     };
+
+    #[test]
+    fn backup_error_preserves_matching_operation_as_paused() {
+        let operation = ActiveAgentOperation {
+            instance_id: 42,
+            operation_id: "resumable-backup".to_string(),
+            kind: "backup".to_string(),
+        };
+        let report = backup_error_report(
+            42,
+            Some(&operation),
+            "connection lost",
+            "finished".to_string(),
+        );
+
+        assert_eq!(report.status, "monitoring_paused");
+        assert_eq!(report.finished_at, None);
+        assert_eq!(report.operation_id.as_deref(), Some("resumable-backup"));
+        assert!(report.message.contains("resumable-backup"));
+        assert!(report.message.contains("resume monitoring"));
+        assert!(report.message.contains("connection lost"));
+    }
+
+    #[test]
+    fn backup_error_finishes_without_matching_active_backup() {
+        for operation in [
+            None,
+            Some(ActiveAgentOperation {
+                instance_id: 43,
+                operation_id: "other-instance".to_string(),
+                kind: "backup".to_string(),
+            }),
+            Some(ActiveAgentOperation {
+                instance_id: 42,
+                operation_id: "other-kind".to_string(),
+                kind: "restore".to_string(),
+            }),
+        ] {
+            let report = backup_error_report(
+                42,
+                operation.as_ref(),
+                "authoritative failure",
+                "finished".to_string(),
+            );
+
+            assert_eq!(report.status, "failed");
+            assert_eq!(report.finished_at.as_deref(), Some("finished"));
+            assert_eq!(report.operation_id, None);
+            assert_eq!(report.message, "authoritative failure");
+        }
+    }
 
     #[test]
     fn selected_apps_use_complete_application_backup_mode() {
         assert_eq!(backup_mode_for_selection(false), "complete_application");
-        assert_eq!(backup_mode_for_selection(true), "personal_state");
+        assert_eq!(backup_mode_for_selection(true), "complete_application");
         assert_eq!(restore_mode_for_catalog_selection(), "complete_application");
     }
 

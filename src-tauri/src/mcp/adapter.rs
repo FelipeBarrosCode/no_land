@@ -621,6 +621,11 @@ impl Backend for DesktopBackend {
                 .map_err(|e| e.details.unwrap_or(e.message))?;
                 Ok(json!({"stream":updated.moonlight_preferences}))
             }
+            "storage_operation_status" => pack(
+                commands::get_storage_operation_status(
+                    app.state(), id(&args)?, args.get("operation_id").and_then(Value::as_str).map(str::to_owned),
+                ).await
+            ),
             "storage_status" => {
                 let backup=crate::services::shared_storage::shared_storage_manager::SharedStorageManager::get_instance_backup_status(&self.context,id(&args)?)
                     .await.map_err(|e|e.to_string())?;

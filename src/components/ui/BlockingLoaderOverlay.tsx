@@ -17,6 +17,9 @@ export interface BlockingActionState {
   cancelRequested?: boolean;
   operationId?: string | null;
   instanceId?: number | null;
+  requestId?: string;
+  pendingStorageRequest?: boolean;
+  storageOperationIds?: string[];
   stage?: string | null;
 }
 

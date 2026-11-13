@@ -3,11 +3,16 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8');
-const restore = read('state-agent/crates/noland-restore/src/pipeline.rs').split('#[cfg(test)]')[0];
+// Out-of-line #[cfg(test)] modules appear before production code. Only strip
+// the inline test body, and include the production verification/stream modules.
+const production = path => read(path).split(/\n#\[cfg\(test\)\]\s*\nmod tests\s*\{/u)[0];
+const restore = ['pipeline.rs', 'pipeline/verification.rs'].map(path =>
+  production(`state-agent/crates/noland-restore/src/${path}`)).join('\n');
 const journal = read('state-agent/crates/noland-restore/src/journal.rs');
 const agent = read('state-agent/crates/noland-state-agent/src/restore.rs');
-const storage = read('state-agent/crates/noland-storage/src/rclone.rs');
-const pack = read('state-agent/crates/noland-pack/src/lib.rs');
+const rclone = production('state-agent/crates/noland-storage/src/rclone.rs');
+const storage = `${rclone}\n${production('state-agent/crates/noland-storage/src/stream.rs')}`;
+const pack = production('state-agent/crates/noland-pack/src/lib.rs');
 
 test('production agent uses one bounded restore pipeline, not tier-wide barriers', () => {
   assert.match(agent, /restore_pipelined\(/);
@@ -21,7 +26,8 @@ test('authenticated records go directly to destination partials without a decryp
   assert.match(restore, /SeekFrom::Start\(placement\.offset\)/);
   assert.match(restore, /O_NOFOLLOW/);
   assert.doesNotMatch(restore, /materialized\/\.chunks|extract_missing\(/);
-  assert.match(pack, /let plain = decode_record/);
+  assert.match(pack, /\.decrypt_in_place\(&nonce, entry\.chunk_hash\.as_bytes\(\), stored\)\?/u);
+  assert.match(pack, /\.decode_payload\(entry, &mut self\.record\)\?;\s*consume\(entry, plain\)\?/u);
   assert.match(pack, /consume\(entry, &plain\)/);
 });
 
@@ -37,6 +43,7 @@ test('streaming network reads are ordered, bounded, and cancellable', () => {
   assert.match(storage, /vec!\["cat"\.into\(\)\]/);
   assert.match(storage, /consumer\.restart\(\)/);
   assert.match(storage, /consumer\.write\(/);
+  assert.match(rclone, /stream::read_attempt\(/);
   assert.match(storage, /kill_on_drop\(true\)/);
   assert.match(restore, /used\.saturating_add\(\*size\) > budget/);
   assert.match(restore, /active\.swap_remove/);

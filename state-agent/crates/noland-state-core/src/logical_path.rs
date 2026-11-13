@@ -312,9 +312,84 @@ pub fn join_validated(root: &Path, relative: &str) -> Result<PathBuf> {
     Ok(joined)
 }
 
+/// Link text is never followed during capture/publication. Leading parent steps
+/// (e.g. Proton dosdevices/c: -> ../drive_c) may ascend only within the link's
+/// logical root. A parent step after a named component is unsafe: that component
+/// could itself be a symlink, making lexical normalization misleading.
+pub fn validate_symlink_target_within_root(relative_path: &str, target: &str) -> Result<()> {
+    validate_relative_path(relative_path)?;
+    let rejected = || StateError::UnsafePath(format!("symlink target rejected: {target}"));
+    if target.is_empty()
+        || target.contains('\0')
+        || target.starts_with("/proc")
+        || target.starts_with("/sys")
+        || target.starts_with("/dev")
+    {
+        return Err(rejected());
+    }
+    if !target.contains("..") {
+        return Ok(());
+    }
+    if target.starts_with('/') || target.contains('\\') {
+        return Err(rejected());
+    }
+    let mut depth = relative_path
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .count()
+        .saturating_sub(1);
+    let mut leading = true;
+    for component in target.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if leading && depth > 0 => depth -= 1,
+            ".." => return Err(rejected()),
+            part if part.contains("..") => return Err(rejected()),
+            _ => leading = false,
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symlink_parent_steps_stay_inside_root_and_precede_named_components() {
+        for (path, target) in [
+            ("dosdevices/c:", "../drive_c"),
+            (
+                "drive_c/users/steamuser/Local Settings/Application Data",
+                "../AppData/Local",
+            ),
+            ("a/b/c", "../../sibling"),
+            ("link", "sibling"),
+            ("link", "/usr/lib/libc.so"),
+        ] {
+            assert!(
+                validate_symlink_target_within_root(path, target).is_ok(),
+                "{path} -> {target}"
+            );
+        }
+        for (path, target) in [
+            ("link", "../outside"),
+            ("a/link", "../../outside"),
+            ("a/link", "child/../outside"),
+            ("a/link", "../child/../outside"),
+            ("a/link", "/tmp/../outside"),
+            ("a/link", "..\\outside"),
+            ("link", "/proc/self/mem"),
+            ("link", "/dev/null"),
+            ("link", "/sys/kernel"),
+            ("../link", "safe"),
+        ] {
+            assert!(
+                validate_symlink_target_within_root(path, target).is_err(),
+                "{path} -> {target}"
+            );
+        }
+    }
 
     #[test]
     fn rejects_traversal() {

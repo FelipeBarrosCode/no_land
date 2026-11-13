@@ -7,4 +7,8 @@ license.workspace = true
 [dependencies]
 blake3.workspace = true
 noland-state-core.workspace = true
+noland-snapshot.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

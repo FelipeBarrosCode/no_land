@@ -54,9 +54,12 @@ set -eu
 exec /usr/bin/xauth -f /etc/X11/.Xauthority-noland extract - :0
 HELPER
 printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/noland-runtime-session ""\n' "$user" > "$work/sudoers"
+printf '%s ALL=(root) NOPASSWD: /usr/local/libexec/noland-runtime-maintain *\n' "$user" >> "$work/sudoers"
 chmod 440 "$work/sudoers"
 visudo -cf "$work/sudoers"
 install -o root -g root -m 755 "$work/session" /usr/local/libexec/noland-runtime-session
+install -o root -g root -m 755 "$source_root/scripts/runtime/maintain-runtime.py" /usr/local/libexec/noland-runtime-maintain
+install -o root -g root -m 644 "$source_root/runtime-images/ubuntu24/prerequisites.json" /etc/noland-runtime/prerequisites.json
 install -o root -g root -m 440 "$work/sudoers" /etc/sudoers.d/noland-runtime
 
 # Official Ubuntu base, pinned to the digest published in Canonical's

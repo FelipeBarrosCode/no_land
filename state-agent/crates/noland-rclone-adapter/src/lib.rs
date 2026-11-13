@@ -181,6 +181,11 @@ pub enum AdapterCredential {
         username: String,
         password: String,
     },
+    SshKey {
+        username: String,
+        private_key: String,
+        passphrase: Option<String>,
+    },
     ServiceAccount {
         json: String,
     },
@@ -245,6 +250,21 @@ impl Drop for EphemeralRcloneSession {
 }
 
 pub fn default_storage_root(input: &AdapterInput) -> Result<RcloneRoot> {
+    if input.provider == ProviderKind::Sftp {
+        let root = input
+            .prefix
+            .clone()
+            .or_else(|| input.fields.get("remote_path").cloned())
+            .unwrap_or_else(|| "Noland Shared Storage".into());
+        return Ok(RcloneRoot {
+            remote_name: input.remote_name.clone(),
+            root: if root.chars().all(|ch| ch == '/') && !root.is_empty() {
+                "/".into()
+            } else {
+                root.trim_end_matches('/').to_string()
+            },
+        });
+    }
     if input.provider.uses_bucket_root() {
         let bucket = input
             .bucket

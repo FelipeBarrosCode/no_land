@@ -73,7 +73,10 @@ impl Store {
     pub fn activation(&self) -> Result<Activation> {
         let mut activation: Activation = read_or_default(&self.data.join("activation.json"))?;
         if activation.current.is_none() {
-            activation.current = system_image()?.map(|(id, _)| id);
+            if let Some(system) = system_image()? {
+                activation.current = Some(system.id);
+                activation.previous = system.previous;
+            }
         }
         Ok(activation)
     }
@@ -118,23 +121,65 @@ impl Store {
             .activation()?
             .current
             .context("Runtime is not installed")?;
-        anyhow::ensure!(crate::valid_id(&id), "Invalid runtime ID");
-        let user_image = self.data.join("images").join(&id);
+        self.root_for_id(&id)
+    }
+
+    pub fn root_for_id(&self, id: &str) -> Result<PathBuf> {
+        anyhow::ensure!(crate::valid_id(id), "Invalid runtime ID");
+        let user_image = self.data.join("images").join(id);
         if user_image.is_dir() {
             return Ok(user_image);
         }
-        if let Some((system_id, root)) = system_image()? {
-            if id == system_id {
-                return Ok(root);
-            }
+        // Updated system images remain immutable and available for user-level
+        // rollback after the global default receipt has advanced.
+        let root = Path::new("/opt/noland/runtime/images").join(id);
+        if id.starts_with("ubuntu24-") && protected_system_root(&root) {
+            crate::artifact::validate_root(&root)?;
+            return Ok(root);
         }
         anyhow::bail!("Runtime image is unavailable; resume Provisioning to repair it")
     }
 }
 
+fn protected_system_root(root: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        for path in [
+            Path::new("/opt"),
+            Path::new("/opt/noland"),
+            Path::new("/opt/noland/runtime"),
+            Path::new("/opt/noland/runtime/images"),
+            root,
+        ] {
+            let Ok(meta) = fs::symlink_metadata(path) else {
+                return false;
+            };
+            if !meta.is_dir() || meta.uid() != 0 || meta.mode() & 0o022 != 0 {
+                return false;
+            }
+        }
+        let marker = root.join("etc/noland-runtime-complete");
+        let Ok(meta) = fs::symlink_metadata(&marker) else {
+            return false;
+        };
+        meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = root;
+        false
+    }
+}
+
 // The image is built on the cloud PC during provisioning, not downloaded from
 // a separately signed No Land release. Apps still run with the desktop UID.
-fn system_image() -> Result<Option<(String, PathBuf)>> {
+struct SystemImage {
+    id: String,
+    previous: Option<String>,
+}
+
+fn system_image() -> Result<Option<SystemImage>> {
     let path = Path::new("/etc/noland-runtime/image.json");
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
@@ -161,7 +206,15 @@ fn system_image() -> Result<Option<(String, PathBuf)>> {
     anyhow::ensure!(crate::valid_id(id), "Invalid provisioned runtime ID");
     let root = Path::new("/opt/noland/runtime/images").join(id);
     crate::artifact::validate_root(&root)?;
-    Ok(Some((id.into(), root)))
+    let previous = value
+        .get("previousId")
+        .and_then(|value| value.as_str())
+        .filter(|previous| crate::valid_id(previous) && *previous != id)
+        .map(str::to_owned);
+    Ok(Some(SystemImage {
+        id: id.into(),
+        previous,
+    }))
 }
 
 pub fn private_dir(path: &Path) -> Result<()> {

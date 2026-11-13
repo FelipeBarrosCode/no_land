@@ -13,6 +13,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -58,6 +69,12 @@ name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
+
+[[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
@@ -544,8 +561,10 @@ name = "noland-cas"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "noland-snapshot",
  "noland-state-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -630,7 +649,10 @@ dependencies = [
 name = "noland-rclone-adapter"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "base64",
  "chrono",
+ "rand",
  "serde",
  "serde_json",
  "thiserror",
@@ -714,6 +736,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -753,6 +776,7 @@ dependencies = [
  "noland-crypto",
  "noland-pack",
  "noland-rclone-adapter",
+ "noland-snapshot",
  "noland-state-core",
  "noland-state-db",
  "serde",

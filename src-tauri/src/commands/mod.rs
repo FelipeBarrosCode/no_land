@@ -4242,7 +4242,6 @@ pub async fn save_instance_to_shared_storage_selected(
         context.inner(),
         instance_id,
         payload.selected_paths,
-        payload.performance_mode,
     )
     .await
     .map_err(Into::into)
@@ -4252,10 +4251,74 @@ pub async fn save_instance_to_shared_storage_selected(
 pub async fn cancel_shared_storage_operation(
     context: State<'_, AppContext>,
     instance_id: u64,
+    operation_id: Option<String>,
 ) -> Result<String, FrontendError> {
-    InstanceLifecycleService::cancel_shared_storage_operation(context.inner(), instance_id)
-        .await
-        .map_err(Into::into)
+    InstanceLifecycleService::cancel_shared_storage_operation(
+        context.inner(),
+        instance_id,
+        operation_id.as_deref(),
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn prepare_storage_deletion(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    target: String,
+    selected_paths: Vec<String>,
+) -> Result<serde_json::Value, FrontendError> {
+    InstanceLifecycleService::storage_deletion(
+        context.inner(),
+        instance_id,
+        &target,
+        Some(&selected_paths),
+        None,
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn confirm_storage_deletion(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    target: String,
+    plan_id: String,
+) -> Result<serde_json::Value, FrontendError> {
+    InstanceLifecycleService::storage_deletion(
+        context.inner(),
+        instance_id,
+        &target,
+        None,
+        Some(&plan_id),
+    )
+    .await
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn get_storage_operation_status(
+    context: State<'_, AppContext>,
+    instance_id: u64,
+    operation_id: Option<String>,
+) -> Result<serde_json::Value, FrontendError> {
+    let id = match operation_id {
+        Some(id) => id,
+        None => context.active_agent_operation(instance_id, None).await
+            .ok_or_else(|| AppError::InvalidInput("No active Shared Storage operation is tracked for this PC.".into()))?
+            .operation_id,
+    };
+    let id = uuid::Uuid::parse_str(&id)
+        .map_err(|_| AppError::InvalidInput("Invalid storage operation ID.".into()))?;
+    // Read-only: no instance action lock, tool installation, agent deployment,
+    // session minting or operation submission while a deletion is active.
+    let remote = build_remote_exec_for_instance(context.inner(), instance_id).await?;
+    crate::services::shared_storage::agent_runtime::call_agent_raw(
+        &remote, "GetOperationStatus",
+        serde_json::json!({"operation_id":id,"projection":"progress"}),
+    ).await.map_err(Into::into)
 }
 
 #[tauri::command]

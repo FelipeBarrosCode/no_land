@@ -2,11 +2,14 @@
 //! Only final file data is retained: no full encrypted cache plus decrypted CAS.
 //! Network pipes provide backpressure while persistent workers verify and flush
 //! completed files concurrently with assembly of a bounded next window.
+mod decode;
+#[cfg(test)]
+mod locality_tests;
 #[cfg(test)]
 mod publication_tests;
 mod verification;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs::{self, OpenOptions};
 use std::future::{poll_fn, Future};
 use std::io::{Seek, SeekFrom, Write};
@@ -14,27 +17,35 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
 use std::task::Poll;
 use std::time::{Duration, Instant};
 
+use decode::{DecodeStats, StreamConsumer};
 use noland_crypto::MasterKey;
-use noland_pack::{PackIndexEntry, PackStreamDecoder};
+use noland_pack::PackIndexEntry;
 use noland_state_core::{
     constants::PACK_MAX, pack_key, ContentObjectKind, Result, StateError, SyncDirection,
     SyncJournalEntry,
 };
 use noland_state_db::StateDb;
-use noland_storage::{DownloadObserver, DownloadStreamConsumer, RemoteKey, SharedStorageProvider};
+#[cfg(test)]
+use noland_storage::DownloadStreamConsumer;
+use noland_storage::{
+    DownloadObserver, RemoteKey, SharedStorageProvider, StreamTransferDiagnostics,
+};
+#[cfg(test)]
+use std::sync::Mutex;
 
+use super::identity::VerifiedIdentity;
 use verification::{VerificationPool, VerificationTask, VerifiedFile};
 
 use super::{
-    destination_partial_path, journal, sync_parent_directory, validate_parent_chain,
-    DownloadJournal, LogicalRootMap, PlannedDestination, PlannedTombstone, RestorePlan,
-    RestorePriority, RestoreReport, RestoreTarget, RestoreTransaction,
+    destination_partial_path, journal, validate_parent_chain, DownloadJournal, LogicalRootMap,
+    PlannedDestination, PlannedTombstone, RestorePlan, RestorePriority, RestorePriorityPlan,
+    RestoreReport, RestoreTarget, RestoreTransaction, SharedRestorePlan,
 };
 
 const PUBLICATION_BATCH: usize = 128;
@@ -44,8 +55,14 @@ const PUBLICATION_DELAY: Duration = Duration::from_millis(100);
 // One oversized file is admitted alone; no file contents are buffered here.
 const MAX_UNPUBLISHED_FILES: usize = PUBLICATION_BATCH * 2;
 const MAX_UNPUBLISHED_BYTES: u64 = PUBLICATION_BYTES * 2;
+// Independent of the number of pending files and active downloads. Completed
+// files release their assembly handle before admission to verification.
+const MAX_ASSEMBLY_HANDLES: usize = 32;
+// Shared first chunks can leave arbitrarily many files incomplete. Hash state
+// has its own budget; eviction forces mandatory full-file readback verification.
+const MAX_ACTIVE_HASHERS: usize = 128;
 
-fn elapsed_us(started: Instant) -> u64 {
+pub(super) fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
@@ -97,6 +114,19 @@ pub struct PipelineIoMetrics {
     pub publication_batches: u64,
     pub peak_unpublished_files: u64,
     pub peak_unpublished_bytes: u64,
+    pub assembly_opens: u64,
+    pub assembly_handle_hits: u64,
+    pub assembly_handle_evictions: u64,
+    pub peak_assembly_handles: u64,
+    pub out_of_order_files: u64,
+    pub sequential_placements: u64,
+    pub assembly_queue_wait_us: u64,
+    pub pack_decode_us: u64,
+    pub decode_dispatch_wait_us: u64,
+    pub peak_decode_workers: u64,
+    pub peak_active_hashers: u64,
+    pub hash_state_evictions: u64,
+    pub commit: super::RestoreCommitMetrics,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -137,8 +167,74 @@ struct PendingFile {
     received: u64,
     hasher: Option<Box<blake3::Hasher>>,
     out_of_order: bool,
+    readback: bool,
     opened: bool,
     identity: Option<(u64, u64)>,
+    last_write: Option<VerifiedIdentity>,
+}
+
+#[derive(Default)]
+struct AssemblyHandles {
+    files: VecDeque<(usize, fs::File)>,
+}
+
+impl AssemblyHandles {
+    fn get<'a>(
+        &'a mut self,
+        pending: &PendingFile,
+        metrics: &mut PipelineIoMetrics,
+    ) -> Result<(&'a mut fs::File, VerifiedIdentity)> {
+        // Recheck on EVERY use, including cache hits. A pinned descriptor cannot
+        // redirect a write; a replaced path or parent is rejected rather than
+        // silently writing an unlinked file and later publishing its replacement.
+        validate_parent_chain(&pending.planned.root, &pending.partial)?;
+        let index = pending.planned.manifest_index;
+        let metadata = if let Some(position) = self.files.iter().position(|(key, _)| *key == index)
+        {
+            let entry = self.files.remove(position).expect("cached handle");
+            let metadata = fs::symlink_metadata(&pending.partial)?;
+            if !metadata.is_file()
+                || metadata.nlink() != 1
+                || pending.identity != Some((metadata.dev(), metadata.ino()))
+            {
+                return Err(StateError::UnsafePath(
+                    "restore partial identity changed".into(),
+                ));
+            }
+            self.files.push_back(entry);
+            metrics.assembly_handle_hits += 1;
+            self.files.back().expect("cached handle").1.metadata()?
+        } else {
+            if self.files.len() == MAX_ASSEMBLY_HANDLES {
+                self.files.pop_front();
+                metrics.assembly_handle_evictions += 1;
+            }
+            let (file, metadata) = open_partial(pending)?;
+            self.files.push_back((index, file));
+            metrics.assembly_opens += 1;
+            metrics.peak_assembly_handles =
+                metrics.peak_assembly_handles.max(self.files.len() as u64);
+            metadata
+        };
+        let file = &mut self.files.back_mut().expect("opened handle").1;
+        let identity = VerifiedIdentity::from_metadata(&metadata);
+        if metadata.nlink() != 1
+            || pending
+                .last_write
+                .is_some_and(|previous| previous != identity)
+        {
+            return Err(StateError::Integrity(
+                "restore partial changed between writes".into(),
+            ));
+        }
+        Ok((file, identity))
+    }
+
+    fn remove(&mut self, index: usize) {
+        if let Some(position) = self.files.iter().position(|(key, _)| *key == index) {
+            self.files.remove(position);
+        }
+    }
 }
 
 struct Placement {
@@ -150,6 +246,8 @@ struct Placement {
 struct Pipeline<'tx, 'plan, F> {
     transaction: &'tx mut RestoreTransaction<'plan>,
     pending: BTreeMap<usize, PendingFile>,
+    handles: AssemblyHandles,
+    active_hashers: VecDeque<usize>,
     consumers: BTreeMap<String, Vec<Placement>>,
     assembled: Vec<PendingFile>,
     assembled_bytes: u64,
@@ -170,13 +268,11 @@ struct Pipeline<'tx, 'plan, F> {
     last_progress: Option<Instant>,
     apply_time: Duration,
     last_space_check: Instant,
+    queue_wait_us: Arc<AtomicU64>,
+    decode_stats: Arc<DecodeStats>,
 }
 
-fn poisoned() -> StateError {
-    StateError::Storage("restore pipeline lock poisoned".into())
-}
-
-fn open_partial(pending: &PendingFile) -> Result<fs::File> {
+fn open_partial(pending: &PendingFile) -> Result<(fs::File, fs::Metadata)> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -189,6 +285,7 @@ fn open_partial(pending: &PendingFile) -> Result<fs::File> {
     let file = options.open(&pending.partial)?;
     let meta = file.metadata()?;
     if !meta.is_file()
+        || meta.nlink() != 1
         || pending
             .identity
             .is_some_and(|identity| identity != (meta.dev(), meta.ino()))
@@ -197,7 +294,7 @@ fn open_partial(pending: &PendingFile) -> Result<fs::File> {
             "restore partial identity changed".into(),
         ));
     }
-    Ok(file)
+    Ok((file, meta))
 }
 
 impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 'plan, F> {
@@ -206,6 +303,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         workers: usize,
         mut on_progress: F,
     ) -> Result<Self> {
+        transaction.begin_index_observation()?;
         let started = Instant::now();
         let mut initial = PipelineProgress {
             phase: "checking_existing_files".into(),
@@ -258,6 +356,8 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         let mut this = Self {
             transaction,
             pending: BTreeMap::new(),
+            handles: AssemblyHandles::default(),
+            active_hashers: VecDeque::new(),
             consumers: BTreeMap::new(),
             assembled: Vec::new(),
             assembled_bytes: 0,
@@ -278,6 +378,8 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             last_progress: None,
             apply_time: Duration::ZERO,
             last_space_check: Instant::now(),
+            queue_wait_us: Arc::new(AtomicU64::new(0)),
+            decode_stats: Arc::default(),
         };
 
         // Parents exist and are durable before batching child intents. Recovery can
@@ -326,6 +428,9 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         for entry in planned {
             let index = entry.manifest_index;
             if entry.identical {
+                if let Some(identity) = entry.verified {
+                    this.transaction.verified_files.insert(index, identity);
+                }
                 this.mark_published(index, entry.destination, true)?;
                 continue;
             }
@@ -369,8 +474,10 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                         received: 0,
                         hasher: None,
                         out_of_order: false,
+                        readback: false,
                         opened: false,
                         identity: None,
+                        last_write: None,
                     };
                     if pending.remaining == 0 {
                         this.queue_completed(pending)?;
@@ -390,7 +497,6 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
     fn mark_published(&mut self, index: usize, destination: PathBuf, reused: bool) -> Result<()> {
         self.transaction.release_entry_chunks(index)?;
         self.transaction.published_entries.insert(index);
-        self.transaction.pending_associations.insert(index);
         self.critical.remove(&index);
         self.report.destinations.push(destination);
         if reused {
@@ -412,6 +518,8 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         {
             self.verification.snapshot(&mut self.progress);
             self.progress.io.overlap_file_syncs = self.overlap_file_syncs;
+            self.progress.io.assembly_queue_wait_us = self.queue_wait_us.load(Ordering::Relaxed);
+            self.decode_stats.snapshot(&mut self.progress.io);
             self.progress.ready_to_launch = self.critical.is_empty();
             self.progress.elapsed_ms =
                 self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
@@ -435,34 +543,38 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             if placement.length != plain.len() as u64 {
                 return Err(StateError::Integrity("chunk length mismatch".into()));
             }
+            self.admit_hasher(placement.index, placement.offset)?;
             let pending = self
                 .pending
                 .get_mut(&placement.index)
                 .ok_or_else(|| StateError::Integrity("missing pending restore file".into()))?;
-            validate_parent_chain(&pending.planned.root, &pending.partial)?;
             if self.last_space_check.elapsed() >= Duration::from_secs(1) {
                 noland_state_core::disk::ensure_space(&pending.partial, plain.len() as u64)?;
                 self.last_space_check = Instant::now();
             }
             let write_started = Instant::now();
-            let mut output = open_partial(pending)?;
-            let metadata = output.metadata()?;
-            pending.identity = Some((metadata.dev(), metadata.ino()));
+            let (output, identity) = self.handles.get(pending, &mut self.progress.io)?;
+            pending.identity = Some((identity.device, identity.inode));
             pending.opened = true;
             output.seek(SeekFrom::Start(placement.offset))?;
             output.write_all(plain)?;
+            pending.last_write = Some(VerifiedIdentity::from_metadata(&output.metadata()?));
             self.progress.io.write_us += elapsed_us(write_started);
             // The normal ordered case hashes during writing. Out-of-order packs
             // use one bounded-worker readback, never an incorrectly ordered hash.
             let hash_started = Instant::now();
             if !pending.out_of_order && placement.offset == pending.cursor {
-                pending
-                    .hasher
-                    .get_or_insert_with(|| Box::new(blake3::Hasher::new()))
-                    .update(plain);
+                self.progress.io.sequential_placements += 1;
+                if let Some(hasher) = &mut pending.hasher {
+                    hasher.update(plain);
+                }
                 pending.cursor += plain.len() as u64;
             } else {
+                if !pending.out_of_order {
+                    self.progress.io.out_of_order_files += 1;
+                }
                 pending.out_of_order = true;
+                pending.readback = true;
                 pending.hasher = None;
             }
             self.progress.io.inline_hash_us += elapsed_us(hash_started);
@@ -470,9 +582,14 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             pending.remaining -= 1;
             self.progress.assembled_bytes += plain.len() as u64;
             let completed = pending.remaining == 0;
-            drop(output);
+            let release_hasher = completed || pending.readback;
             self.apply_time += started.elapsed();
+            if release_hasher {
+                self.active_hashers
+                    .retain(|&index| index != placement.index);
+            }
             if completed {
+                self.handles.remove(placement.index);
                 let pending = self
                     .pending
                     .remove(&placement.index)
@@ -482,6 +599,35 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             self.tick()?;
         }
         self.emit_progress(false)
+    }
+
+    fn admit_hasher(&mut self, index: usize, offset: u64) -> Result<()> {
+        let pending = self
+            .pending
+            .get(&index)
+            .ok_or_else(|| StateError::Integrity("missing pending restore file".into()))?;
+        if pending.readback || pending.hasher.is_some() || offset != pending.cursor {
+            return Ok(());
+        }
+        if self.active_hashers.len() == MAX_ACTIVE_HASHERS {
+            let evicted = self.active_hashers.pop_front().expect("full hash budget");
+            let pending = self
+                .pending
+                .get_mut(&evicted)
+                .expect("active incomplete hasher");
+            pending.hasher = None;
+            pending.readback = true;
+            self.progress.io.hash_state_evictions += 1;
+        }
+        self.pending.get_mut(&index).expect("pending file").hasher =
+            Some(Box::new(blake3::Hasher::new()));
+        self.active_hashers.push_back(index);
+        self.progress.io.peak_active_hashers = self
+            .progress
+            .io
+            .peak_active_hashers
+            .max(self.active_hashers.len() as u64);
+        Ok(())
     }
 
     fn queue_completed(&mut self, pending: PendingFile) -> Result<()> {
@@ -596,22 +742,32 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             return Ok(());
         }
         let started = Instant::now();
-        let ready = std::mem::take(&mut self.ready);
+        let mut ready = std::mem::take(&mut self.ready);
         let mut parents = BTreeSet::new();
         let rename_started = Instant::now();
-        for verified in &ready {
+        for verified in &mut ready {
             let pending = &verified.pending;
             validate_parent_chain(&pending.planned.root, &pending.planned.destination)?;
             let metadata = fs::symlink_metadata(&pending.partial)?;
             if !metadata.is_file()
                 || metadata.file_type().is_symlink()
-                || verified.identity != (metadata.dev(), metadata.ino())
+                || verified.identity != VerifiedIdentity::from_metadata(&metadata)
             {
                 return Err(StateError::UnsafePath(
                     "verified restore partial was replaced".into(),
                 ));
             }
             fs::rename(&pending.partial, &pending.planned.destination)?;
+            let published = fs::symlink_metadata(&pending.planned.destination)?;
+            let identity = VerifiedIdentity::from_metadata(&published);
+            if !published.is_file() || !verified.identity.matches_after_rename(identity) {
+                return Err(StateError::Integrity(
+                    "restored file changed during publication".into(),
+                ));
+            }
+            // Only rename may change ctime. Retain that immediate observation,
+            // rather than adopting edits made during the remaining batch/fsyncs.
+            verified.identity = identity;
             parents.insert(
                 pending
                     .planned
@@ -637,6 +793,16 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
         self.verifying_files = 0;
         for verified in ready {
             let pending = verified.pending;
+            let metadata = fs::symlink_metadata(&pending.planned.destination)?;
+            let identity = VerifiedIdentity::from_metadata(&metadata);
+            if !metadata.is_file() || verified.identity != identity {
+                return Err(StateError::Integrity(
+                    "restored file changed during publication".into(),
+                ));
+            }
+            self.transaction
+                .verified_files
+                .insert(pending.planned.manifest_index, identity);
             self.transaction.clear_partial(&pending.partial)?;
             self.mark_published(
                 pending.planned.manifest_index,
@@ -656,9 +822,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             ));
         }
         for tombstone in &self.tombstones {
-            if super::remove_path_if_present(&tombstone.destination)? {
-                sync_parent_directory(&tombstone.destination)?;
-            }
+            tombstone.apply()?;
         }
         self.transaction.tombstones_applied = true;
         self.emit_progress(true)?;
@@ -678,10 +842,14 @@ struct PackJob {
     entries: Vec<PackIndexEntry>,
     size: u64,
     priority: RestorePriority,
+    first_use: (usize, usize),
+    selected_chunk_references: u64,
+    selected_plaintext_bytes: u64,
 }
 
 fn pack_jobs(
     plan: &RestorePlan,
+    priorities: &RestorePriorityPlan,
     index: &[PackIndexEntry],
     needed: &BTreeSet<String>,
 ) -> Result<Vec<PackJob>> {
@@ -700,16 +868,19 @@ fn pack_jobs(
             .entry(entry.pack_id.clone())
             .and_modify(|size| *size = (*size).max(end))
             .or_insert(end);
-        by_hash.entry(entry.chunk_hash.clone()).or_insert(entry);
+        by_hash.entry(entry.chunk_hash.as_str()).or_insert(entry);
     }
-    let priorities = plan.priority_plan();
     let mut grouped = BTreeMap::<String, PackJob>::new();
-    for planned in priorities.entries {
-        for chunk in &plan.manifest.files[planned.manifest_index].chunks {
+    for planned in &priorities.entries {
+        for (chunk_index, chunk) in plan.manifest.files[planned.manifest_index]
+            .chunks
+            .iter()
+            .enumerate()
+        {
             if !needed.contains(&chunk.hash) {
                 continue;
             }
-            let entry = by_hash.get(&chunk.hash).ok_or_else(|| {
+            let entry = by_hash.get(chunk.hash.as_str()).ok_or_else(|| {
                 StateError::Integrity("manifest chunk absent from pack index".into())
             })?;
             let job = grouped
@@ -719,13 +890,22 @@ fn pack_jobs(
                     entries: Vec::new(),
                     size: sizes[&entry.pack_id],
                     priority: planned.priority,
+                    first_use: (planned.manifest_index, chunk_index),
+                    selected_chunk_references: 0,
+                    selected_plaintext_bytes: 0,
                 });
-            job.priority = job.priority.min(planned.priority);
+            job.selected_chunk_references = job.selected_chunk_references.saturating_add(1);
+            job.selected_plaintext_bytes = job.selected_plaintext_bytes.saturating_add(chunk.size);
+            let first_use = (planned.manifest_index, chunk_index);
+            if (planned.priority, first_use) < (job.priority, job.first_use) {
+                job.priority = planned.priority;
+                job.first_use = first_use;
+            }
         }
     }
     for hash in needed {
         let entry = by_hash
-            .get(hash)
+            .get(hash.as_str())
             .ok_or_else(|| StateError::Integrity("missing indexed chunk".into()))?;
         grouped
             .get_mut(&entry.pack_id)
@@ -734,7 +914,13 @@ fn pack_jobs(
             .push((*entry).clone());
     }
     let mut jobs = grouped.into_values().collect::<Vec<_>>();
-    jobs.sort_by(|a, b| a.priority.cmp(&b.priority).then_with(|| a.id.cmp(&b.id)));
+    // Capture packs follow manifest/file/chunk order, whereas their UUIDs are
+    // random. The earliest use in the highest-priority tier preserves locality
+    // without a barrier between downloads or extra plaintext buffering.
+    jobs.sort_by_key(|job| (job.priority, job.first_use));
+    for job in &mut jobs {
+        job.entries.sort_by_key(|entry| entry.offset);
+    }
     Ok(jobs)
 }
 
@@ -764,69 +950,58 @@ impl Drop for AssemblyGuard {
     }
 }
 
-struct StreamConsumer<'a> {
-    job: &'a PackJob,
-    master: &'a MasterKey,
-    decoder: Mutex<PackStreamDecoder>,
-    sender: &'a tokio::sync::mpsc::Sender<AssemblyMessage>,
-}
-
-#[async_trait::async_trait]
-impl DownloadStreamConsumer for StreamConsumer<'_> {
-    fn restart(&self) -> Result<()> {
-        *self.decoder.lock().map_err(|_| poisoned())? =
-            PackStreamDecoder::new(&self.job.id, self.job.entries.clone())?;
-        Ok(())
-    }
-    async fn write(&self, mut bytes: &[u8]) -> Result<()> {
-        while !bytes.is_empty() {
-            let (consumed, record) = {
-                let mut decoder = self.decoder.lock().map_err(|_| poisoned())?;
-                let count = bytes.len().min(decoder.next_record_input_limit());
-                let mut record = None;
-                decoder.push(&bytes[..count], self.master, |entry, plain| {
-                    record = Some((entry.chunk_hash.clone(), plain.to_vec()));
-                    Ok(())
-                })?;
-                (count, record)
-            };
-            bytes = &bytes[consumed..];
-            if let Some((hash, plain)) = record {
-                self.sender
-                    .send(AssemblyMessage::Chunk(hash, plain))
-                    .await
-                    .map_err(|_| StateError::Storage("restore assembly stopped".into()))?;
-            }
-        }
-        Ok(())
-    }
-    async fn finish(&self) -> Result<()> {
-        {
-            let decoder = self.decoder.lock().map_err(|_| poisoned())?;
-            decoder.finish()?;
-            // Retained immutable packs can have unreferenced trailing records that
-            // are omitted from this manifest's index; the indexed extent is a minimum.
-            if decoder.received_bytes() < self.job.size {
-                return Err(StateError::Integrity("streamed pack size mismatch".into()));
-            }
-        }
-        self.sender
-            .send(AssemblyMessage::Flush)
-            .await
-            .map_err(|_| StateError::Storage("restore assembly stopped".into()))
-    }
-}
-
 struct PackObserver<'a> {
     journal: DownloadJournal<'a>,
     key: String,
 }
 impl DownloadObserver for PackObserver<'_> {
+    fn transfer_started(&self) -> Result<()> {
+        self.journal
+            .db
+            .set_sync_journal_state(
+                self.journal.operation_id,
+                &self.key,
+                noland_state_core::SyncJournalState::InProgress,
+                None,
+                None,
+            )
+            .map(|_| ())
+    }
+
+    fn transfer_retrying(&self, reason: &str) -> Result<()> {
+        self.journal
+            .db
+            .set_sync_journal_state(
+                self.journal.operation_id,
+                &self.key,
+                noland_state_core::SyncJournalState::RetryScheduled,
+                Some(reason),
+                None,
+            )
+            .map(|_| ())
+    }
+
     fn transfer_progress(&self, bytes: u64) -> Result<()> {
         // Keep transfer bytes separate from the generic file publication counter.
         self.journal
             .db
             .update_sync_journal_progress(self.journal.operation_id, &self.key, bytes)
+            .map(|_| ())
+    }
+
+    fn transfer_progress_with_diagnostics(
+        &self,
+        bytes: u64,
+        diagnostics: &StreamTransferDiagnostics,
+    ) -> Result<()> {
+        self.journal
+            .db
+            .update_sync_journal_stream_progress(
+                self.journal.operation_id,
+                &self.key,
+                bytes,
+                &serde_json::to_value(diagnostics)?,
+            )
             .map(|_| ())
     }
 }
@@ -838,6 +1013,7 @@ impl Drop for ScratchGuard {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn stream_pack(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
@@ -845,6 +1021,8 @@ async fn stream_pack(
     job: PackJob,
     sender: &tokio::sync::mpsc::Sender<AssemblyMessage>,
     journal: Option<DownloadJournal<'_>>,
+    queue_wait_us: &Arc<AtomicU64>,
+    decode_stats: &Arc<DecodeStats>,
 ) -> Result<()> {
     let key = pack_key(&job.id);
     let scratch = ScratchGuard(
@@ -867,12 +1045,13 @@ async fn stream_pack(
             None,
         )?;
     }
-    let consumer = StreamConsumer {
-        decoder: Mutex::new(PackStreamDecoder::new(&job.id, job.entries.clone())?),
-        job: &job,
+    let consumer = StreamConsumer::new(
+        job,
         master,
-        sender,
-    };
+        sender.clone(),
+        Arc::clone(queue_wait_us),
+        Arc::clone(decode_stats),
+    )?;
     let result = provider
         .download_stream_observed(
             &RemoteKey::new(&key),
@@ -886,11 +1065,7 @@ async fn stream_pack(
     if let Some(journal) = journal {
         match &result {
             Ok(()) => {
-                let bytes = consumer
-                    .decoder
-                    .lock()
-                    .map_err(|_| poisoned())?
-                    .received_bytes();
+                let bytes = consumer.received_bytes();
                 if let Some(mut entry) = journal
                     .db
                     .get_sync_journal_entry(journal.operation_id, &key)?
@@ -960,7 +1135,7 @@ async fn run_weighted<T, Fut: Future<Output = Result<()>>>(
 pub async fn restore_pipelined(
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
-    plan: &RestorePlan,
+    plan: impl Into<SharedRestorePlan>,
     index: &[PackIndexEntry],
     roots: &LogicalRootMap,
     db: Option<&StateDb>,
@@ -978,6 +1153,7 @@ pub async fn restore_pipelined(
             "invalid bounded restore pipeline options".into(),
         ));
     }
+    let plan = plan.into();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(options.buffered_chunks);
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
     let (init_tx, init_rx) = tokio::sync::oneshot::channel();
@@ -988,6 +1164,10 @@ pub async fn restore_pipelined(
     let worker_plan = plan.clone();
     let worker_roots = roots.clone();
     let worker_db = db.cloned();
+    let queue_wait_us = Arc::new(AtomicU64::new(0));
+    let worker_queue_wait_us = Arc::clone(&queue_wait_us);
+    let decode_stats = Arc::new(DecodeStats::default());
+    let worker_decode_stats = Arc::clone(&decode_stats);
     let thread = std::thread::spawn(move || {
         let result = (|| {
             // This restore-owned thread only runs the timer while awaiting input.
@@ -996,9 +1176,14 @@ pub async fn restore_pipelined(
             let receiver_runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_time()
                 .build()?;
-            let mut transaction =
-                RestoreTransaction::new(&worker_plan, &worker_roots, worker_db.as_ref());
-            transaction.uses_legacy_pack_cache = false;
+            let mut transaction = RestoreTransaction::with_priorities(
+                &worker_plan,
+                &worker_roots,
+                worker_db.as_ref(),
+                worker_plan.priority_plan(),
+                false,
+            );
+            let pipeline_started = Instant::now();
             let mut pipeline = match Pipeline::new(
                 &mut transaction,
                 options.reconstruction_workers.min(16),
@@ -1017,6 +1202,8 @@ pub async fn restore_pipelined(
                 }
             };
             pipeline.overlap_file_syncs = options.overlap_file_syncs;
+            pipeline.queue_wait_us = worker_queue_wait_us;
+            pipeline.decode_stats = worker_decode_stats;
             let needed = pipeline.consumers.keys().cloned().collect::<BTreeSet<_>>();
             init_tx
                 .send(Ok(needed))
@@ -1052,7 +1239,8 @@ pub async fn restore_pipelined(
                     }
                 }
             }
-            let report = pipeline.finish()?;
+            let mut report = pipeline.finish()?;
+            transaction.publish_prerequisites(&worker_plan.prerequisites)?;
             ready_tx
                 .send(())
                 .map_err(|_| StateError::Storage("restore cancelled".into()))?;
@@ -1064,7 +1252,11 @@ pub async fn restore_pipelined(
             if worker_cancelled.load(Ordering::Acquire) {
                 return Err(StateError::Storage("restore cancelled".into()));
             }
-            transaction.commit()?;
+            report.io.commit = transaction.commit_with_metrics()?;
+            report.pipeline_duration_ms = pipeline_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
             Ok(report)
         })();
         let _ = result_tx.send(result);
@@ -1084,7 +1276,7 @@ pub async fn restore_pipelined(
         &mut on_progress,
     )
     .await?;
-    let jobs = pack_jobs(plan, index, &needed)?;
+    let jobs = pack_jobs(&plan, &plan.priorities, index, &needed)?;
     let total_packs = jobs.len();
     if let Some(journal) = journal {
         for job in &jobs {
@@ -1095,6 +1287,16 @@ pub async fn restore_pipelined(
                 SyncDirection::Download,
             );
             entry.size = Some(job.size);
+            // A small compressed/deduplicated object can represent far more
+            // destination work. These are selected-manifest references, not a
+            // claim that already-reused files will be rewritten.
+            entry.detail_json = serde_json::json!({"stream_plan": {
+                "indexed_ciphertext_bytes": job.size,
+                "requested_records": job.entries.len(),
+                "unique_plaintext_bytes": job.entries.iter().map(|entry| u64::from(entry.plaintext_len)).sum::<u64>(),
+                "selected_chunk_references": job.selected_chunk_references,
+                "selected_plaintext_bytes": job.selected_plaintext_bytes,
+            }});
             journal.db.upsert_sync_journal_entry(&entry)?;
         }
     }
@@ -1104,7 +1306,9 @@ pub async fn restore_pipelined(
                 let size = if provider.supports_streaming_downloads() {
                     // A pipe never retains a whole pack. Bound actual active records;
                     // the assembly channel separately bounds queued plaintext.
-                    3 * noland_state_core::constants::FASTCDC_MAX + 1024
+                    3 * noland_state_core::constants::FASTCDC_MAX
+                        + 2 * decode::INPUT_BYTES as u64
+                        + 1024
                 } else {
                     PACK_MAX
                 };
@@ -1113,7 +1317,18 @@ pub async fn restore_pipelined(
             .collect(),
         options.max_parallel_packs.min(32),
         options.max_inflight_pack_bytes,
-        |job| stream_pack(provider, master, plan, job, &sender, journal),
+        |job| {
+            stream_pack(
+                provider,
+                master,
+                &plan,
+                job,
+                &sender,
+                journal,
+                &queue_wait_us,
+                &decode_stats,
+            )
+        },
     );
     let transfer_result = monitor_progress(transfer, &mut progress_rx, &mut on_progress).await;
     let completion_result = if transfer_result.is_ok() {
@@ -1188,7 +1403,7 @@ async fn monitor_progress<T>(
 mod tests {
     use super::*;
     use crate::tests::{block_on, crash_test_plan, test_dir, test_file, test_manifest, test_plan};
-    use noland_state_core::{AgentPaths, ChunkRef, PersistenceClass, SemanticRole};
+    use noland_state_core::{AgentPaths, AppIdentity, ChunkRef, PersistenceClass, SemanticRole};
     use noland_storage::LocalStorage;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::AtomicUsize;
@@ -1248,6 +1463,7 @@ mod tests {
         assert_eq!(report.restore.published_entries, 1);
         assert!(samples.last().unwrap().ready_to_launch);
         assert!(samples.last().unwrap().readback_bytes > 0);
+        assert_eq!(report.io.out_of_order_files, 1);
         assert!(samples
             .windows(2)
             .all(|pair| pair[0].completed_entries <= pair[1].completed_entries));
@@ -1324,7 +1540,7 @@ mod tests {
         let storage = LocalStorage::new(&remote);
         let home = root.join("home");
         let roots = LogicalRootMap::from_home(&home);
-        let first = test_plan(&root.join("first"), test_manifest(vec![file.clone()]));
+        let first = test_plan(&root.join("first"), test_manifest(vec![file.clone()])).into_shared();
         let report = block_on(restore_pipelined(
             &storage,
             &master,
@@ -1389,13 +1605,19 @@ mod tests {
         let destination = home.join(".local/share/game/save.dat");
         fs::create_dir_all(destination.parent().unwrap()).unwrap();
         fs::write(&destination, b"original save").unwrap();
+        let db = StateDb::open_in_memory().unwrap();
+        db.upsert_app(&AppIdentity::new(
+            plan.manifest.app.app_id.clone(),
+            "Restore Test",
+        ))
+        .unwrap();
         let result = block_on(restore_pipelined(
             &LocalStorage::new(remote),
             &master,
             &plan,
             &packs[0].entries,
             &LogicalRootMap::from_home(home),
-            None,
+            Some(&db),
             None,
             PipelineOptions::default(),
             |sample| {
@@ -1408,6 +1630,14 @@ mod tests {
         ));
         assert!(result.is_err());
         assert_eq!(fs::read(&destination).unwrap(), b"original save");
+        assert!(db
+            .list_file_states(&plan.manifest.app.app_id, None)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .associations_for_app(&plan.manifest.app.app_id)
+            .unwrap()
+            .is_empty());
         assert!(
             !plan.staging.exists(),
             "worker must join and complete rollback before cancellation returns"

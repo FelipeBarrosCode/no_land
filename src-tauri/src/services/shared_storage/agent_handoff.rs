@@ -8,11 +8,18 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
-use crate::models::app_state::{BackupPerformanceMode, SharedStorageObjectEntry};
+use crate::models::app_state::SharedStorageObjectEntry;
 use crate::models::events::{SharedStorageProgressEvent, SharedStorageRestoreCompletedEvent};
 use crate::services::app_context::{ActiveAgentOperation, AppContext};
 use crate::services::remote_exec::RemoteExec;
 use crate::services::shared_storage::agent_runtime::{call_agent_raw, ensure_state_agent};
+use crate::services::shared_storage::operation_monitor::{
+    monitor_operation, select_existing_operation, ExistingOperation, MonitorFailure, OperationMatch,
+};
+use crate::services::shared_storage::operation_submission::{
+    clear_rejected_submission, request_fingerprint, submit_with_id, SubmissionAttemptError,
+    SubmissionFailure, SubmissionMemory, SubmissionReceipt,
+};
 use crate::services::shared_storage::provider_profiles::shared_profile_manager;
 use crate::services::shared_storage::rclone_adapter::mint_ephemeral_session;
 use crate::services::shared_storage::shared_storage_manager::SharedStorageManager;
@@ -82,8 +89,23 @@ impl SharedStorageManager {
         Self::ensure_rclone_installed(remote).await?;
         ensure_state_agent(remote, target_user).await?;
         let session_op = Uuid::new_v4().to_string();
-        let session = Self::mint_session(context, &session_op).await?;
-        let key_hex = Self::master_key_hex(context).await?;
+        // Resolve once: a profile switch during these awaits must not pair one
+        // provider's session with another provider's repository key.
+        let active = Self::resolve_active_profile(context).await?;
+        let session = mint_ephemeral_session(
+            &active.profile.provider,
+            &active.credentials,
+            &active.provider_fields,
+            active.profile.bucket.as_deref(),
+            active.profile.prefix.as_deref(),
+            &active.remote_name,
+            &session_op,
+        )?;
+        let key_hex = hex::encode(
+            shared_profile_manager()
+                .retrieve_repository_key(context, &active.profile)
+                .await?,
+        );
         Ok((session, key_hex))
     }
 
@@ -94,65 +116,37 @@ impl SharedStorageManager {
         target_user: &str,
         app_id: &str,
         mode: &str,
-        performance_mode: BackupPerformanceMode,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
-        if let Some(operation_id) =
-            find_interrupted_operation(remote, "backup", Some(app_id), None).await?
-        {
-            let queued = call_agent_raw(
-                remote,
-                "RetryOperation",
-                json!({
-                    "operation_id": operation_id,
-                    "session": session,
-                    "master_key_hex": hex,
-                }),
-            )
-            .await?;
-            let operation_id = queued
-                .get("operation_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(operation_id.as_str());
-            return wait_for_agent_operation(
-                context,
-                remote,
-                instance_id,
-                operation_id,
-                "backup",
-                None,
-                None,
-                Duration::from_secs(2 * 60 * 60),
-            )
-            .await;
-        }
-        let queued = call_agent_raw(
+        let submission = queue_or_reattach(
+            context,
             remote,
-            "StartBackup",
+            instance_id,
+            "backup",
+            app_id,
+            None,
+            mode,
             json!({
                 "app_id": app_id,
                 "mode": mode,
-                "performance_mode": performance_mode,
+                "client_storage_identity": operation_storage_identity(&session),
                 "session": session,
                 "master_key_hex": hex,
             }),
         )
         .await?;
-        let operation_id = queued
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| AppError::State("state-agent backup returned no operation_id".into()))?;
         wait_for_agent_operation(
             context,
             remote,
             instance_id,
-            operation_id,
+            &submission.operation_id,
             "backup",
             None,
             None,
             Duration::from_secs(2 * 60 * 60),
+            submission.status,
         )
         .await
     }
@@ -160,36 +154,30 @@ impl SharedStorageManager {
     pub async fn start_agent_seal(
         context: &AppContext,
         remote: &RemoteExec,
+        instance_id: u64,
         target_user: &str,
         mode: &str,
         master_key_hex: Option<&str>,
     ) -> AppResult<serde_json::Value> {
         let (session, key) = Self::prepare_agent_operation(context, remote, target_user).await?;
         let hex = master_key_hex.unwrap_or(key.as_str());
-        call_agent_raw(
+        let submission = queue_or_reattach(
+            context,
             remote,
-            "StartSeal",
+            instance_id,
+            "seal",
+            "*",
+            None,
+            mode,
             json!({
                 "mode": mode,
+                "client_storage_identity": operation_storage_identity(&session),
                 "session": session,
                 "master_key_hex": hex,
             }),
         )
-        .await
-    }
-
-    pub async fn seal_before_stop(
-        context: &AppContext,
-        remote: &RemoteExec,
-        instance_id: u64,
-        target_user: &str,
-    ) -> AppResult<serde_json::Value> {
-        let queued =
-            Self::start_agent_seal(context, remote, target_user, "personal_state", None).await?;
-        let operation_id = queued
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| AppError::State("state-agent seal returned no operation_id".into()))?;
+        .await?;
+        let operation_id = &submission.operation_id;
         let completed = wait_for_agent_operation(
             context,
             remote,
@@ -199,10 +187,44 @@ impl SharedStorageManager {
             None,
             None,
             Duration::from_secs(2 * 60 * 60),
+            submission.status,
         )
-        .await?;
+        .await;
+        let cancelled = seal_cancellation_requested(
+            instance_id,
+            operation_id,
+            !matches!(&completed, Err(AppError::Timeout(_))),
+        );
+        if cancelled {
+            return Err(AppError::Cancelled);
+        }
+        let completed = completed?;
         require_successful_seal(&completed)?;
         Ok(completed)
+    }
+
+    pub async fn seal_before_stop(
+        context: &AppContext,
+        remote: &RemoteExec,
+        instance_id: u64,
+        target_user: &str,
+    ) -> AppResult<serde_json::Value> {
+        Self::start_agent_seal(
+            context,
+            remote,
+            instance_id,
+            target_user,
+            "personal_state",
+            None,
+        )
+        .await
+    }
+
+    pub(crate) fn request_seal_cancellation(instance_id: u64, operation_id: &str) {
+        CANCELLED_SEALS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert((instance_id, operation_id.to_owned()));
     }
 
     pub async fn list_agent_catalog(
@@ -234,62 +256,34 @@ impl SharedStorageManager {
         mode: &str,
     ) -> AppResult<serde_json::Value> {
         let (session, hex) = Self::prepare_agent_operation(context, remote, target_user).await?;
-        if let Some(operation_id) =
-            find_interrupted_operation(remote, "restore", Some(app_id), Some(bundle_id)).await?
-        {
-            let queued = call_agent_raw(
-                remote,
-                "RetryOperation",
-                json!({
-                    "operation_id": operation_id,
-                    "session": session,
-                    "master_key_hex": hex,
-                }),
-            )
-            .await?;
-            let operation_id = queued
-                .get("operation_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or(operation_id.as_str());
-            return wait_for_agent_operation(
-                context,
-                remote,
-                instance_id,
-                operation_id,
-                "restore",
-                Some(app_id),
-                Some(bundle_id),
-                Duration::from_secs(2 * 60 * 60),
-            )
-            .await;
-        }
-        let queued = call_agent_raw(
+        let submission = queue_or_reattach(
+            context,
             remote,
-            "StartRestore",
+            instance_id,
+            "restore",
+            app_id,
+            Some(bundle_id),
+            mode,
             json!({
                 "app_id": app_id,
                 "bundle_id": bundle_id,
                 "mode": mode,
+                "client_storage_identity": operation_storage_identity(&session),
                 "session": session,
                 "master_key_hex": hex,
             }),
         )
         .await?;
-        let operation_id = queued
-            .get("operation_id")
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                AppError::State("state-agent restore returned no operation_id".into())
-            })?;
         wait_for_agent_operation(
             context,
             remote,
             instance_id,
-            operation_id,
+            &submission.operation_id,
             "restore",
             Some(app_id),
             Some(bundle_id),
             Duration::from_secs(2 * 60 * 60),
+            submission.status,
         )
         .await
     }
@@ -330,81 +324,298 @@ impl SharedStorageManager {
         let catalog = Self::list_agent_catalog(context, remote, target_user, None).await?;
         parse_agent_catalog(&catalog)
     }
+}
 
-    async fn mint_session(
-        context: &AppContext,
-        operation_id: &str,
-    ) -> AppResult<EphemeralRcloneSession> {
-        let active = Self::resolve_active_profile(context).await?;
-        mint_ephemeral_session(
-            &active.profile.provider,
-            &active.credentials,
-            &active.provider_fields,
-            active.profile.bucket.as_deref(),
-            active.profile.prefix.as_deref(),
-            &active.remote_name,
-            operation_id,
-        )
-    }
+fn operation_storage_identity(session: &EphemeralRcloneSession) -> serde_json::Value {
+    // Preserve the exact root: e.g. SFTP /repo and repo are different locations.
+    // Credentials and ephemeral session IDs must never enter persisted matching data.
+    json!({
+        "provider": session.provider,
+        "backend_type": session.backend_type,
+        "remote_name": session.remote_name,
+        "root": session.root,
+    })
+}
 
-    async fn master_key_hex(context: &AppContext) -> AppResult<String> {
-        let active = Self::resolve_active_profile(context).await?;
-        let key = shared_profile_manager()
-            .retrieve_repository_key(context, &active.profile)
-            .await?;
-        Ok(hex::encode(key))
+// Serialize the lookup/submission boundary, not the long-running monitor. Two
+// UI requests must not both observe an empty operation list and submit work.
+static SUBMISSION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static SUBMISSION_MEMORY: SubmissionMemory = SubmissionMemory::new();
+static CANCELLED_SEALS: std::sync::Mutex<std::collections::BTreeSet<(u64, String)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+fn seal_cancellation_requested(instance_id: u64, operation_id: &str, terminal: bool) -> bool {
+    let mut cancelled = CANCELLED_SEALS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let key = (instance_id, operation_id.to_owned());
+    if terminal {
+        cancelled.remove(&key)
+    } else {
+        cancelled.contains(&key)
     }
 }
 
-async fn find_interrupted_operation(
+async fn queue_or_reattach(
+    context: &AppContext,
     remote: &RemoteExec,
+    instance_id: u64,
     kind: &str,
-    app_id: Option<&str>,
+    app_id: &str,
     bundle_id: Option<&str>,
-) -> AppResult<Option<String>> {
-    let recent = call_agent_raw(remote, "ListRecentOperations", json!({"limit": 100})).await?;
-    let operations = recent
-        .get("operations")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    for operation in operations {
-        if operation.get("kind").and_then(serde_json::Value::as_str) != Some(kind)
-            || operation.get("state").and_then(serde_json::Value::as_str) != Some("INTERRUPTED")
-        {
-            continue;
-        }
-        let detail = operation.get("detail_json");
-        let persisted_app = operation
-            .get("app_id")
+    mode: &str,
+    mut params: serde_json::Value,
+) -> AppResult<SubmissionReceipt> {
+    let _submission = SUBMISSION.lock().await;
+    let fingerprint = request_fingerprint(kind, &params);
+    // A newer request of the same kind must not mask an earlier paused ID.
+    // Only this exact immutable fingerprint authorizes an unobserved replay.
+    let local_resume_id = SUBMISSION_MEMORY.lookup(instance_id, &fingerprint);
+    let preferred_id = match &local_resume_id {
+        Some(id) => Some(id.clone()),
+        None => context
+            .active_agent_operation(instance_id, Some(kind))
+            .await
+            .map(|operation| operation.operation_id),
+    };
+    let request = OperationMatch {
+        kind,
+        app_id,
+        bundle_id,
+        mode,
+        storage_identity: &params["client_storage_identity"],
+        regenerable_caches: params
+            .get("regenerable_caches")
             .and_then(serde_json::Value::as_str)
-            .or_else(|| {
-                detail
-                    .and_then(|value| value.get("app_id"))
-                    .and_then(serde_json::Value::as_str)
-            });
-        let app_matches = match app_id {
-            Some("*") | Some("_all") => persisted_app.is_none(),
-            Some(expected) => persisted_app == Some(expected),
-            None => true,
-        };
-        let bundle_matches = bundle_id.is_none_or(|expected| {
-            detail
-                .and_then(|value| value.get("bundle_id"))
-                .and_then(serde_json::Value::as_str)
-                == Some(expected)
-        });
-        if app_matches && bundle_matches {
-            return Ok(operation
-                .get("operation_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string));
+            .unwrap_or("include"),
+    };
+    let existing = match find_existing_operation(
+        remote,
+        &request,
+        preferred_id.as_deref(),
+        local_resume_id.is_some(),
+    )
+    .await
+    {
+        Ok(existing) => existing,
+        // A missing/unreachable remote record is ambiguous. Only our retained
+        // immutable fingerprint authorizes replaying the original ID here.
+        Err(OperationLookupFailure::Unavailable(_)) if local_resume_id.is_some() => None,
+        Err(
+            OperationLookupFailure::Unavailable(error) | OperationLookupFailure::Mismatch(error),
+        ) => return Err(error),
+    };
+    if let Some(existing) = &existing {
+        let (ExistingOperation::Running(id)
+        | ExistingOperation::Tracked(id)
+        | ExistingOperation::Interrupted(id)
+        | ExistingOperation::UnboundRunning(id)) = existing;
+        if SUBMISSION_MEMORY.has_conflicting_binding(instance_id, id, &fingerprint) {
+            return Err(AppError::State(format!("Operation {id} is retained for different selection, provider or vault inputs; submission deferred")));
         }
     }
-    Ok(None)
+    let matched_seal_id = match existing {
+        Some(ExistingOperation::Running(id) | ExistingOperation::Tracked(id)) if kind == "seal" => Some(id),
+        Some(ExistingOperation::Running(id) | ExistingOperation::Tracked(id)) => return Ok(SubmissionReceipt::attached(id)),
+        Some(ExistingOperation::UnboundRunning(id)) => return Err(AppError::State(format!(
+            "Operation {id} is still running but its provider cannot be verified. Resume or cancel that operation before submitting another {kind}."
+        ))),
+        Some(ExistingOperation::Interrupted(id)) => {
+            if kind == "seal" {
+                // Resuming a pre-stop monitor cannot restart a failed/interrupted
+                // lifecycle prerequisite and subsequently authorize destruction.
+                return Ok(SubmissionReceipt::attached(id));
+            }
+            // A retry is allowed only after an authoritative INTERRUPTED result
+            // with matching app/bundle/mode/provider. A lost retry response is
+            // resolved by monitoring this ID, never by another submission.
+            let queued = call_agent_raw(remote, "RetryOperation", json!({
+                "operation_id": id,
+                "session": params["session"],
+                "master_key_hex": params["master_key_hex"],
+            })).await;
+            let status = if let Ok(queued) = queued {
+                if queued.get("operation_id").and_then(serde_json::Value::as_str).is_some_and(|returned| returned != id) {
+                    return Err(AppError::State(format!("Retry returned a different operation ID; original resumable operation is {id}")));
+                }
+                Some(queued)
+            } else { None };
+            return Ok(SubmissionReceipt { operation_id: id, status });
+        }
+        None => None,
+    };
+    let method = match kind {
+        "backup" => "StartBackup",
+        "restore" => "StartRestore",
+        "seal" => "StartSeal",
+        _ => {
+            return Err(AppError::InvalidInput(
+                "Unsupported state-agent operation kind".into(),
+            ))
+        }
+    };
+    let operation_id = matched_seal_id
+        .or(local_resume_id)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    params["client_operation_id"] = operation_id.clone().into();
+    if !SUBMISSION_MEMORY.remember(instance_id, &operation_id, fingerprint) {
+        return Err(AppError::State(format!("Operation {operation_id} is retained for different selection, provider or vault inputs; submission deferred")));
+    }
+    let result = submit_with_id(
+        operation_id.clone(),
+        |id| async move {
+            context
+                .retain_agent_operation(ActiveAgentOperation {
+                    instance_id,
+                    operation_id: id,
+                    kind: kind.to_owned(),
+                })
+                .await;
+        },
+        |id| {
+            let params = params.clone();
+            async move {
+                // Once cancellation is requested, reconcile only. An admission
+                // retry must not start an as-yet-unaccepted seal after cancellation.
+                if kind == "seal" && seal_cancellation_requested(instance_id, &id, false) {
+                    return call_agent_raw(
+                        remote,
+                        "GetOperationStatus",
+                        json!({"operation_id": id, "projection": "progress"}),
+                    )
+                    .await
+                    .map_err(|_| SubmissionAttemptError::Unavailable);
+                }
+                call_agent_raw(remote, method, params)
+                    .await
+                    .map_err(|error| {
+                        // call_agent_raw distinguishes an authoritative RPC error
+                        // using this prefix; SSH/transfer/decoding errors do not use it.
+                        match error {
+                            AppError::Provisioning(message)
+                                if message.starts_with(&format!("state-agent {method}:")) =>
+                            {
+                                SubmissionAttemptError::Rejected(message)
+                            }
+                            _ => SubmissionAttemptError::Unavailable,
+                        }
+                    })
+            }
+        },
+        |status| emit_operation_progress(context, instance_id, kind, &operation_id, status),
+    )
+    .await;
+    if clear_rejected_submission(
+        &result,
+        &SUBMISSION_MEMORY,
+        instance_id,
+        &operation_id,
+        context.clear_agent_operation(instance_id, &operation_id),
+    )
+    .await
+    {
+        seal_cancellation_requested(instance_id, &operation_id, true);
+        emit_operation_progress(
+            context,
+            instance_id,
+            kind,
+            &operation_id,
+            &json!({
+                "state": "FAILED", "running": false,
+                "progress": {"phase": "rejected", "message": "Operation submission was rejected"},
+            }),
+        );
+    }
+    result.map_err(|error| match error {
+        SubmissionFailure::Unconfirmed(message) | SubmissionFailure::Incompatible(message) => {
+            AppError::Timeout(message)
+        }
+        SubmissionFailure::Rejected(message) => AppError::State(message),
+    })
+}
+
+enum OperationLookupFailure {
+    Unavailable(AppError),
+    Mismatch(AppError),
+}
+
+async fn find_existing_operation(
+    remote: &RemoteExec,
+    request: &OperationMatch<'_>,
+    preferred_id: Option<&str>,
+    require_preferred_match: bool,
+) -> Result<Option<ExistingOperation>, OperationLookupFailure> {
+    let recent = call_agent_raw(remote, "ListRecentOperations", json!({
+        "limit": 100, "projection": "matching", "kind": request.kind,
+        "app_id": if matches!(request.app_id, "*" | "_all") { None } else { Some(request.app_id) },
+        "mode": request.mode, "bundle_id": request.bundle_id,
+        "client_storage_identity": request.storage_identity,
+        "regenerable_caches": request.regenerable_caches, "preferred_id": preferred_id,
+    })).await.map_err(OperationLookupFailure::Unavailable)?;
+    let mut operations = recent
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::State(
+                "state-agent returned an invalid operation list; submission deferred".into(),
+            )
+        })
+        .map_err(OperationLookupFailure::Unavailable)?;
+    if let Some(id) = preferred_id {
+        if !operations.iter().any(|operation| {
+            operation
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                == Some(id)
+        }) {
+            let status = call_agent_raw(
+                remote,
+                "GetOperationStatus",
+                json!({"operation_id": id, "projection": "matching"}),
+            )
+            .await
+            .map_err(OperationLookupFailure::Unavailable)?;
+            if status
+                .get("operation_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(id)
+            {
+                return Err(OperationLookupFailure::Mismatch(AppError::State(format!(
+                    "Could not verify active operation {id}; submission deferred"
+                ))));
+            }
+            operations.insert(0, status);
+        }
+        if require_preferred_match {
+            let preferred = operations
+                .iter()
+                .find(|operation| operation["operation_id"].as_str() == Some(id))
+                .expect("preferred status was found or fetched");
+            match select_existing_operation(std::slice::from_ref(preferred), request, Some(id)) {
+                Some(unbound @ ExistingOperation::UnboundRunning(_)) => return Ok(Some(unbound)),
+                Some(_) => {},
+                None => return Err(OperationLookupFailure::Mismatch(AppError::State(format!(
+                    "Retained operation {id} has mismatched or unverifiable status; submission deferred"
+                )))),
+            }
+        }
+    }
+    Ok(select_existing_operation(
+        &operations,
+        request,
+        preferred_id,
+    ))
 }
 
 fn require_successful_seal(status: &serde_json::Value) -> AppResult<()> {
+    if status
+        .get("cancel_requested")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+    {
+        return Err(AppError::Cancelled);
+    }
     match status.get("state").and_then(serde_json::Value::as_str) {
         Some("SEALED" | "COMPLETED") => Ok(()),
         _ => Err(AppError::Provisioning(
@@ -413,7 +624,7 @@ fn require_successful_seal(status: &serde_json::Value) -> AppResult<()> {
     }
 }
 
-async fn wait_for_agent_operation(
+pub(super) async fn wait_for_agent_operation(
     context: &AppContext,
     remote: &RemoteExec,
     instance_id: u64,
@@ -422,92 +633,64 @@ async fn wait_for_agent_operation(
     app_id: Option<&str>,
     bundle_id: Option<&str>,
     timeout: Duration,
+    initial_status: Option<serde_json::Value>,
 ) -> AppResult<serde_json::Value> {
-    {
-        let mut active = context.active_agent_operation.write().await;
-        *active = Some(ActiveAgentOperation {
+    context
+        .retain_agent_operation(ActiveAgentOperation {
             instance_id,
             operation_id: operation_id.to_string(),
             kind: kind.to_string(),
-        });
-    }
-    let result = tokio::time::timeout(timeout, async {
-        loop {
-            let status = call_agent_raw(
+        })
+        .await;
+    let result = monitor_operation(
+        operation_id,
+        timeout,
+        initial_status,
+        |id| async move {
+            call_agent_raw(
                 remote,
                 "GetOperationStatus",
-                json!({"operation_id": operation_id}),
+                json!({"operation_id": id, "projection": "progress"}),
             )
-            .await?;
-            emit_operation_progress(context, instance_id, kind, operation_id, &status);
-            let operation_state = status
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("UNKNOWN");
-            if kind == "restore" && operation_state == "COMPLETED" {
-                if let (Some(app_id), Some(bundle_id)) = (app_id, bundle_id) {
-                    context.emit_shared_storage_restore_completed(
-                        SharedStorageRestoreCompletedEvent {
-                            operation_id: operation_id.to_string(),
-                            instance_id,
-                            kind: kind.to_string(),
-                            app_id: app_id.to_string(),
-                            display_name: app_id.to_string(),
-                            bundle_id: bundle_id.to_string(),
-                        },
-                    );
-                }
-                return Ok(status);
-            }
-            let ready_to_launch = status
-                .get("progress")
-                .and_then(|progress| progress.get("detail_json"))
-                .and_then(|detail| detail.get("ready_to_launch_reached"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            // Restore completion is the notification boundary. Keep polling past
-            // READY_TO_LAUNCH so the event cannot claim readiness prematurely.
-            if ready_to_launch && kind != "restore" {
-                return Ok(status);
-            }
-            match status
-                .get("state")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("UNKNOWN")
-            {
-                "COMPLETED" | "SEALED" | "ROLLED_BACK" => return Ok(status),
-                "FAILED" => {
-                    let error = status
-                        .get("last_error")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("state-agent operation failed");
-                    return Err(AppError::Provisioning(error.to_string()));
-                }
-                "CANCELLED" => {
-                    return Err(AppError::State(format!(
-                        "state-agent operation {operation_id} was cancelled"
-                    )));
-                }
-                _ => tokio::time::sleep(Duration::from_secs(1)).await,
-            }
-        }
-    })
-    .await
-    .map_err(|_| {
-        AppError::Command(format!(
-            "timed out waiting for state-agent operation {operation_id}"
-        ))
-    });
+            .await
+        },
+        |status| emit_operation_progress(context, instance_id, kind, operation_id, status),
+    )
+    .await;
+    // A monitoring timeout is not a terminal execution result. Retain the
+    // cancellation/resumption handle until authoritative completion is observed.
+    if !result
+        .as_ref()
+        .err()
+        .is_some_and(MonitorFailure::keep_active_handle)
     {
-        let mut active = context.active_agent_operation.write().await;
-        if active
-            .as_ref()
-            .is_some_and(|operation| operation.operation_id == operation_id)
-        {
-            *active = None;
+        context
+            .clear_agent_operation(instance_id, operation_id)
+            .await;
+        SUBMISSION_MEMORY.forget(instance_id, operation_id);
+    }
+    let status = result.map_err(|error| match error {
+        MonitorFailure::TimedOut { message } => AppError::Timeout(message),
+        MonitorFailure::Terminal { state, message } if state == "FAILED" => {
+            AppError::Provisioning(message)
+        }
+        MonitorFailure::Terminal { message, .. } => AppError::State(message),
+    })?;
+    if kind == "restore"
+        && status.get("state").and_then(serde_json::Value::as_str) == Some("COMPLETED")
+    {
+        if let (Some(app_id), Some(bundle_id)) = (app_id, bundle_id) {
+            context.emit_shared_storage_restore_completed(SharedStorageRestoreCompletedEvent {
+                operation_id: operation_id.to_string(),
+                instance_id,
+                kind: kind.to_string(),
+                app_id: app_id.to_string(),
+                display_name: app_id.to_string(),
+                bundle_id: bundle_id.to_string(),
+            });
         }
     }
-    result?
+    Ok(status)
 }
 
 fn emit_operation_progress(
@@ -517,7 +700,27 @@ fn emit_operation_progress(
     operation_id: &str,
     status: &serde_json::Value,
 ) {
+    context.emit_shared_storage_progress(operation_progress_event(
+        instance_id,
+        kind,
+        operation_id,
+        status,
+    ));
+}
+
+fn operation_progress_event(
+    instance_id: u64,
+    kind: &str,
+    operation_id: &str,
+    status: &serde_json::Value,
+) -> SharedStorageProgressEvent {
     let progress = status.get("progress");
+    let backup_pipeline = progress
+        .and_then(|p| p.pointer("/detail_json/streaming_pipeline"))
+        .cloned();
+    let deletion = (kind == "delete")
+        .then(|| progress.and_then(|p| p.pointer("/detail_json/deletion")).cloned())
+        .flatten();
     let phase = progress
         .and_then(|value| value.get("phase"))
         .and_then(serde_json::Value::as_str)
@@ -542,17 +745,23 @@ fn emit_operation_progress(
         .and_then(|value| value.get("unit"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
-    let fraction = match (completed_units, total_units) {
-        (Some(completed), Some(total)) if total > 0 => {
-            Some((completed as f64 / total as f64).clamp(0.0, 1.0))
+    let fraction = if backup_pipeline.is_some() {
+        None
+    } else {
+        match (completed_units, total_units) {
+            (Some(completed), Some(total)) if total > 0 => {
+                Some((completed as f64 / total as f64).clamp(0.0, 1.0))
+            }
+            _ => None,
         }
-        _ => None,
     };
     let pack_transfer = status.get("pack_transfer");
-    let completed_objects = pack_transfer
+    let completed_objects = deletion.as_ref().and_then(|value| value.get("completed_packs"))
+        .and_then(serde_json::Value::as_u64).or_else(|| pack_transfer
         .and_then(|value| value.get("completed_items"))
-        .and_then(serde_json::Value::as_u64);
-    let total_objects = progress
+        .and_then(serde_json::Value::as_u64));
+    let total_objects = deletion.as_ref().and_then(|value| value.get("total_packs"))
+        .and_then(serde_json::Value::as_u64).or_else(|| progress
         .and_then(|value| value.get("detail_json"))
         .and_then(|value| value.get("total_packs"))
         .and_then(serde_json::Value::as_u64)
@@ -560,11 +769,12 @@ fn emit_operation_progress(
             pack_transfer
                 .and_then(|value| value.get("total_items"))
                 .and_then(serde_json::Value::as_u64)
-        });
+        }));
     let pipeline = progress
         .and_then(|value| value.get("detail_json"))
         .and_then(|value| value.get("pipeline"));
-    let completed_bytes = pipeline
+    let completed_bytes = deletion.as_ref().and_then(|value| value.get("verified_absent_bytes"))
+        .and_then(serde_json::Value::as_u64).or_else(|| pipeline
         .and_then(|value| value.get("published_bytes"))
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
@@ -572,22 +782,23 @@ fn emit_operation_progress(
                 .and_then(|value| value.get("detail_json"))
                 .and_then(|value| value.get("completed_pack_bytes"))
                 .and_then(serde_json::Value::as_u64)
-        })
-        .or_else(|| {
-            pack_transfer
-                .and_then(|value| value.get("completed_bytes"))
-                .and_then(serde_json::Value::as_u64)
-        });
+                .max(
+                    pack_transfer
+                        .and_then(|value| value.get("completed_bytes"))
+                        .and_then(serde_json::Value::as_u64),
+                )
+        }));
     let transferred_bytes = progress
         .and_then(|value| value.get("detail_json"))
         .and_then(|value| value.get("bytes_transferred"))
         .and_then(serde_json::Value::as_u64)
-        .or_else(|| {
+        .max(
             pack_transfer
                 .and_then(|value| value.get("bytes_transferred"))
-                .and_then(serde_json::Value::as_u64)
-        });
-    let total_bytes = pipeline
+                .and_then(serde_json::Value::as_u64),
+        );
+    let total_bytes = deletion.as_ref().and_then(|value| value.get("total_bytes"))
+        .and_then(serde_json::Value::as_u64).or_else(|| pipeline
         .and_then(|value| value.get("total_bytes"))
         .and_then(serde_json::Value::as_u64)
         .or_else(|| {
@@ -595,12 +806,12 @@ fn emit_operation_progress(
                 .and_then(|value| value.get("detail_json"))
                 .and_then(|value| value.get("total_transfer_bytes"))
                 .and_then(serde_json::Value::as_u64)
-        })
-        .or_else(|| {
-            pack_transfer
-                .and_then(|value| value.get("total_bytes"))
-                .and_then(serde_json::Value::as_u64)
-        });
+                .max(
+                    pack_transfer
+                        .and_then(|value| value.get("total_bytes"))
+                        .and_then(serde_json::Value::as_u64),
+                )
+        }));
     let object_unit = total_objects
         .filter(|total| *total > 0)
         .map(|_| "packs".to_string());
@@ -632,7 +843,7 @@ fn emit_operation_progress(
         .get("running")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    context.emit_shared_storage_progress(SharedStorageProgressEvent {
+    SharedStorageProgressEvent {
         operation_id: operation_id.to_string(),
         instance_id,
         kind: kind.to_string(),
@@ -649,10 +860,12 @@ fn emit_operation_progress(
         completed_bytes,
         total_bytes,
         transferred_bytes,
+        backup_pipeline,
+        deletion,
         ready_to_launch,
         cancel_requested,
         cancellable: running && !cancel_requested,
-    });
+    }
 }
 
 fn parse_agent_apps(value: &serde_json::Value) -> AppResult<Vec<AgentAppRecord>> {
@@ -898,6 +1111,7 @@ fn apps_to_entries(apps: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
 }
 
 fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEntry> {
+    let mut retained = Vec::new();
     let mut out = vec![SharedStorageObjectEntry {
         path: "/catalog".into(),
         name: "Shared Storage apps".into(),
@@ -928,12 +1142,35 @@ fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEnt
             is_dir: true,
         });
         if let Some(bundles) = app.get("bundles").and_then(|v| v.as_array()) {
+            let current = app
+                .get("latest_complete_bundle_id")
+                .and_then(|v| v.as_str())
+                .or_else(|| app.get("latest_bundle_id").and_then(|v| v.as_str()));
+            let mut has_retained = false;
             for bundle in bundles {
                 let bundle_id = bundle
                     .get("bundle_id")
                     .and_then(|v| v.as_str())
                     .or_else(|| bundle.get("bundleId").and_then(|v| v.as_str()))
                     .unwrap_or("latest");
+                if current.is_some_and(|id| id != bundle_id) {
+                    if !has_retained {
+                        retained.push(SharedStorageObjectEntry {
+                            path: format!("/retained-backups/{id}"),
+                            name: name.into(),
+                            parent_path: "/retained-backups".into(),
+                            is_dir: true,
+                        });
+                        has_retained = true;
+                    }
+                    retained.push(SharedStorageObjectEntry {
+                        path: format!("/retained-backups/{id}/{bundle_id}"),
+                        name: bundle_id.into(),
+                        parent_path: format!("/retained-backups/{id}"),
+                        is_dir: false,
+                    });
+                    continue;
+                }
                 out.push(SharedStorageObjectEntry {
                     path: format!("{app_path}/{bundle_id}"),
                     name: format!("bundle {bundle_id}"),
@@ -954,6 +1191,35 @@ fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEnt
             });
         }
     }
+    if !retained.is_empty() {
+        out.push(SharedStorageObjectEntry {
+            path: "/retained-backups".into(),
+            name: "Retained backups".into(),
+            parent_path: "/".into(),
+            is_dir: true,
+        });
+        out.extend(retained);
+    }
+    if let Some(pending) = catalog.get("pending_deletions").and_then(|v| v.as_array()) {
+        if !pending.is_empty() {
+            out.push(SharedStorageObjectEntry {
+                path: "/pending-deletions".into(),
+                name: "Pending cloud deletions".into(),
+                parent_path: "/".into(),
+                is_dir: true,
+            });
+        }
+        for plan in pending {
+            if let Some(id) = plan.get("plan_id").and_then(|v| v.as_str()) {
+                out.push(SharedStorageObjectEntry {
+                    path: format!("/pending-deletions/{id}"),
+                    name: format!("Resume deletion {id}"),
+                    parent_path: "/pending-deletions".into(),
+                    is_dir: false,
+                });
+            }
+        }
+    }
     out
 }
 
@@ -961,6 +1227,118 @@ fn catalog_to_entries(catalog: &serde_json::Value) -> Vec<SharedStorageObjectEnt
 mod tests {
     use super::{parse_agent_apps, parse_agent_catalog, require_successful_seal};
     use serde_json::json;
+
+    #[test]
+    fn catalog_selector_has_one_current_head_and_delete_only_recovery_entries() {
+        let entries =
+            super::catalog_to_entries(&json!({"apps":[{"app_id":"game","display_name":"Game",
+            "latest_bundle_id":"current","latest_complete_bundle_id":"current",
+            "bundles":[{"bundle_id":"old"},{"bundle_id":"current"}]}],
+            "pending_deletions":[{"plan_id":"pending"}]}));
+        let restorable = entries
+            .iter()
+            .filter(|entry| !entry.is_dir && entry.path.starts_with("/catalog/"))
+            .collect::<Vec<_>>();
+        assert_eq!(restorable.len(), 1);
+        assert_eq!(restorable[0].path, "/catalog/game/current");
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == "/retained-backups/game/old"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.path == "/pending-deletions/pending"));
+    }
+
+    #[test]
+    fn progress_keeps_logical_reuse_separate_from_network_transfer() {
+        let reused = json!({"state":"COMMITTING", "progress":{"detail_json":{
+            "completed_pack_bytes":100,"bytes_transferred":0}},
+            "pack_transfer":{"completed_bytes":900,"total_bytes":900,"bytes_transferred":0}});
+        let event = super::operation_progress_event(42, "backup", "op", &reused);
+        assert_eq!(event.completed_bytes, Some(900));
+        assert_eq!(event.total_bytes, Some(900));
+        assert_eq!(event.transferred_bytes, Some(0));
+        let mut restored = reused;
+        restored["progress"]["detail_json"]["pipeline"] =
+            json!({"published_bytes":2000,"total_bytes":3000});
+        restored["progress"]["detail_json"]["bytes_transferred"] = json!(40);
+        restored["pack_transfer"]["bytes_transferred"] = json!(60);
+        let event = super::operation_progress_event(42, "restore", "op", &restored);
+        assert_eq!(event.completed_bytes, Some(2000));
+        assert_eq!(event.total_bytes, Some(3000));
+        assert_eq!(event.transferred_bytes, Some(60));
+    }
+
+    #[test]
+    fn deletion_event_preserves_verified_absence_without_calling_it_network_transfer() {
+        let status = json!({"state":"RUNNING", "running":true, "progress": {
+            "phase":"deleting_packs", "completed_units":41, "total_units":119,
+            "unit":"objects", "detail_json":{"deletion":{
+                "completed_packs":37,"total_packs":115,"verified_absent_bytes":9000,"total_bytes":26000
+            }}}});
+        let event = super::operation_progress_event(42, "delete", "plan", &status);
+        assert_eq!(event.completed_objects, Some(37));
+        assert_eq!(event.total_objects, Some(115));
+        assert_eq!(event.completed_bytes, Some(9000));
+        assert_eq!(event.transferred_bytes, None);
+        assert_eq!(event.deletion.unwrap()["completed_packs"], 37);
+    }
+
+    #[test]
+    fn streaming_progress_keeps_selected_scope_separate_from_partial_pack_totals() {
+        let status = json!({"state":"CAPTURING_AND_UPLOADING", "running":true,
+            "progress":{"phase":"capture_and_upload", "completed_units":178, "total_units":178,"unit":"files",
+                "detail_json":{"streaming_pipeline":{"selected_files":178,"source_total_bytes":24_128_523_743u64,
+                    "prepared_bytes":151_000_000,"durable_bytes":900_000_000}}},
+            "pack_transfer":{"total_items":2,"completed_items":1,"bytes_transferred":20_000_000}});
+        let event = super::operation_progress_event(42, "backup", "op", &status);
+        assert_eq!(event.fraction, None, "capture EOF is not backup completion");
+        assert_eq!(event.total_objects, Some(2));
+        assert_eq!(
+            event.backup_pipeline.as_ref().unwrap()["selected_files"],
+            178
+        );
+        assert_eq!(
+            event.backup_pipeline.as_ref().unwrap()["source_total_bytes"],
+            24_128_523_743u64
+        );
+        assert_eq!(event.transferred_bytes, Some(20_000_000));
+    }
+
+    #[test]
+    fn uncertain_or_cancel_requested_seals_never_authorize_lifecycle_actions() {
+        for state in [
+            "RECONNECTING",
+            "MONITORING_PAUSED",
+            "INTERRUPTED",
+            "READY_TO_LAUNCH",
+            "QUEUED",
+            "CANCELLED",
+            "ROLLED_BACK",
+            "FAILED",
+        ] {
+            assert!(require_successful_seal(&json!({"state":state})).is_err());
+        }
+        for state in ["COMPLETED", "SEALED"] {
+            assert!(
+                require_successful_seal(&json!({"state":state,"cancel_requested":true})).is_err()
+            );
+            assert!(
+                require_successful_seal(&json!({"state":state,"cancel_requested":false})).is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn local_seal_cancellation_survives_a_timeout_and_is_scoped_to_exact_operation() {
+        let id = uuid::Uuid::new_v4().to_string();
+        super::SharedStorageManager::request_seal_cancellation(42, &id);
+        assert!(super::seal_cancellation_requested(42, &id, false));
+        assert!(!super::seal_cancellation_requested(43, &id, true));
+        assert!(!super::seal_cancellation_requested(42, "other", true));
+        assert!(super::seal_cancellation_requested(42, &id, true));
+        assert!(!super::seal_cancellation_requested(42, &id, false));
+    }
 
     #[test]
     fn queued_failed_or_rolled_back_seals_never_authorize_a_stop() {

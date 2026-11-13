@@ -1,13 +1,17 @@
 //! Noland remote state agent: always-on tracking, backup, restore, seal.
 
 pub mod backup;
+mod backup_policy;
 pub mod checkpoint;
+mod deletion;
 pub mod observer;
 pub mod operation_manager;
 pub mod reconcile;
+mod repository;
 pub mod restore;
 pub mod rpc_handler;
 pub mod seal;
+mod transfer_workload;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +90,7 @@ pub struct StateAgent {
     pub roots: Mutex<LogicalRootMap>,
     pub steam: Mutex<Option<SteamDiscovery>>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
+    pub(crate) deletion_plan: Mutex<Option<deletion::DeletionPlan>>,
 }
 
 impl StateAgent {
@@ -105,6 +110,7 @@ impl StateAgent {
             roots: Mutex::new(roots),
             steam: Mutex::new(None),
             master_key: Mutex::new(None),
+            deletion_plan: Mutex::new(None),
         })
     }
 
@@ -130,7 +136,7 @@ impl StateAgent {
         }
         for mut op in self.db.unfinished_operations()? {
             let journal = self.db.sync_journal_summary(op.operation_id)?;
-            let has_retry = matches!(op.kind.as_str(), "backup" | "restore");
+            let has_retry = matches!(op.kind.as_str(), "backup" | "restore" | "seal");
             let resume_mode = if journal.completed_items > 0 && op.kind == "backup" {
                 "UPLOAD_JOURNAL"
             } else {
@@ -214,6 +220,7 @@ impl StateAgent {
         if let Some(steam) = &scan.steam {
             let mut roots = self.roots.lock();
             roots.steam_root = Some(steam.root.clone());
+            roots.steam_userdata = Some(steam.root.join("userdata"));
             for (id, lib) in &steam.libraries {
                 roots.steam_libraries.insert(id.clone(), lib.clone());
             }
@@ -313,16 +320,22 @@ impl StateAgent {
         };
         let mut engine = self.attribution_engine();
         for event in events {
-            let had_session = self.db.session_for_pid(event.pid)?.is_some();
-            let session = engine.ingest_process(&event)?;
-            if session.is_none() {
+            let previous_session = self
+                .db
+                .session_for_pid(event.pid)?
+                .map(|session| session.session_id);
+            let Some(session) = engine.ingest_process(&event)? else {
                 continue;
-            }
-            if had_session {
+            };
+            if previous_session == Some(session.session_id) {
                 continue;
             }
             recovery.sessions_recovered = recovery.sessions_recovered.saturating_add(1);
-            for path in noland_observer::open_files_from_procfs(event.pid) {
+            let open_files = noland_observer::recover_open_files_from_procfs(event.pid);
+            if open_files.requires_reconciliation {
+                engine.mark_filesystem_gap(event.pid)?;
+            }
+            for path in open_files.paths {
                 let fact = FilesystemEvent {
                     kind: FsEventKind::Open,
                     pid: event.pid,

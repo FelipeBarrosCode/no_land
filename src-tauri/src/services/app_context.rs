@@ -21,6 +21,11 @@ use crate::{
 
 use super::{app_config::AppConfig, state_store::StateStore};
 
+#[path = "active_agent_operations.rs"]
+mod active_operations;
+pub use active_operations::ActiveAgentOperation;
+use active_operations::ActiveAgentOperations;
+
 #[derive(Clone)]
 pub struct AppContext {
     pub config: AppConfig,
@@ -45,7 +50,7 @@ pub struct AppContext {
     pub shared_storage_progress: tokio::sync::broadcast::Sender<SharedStorageProgressEvent>,
     pub shared_storage_restore_completed:
         tokio::sync::broadcast::Sender<SharedStorageRestoreCompletedEvent>,
-    pub active_agent_operation: Arc<RwLock<Option<ActiveAgentOperation>>>,
+    active_agent_operations: Arc<RwLock<ActiveAgentOperations>>,
     pub(crate) spend_stop_jobs: Arc<std::sync::Mutex<super::spend_tracker::BudgetStopJobs>>,
     pub(crate) spend_stop_slots: Arc<tokio::sync::Semaphore>,
 }
@@ -67,13 +72,6 @@ impl Default for ConnectionDecisionState {
             last_transport_change: None,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub struct ActiveAgentOperation {
-    pub instance_id: u64,
-    pub operation_id: String,
-    pub kind: String,
 }
 
 pub struct WireGuardMutationGuard {
@@ -136,7 +134,7 @@ impl AppContext {
             connection_decisions: Arc::new(Mutex::new(HashMap::new())),
             shared_storage_progress: tokio::sync::broadcast::channel(64).0,
             shared_storage_restore_completed: tokio::sync::broadcast::channel(16).0,
-            active_agent_operation: Arc::new(RwLock::new(None)),
+            active_agent_operations: Arc::new(RwLock::new(ActiveAgentOperations::default())),
             spend_stop_jobs: Arc::new(std::sync::Mutex::new(Default::default())),
             spend_stop_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
@@ -144,6 +142,39 @@ impl AppContext {
 
     pub fn set_stream_network_active(&self, active: bool) {
         self.stream_network_active.store(active, Ordering::SeqCst);
+    }
+
+    pub async fn active_agent_operation(
+        &self,
+        instance_id: u64,
+        kind: Option<&str>,
+    ) -> Option<ActiveAgentOperation> {
+        self.active_agent_operations
+            .read()
+            .await
+            .get(instance_id, kind)
+    }
+
+    pub async fn retain_agent_operation(&self, operation: ActiveAgentOperation) {
+        self.active_agent_operations.write().await.retain(operation);
+    }
+
+    pub async fn agent_operation_by_id(
+        &self,
+        instance_id: u64,
+        operation_id: &str,
+    ) -> Option<ActiveAgentOperation> {
+        self.active_agent_operations
+            .read()
+            .await
+            .get_by_id(instance_id, operation_id)
+    }
+
+    pub async fn clear_agent_operation(&self, instance_id: u64, operation_id: &str) {
+        self.active_agent_operations
+            .write()
+            .await
+            .clear(instance_id, operation_id);
     }
 
     pub fn is_stream_network_active(&self) -> bool {

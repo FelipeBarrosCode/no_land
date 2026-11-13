@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -11,11 +11,10 @@ use noland_rclone_adapter::{
 use noland_state_core::{Result, StateError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use tokio::time::Instant;
 
 use crate::adaptive::AdaptiveConcurrency;
-use crate::{RemoteKey, RemoteMeta, SharedStorageProvider};
+use crate::{RemoteKey, RemoteMeta, RollingUploadWindow, SharedStorageProvider};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImmutableUpload {
@@ -112,31 +111,99 @@ pub struct RemoteKnownComparison {
     pub size_conflicts: Vec<RemoteSizeConflict>,
 }
 
+impl RemoteKnownComparison {
+    pub(crate) fn ensure_immutable(&self) -> Result<()> {
+        if let Some(conflict) = self.size_conflicts.first() {
+            return Err(StateError::Conflict(format!(
+                "immutable remote object differs: {} (local {}, remote {})",
+                conflict.key.as_str(),
+                conflict.local_size,
+                conflict.remote_size
+            )));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RemoteKnownSet {
     pub prefix: RemoteKey,
-    entries: HashMap<RemoteKey, u64>,
+    entries: Arc<RwLock<HashMap<RemoteKey, u64>>>,
 }
 
 impl RemoteKnownSet {
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     pub fn size(&self, key: &RemoteKey) -> Option<u64> {
-        self.entries.get(key).copied()
+        self.entries
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(key)
+            .copied()
     }
 
     pub fn contains(&self, key: &RemoteKey) -> bool {
-        self.entries.contains_key(key)
+        self.size(key).is_some()
     }
 
     pub fn compare(&self, candidates: &[ImmutableUpload]) -> Result<RemoteKnownComparison> {
-        compare_known_map(&self.entries, candidates)
+        for candidate in candidates {
+            self.validate_scope(&candidate.key)?;
+        }
+        compare_known_map(
+            &self
+                .entries
+                .read()
+                .unwrap_or_else(|error| error.into_inner()),
+            candidates,
+        )
+    }
+
+    fn validate_scope(&self, key: &RemoteKey) -> Result<()> {
+        validate_remote_key(key)?;
+        if key != &self.prefix
+            && !key
+                .as_str()
+                .strip_prefix(self.prefix.as_str().trim_end_matches('/'))
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            return Err(StateError::Invalid(
+                "upload inventory prefix does not cover key".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Only confirmed results are added. A failed or cancelled transfer cannot
+    /// poison the operation's known set and suppress a later retry.
+    pub fn remember(&self, completed: &[RemoteMeta]) -> Result<()> {
+        let mut entries = self
+            .entries
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        for meta in completed {
+            self.validate_scope(&meta.key)?;
+            if entries
+                .get(&meta.key)
+                .is_some_and(|size| *size != meta.size)
+            {
+                return Err(StateError::Conflict(format!(
+                    "immutable inventory changed: {}",
+                    meta.key.as_str()
+                )));
+            }
+        }
+        entries.extend(completed.iter().map(|meta| (meta.key.clone(), meta.size)));
+        Ok(())
     }
 }
 
@@ -145,17 +212,21 @@ pub async fn list_remote_known(
     provider: &dyn SharedStorageProvider,
     prefix: &RemoteKey,
 ) -> Result<RemoteKnownSet> {
-    let entries = provider
-        .list_prefix(prefix)
-        .await?
-        .into_iter()
-        .filter(|entry| !entry.is_prefix)
-        .map(|entry| (entry.key, entry.size))
-        .collect();
-    Ok(RemoteKnownSet {
+    validate_remote_key(prefix)?;
+    let known = RemoteKnownSet {
         prefix: prefix.clone(),
-        entries,
-    })
+        entries: Arc::new(RwLock::new(HashMap::new())),
+    };
+    let entries = provider.list_prefix(prefix).await?;
+    // Preserve duplicate-size conflicts rather than silently trusting whichever
+    // listing entry happened to arrive last (some backends allow duplicate names).
+    for entry in entries.into_iter().filter(|entry| !entry.is_prefix) {
+        known.remember(&[RemoteMeta {
+            key: entry.key,
+            size: entry.size,
+        }])?;
+    }
+    Ok(known)
 }
 
 /// Lists a prefix once and compares exact keys and sizes locally.
@@ -311,6 +382,7 @@ pub struct DownloadBatchReport {
 pub struct SharedRetryGate {
     tuning: TransferTuning,
     next_request: Mutex<Instant>,
+    cooldown_until: Mutex<Instant>,
 }
 
 impl SharedRetryGate {
@@ -318,6 +390,7 @@ impl SharedRetryGate {
         Self {
             tuning: tuning.normalized(),
             next_request: Mutex::new(Instant::now()),
+            cooldown_until: Mutex::new(Instant::now()),
         }
     }
 
@@ -333,7 +406,15 @@ impl SharedRetryGate {
             *next = deadline + Duration::from_millis(self.tuning.min_request_interval_ms);
             deadline
         };
-        tokio::time::sleep_until(deadline).await;
+        let mut deadline = deadline;
+        loop {
+            deadline = deadline.max(*self.cooldown_until.lock().await);
+            tokio::time::sleep_until(deadline).await;
+            // A different worker may have hit a limit while we were queued.
+            if *self.cooldown_until.lock().await <= Instant::now() {
+                break;
+            }
+        }
     }
 
     pub async fn wait_for_retry(&self, failed_attempt: u32, class: RemoteErrorClass) {
@@ -342,6 +423,11 @@ impl SharedRetryGate {
                 .backoff_ms(failed_attempt, class.is_rate_limited()),
         );
         let deadline = Instant::now() + delay;
+        let deadline = {
+            let mut cooldown = self.cooldown_until.lock().await;
+            *cooldown = (*cooldown).max(deadline);
+            *cooldown
+        };
         {
             let mut next = self.next_request.lock().await;
             if deadline > *next {
@@ -364,8 +450,9 @@ where
     let tuning = tuning.normalized();
     let gate = Arc::new(SharedRetryGate::new(tuning.clone()));
     let limiter = AdaptiveConcurrency::for_uploads(&tuning);
-    let mut tasks = JoinSet::new();
+    let mut tasks = RollingUploadWindow::new(tuning.max_parallel_uploads, tuning.max_bulk_bytes);
     let mut skipped = Vec::new();
+    let mut uploaded = Vec::new();
 
     for (index, upload) in uploads.into_iter().enumerate() {
         validate_remote_key(&upload.key)?;
@@ -380,12 +467,21 @@ where
             skipped.push(upload.key);
             continue;
         }
+        let bytes = std::fs::metadata(&upload.local)?.len();
+        if bytes > tuning.max_bulk_bytes {
+            return Err(StateError::Invalid(
+                "immutable object exceeds transfer byte budget".into(),
+            ));
+        }
+        while !tasks.can_push(bytes) {
+            uploaded.push(tasks.next().await.expect("occupied upload window")?);
+        }
         let provider = Arc::clone(&provider);
         let gate = Arc::clone(&gate);
         let limiter = Arc::clone(&limiter);
         let journal = journal.clone();
         let max_attempts = tuning.max_attempts;
-        tasks.spawn(async move {
+        tasks.push(bytes, async move {
             let _permit = limiter.acquire().await?;
             let key = upload.key.clone();
             let result = retry_transfer(
@@ -395,28 +491,16 @@ where
                 TransferDirection::Upload,
                 &key,
                 &journal,
+                |meta: &RemoteMeta| meta.size,
                 || provider.upload_immutable(&upload.local, &upload.key),
             )
             .await;
             result.map(|meta| (index, meta))
-        });
+        })?;
     }
 
-    let mut uploaded = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(item)) => uploaded.push(item),
-            Ok(Err(error)) => {
-                tasks.abort_all();
-                return Err(error);
-            }
-            Err(error) => {
-                tasks.abort_all();
-                return Err(StateError::Storage(format!(
-                    "upload worker failed: {error}"
-                )));
-            }
-        }
+    while let Some(result) = tasks.next().await {
+        uploaded.push(result?);
     }
     uploaded.sort_by_key(|(index, _)| *index);
     Ok(UploadBatchReport {
@@ -437,8 +521,9 @@ where
     let tuning = tuning.normalized();
     let gate = Arc::new(SharedRetryGate::new(tuning.clone()));
     let limiter = AdaptiveConcurrency::for_downloads(&tuning);
-    let mut tasks = JoinSet::new();
+    let mut tasks = RollingUploadWindow::new(limiter.max(), u64::MAX);
     let mut skipped = Vec::new();
+    let mut downloaded = Vec::new();
 
     for (index, download) in downloads.into_iter().enumerate() {
         validate_remote_key(&download.key)?;
@@ -453,12 +538,15 @@ where
             skipped.push(download.key);
             continue;
         }
+        while !tasks.can_push(0) {
+            downloaded.push(tasks.next().await.expect("occupied download window")?);
+        }
         let provider = Arc::clone(&provider);
         let gate = Arc::clone(&gate);
         let limiter = Arc::clone(&limiter);
         let journal = journal.clone();
         let max_attempts = tuning.max_attempts;
-        tasks.spawn(async move {
+        tasks.push(0, async move {
             let _permit = limiter.acquire().await?;
             let key = download.key.clone();
             retry_transfer(
@@ -468,6 +556,11 @@ where
                 TransferDirection::Download,
                 &key,
                 &journal,
+                |_| {
+                    std::fs::metadata(&download.destination)
+                        .map(|meta| meta.len())
+                        .unwrap_or(0)
+                },
                 || async {
                     provider
                         .download(&download.key, &download.destination)
@@ -477,24 +570,11 @@ where
             )
             .await
             .map(|key| (index, key))
-        });
+        })?;
     }
 
-    let mut downloaded = Vec::new();
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok(Ok(item)) => downloaded.push(item),
-            Ok(Err(error)) => {
-                tasks.abort_all();
-                return Err(error);
-            }
-            Err(error) => {
-                tasks.abort_all();
-                return Err(StateError::Storage(format!(
-                    "download worker failed: {error}"
-                )));
-            }
-        }
+    while let Some(result) = tasks.next().await {
+        downloaded.push(result?);
     }
     downloaded.sort_by_key(|(index, _)| *index);
     Ok(DownloadBatchReport {
@@ -510,6 +590,7 @@ async fn retry_transfer<T, F, Fut>(
     direction: TransferDirection,
     key: &RemoteKey,
     journal: &TransferJournalCallbacks,
+    transferred_bytes: impl Fn(&T) -> u64,
     mut operation: F,
 ) -> Result<T>
 where
@@ -529,7 +610,7 @@ where
         match operation().await {
             Ok(value) => {
                 if let Some(limiter) = limiter {
-                    limiter.record_success(started.elapsed());
+                    limiter.record_success(transferred_bytes(&value), started.elapsed());
                 }
                 journal.record(&TransferJournalEvent {
                     direction,

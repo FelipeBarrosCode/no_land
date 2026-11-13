@@ -1,5 +1,7 @@
 pub mod artifact;
+mod elf;
 pub mod engine;
+pub mod maintenance;
 pub mod session;
 pub mod store;
 
