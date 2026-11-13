@@ -51,7 +51,7 @@ pub(crate) fn inspect(path: &Path) -> Result<Requirements> {
     let headers = read_at(&mut file, u64_at(&header, 32), count * stride)?;
     let mut loads = Vec::new();
     let mut dynamic = None;
-    for ph in headers.chunks_exact(56) {
+    for ph in headers.as_chunks::<56>().0 {
         let kind = u32::from_le_bytes(ph[..4].try_into().unwrap());
         let offset = u64_at(ph, 8);
         let address = u64_at(ph, 16);
@@ -74,7 +74,7 @@ pub(crate) fn inspect(path: &Path) -> Result<Requirements> {
     let mut strings_address = None;
     let mut strings_size = None;
     let mut wanted = Vec::new();
-    for entry in table.chunks_exact(16) {
+    for entry in table.as_chunks::<16>().0 {
         let tag = u64_at(entry, 0);
         let value = u64_at(entry, 8);
         match tag {
