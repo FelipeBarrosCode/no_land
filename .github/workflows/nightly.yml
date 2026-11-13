@@ -86,6 +86,7 @@ jobs:
     needs: [tests, version]
     permissions:
       contents: read
+      actions: read
     uses: ./.github/workflows/_build.yml
     with:
       version: ${{ needs.version.outputs.version }}
