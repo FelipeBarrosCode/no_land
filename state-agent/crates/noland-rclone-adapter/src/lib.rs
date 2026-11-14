@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 mod config;
 mod profile;
 mod providers;
+mod resources;
 mod session;
 mod tuning;
 
@@ -22,6 +23,7 @@ pub use profile::{
     TransferProfile,
 };
 pub use providers::{adapter_for, Dispatcher};
+pub use resources::WorkerResources;
 pub use session::{session_from_input, TokenMode};
 pub use tuning::{
     classify_remote_error, ProviderRootIdentity, RemoteErrorClass, TransferTuning, TransferWorkload,

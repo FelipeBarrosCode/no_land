@@ -86,6 +86,110 @@ fn assembly_overlaps_a_blocked_verifier_and_reuses_workers_across_publications()
 }
 
 #[test]
+fn admitted_verification_pool_really_runs_more_than_sixteen_workers() {
+    let host = WorkerResources {
+        logical_cpus: 64,
+        available_memory: Some(32 * PACK_MAX),
+        io_pressure: false,
+    };
+    let requested = PipelineOptions {
+        reconstruction_workers: 24,
+        overlap_file_syncs: true,
+        ..PipelineOptions::for_resources(host, TransferWorkload::Throughput)
+    };
+    let provider = noland_storage::LocalStorage::new("unused-wide-verification");
+    let (admitted, io) = requested.resolve(host, &provider).unwrap();
+    let workers = admitted.reconstruction_workers;
+    assert!(workers > 16);
+    let root = test_dir("pipeline-wide-verification");
+    let payload = b"authenticated read-back";
+    let plan = test_plan(
+        &root,
+        test_manifest(
+            (0..workers)
+                .map(|index| file(&format!("game/{index}"), payload))
+                .collect(),
+        ),
+    );
+    let roots = LogicalRootMap::from_home(root.join("home"));
+    let mut transaction = RestoreTransaction::new(&plan, &roots, None);
+    let mut readback = 0;
+    let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let worker_release = Arc::clone(&release);
+    let (started, entered) = mpsc::channel();
+    // Use the same constructor as production, passing its final admitted count
+    // into the factory. Only the verifier body is gated, never the pool width.
+    let mut pipeline = Pipeline::with_verification_factory(
+        &mut transaction,
+        admitted.reconstruction_workers,
+        io,
+        move |resolved_workers| {
+            assert_eq!(resolved_workers, workers);
+            VerificationPool::start(resolved_workers, move |task, stats, stopped, buffer| {
+                started.send(std::thread::current().id()).unwrap();
+                let (ready, notify) = &*worker_release;
+                let (released, _) = notify
+                    .wait_timeout_while(ready.lock().unwrap(), Duration::from_secs(5), |ready| {
+                        !*ready
+                    })
+                    .unwrap();
+                if !*released {
+                    return Err(StateError::Storage(
+                        "verification pool was serialized".into(),
+                    ));
+                }
+                verification::verify_file(task, stats, stopped, buffer)
+            })
+        },
+        |sample| {
+            assert_eq!(sample.io.effective_verification_workers, workers as u64);
+            assert!(sample.io.overlap_file_syncs);
+            if sample.phase != "checking_existing_files" {
+                assert_eq!(sample.io.verification_pool_workers, workers as u64);
+            }
+            readback = sample.readback_bytes;
+            Ok(())
+        },
+    )
+    .unwrap();
+    // EOF/explicit dispatch, not elapsed wall time, releases this complete
+    // window. Slow test filesystems must not dispatch a smaller gated batch.
+    pipeline.publication_delay = Duration::MAX;
+    for pending in pipeline.pending.values_mut() {
+        pending.readback = true;
+    }
+    pipeline
+        .consume(&noland_cas::blake3_hex(payload), payload)
+        .unwrap();
+    pipeline.dispatch_assembled().unwrap();
+    let mut threads = Vec::new();
+    for _ in 0..workers {
+        let thread = entered.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            !threads.contains(&thread),
+            "one worker consumed multiple gated jobs"
+        );
+        threads.push(thread);
+    }
+    *release.0.lock().unwrap() = true;
+    release.1.notify_all();
+    let report = pipeline.finish().unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(report.io.peak_verification_workers, workers as u64);
+    assert_eq!(report.io.verification_pool_workers, workers as u64);
+    assert_eq!(report.io.file_syncs, workers as u64);
+    assert_eq!(report.restore.published_entries, workers);
+    assert_eq!(readback, workers as u64 * payload.len() as u64);
+    for index in 0..workers {
+        assert_eq!(
+            fs::read(root.join(format!("home/.local/share/game/{index}"))).unwrap(),
+            payload
+        );
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cancellation_joins_an_active_verifier_before_rollback_removes_partials() {
     let root = test_dir("pipeline-verifier-cancel");
     let plan = test_plan(&root, test_manifest(vec![file("game/save", b"new-save")]));
@@ -553,4 +657,315 @@ async fn restarted_authenticated_stream_never_rewrites_or_double_counts_accepted
         payload
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+/// The first pack retains its network slot until another slot has completed and
+/// refilled AND the assembler has verified/published real authenticated data.
+struct RollingStreams {
+    local: noland_storage::LocalStorage,
+    packs: BTreeMap<String, Vec<u8>>,
+    initial_group: tokio::sync::Barrier,
+    initial_width: usize,
+    started: AtomicUsize,
+    refilled: AtomicBool,
+    published: AtomicBool,
+    slow_finished: AtomicBool,
+    changed: tokio::sync::Notify,
+}
+
+#[async_trait::async_trait]
+impl SharedStorageProvider for RollingStreams {
+    async fn health_check(&self) -> Result<noland_storage::Health> {
+        self.local.health_check().await
+    }
+    async fn ensure_root(&self) -> Result<()> {
+        self.local.ensure_root().await
+    }
+    async fn stat(&self, key: &RemoteKey) -> Result<Option<noland_storage::RemoteMeta>> {
+        self.local.stat(key).await
+    }
+    async fn upload_immutable(
+        &self,
+        path: &Path,
+        key: &RemoteKey,
+    ) -> Result<noland_storage::RemoteMeta> {
+        self.local.upload_immutable(path, key).await
+    }
+    async fn download(&self, key: &RemoteKey, path: &Path) -> Result<()> {
+        self.local.download(key, path).await
+    }
+    async fn list_prefix(&self, key: &RemoteKey) -> Result<Vec<noland_storage::RemoteEntry>> {
+        self.local.list_prefix(key).await
+    }
+    async fn put_small_versioned(
+        &self,
+        bytes: bytes::Bytes,
+        key: &RemoteKey,
+    ) -> Result<noland_storage::RemoteMeta> {
+        self.local.put_small_versioned(bytes, key).await
+    }
+    fn supports_streaming_downloads(&self) -> bool {
+        true
+    }
+    fn transfer_tuning(&self) -> TransferTuning {
+        TransferTuning {
+            max_parallel_downloads: self.initial_width,
+            ..TransferTuning::default()
+        }
+    }
+    async fn download_stream_observed(
+        &self,
+        key: &RemoteKey,
+        _: &Path,
+        consumer: &dyn DownloadStreamConsumer,
+        _: Option<&(dyn DownloadObserver + '_)>,
+    ) -> Result<()> {
+        let order = self.started.fetch_add(1, Ordering::AcqRel);
+        if order == self.initial_width {
+            self.refilled.store(true, Ordering::Release);
+            self.changed.notify_waiters();
+        }
+        consumer.restart().await?;
+        if order < self.initial_width {
+            tokio::time::timeout(Duration::from_secs(5), self.initial_group.wait())
+                .await
+                .map_err(|_| StateError::Storage("pack decoders were serialized".into()))?;
+        }
+        consumer.write(&self.packs[key.as_str()]).await?;
+        if order == 0 {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let notified = self.changed.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if self.refilled.load(Ordering::Acquire)
+                        && self.published.load(Ordering::Acquire)
+                    {
+                        break;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            .map_err(|_| StateError::Storage("restore waited for the slowest pack".into()))?;
+        }
+        consumer.finish().await?;
+        if order == 0 {
+            self.slow_finished.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+}
+
+fn rolling_fixture(
+    root: &Path,
+    master: &MasterKey,
+    payloads: &[&[u8]],
+    initial_width: usize,
+    corrupt_last: bool,
+) -> (RollingStreams, Vec<PackIndexEntry>) {
+    let mut index = Vec::new();
+    let mut streams = BTreeMap::new();
+    for (number, payload) in payloads.iter().enumerate() {
+        // Separate pack builders produce real, distinct encrypted packs without
+        // allocating gigabytes merely to cross a pack-format boundary.
+        let pack = noland_pack::pack_chunks(
+            &root.join(format!("built-{number}")),
+            master,
+            vec![(noland_cas::blake3_hex(payload), payload.to_vec())],
+            |_| false,
+        )
+        .unwrap()
+        .remove(0);
+        let mut bytes = fs::read(&pack.path).unwrap();
+        if corrupt_last && number == payloads.len() - 1 {
+            *bytes.last_mut().unwrap() ^= 1;
+        }
+        streams.insert(pack_key(&pack.pack_id), bytes);
+        index.extend(pack.entries);
+    }
+    (
+        RollingStreams {
+            local: noland_storage::LocalStorage::new(root.join("unused-remote")),
+            packs: streams,
+            initial_group: tokio::sync::Barrier::new(initial_width),
+            initial_width,
+            started: AtomicUsize::new(0),
+            refilled: AtomicBool::new(false),
+            published: AtomicBool::new(false),
+            slow_finished: AtomicBool::new(false),
+            changed: tokio::sync::Notify::new(),
+        },
+        index,
+    )
+}
+
+#[tokio::test]
+async fn authenticated_multi_pack_restore_verifies_during_download_and_refills_completed_slots() {
+    let root = test_dir("pipeline-parallel-streams");
+    let master = MasterKey::generate();
+    let payloads = [
+        b"first pack".as_slice(),
+        b"second pack",
+        b"third pack",
+        b"fourth pack",
+        b"fifth pack",
+        b"sixth pack",
+    ];
+    let (storage, index) = rolling_fixture(&root, &master, &payloads, 5, false);
+    let plan = test_plan(
+        &root.join("restore"),
+        test_manifest(
+            payloads
+                .iter()
+                .enumerate()
+                .map(|(index, payload)| file(&format!("game/{index}"), payload))
+                .collect(),
+        ),
+    );
+    let roots = LogicalRootMap::from_home(root.join("home"));
+    let report = restore_pipelined_for_resources(
+        &storage,
+        &master,
+        &plan,
+        &index,
+        &roots,
+        None,
+        None,
+        PipelineOptions {
+            workload: TransferWorkload::Throughput,
+            max_parallel_packs: 5,
+            reconstruction_workers: 2,
+            buffered_chunks: 8,
+            max_inflight_pack_bytes: PACK_MAX,
+            overlap_file_syncs: true,
+        },
+        WorkerResources {
+            logical_cpus: 16,
+            available_memory: Some(8 * PACK_MAX),
+            io_pressure: false,
+        },
+        |sample| {
+            assert_eq!(sample.io.requested_parallel_packs, 5);
+            assert_eq!(sample.io.effective_parallel_packs, 5);
+            assert_eq!(sample.io.requested_verification_workers, 2);
+            assert_eq!(sample.io.effective_verification_workers, 2);
+            assert_eq!(sample.io.requested_buffered_chunks, 8);
+            assert_eq!(sample.io.effective_buffered_chunks, 5);
+            if sample.completed_entries >= 2 && !storage.published.load(Ordering::Acquire) {
+                assert!(!storage.slow_finished.load(Ordering::Acquire));
+                assert!(sample.verified_bytes > 0);
+                storage.published.store(true, Ordering::Release);
+                storage.changed.notify_waiters();
+            }
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    assert!(storage.refilled.load(Ordering::Acquire));
+    assert!(storage.published.load(Ordering::Acquire));
+    assert!(storage.slow_finished.load(Ordering::Acquire));
+    assert_eq!(report.packs_downloaded, payloads.len());
+    assert_eq!(report.restore.published_entries, payloads.len());
+    assert_eq!(report.io.peak_decode_workers, 5);
+    assert!(report.io.peak_verification_workers > 0);
+    assert_eq!(report.io.file_syncs, payloads.len() as u64);
+    for (index, payload) in payloads.iter().enumerate() {
+        assert_eq!(
+            fs::read(root.join(format!("home/.local/share/game/{index}"))).unwrap(),
+            *payload
+        );
+    }
+    assert!(!plan.staging.exists());
+    assert!(!plan.pack_cache.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn parallel_stream_corruption_and_callback_cancellation_restore_every_original_exactly() {
+    for corrupt in [false, true] {
+        let root = test_dir("pipeline-parallel-rollback");
+        let master = MasterKey::generate();
+        let payloads = [b"first pack".as_slice(), b"second pack", b"third pack"];
+        let (storage, index) = rolling_fixture(&root, &master, &payloads, 2, corrupt);
+        let plan = test_plan(
+            &root.join("restore"),
+            test_manifest(
+                payloads
+                    .iter()
+                    .enumerate()
+                    .map(|(index, payload)| file(&format!("game/{index}"), payload))
+                    .collect(),
+            ),
+        );
+        let home = root.join("home");
+        let game = home.join(".local/share/game");
+        fs::create_dir_all(&game).unwrap();
+        for index in 0..payloads.len() {
+            fs::write(game.join(index.to_string()), format!("original-{index}")).unwrap();
+        }
+        fs::write(game.join("unrelated"), b"keep-me").unwrap();
+        let mut cancelled_at_publication = false;
+        let error = restore_pipelined_for_resources(
+            &storage,
+            &master,
+            &plan,
+            &index,
+            &LogicalRootMap::from_home(&home),
+            None,
+            None,
+            PipelineOptions {
+                workload: TransferWorkload::Throughput,
+                max_parallel_packs: 2,
+                reconstruction_workers: 2,
+                buffered_chunks: 2,
+                max_inflight_pack_bytes: PACK_MAX,
+                overlap_file_syncs: true,
+            },
+            WorkerResources {
+                logical_cpus: 8,
+                available_memory: Some(8 * PACK_MAX),
+                io_pressure: false,
+            },
+            |sample| {
+                if sample.completed_entries >= 2 && storage.refilled.load(Ordering::Acquire) {
+                    if !corrupt {
+                        cancelled_at_publication = true;
+                        return Err(StateError::Storage(
+                            "cancel parallel restore after publication".into(),
+                        ));
+                    }
+                    storage.published.store(true, Ordering::Release);
+                    storage.changed.notify_waiters();
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(storage.refilled.load(Ordering::Acquire));
+        assert!(corrupt || cancelled_at_publication);
+        assert!(
+            !error.to_string().contains("serialized")
+                && !error.to_string().contains("slowest pack"),
+            "the fixture must exercise corruption/cancellation, not a timeout: {error}"
+        );
+        for index in 0..payloads.len() {
+            let destination = game.join(index.to_string());
+            assert_eq!(
+                fs::read(&destination).unwrap(),
+                format!("original-{index}").as_bytes()
+            );
+            assert!(!destination_partial_path(&destination, plan.restore_id)
+                .unwrap()
+                .exists());
+        }
+        assert_eq!(fs::read(game.join("unrelated")).unwrap(), b"keep-me");
+        assert!(
+            !plan.staging.exists(),
+            "rollback must finish before returning"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }

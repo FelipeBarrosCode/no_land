@@ -91,6 +91,9 @@ pub struct StateAgent {
     pub steam: Mutex<Option<SteamDiscovery>>,
     pub master_key: Mutex<Option<noland_crypto::MasterKey>>,
     pub(crate) deletion_plan: Mutex<Option<deletion::DeletionPlan>>,
+    /// Fixture-local coalescing age; None retains the real one-second deadline.
+    #[cfg(test)]
+    pub(crate) streaming_partial_builder_age: Option<Duration>,
 }
 
 impl StateAgent {
@@ -111,6 +114,8 @@ impl StateAgent {
             steam: Mutex::new(None),
             master_key: Mutex::new(None),
             deletion_plan: Mutex::new(None),
+            #[cfg(test)]
+            streaming_partial_builder_age: None,
         })
     }
 

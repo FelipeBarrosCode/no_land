@@ -1,6 +1,7 @@
 //! Upload supervision. Byte progress, local observer work, provider finalization
 //! and process/pipe exit are separate phases with separate deadlines.
 use super::*;
+use crate::stream::SlowPeerTracker;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -8,6 +9,12 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct UploadTransferDiagnostics {
+    /// Operation-wide admission samples, not additive per-object/socket counts.
+    pub worker_ceiling: usize,
+    pub effective_worker_limit: usize,
+    pub reserved_transfer_slots: usize,
+    pub queued_transfer_requests: usize,
+    pub controller_epoch: u64,
     pub attempt: u32,
     pub attempt_bytes: u64,
     /// Rclone-reported payload bytes, including failed attempts (not protocol overhead).
@@ -36,6 +43,8 @@ pub(super) struct UploadPolicy {
     pub tick: Duration,
     /// Production samples kernel pressure; fixtures must not depend on host load.
     pub io_pressure: fn() -> bool,
+    /// Actual weighted backend grant, not the requested group width.
+    pub transfer_slots: usize,
 }
 
 impl Default for UploadPolicy {
@@ -46,7 +55,8 @@ impl Default for UploadPolicy {
             exit: Duration::from_secs(30),
             slow_window: Duration::from_secs(30),
             tick: Duration::from_millis(500),
-            io_pressure,
+            io_pressure: stream::io_pressure,
+            transfer_slots: 1,
         }
     }
 }
@@ -58,21 +68,6 @@ fn copied_object(value: &serde_json::Value) -> Option<&str> {
     (value.get("level")?.as_str()? == "info" && message.starts_with("Copied ("))
         .then(|| value.get("object")?.as_str())
         .flatten()
-}
-
-fn io_pressure() -> bool {
-    std::fs::read_to_string("/proc/pressure/io")
-        .ok()
-        .is_some_and(|text| {
-            text.lines()
-                .filter(|line| line.starts_with("some "))
-                .any(|line| {
-                    line.split_whitespace()
-                        .find_map(|part| part.strip_prefix("avg10="))
-                        .and_then(|value| value.parse::<f64>().ok())
-                        .is_some_and(|value| value >= 5.0)
-                })
-        })
 }
 
 impl RcloneStorage {
@@ -118,7 +113,20 @@ impl RcloneStorage {
             })
             .collect::<Result<HashMap<_, _>>>()?;
         let mut completed = HashSet::new();
+        let transfer_slots = policy.transfer_slots.max(1).min(objects.len().max(1));
+        let peer_context = |remaining: usize| {
+            PeerContext::new(
+                self.upload_limiter.active(),
+                transfer_slots.min(remaining.max(1)),
+                self.upload_limiter.epoch(),
+            )
+        };
         let mut diagnostics = UploadTransferDiagnostics {
+            worker_ceiling: self.upload_limiter.max(),
+            effective_worker_limit: self.upload_limiter.current(),
+            reserved_transfer_slots: self.upload_limiter.active(),
+            queued_transfer_requests: self.upload_limiter.queued(),
+            controller_epoch: self.upload_limiter.epoch(),
             limiter_wait_us: stream::micros(limiter_wait),
             ..Default::default()
         };
@@ -134,6 +142,10 @@ impl RcloneStorage {
                 .map(|(_, size)| *size)
                 .sum::<u64>();
             diagnostics.phase = "starting".into();
+            diagnostics.effective_worker_limit = self.upload_limiter.current();
+            diagnostics.reserved_transfer_slots = self.upload_limiter.active();
+            diagnostics.queued_transfer_requests = self.upload_limiter.queued();
+            diagnostics.controller_epoch = self.upload_limiter.epoch();
             let local = Instant::now();
             if let Some(observer) = observer {
                 observer.transfer_started()?;
@@ -165,8 +177,11 @@ impl RcloneStorage {
             let observer_before = diagnostics.observer_us;
             let mut last_progress = started;
             let mut last_tick = started;
-            let mut slow_start = started;
+            let initial_context = peer_context(objects.len().saturating_sub(completed.len()));
+            let mut sample_stable = true;
+            let mut slow_tracker = SlowPeerTracker::new();
             let mut slow_bytes = 0;
+            let mut supervised_restart = false;
             let mut finalizing_since = None;
             let mut exit_since = None;
             let mut status = None;
@@ -210,7 +225,6 @@ impl RcloneStorage {
                                                 let elapsed = local.elapsed();
                                                 diagnostics.observer_us += stream::micros(elapsed);
                                                 last_progress = Instant::now();
-                                                slow_start += elapsed;
                                                 last_tick += elapsed;
                                                 diagnostics.completed_objects = completed.len();
                                                 if completed.len() == objects.len() { exit_since.get_or_insert(Instant::now()); }
@@ -233,9 +247,17 @@ impl RcloneStorage {
                         }
                         _ = tick.tick() => {
                             let now = Instant::now();
-                            let elapsed = stream::micros(now.saturating_duration_since(last_tick));
+                            let network_elapsed = now.saturating_duration_since(last_tick);
+                            let elapsed = stream::micros(network_elapsed);
                             last_tick = now;
                             let local_io = (policy.io_pressure)();
+                            self.upload_limiter.observe_local_pressure(local_io);
+                            let context = peer_context(objects.len().saturating_sub(completed.len()));
+                            sample_stable &= !local_io && context == initial_context;
+                            diagnostics.effective_worker_limit = self.upload_limiter.current();
+                            diagnostics.reserved_transfer_slots = self.upload_limiter.active();
+                            diagnostics.queued_transfer_requests = self.upload_limiter.queued();
+                            diagnostics.controller_epoch = self.upload_limiter.epoch();
                             diagnostics.phase = if exit_since.is_some() {
                                 diagnostics.process_exit_wait_us += elapsed; "waiting_exit"
                             } else if finalizing_since.is_some() {
@@ -245,6 +267,11 @@ impl RcloneStorage {
                             } else {
                                 diagnostics.transfer_wait_us += elapsed; "transferring"
                             }.into();
+                            if local_io {
+                                // A local disk stall is not network inactivity;
+                                // give the transport a fresh idle window afterward.
+                                last_progress = now;
+                            }
                             let reason = if exit_since.is_some_and(|time| time.elapsed() >= policy.exit) {
                                 diagnostics.exit_restarts += 1; Some("upload process or stderr exit timeout")
                             } else if finalizing_since.is_some_and(|time| time.elapsed() >= policy.finalization) {
@@ -252,20 +279,29 @@ impl RcloneStorage {
                             } else if finalizing_since.is_none() && exit_since.is_none() && last_progress.elapsed() >= policy.idle && !local_io {
                                 diagnostics.idle_restarts += 1; Some("upload byte-progress idle timeout")
                             } else { None };
-                            let slow = finalizing_since.is_none() && exit_since.is_none() && diagnostics.slow_restarts == 0
-                                && slow_start.elapsed() >= policy.slow_window && !local_io
-                                && self.upload_peers.baseline().is_some_and(|baseline| baseline >= 256.0 * 1024.0
-                                    && (diagnostics.attempt_bytes.saturating_sub(slow_bytes) as f64 / slow_start.elapsed().as_secs_f64()) < baseline / 8.0);
+                            let delta = diagnostics.attempt_bytes.saturating_sub(slow_bytes);
+                            slow_bytes = diagnostics.attempt_bytes;
+                            let slow = if finalizing_since.is_none() && exit_since.is_none()
+                                && diagnostics.slow_restarts == 0 && attempt < self.tuning.max_attempts.max(1)
+                            {
+                                slow_tracker.observe(&self.upload_peers, context, delta,
+                                    network_elapsed, Duration::ZERO, policy.slow_window, local_io)
+                            } else {
+                                slow_tracker.reset();
+                                false
+                            };
                             let reason = reason.or_else(|| if slow { diagnostics.slow_restarts += 1; Some("upload slower than healthy peers") } else { None });
-                            if slow_start.elapsed() >= policy.slow_window { slow_start = now; slow_bytes = diagnostics.attempt_bytes; }
                             let local = Instant::now();
                             if let Some(observer) = observer { observer.transfer_diagnostics(&diagnostics)?; }
                             let elapsed = local.elapsed();
                             diagnostics.observer_us += stream::micros(elapsed);
-                            last_progress += elapsed; slow_start += elapsed; last_tick += elapsed;
+                            last_progress += elapsed; last_tick += elapsed;
                             if let Some(time) = finalizing_since.as_mut() { *time += elapsed; }
                             if let Some(time) = exit_since.as_mut() { *time += elapsed; }
-                            if let Some(reason) = reason { return Ok(Some(RcloneFailure { class: RemoteErrorClass::Retryable, message: reason.into() })); }
+                            if let Some(reason) = reason {
+                                supervised_restart = true;
+                                return Ok(Some(RcloneFailure { class: RemoteErrorClass::Retryable, message: reason.into() }));
+                            }
                         }
                     }
                 }
@@ -294,7 +330,12 @@ impl RcloneStorage {
                 if let Some(observer) = observer {
                     observer.transfer_diagnostics(&diagnostics)?;
                 }
-                self.record_remote_error(failure.class);
+                // An isolated watchdog/straggler replay is not a provider-wide
+                // congestion response. Real child/provider failures still train
+                // backpressure, including rate-limit responses.
+                if !supervised_restart {
+                    self.record_remote_error(failure.class);
+                }
                 if !failure.class.is_retryable() || attempt == self.tuning.max_attempts.max(1) {
                     return Err(failure.into_state_error());
                 }
@@ -319,6 +360,10 @@ impl RcloneStorage {
             // copies give a conservative payload lower bound without counting
             // reused immutable remote objects as new traffic.
             diagnostics.phase = "complete".into();
+            diagnostics.effective_worker_limit = self.upload_limiter.current();
+            diagnostics.reserved_transfer_slots = self.upload_limiter.active();
+            diagnostics.queued_transfer_requests = self.upload_limiter.queued();
+            diagnostics.controller_epoch = self.upload_limiter.epoch();
             if let Some(observer) = observer {
                 let reused = objects
                     .iter()
@@ -333,17 +378,28 @@ impl RcloneStorage {
                 observer.transfer_diagnostics(&diagnostics)?;
             }
             let elapsed = started.elapsed();
-            if !(policy.io_pressure)() {
+            let pressured = (policy.io_pressure)();
+            self.upload_limiter.observe_local_pressure(pressured);
+            if !pressured {
                 let transfer = finalizing_since
                     .unwrap_or_else(Instant::now)
                     .saturating_duration_since(started)
                     .saturating_sub(Duration::from_micros(
                         diagnostics.observer_us.saturating_sub(observer_before),
                     ));
-                self.upload_peers
-                    .record(diagnostics.attempt_bytes, transfer, Duration::ZERO);
+                if sample_stable
+                    && peer_context(objects.len().saturating_sub(completed.len()))
+                        == initial_context
+                {
+                    self.upload_peers.record_with_context(
+                        diagnostics.attempt_bytes,
+                        transfer,
+                        Duration::ZERO,
+                        initial_context,
+                    );
+                }
                 self.upload_limiter
-                    .record_success(diagnostics.attempt_bytes, transfer);
+                    .record_success(diagnostics.attempt_bytes / transfer_slots as u64, transfer);
             }
             return Ok(elapsed);
         }
@@ -397,6 +453,9 @@ mod tests {
                 ..Default::default()
             });
         storage.upload_executable = Some(executable);
+        // Fixture transfers must not train admission from the host's disk load.
+        // Explicit pressure tests still pass their own UploadPolicy below.
+        storage.stream_policy.io_pressure = || false;
         let file = root.join("pack");
         std::fs::write(&file, b"12345678").unwrap();
         (
@@ -416,6 +475,7 @@ mod tests {
             slow_window: Duration::from_millis(50),
             tick: Duration::from_millis(10),
             io_pressure: || false,
+            transfer_slots: 1,
         }
     }
     async fn run(
@@ -437,6 +497,85 @@ mod tests {
         )
         .await
         .expect("bounded upload")
+    }
+
+    #[tokio::test]
+    async fn staged_groups_launch_with_the_free_width_without_waiting_for_a_busy_peer() {
+        let (root, storage, _) = fixture(
+            r#"
+printf '%s\n' "$@" > arguments
+for id in 0 1 2 3 4; do
+  printf '{"level":"info","object":"packs/%s.pack","msg":"Copied (new)"}\n' "$id" >&2
+done
+"#,
+            1,
+        );
+        let storage = storage.with_transfer_tuning(TransferTuning {
+            max_parallel_uploads: 5,
+            rclone_transfers: 5,
+            rclone_checkers: 5,
+            max_attempts: 1,
+            ..Default::default()
+        });
+        let busy = tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.upload_limiter.acquire_slots(3),
+        )
+        .await
+        .expect("the initial reservation must fit the known five-slot ceiling")
+        .unwrap();
+        assert_eq!(busy.slots(), 3);
+        let mut stage = StagingTree::create_under(&root, "partial-width").unwrap();
+        for id in 0..5 {
+            stage
+                .write(&RemoteKey::new(format!("packs/{id}.pack")), b"payload")
+                .unwrap();
+        }
+        let observer = Observer::default();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.copy_staged(&stage, true, Some(&observer)),
+        )
+        .await
+        .expect("free provider slots must not wait for the unrelated busy peer")
+        .unwrap();
+        let arguments = std::fs::read_to_string(root.join("arguments")).unwrap();
+        let arguments: Vec<_> = arguments.lines().collect();
+        for flag in ["--transfers", "--checkers"] {
+            let index = arguments.iter().position(|arg| *arg == flag).unwrap();
+            assert_eq!(
+                arguments[index + 1],
+                "2",
+                "{flag} must use the actual permit"
+            );
+        }
+        assert_eq!(observer.completed.lock().unwrap().len(), 5);
+        assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+        let replacement = tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.upload_limiter.acquire_slots(5),
+        )
+        .await
+        .expect("the completed group must release its two slots before the busy peer exits")
+        .unwrap();
+        assert_eq!(
+            replacement.slots(),
+            2,
+            "the group's permits were released while the original peer is still busy"
+        );
+        drop(replacement);
+        drop(busy);
+        let all_slots = tokio::time::timeout(
+            Duration::from_secs(5),
+            storage.upload_limiter.acquire_slots(5),
+        )
+        .await
+        .expect("all five slots must be available after both owners exit")
+        .unwrap();
+        assert_eq!(all_slots.slots(), 5);
+        drop(all_slots);
+        drop(stage);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -661,18 +800,106 @@ echo '{"level":"info","object":"packs/second.pack","msg":"Copied (new)"}' >&2
     async fn slow_peer_restart_is_allowed_only_once() {
         let (root, storage, objects) =
             fixture("echo '{\"stats\":{\"bytes\":1}}' >&2\nexec sleep 10", 2);
+        let storage = storage.with_transfer_tuning(TransferTuning {
+            max_parallel_uploads: 4,
+            max_attempts: 2,
+            initial_backoff_ms: 1,
+            max_backoff_ms: 1,
+            ..Default::default()
+        });
+        // Three independent concurrent peers are required. A lone progressing
+        // upload must never be compared with historical full-link rates.
+        let peers = storage.upload_limiter.acquire_slots(4).await.unwrap();
+        let context = PeerContext::new(4, 1, storage.upload_limiter.epoch());
         for _ in 0..3 {
-            storage
-                .upload_peers
-                .record(8 * 1024 * 1024, Duration::from_secs(1), Duration::ZERO);
+            storage.upload_peers.record_with_context(
+                8 * 1024 * 1024,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                context,
+            );
         }
         let observer = Observer::default();
-        assert!(run(&storage, &objects, &observer, policy()).await.is_err());
+        let test_policy = UploadPolicy {
+            idle: Duration::from_millis(250),
+            ..policy()
+        };
+        assert!(run(&storage, &objects, &observer, test_policy)
+            .await
+            .is_err());
         let snapshots = observer.snapshots.lock().unwrap();
         let last = snapshots.last().unwrap();
         assert_eq!(last.slow_restarts, 1);
         assert_eq!(last.idle_restarts, 1);
         assert_eq!(last.sent_bytes, 2);
+        assert_eq!(
+            storage.upload_limiter.current(),
+            4,
+            "isolated supervision retries must not collapse the global network limit"
+        );
+        drop(peers);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn solo_upload_keeps_making_progress_without_speculative_restarts() {
+        let (root, storage, objects) = fixture(
+            r#"
+for n in 1 2 3 4 5 6 7; do
+  printf '{"stats":{"bytes":%s}}\n' "$n" >&2
+  sleep 0.04
+done
+echo '{"stats":{"bytes":8}}' >&2
+echo '{"level":"info","object":"packs/test.pack","msg":"Copied (new)"}' >&2
+"#,
+            2,
+        );
+        let context = PeerContext::new(1, 1, storage.upload_limiter.epoch());
+        for _ in 0..3 {
+            storage.upload_peers.record_with_context(
+                8 * 1024 * 1024,
+                Duration::from_secs(1),
+                Duration::ZERO,
+                context,
+            );
+        }
+        let observer = Observer::default();
+        run(
+            &storage,
+            &objects,
+            &observer,
+            UploadPolicy {
+                idle: Duration::from_millis(300),
+                ..policy()
+            },
+        )
+        .await
+        .unwrap();
+        let snapshots = observer.snapshots.lock().unwrap();
+        let last = snapshots.last().unwrap();
+        assert_eq!(
+            (last.attempt, last.slow_restarts, last.idle_restarts),
+            (1, 0, 0)
+        );
+        assert_eq!(last.sent_bytes, 8);
+        assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+        assert_eq!(observer.completed.lock().unwrap().len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn actual_provider_rate_limit_still_reduces_network_admission() {
+        let (root, storage, objects) = fixture("echo '429 rate limit exceeded' >&2\nexit 5", 1);
+        let storage = storage.with_transfer_tuning(TransferTuning {
+            max_parallel_uploads: 4,
+            max_attempts: 1,
+            ..Default::default()
+        });
+        let observer = Observer::default();
+        assert!(run(&storage, &objects, &observer, policy()).await.is_err());
+        assert_eq!(storage.upload_limiter.current(), 2);
+        assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+        assert!(observer.completed.lock().unwrap().is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 }

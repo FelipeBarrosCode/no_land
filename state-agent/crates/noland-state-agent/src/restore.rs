@@ -5,7 +5,7 @@ use std::{
 
 use noland_crypto::MasterKey;
 use noland_rclone_adapter::{
-    EphemeralRcloneSession, ProviderKind, TransferTuning, TransferWorkload,
+    EphemeralRcloneSession, ProviderKind, TransferTuning, TransferWorkload, WorkerResources,
 };
 use noland_restore::{
     prepare_restore, restore_pipelined, DownloadJournal, PipelineOptions, RestorePrerequisite,
@@ -148,35 +148,43 @@ async fn run_restore_inner(
     let (config_path, _session_guard) =
         write_guarded_ephemeral_session(&agent.config.paths.run_root, session)?;
     let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
-    let workload = if agent.has_latency_sensitive_sessions()? {
+    let baseline_workload = if agent.has_latency_sensitive_sessions()? {
         TransferWorkload::GameplaySafe
     } else {
         TransferWorkload::Throughput
     };
-    let tuning = TransferTuning::automatic(provider, workload);
+    let workload = baseline_workload.for_active_transfer();
+    let resources = WorkerResources::detect();
+    let tuning = TransferTuning::from_worker_resources(provider, workload, resources);
+    let pipeline_options = PipelineOptions::for_transfer_tuning(resources, workload, &tuning);
     tracing::info!(
         provider = provider.as_str(),
+        ?baseline_workload,
         ?workload,
         uploads = tuning.max_parallel_uploads,
         downloads = tuning.max_parallel_downloads,
         rclone_transfers = tuning.rclone_transfers,
+        decoder_workers = pipeline_options.max_parallel_packs,
+        verification_workers = pipeline_options.reconstruction_workers,
+        buffered_chunks = pipeline_options.buffered_chunks,
+        io_pressure = resources.io_pressure,
         "resolved automatic shared-storage restore parallelism"
     );
-    let pipeline_options = PipelineOptions {
-        // Streaming uses one ordered connection per pack, not copyto multistream.
-        max_parallel_packs: tuning.max_parallel_downloads.max(1),
-        reconstruction_workers: if workload == TransferWorkload::GameplaySafe {
-            1
-        } else {
-            PipelineOptions::default().reconstruction_workers
-        },
-        ..PipelineOptions::default()
-    };
     let transfer_plan = serde_json::json!({
+        "baseline_workload": format!("{baseline_workload:?}"),
         "workload": format!("{workload:?}"),
-        "logical_cpus": std::thread::available_parallelism().map_or(1, usize::from),
+        "logical_cpus": resources.logical_cpus,
+        "available_memory_bytes": resources.available_memory,
+        "io_pressure": resources.io_pressure,
+        "cpu_worker_budget": resources.cpu_workers(workload, 1),
+        "requested_download_slots": tuning.max_parallel_downloads,
+        "requested_parallel_packs": pipeline_options.max_parallel_packs,
+        "requested_verification_workers": pipeline_options.reconstruction_workers,
+        "requested_buffered_chunks": pipeline_options.buffered_chunks,
+        "requested_inflight_pack_bytes": pipeline_options.max_inflight_pack_bytes,
         "max_parallel_packs": pipeline_options.max_parallel_packs,
         "verification_workers": pipeline_options.reconstruction_workers,
+        "verification_pool_workers": 0,
         "buffered_chunks": pipeline_options.buffered_chunks,
         "max_inflight_pack_bytes": pipeline_options.max_inflight_pack_bytes,
     });
@@ -307,6 +315,20 @@ async fn run_restore_inner(
                         progress.unit = Some("files".into());
                         progress.detail_json["ready_to_launch_reached"] =
                             serde_json::json!(sample.ready_to_launch);
+                        // Admission can tighten explicit options if resources
+                        // changed during manifest/index preparation. Keep legacy
+                        // plan labels truthful as well as the requested/effective
+                        // counts recorded in the pipeline's I/O diagnostics.
+                        progress.detail_json["transfer_plan"]["max_parallel_packs"] =
+                            serde_json::json!(sample.io.effective_parallel_packs);
+                        progress.detail_json["transfer_plan"]["verification_workers"] =
+                            serde_json::json!(sample.io.effective_verification_workers);
+                        progress.detail_json["transfer_plan"]["verification_pool_workers"] =
+                            serde_json::json!(sample.io.verification_pool_workers);
+                        progress.detail_json["transfer_plan"]["buffered_chunks"] =
+                            serde_json::json!(sample.io.effective_buffered_chunks);
+                        progress.detail_json["transfer_plan"]["max_inflight_pack_bytes"] =
+                            serde_json::json!(sample.io.max_inflight_pack_bytes);
                         progress.detail_json["pipeline"] = serde_json::json!({
                             "phase": sample.phase,
                             "checked_files": sample.checked_entries,

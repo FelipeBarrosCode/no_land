@@ -4,7 +4,9 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::stream::{self, PeerRates, StreamPolicy, StreamReadFailure, StreamTransferDiagnostics};
+use crate::stream::{
+    self, PeerContext, PeerRates, StreamPolicy, StreamReadFailure, StreamTransferDiagnostics,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use noland_rclone_adapter::{
@@ -63,6 +65,20 @@ impl RcloneFailure {
             "rclone failed ({:?}): {}",
             self.class, self.message
         ))
+    }
+}
+
+struct DownloadAttemptTiming {
+    elapsed: std::time::Duration,
+    observer_wait: std::time::Duration,
+}
+
+impl DownloadAttemptTiming {
+    fn network_sample(&self) -> Option<std::time::Duration> {
+        let network = self.elapsed.saturating_sub(self.observer_wait);
+        // Local journal/progress work is not provider congestion. As with
+        // ordered downloads, discard significantly backpressured samples.
+        (!network.is_zero() && self.observer_wait <= network / 3).then_some(network)
     }
 }
 
@@ -221,7 +237,12 @@ impl RcloneCommandBuilder {
             "--stats-one-line".into(),
             "--use-json-log".into(),
             "--multi-thread-streams".into(),
-            tuning.rclone_download_streams.max(1).to_string(),
+            tuning
+                .rclone_download_streams
+                .max(1)
+                .min(tuning.max_parallel_downloads.max(1))
+                .min(ProviderCapabilities::for_provider(self.provider).max_download_concurrency)
+                .to_string(),
         ];
         self.push_backend_options(&mut args);
         args.extend([source, destination]);
@@ -304,7 +325,6 @@ pub struct RcloneStorage {
     #[cfg(test)]
     upload_executable: Option<PathBuf>,
     download_limiter: Arc<AdaptiveConcurrency>,
-    stream_limiter: Arc<AdaptiveConcurrency>,
     stream_peers: PeerRates,
     stream_policy: StreamPolicy,
     control_timeout: std::time::Duration,
@@ -313,6 +333,8 @@ pub struct RcloneStorage {
     control_executable: Option<PathBuf>,
     #[cfg(test)]
     stream_executable: Option<PathBuf>,
+    #[cfg(test)]
+    progress_executable: Option<PathBuf>,
     root_ready: OnceCell<()>,
     metrics: StorageCounters,
 }
@@ -342,7 +364,6 @@ impl RcloneStorage {
             #[cfg(test)]
             upload_executable: None,
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
-            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
             stream_peers: PeerRates::default(),
             stream_policy: StreamPolicy::default(),
             control_timeout: std::time::Duration::from_secs(120),
@@ -351,6 +372,8 @@ impl RcloneStorage {
             control_executable: None,
             #[cfg(test)]
             stream_executable: None,
+            #[cfg(test)]
+            progress_executable: None,
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -400,7 +423,6 @@ impl RcloneStorage {
             #[cfg(test)]
             upload_executable: None,
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
-            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
             stream_peers: PeerRates::default(),
             stream_policy: StreamPolicy::default(),
             control_timeout: std::time::Duration::from_secs(120),
@@ -409,6 +431,8 @@ impl RcloneStorage {
             control_executable: None,
             #[cfg(test)]
             stream_executable: None,
+            #[cfg(test)]
+            progress_executable: None,
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -421,11 +445,18 @@ impl RcloneStorage {
             .max_parallel_uploads
             .min(self.capabilities.max_upload_concurrency)
             .clamp(1, 32);
+        tuning.max_parallel_downloads = tuning
+            .max_parallel_downloads
+            .min(self.capabilities.max_download_concurrency)
+            .clamp(1, 32);
+        tuning.rclone_download_streams = tuning
+            .rclone_download_streams
+            .min(tuning.max_parallel_downloads)
+            .max(1);
         self.retry_gate = Arc::new(SharedRetryGate::new(tuning.clone()));
         self.upload_limiter = AdaptiveConcurrency::for_uploads(&tuning);
         self.upload_peers = PeerRates::default();
         self.download_limiter = AdaptiveConcurrency::for_downloads(&tuning);
-        self.stream_limiter = AdaptiveConcurrency::for_streams(&tuning);
         self.stream_peers = PeerRates::default();
         self.tuning = tuning;
         self
@@ -504,7 +535,6 @@ impl RcloneStorage {
     fn record_remote_error(&self, class: RemoteErrorClass) {
         self.upload_limiter.record_error(class);
         self.download_limiter.record_error(class);
-        self.stream_limiter.record_error(class);
     }
 
     async fn run(&self, args: Vec<String>) -> Result<String> {
@@ -549,7 +579,11 @@ impl RcloneStorage {
         #[cfg(test)]
         if _control {
             if let Some(executable) = &self.control_executable {
-                return Command::new(executable);
+                // Avoid macOS validation of a freshly written executable script;
+                // fixture deadlines must exercise the command, not its launch.
+                let mut command = Command::new("/bin/sh");
+                command.arg(executable);
+                return command;
             }
         }
         Command::new("rclone")
@@ -686,7 +720,7 @@ impl RcloneStorage {
         &self,
         args: Vec<String>,
         mut on_progress: impl FnMut(u64) -> Result<()>,
-    ) -> Result<std::time::Duration> {
+    ) -> Result<DownloadAttemptTiming> {
         forbid_rclone_sync(&args)?;
         if let Some(arg) =
             self.extra_args.iter().chain(args.iter()).find(|arg| {
@@ -703,10 +737,16 @@ impl RcloneStorage {
         for attempt in 1..=max_attempts {
             self.retry_gate.wait_for_turn().await;
             let started = std::time::Instant::now();
+            let mut observer_wait = std::time::Duration::ZERO;
             self.metrics
                 .rclone_invocations
                 .fetch_add(1, Ordering::Relaxed);
             let mut cmd = Command::new("rclone");
+            #[cfg(test)]
+            if let Some(executable) = &self.progress_executable {
+                cmd = Command::new("/bin/sh");
+                cmd.arg(executable);
+            }
             cmd.args(&self.extra_args)
                 .args(&args)
                 .stdout(Stdio::null())
@@ -732,9 +772,27 @@ impl RcloneStorage {
             })?;
             let mut lines = BufReader::new(stderr).lines();
             let mut error_output = String::new();
-            while let Some(line) = lines.next_line().await? {
+            let mut pressure_tick = tokio::time::interval(
+                self.stream_policy
+                    .observation_interval
+                    .max(std::time::Duration::from_millis(1)),
+            );
+            pressure_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let line = tokio::select! {
+                    line = lines.next_line() => line?,
+                    _ = pressure_tick.tick() => {
+                        self.download_limiter
+                            .observe_local_pressure((self.stream_policy.io_pressure)());
+                        continue;
+                    }
+                };
+                let Some(line) = line else { break };
                 if let Some(bytes) = parse_rclone_stats_bytes(&line) {
-                    if let Err(error) = on_progress(bytes) {
+                    let local = std::time::Instant::now();
+                    let observed = on_progress(bytes);
+                    observer_wait = observer_wait.saturating_add(local.elapsed());
+                    if let Err(error) = observed {
                         let _ = child.kill().await;
                         return Err(error);
                     }
@@ -754,7 +812,10 @@ impl RcloneStorage {
             }
             let status = child.wait().await?;
             if status.success() {
-                return Ok(started.elapsed());
+                return Ok(DownloadAttemptTiming {
+                    elapsed: started.elapsed(),
+                    observer_wait,
+                });
             }
             let failure = RcloneFailure {
                 class: classify_remote_error(status.code(), error_output.trim()),
@@ -805,7 +866,11 @@ impl RcloneStorage {
                     Ok(())
                 },
                 limiter_wait,
-                upload::UploadPolicy::default(),
+                upload::UploadPolicy {
+                    io_pressure: self.stream_policy.io_pressure,
+                    transfer_slots: current_tuning.rclone_transfers,
+                    ..upload::UploadPolicy::default()
+                },
             )
             .await;
         drop(permit);
@@ -1191,29 +1256,45 @@ impl SharedStorageProvider for RcloneStorage {
         dest: &Path,
         observer: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
-        let permit = self.download_limiter.acquire().await?;
+        self.download_limiter
+            .observe_local_pressure((self.stream_policy.io_pressure)());
+        let permit = self
+            .download_limiter
+            .acquire_slots(self.tuning.rclone_download_streams)
+            .await?;
         self.metrics
             .remote_download_calls
             .fetch_add(1, Ordering::Relaxed);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let mut current_tuning = self.tuning.clone();
+        current_tuning.rclone_download_streams = permit.slots();
         let args = self.command_builder.download_copyto_args(
-            &self.tuning,
+            &current_tuning,
             self.remote_path(key),
             dest.display().to_string(),
         );
-        let result = match observer {
-            Some(observer) => {
-                observer.transfer_started()?;
-                self.run_with_progress(args, |bytes| observer.transfer_progress(bytes))
-                    .await
-            }
-            None => self.run_timed(args).await.map(|(_, elapsed)| elapsed),
-        };
-        if let Ok(elapsed) = &result {
+        if let Some(observer) = observer {
+            observer.transfer_started()?;
+        }
+        // Even callers without a UI observer need bounded, periodic pressure
+        // observations so a temporary local cap can clear before file EOF.
+        let result = self
+            .run_with_progress(args, |bytes| {
+                observer.map_or(Ok(()), |observer| observer.transfer_progress(bytes))
+            })
+            .await;
+        if let Ok(timing) = &result {
             let bytes = std::fs::metadata(dest).map(|meta| meta.len()).unwrap_or(0);
-            self.download_limiter.record_success(bytes, *elapsed);
+            let pressured = (self.stream_policy.io_pressure)();
+            self.download_limiter.observe_local_pressure(pressured);
+            if !pressured {
+                if let Some(network) = timing.network_sample() {
+                    self.download_limiter
+                        .record_success(bytes / permit.slots() as u64, network);
+                }
+            }
         }
         drop(permit);
         result?;
@@ -1238,8 +1319,15 @@ impl SharedStorageProvider for RcloneStorage {
     ) -> Result<()> {
         validate_remote_key(key)?;
         let waiting = std::time::Instant::now();
-        let _permit = self.stream_limiter.acquire().await?;
+        self.download_limiter
+            .observe_local_pressure((self.stream_policy.io_pressure)());
+        let _permit = self.download_limiter.acquire().await?;
         let mut diagnostics = StreamTransferDiagnostics {
+            worker_ceiling: self.download_limiter.max(),
+            effective_worker_limit: self.download_limiter.current(),
+            reserved_transfer_slots: self.download_limiter.active(),
+            queued_transfer_requests: self.download_limiter.queued(),
+            controller_epoch: self.download_limiter.epoch(),
             limiter_wait_us: stream::micros(waiting.elapsed()),
             ..StreamTransferDiagnostics::default()
         };
@@ -1268,6 +1356,10 @@ impl SharedStorageProvider for RcloneStorage {
             diagnostics.attempt = attempt;
             diagnostics.attempt_bytes = 0;
             diagnostics.phase = "receiving".into();
+            diagnostics.effective_worker_limit = self.download_limiter.current();
+            diagnostics.reserved_transfer_slots = self.download_limiter.active();
+            diagnostics.queued_transfer_requests = self.download_limiter.queued();
+            diagnostics.controller_epoch = self.download_limiter.epoch();
             let processing = std::time::Instant::now();
             consumer.restart().await?;
             diagnostics.consumer_us = diagnostics
@@ -1310,6 +1402,39 @@ impl SharedStorageProvider for RcloneStorage {
             let before_consumer = diagnostics.consumer_us;
             let allow_slow_restart =
                 diagnostics.slow_restarts == 0 && attempt < self.tuning.max_attempts.max(1);
+            let starting_pressure = (self.stream_policy.io_pressure)();
+            self.download_limiter
+                .observe_local_pressure(starting_pressure);
+            let initial_context = PeerContext::new(
+                self.download_limiter.active(),
+                1,
+                self.download_limiter.epoch(),
+            );
+            let sample_stable = std::sync::atomic::AtomicBool::new(!starting_pressure);
+            let stable = &sample_stable;
+            let pressure_cache =
+                std::cell::Cell::new((std::time::Instant::now(), starting_pressure));
+            let observation_interval = self
+                .stream_policy
+                .observation_interval
+                .max(std::time::Duration::from_millis(1));
+            let observe_context = move || {
+                let (observed, mut pressured) = pressure_cache.get();
+                if observed.elapsed() >= observation_interval {
+                    pressured = (self.stream_policy.io_pressure)();
+                    pressure_cache.set((std::time::Instant::now(), pressured));
+                    self.download_limiter.observe_local_pressure(pressured);
+                }
+                let context = PeerContext::new(
+                    self.download_limiter.active(),
+                    1,
+                    self.download_limiter.epoch(),
+                );
+                if pressured || context != initial_context {
+                    stable.store(false, Ordering::Relaxed);
+                }
+                context
+            };
             let (done, ended) = tokio::sync::oneshot::channel();
             // No detached tasks. An unsuccessful read kills the child before
             // draining stderr; successful EOF bounds only exit housekeeping.
@@ -1323,6 +1448,7 @@ impl SharedStorageProvider for RcloneStorage {
                     self.stream_policy,
                     allow_slow_restart,
                     &self.metrics.bytes_downloaded,
+                    observe_context,
                 )
                 .await;
                 if result.is_err() {
@@ -1397,10 +1523,29 @@ impl SharedStorageProvider for RcloneStorage {
                                 return Err(error);
                             }
                             // Disk/decoder backpressure is not provider congestion.
-                            if consumed <= receive / 3 {
-                                self.stream_limiter.record_success(bytes, receive);
-                                self.stream_peers.record(bytes, receive, consumed);
+                            let pressured = (self.stream_policy.io_pressure)();
+                            self.download_limiter.observe_local_pressure(pressured);
+                            if !pressured && consumed <= receive / 3 {
+                                self.download_limiter.record_success(bytes, receive);
+                                if sample_stable.load(Ordering::Relaxed)
+                                    && PeerContext::new(
+                                        self.download_limiter.active(),
+                                        1,
+                                        self.download_limiter.epoch(),
+                                    ) == initial_context
+                                {
+                                    self.stream_peers.record_with_context(
+                                        bytes,
+                                        receive,
+                                        consumed,
+                                        initial_context,
+                                    );
+                                }
                             }
+                            diagnostics.effective_worker_limit = self.download_limiter.current();
+                            diagnostics.reserved_transfer_slots = self.download_limiter.active();
+                            diagnostics.queued_transfer_requests = self.download_limiter.queued();
+                            diagnostics.controller_epoch = self.download_limiter.epoch();
                             diagnostics.phase = "completed".into();
                             stream::observe(observer, &diagnostics)?;
                             return Ok(());
@@ -1659,9 +1804,9 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut storage = RcloneStorage::new("fixture", "").for_deletion();
         storage.control_executable = Some(script);
-        // macOS may validate a cold script before it starts. Leave the same
-        // startup allowance as the stream fixtures; the intentional 30s sleep
-        // must be what exercises the timeout, not interpreter startup latency.
+        // Invoke fixtures through the system shell and leave a generous startup
+        // allowance. The intentional 30s sleep, not script validation, must be
+        // what exercises this bounded deadline.
         storage.control_timeout = std::time::Duration::from_secs(2);
         let result = storage
             .stat_for_deletion(&RemoteKey::new("packs/fixture"))
@@ -1751,6 +1896,7 @@ mod tests {
             storage.stream_policy = StreamPolicy {
                 idle_timeout: std::time::Duration::from_secs(2),
                 exit_timeout: std::time::Duration::from_millis(500),
+                io_pressure: || false,
                 ..StreamPolicy::default()
             };
             Self { root, storage }
@@ -1801,6 +1947,243 @@ mod tests {
             self.0.lock().unwrap().push(metrics.clone());
             Ok(())
         }
+    }
+
+    #[test]
+    fn copyto_feedback_subtracts_small_observer_waits_and_rejects_local_backpressure() {
+        use std::time::Duration;
+        assert_eq!(
+            DownloadAttemptTiming {
+                elapsed: Duration::from_millis(100),
+                observer_wait: Duration::from_millis(10),
+            }
+            .network_sample(),
+            Some(Duration::from_millis(90))
+        );
+        for (elapsed, observer) in [(100, 80), (100, 100), (100, 101), (0, 0)] {
+            assert!(DownloadAttemptTiming {
+                elapsed: Duration::from_millis(elapsed),
+                observer_wait: Duration::from_millis(observer),
+            }
+            .network_sample()
+            .is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_copyto_observers_do_not_reduce_the_shared_network_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        struct SlowObserver(AtomicU64);
+        impl DownloadObserver for SlowObserver {
+            fn transfer_progress(&self, _bytes: u64) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("noland-copyto-observer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("copyto-fixture");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nset -eu\nfor destination in \"$@\"; do :; done\nprintf payload > \"$destination\"\nprintf '%s\\n' '{\"stats\":{\"bytes\":7}}' >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut storage =
+            RcloneStorage::new("fixture", "root").with_transfer_tuning(TransferTuning {
+                max_parallel_downloads: 4,
+                rclone_download_streams: 2,
+                ..Default::default()
+            });
+        storage.progress_executable = Some(script);
+        storage.stream_policy.io_pressure = || false;
+        storage
+            .download_limiter
+            .record_success(1024 * 1024, Duration::from_millis(1));
+        storage
+            .download_limiter
+            .record_error(RemoteErrorClass::RateLimited);
+        assert_eq!(storage.download_limiter.current(), 2);
+        let observer = SlowObserver(AtomicU64::new(0));
+        for index in 0..4 {
+            let destination = root.join(format!("download/{index}"));
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                storage.download_observed(
+                    &RemoteKey::new(format!("packs/{index}")),
+                    &destination,
+                    Some(&observer),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+        }
+        assert_eq!(observer.0.load(Ordering::SeqCst), 4);
+        assert_eq!(storage.download_limiter.current(), 2);
+        assert_eq!(storage.download_limiter.active(), 0);
+        assert_eq!(storage.operation_metrics().bytes_downloaded, 28);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unobserved_copyto_keeps_sampling_pressure_without_reducing_the_limit_to_one() {
+        static SAMPLES: AtomicU64 = AtomicU64::new(0);
+        fn pressure() -> bool {
+            SAMPLES.fetch_add(1, Ordering::SeqCst) < 2
+        }
+        let mut fixture = StreamFixture::new(
+            "for destination in \"$@\"; do :; done\nprintf payload > \"$destination\"\necho '{\"stats\":{\"bytes\":3}}' >&2\nsleep 0.08\necho '{\"stats\":{\"bytes\":7}}' >&2\nexit 0",
+        );
+        fixture.storage.progress_executable = fixture.storage.stream_executable.clone();
+        fixture.storage.stream_policy.io_pressure = pressure;
+        fixture.storage.stream_policy.observation_interval = std::time::Duration::from_millis(10);
+        let destination = fixture.root.join("copyto-result");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture
+                .storage
+                .download_observed(&RemoteKey::new("packs/fixture"), &destination, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+        assert!(SAMPLES.load(Ordering::SeqCst) >= 3);
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unobserved_pack_stream_keeps_sampling_pressure_while_waiting_for_bytes() {
+        static SAMPLES: AtomicU64 = AtomicU64::new(0);
+        fn pressure() -> bool {
+            SAMPLES.fetch_add(1, Ordering::SeqCst) < 2
+        }
+        let mut fixture = StreamFixture::new("printf abc\nsleep 0.08\nprintf def\nexit 0");
+        fixture.storage.stream_policy.io_pressure = pressure;
+        fixture.storage.stream_policy.observation_interval = std::time::Duration::from_millis(10);
+        let consumer = StreamBuffer::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.storage.download_stream_observed(
+                &RemoteKey::new("packs/fixture"),
+                &fixture.root.join("unused"),
+                &consumer,
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&*consumer.bytes.lock().unwrap(), b"abcdef");
+        assert!(SAMPLES.load(Ordering::SeqCst) >= 3);
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn actual_download_rate_limit_still_reduces_network_admission() {
+        let mut fixture = StreamFixture::new("echo '429 rate limit exceeded' >&2\nexit 5");
+        fixture.storage.progress_executable = fixture.storage.stream_executable.clone();
+        fixture.storage.tuning.max_attempts = 1;
+        let error = fixture
+            .storage
+            .download_observed(
+                &RemoteKey::new("packs/fixture"),
+                &fixture.root.join("missing"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("RateLimited"));
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[test]
+    fn automatic_or_legacy_tuning_cannot_exceed_provider_limits_in_either_direction() {
+        for provider in [
+            ProviderKind::GoogleDrive,
+            ProviderKind::MicrosoftOneDrive,
+            ProviderKind::AmazonS3,
+            ProviderKind::Sftp,
+        ] {
+            let capabilities = ProviderCapabilities::for_provider(provider);
+            let mut storage = RcloneStorage::new("fixture", "root");
+            storage.provider_kind = provider;
+            storage.capabilities = capabilities.clone();
+            storage.command_builder = RcloneCommandBuilder::new(
+                provider,
+                provider.backend_type(),
+                TransferProfile::for_provider(provider, provider.backend_type()).unwrap(),
+            )
+            .unwrap();
+            let storage = storage.with_transfer_tuning(TransferTuning {
+                max_parallel_uploads: usize::MAX,
+                max_parallel_downloads: usize::MAX,
+                rclone_download_streams: usize::MAX,
+                ..Default::default()
+            });
+            assert_eq!(
+                storage.tuning.max_parallel_uploads,
+                capabilities.max_upload_concurrency
+            );
+            assert_eq!(
+                storage.download_limiter.max(),
+                capabilities.max_download_concurrency
+            );
+            assert_eq!(
+                storage.tuning.rclone_download_streams,
+                capabilities.max_download_concurrency
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordered_download_and_copyto_reservations_share_one_provider_ceiling() {
+        let fixture = StreamFixture::new("printf abcdef; exit 0");
+        let copyto = fixture
+            .storage
+            .download_limiter
+            .acquire_slots(3)
+            .await
+            .unwrap();
+        let target = StreamBuffer::default();
+        let observer = StreamObserver::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.storage.download_stream_observed(
+                &RemoteKey::new("packs/test"),
+                &fixture.root.join("unused"),
+                &target,
+                Some(&observer),
+            ),
+        )
+        .await
+        .expect("the ordered stream must use the single remaining connection slot")
+        .unwrap();
+        assert_eq!(&*target.bytes.lock().unwrap(), b"abcdef");
+        let first = observer.0.lock().unwrap().first().unwrap().clone();
+        assert_eq!(first.worker_ceiling, 4);
+        assert_eq!(first.reserved_transfer_slots, 4);
+        assert_eq!(fixture.storage.download_limiter.active(), 3);
+        drop(copyto);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
     }
 
     #[cfg(unix)]

@@ -12,8 +12,57 @@ const FIRST_PACK_BYTES: u64 = 64 * 1024 * 1024;
 // Preserve the default until comparable benchmarks select a better target.
 const PACK_BYTES: u64 = constants::PACK_TARGET;
 
+mod durability;
+mod scheduler;
+use durability::PlanWriter;
+use scheduler::{reservation_snapshot, Limits, Ready, UploadEvent, WaitTime};
+
+#[cfg(test)]
+mod automatic_ceilings;
 #[cfg(test)]
 mod tests;
+
+#[derive(Clone, Copy)]
+struct WorkerCeilings {
+    readers: usize,
+    codecs: usize,
+    capture_queue: usize,
+}
+impl WorkerCeilings {
+    fn for_work(
+        budget: preparation::Budget,
+        ranges: usize,
+        codec_jobs: usize,
+        codec_capacity: usize,
+    ) -> Self {
+        let readers = budget.hashing.min(ranges);
+        Self {
+            readers,
+            codecs: budget.packing.min(codec_jobs).min(codec_capacity),
+            // Tokio requires nonzero capacity even when there is no source work.
+            // Receipts contain disk-backed sources, never segment payload buffers.
+            capture_queue: readers.saturating_mul(2).max(1),
+        }
+    }
+}
+
+fn codec_job_bound(sizes: impl Iterator<Item = u64>, frozen_plans: usize) -> usize {
+    // A pack cannot outnumber its chunks. Include each file's short final chunk,
+    // and retain frozen plans without resizing or replanning their ciphertext.
+    sizes.fold(frozen_plans, |jobs, size| {
+        jobs.saturating_add(
+            usize::try_from(size.div_ceil(constants::FASTCDC_MIN)).unwrap_or(usize::MAX),
+        )
+    })
+}
+
+fn upload_slots(tuning: &TransferTuning) -> usize {
+    // 32 is the rolling window's global safety bound, not an app-level 8-slot cap.
+    tuning
+        .max_parallel_uploads
+        .min(tuning.max_bulk_files)
+        .clamp(1, 32)
+}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct CapturedChunk {
@@ -77,7 +126,11 @@ struct Counters {
     durable_bytes: AtomicU64,
     active_readers: AtomicUsize,
     active_codecs: AtomicUsize,
+    peak_codecs: AtomicUsize,
     capture_wait_us: AtomicU64,
+    capture_durability_us: AtomicU64,
+    #[cfg(test)]
+    hooks: Option<Arc<tests::Hooks>>,
 }
 
 /// Replays a verified local prefix, then reads only the still-uncaptured suffix
@@ -136,6 +189,7 @@ impl Drop for CaptureWorkers {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_workers(
     agent: &StateAgent,
     operation: Uuid,
@@ -144,16 +198,16 @@ fn capture_workers(
     directory: &Path,
     counters: Arc<Counters>,
     stop: Arc<AtomicBool>,
+    ceilings: WorkerCeilings,
 ) -> CaptureWorkers {
-    let workers = state.budget.hashing.min(4).min(state.ranges.len().max(1));
-    let (sender, receiver) = tokio::sync::mpsc::channel(workers * 2);
+    let (sender, receiver) = tokio::sync::mpsc::channel(ceilings.capture_queue);
     let next = Arc::new(AtomicUsize::new(0));
     let mut pool = CaptureWorkers {
         receiver,
         stop: stop.clone(),
         threads: Vec::new(),
     };
-    for _ in 0..workers {
+    for _ in 0..ceilings.readers {
         let (sender, next, state, stop, counters) = (
             sender.clone(),
             next.clone(),
@@ -308,6 +362,7 @@ fn capture_work(
         if pending.chunks.is_empty() && pending.files.is_empty() && !pending.done {
             return Ok(());
         }
+        let durable = Instant::now();
         lease.checkpoint()?;
         write_batch(
             &directory.join(format!("{sequence}.enc")),
@@ -315,6 +370,9 @@ fn capture_work(
             master,
             pending,
         )?;
+        counters
+            .capture_durability_us
+            .fetch_add(durable.elapsed().as_micros() as u64, Ordering::Relaxed);
         sequence += 1;
         counters.durable_bytes.fetch_add(
             pending
@@ -581,9 +639,14 @@ fn pack_workers(
                 if stop.load(Ordering::Acquire) || operations.cancel_requested(operation) {
                     break;
                 }
-                counters.active_codecs.fetch_add(1, Ordering::Relaxed);
+                let active = counters.active_codecs.fetch_add(1, Ordering::Relaxed) + 1;
+                counters.peak_codecs.fetch_max(active, Ordering::Relaxed);
                 let started = Instant::now();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(test)]
+                    if let Some(hooks) = &counters.hooks {
+                        hooks.before_codec(plan.index, &stop)?;
+                    }
                     let cas = LocalCas::new(&cas_root)?;
                     let mut checked = HashMap::new();
                     for chunk in &plan.chunks {
@@ -637,6 +700,10 @@ fn pack_workers(
                         &format!("backup-stream:{operation}:sealed:{}", plan.index),
                         &pack,
                     )?;
+                    #[cfg(test)]
+                    if let Some(hooks) = &counters.hooks {
+                        hooks.sealed(plan.index);
+                    }
                     Ok((plan.index, pack, elapsed_ms(started)))
                 }))
                 .unwrap_or_else(|_| Err(StateError::Storage("pack worker panicked".into())));
@@ -744,19 +811,76 @@ fn validate_resume_capture(
     Ok(())
 }
 
+fn accept_sealed(
+    result: Result<(usize, BuiltPack, u64)>,
+    reserved: &mut HashMap<usize, u64>,
+    ready: &mut VecDeque<Ready>,
+    prepared: &mut PreparedBackup,
+    prepared_bytes: &mut u64,
+) -> Result<()> {
+    let (index, pack, milliseconds) = result?;
+    let reservation = reserved
+        .get_mut(&index)
+        .ok_or_else(|| StateError::Integrity("unexpected sealed pack".into()))?;
+    if pack.bytes > *reservation {
+        return Err(StateError::Integrity(
+            "sealed pack exceeds its reservation".into(),
+        ));
+    }
+    *reservation = pack.bytes;
+    prepared.metrics.packing_duration_ms += milliseconds;
+    prepared.metrics.bytes_packed += pack.bytes;
+    *prepared_bytes += pack.bytes;
+    ready.push_back(Ready::new(index, pack));
+    Ok(())
+}
+
+fn extend_details(target: &mut serde_json::Value, details: serde_json::Value) {
+    if let (serde_json::Value::Object(target), serde_json::Value::Object(details)) =
+        (target, details)
+    {
+        target.extend(details);
+    }
+}
+
 pub(super) async fn run(
     agent: &StateAgent,
     provider: &dyn SharedStorageProvider,
     master: &MasterKey,
     operation: Uuid,
     prepared: &mut PreparedBackup,
+    current: preparation::Budget,
+    state: State,
+) -> Result<()> {
+    run_with_counters(
+        agent,
+        provider,
+        master,
+        operation,
+        prepared,
+        current,
+        state,
+        Arc::new(Counters::default()),
+    )
+    .await
+}
+
+// As with the owned worker entry points above, keep dependencies, frozen state,
+// live admission and instrumentation explicit without changing checkpoint data.
+#[allow(clippy::too_many_arguments)]
+async fn run_with_counters(
+    agent: &StateAgent,
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    operation: Uuid,
+    prepared: &mut PreparedBackup,
+    current: preparation::Budget,
     mut state: State,
+    counters: Arc<Counters>,
 ) -> Result<()> {
     // A restart can have less memory or a newly active game. Frozen input/pack
     // identities survive retry; the saved worker count is only an upper bound.
-    let available = preparation::Budget::detect(agent, BackupPerformanceMode::Automatic)?;
-    state.budget.hashing = state.budget.hashing.min(available.hashing);
-    state.budget.packing = state.budget.packing.min(available.packing);
+    state.budget = state.budget.admitted(current);
     let directory = prepared_backup_path(agent, operation).with_extension("stream");
     if let Some(mut record) = agent.db.get_operation(operation)? {
         persist_operation(
@@ -772,28 +896,34 @@ pub(super) async fn run(
         .packs
         .join(prepared.manifest.bundle_id.to_string());
     let tuning = provider.transfer_tuning().normalized();
-    let slots = tuning
-        .max_parallel_uploads
-        .min(tuning.max_bulk_files)
-        .clamp(1, 8);
+    let slots = upload_slots(&tuning);
     // This budget covers compression + ready + active uploads, independently of
     // CPU worker count. Capture queues have their own bounded segment admission.
-    let capacity = slots.saturating_mul(2);
     let byte_limit = tuning.max_bulk_bytes;
-    let pack_max = constants::PACK_MAX.min(byte_limit);
     let requested_target = std::env::var("NOLAND_STREAM_PACK_MIB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| matches!(v, 128 | 256 | 512))
         .map(|v| v * 1024 * 1024)
         .unwrap_or(PACK_BYTES);
-    let pack_target = requested_target
-        .min(pack_max)
-        .min((byte_limit / slots as u64).max(1));
+    let limits = Limits::new(slots, byte_limit, requested_target);
+    let capacity = limits.capacity;
+    let pack_max = limits.pack_max;
+    let pack_target = limits.target;
+    let group_limit = limits.group_limit(provider).min(tuning.max_bulk_files);
     let session =
         noland_storage::PackUploadSession::new(provider, Some(&agent.db), Some(operation));
     let mut uploads = noland_storage::RollingUploadWindow::new(slots, byte_limit);
     let mut plans = load_plans(&directory, master, operation)?;
+    let ceilings = WorkerCeilings::for_work(
+        state.budget,
+        state.ranges.len(),
+        codec_job_bound(
+            state.jobs.iter().map(|(_, identity)| identity.size),
+            plans.len(),
+        ),
+        capacity,
+    );
     // Recovery validates persisted metadata/ciphertext before remote effects.
     // New capture still streams immediately; this only walks existing receipts.
     validate_resume_capture(&directory, &state, master, operation)?;
@@ -805,6 +935,11 @@ pub(super) async fn run(
             &format!("backup-stream:{operation}:sealed:{}", plan.index),
         )? {
             packing::validate_receipt(agent, operation, &output, &plan.packing(), &pack)?;
+            if pack.bytes > plan.bytes()? {
+                return Err(StateError::Integrity(
+                    "retained pack exceeds its frozen plaintext bound".into(),
+                ));
+            }
             sealed.insert(plan.index, pack);
         }
     }
@@ -834,7 +969,6 @@ pub(super) async fn run(
         }),
     };
     let state = Arc::new(state);
-    let counters = Arc::new(Counters::default());
     let stop = Arc::new(AtomicBool::new(false));
     let mut capture = capture_workers(
         agent,
@@ -844,6 +978,7 @@ pub(super) async fn run(
         &directory,
         counters.clone(),
         stop.clone(),
+        ceilings,
     );
     let mut codecs = pack_workers(
         agent,
@@ -851,24 +986,31 @@ pub(super) async fn run(
         operation,
         &directory,
         &output,
-        state.budget.packing,
+        ceilings.codecs,
         capacity,
         counters.clone(),
-        stop,
+        stop.clone(),
     );
+    let mut plan_writer = PlanWriter::new(&directory, master, operation, stop, counters.clone());
+    let mut plan_persisting = false;
+    let mut plan_persist_ms = 0u64;
     let mut capture_closed = false;
     let mut pending_chunks = VecDeque::<CapturedChunk>::new();
     let mut builders: [Vec<CapturedChunk>; 2] = [Vec::new(), Vec::new()];
     let mut builder_bytes = [24u64; 2];
     let mut builder_started: [Option<Instant>; 2] = [None, None];
-    let mut ready = VecDeque::new();
+    let mut ready = VecDeque::<Ready>::new();
+    // These reservations are owned by sealing/ready items only. On upload
+    // launch they move to the rolling window; partial durable receipts release
+    // capacity there, without waiting for the remaining group members.
     let mut reserved = HashMap::<usize, u64>::new();
-    let mut reserved_bytes = 0u64;
     let mut codec_count = 0usize;
     let mut leases = HashSet::new();
     let mut completed_files = HashSet::new();
     let mut prepared_bytes = 0u64;
     let started = Instant::now();
+    // Scheduler admission/reservation diagnostics, not socket counts or the
+    // time of a network first byte.
     let mut first_upload_ms = None;
     let mut upload_started = None;
     let mut upload_active_ms = 0u64;
@@ -877,6 +1019,21 @@ pub(super) async fn run(
     let source_bytes = state.jobs.iter().map(|(_, i)| i.size).sum::<u64>();
     let mut peak_uploads = 0;
     let mut peak_reserved_bytes = 0;
+    let mut peak_reserved_count = 0;
+    let mut peak_ready = 0;
+    let mut peak_group_size = 0;
+    let mut upload_groups = 0;
+    let mut grouped_packs = 0;
+    let mut ready_wait_us = 0u64;
+    let mut max_ready_wait_us = 0u64;
+    let mut codec_backpressure = WaitTime::default();
+    let mut upload_backpressure = WaitTime::default();
+    // Completion-to-next-admission latency includes waiting for upstream work;
+    // it is intentionally not reported as transport or network latency.
+    let mut refill_since: Option<Instant> = None;
+    let mut completion_to_refill_us = 0u64;
+    let mut max_completion_to_refill_us = 0u64;
+    let mut refill_samples = 0;
     let mut last_loop = Instant::now();
     let mut slot_starvation_ms = 0u64;
     let mut tick = tokio::time::interval(Duration::from_millis(500));
@@ -890,8 +1047,24 @@ pub(super) async fn run(
         if agent.operations.cancel_requested(operation) {
             return Err(cancellation_error());
         }
-        if plans.len() < capacity {
-            while let Some(chunk) = pending_chunks.pop_front() {
+        if !plan_persisting && plans.len() < capacity {
+            // The scoped cache is intentionally bounded. Prefetch and consume
+            // one matching window, then poll uploads before another DB batch;
+            // prefetching an entire receipt could evict its earliest hashes.
+            let window = pending_chunks.len().min(scoped_index::PREFETCH_HASHES);
+            let hashes = pending_chunks
+                .iter()
+                .take(window)
+                .filter(|chunk| !seen.contains(&chunk.hash))
+                .map(|chunk| chunk.hash.as_str())
+                .collect::<Vec<_>>();
+            remote.prefetch(&hashes)?;
+            drop(hashes);
+            for _ in 0..window {
+                let Some(chunk) = pending_chunks.pop_front() else {
+                    break;
+                };
+                advanced = true;
                 if seen.contains(&chunk.hash) {
                     prepared.metrics.num_chunks_reused += 1;
                     continue;
@@ -911,7 +1084,7 @@ pub(super) async fn run(
                 } else {
                     pack_target
                 };
-                let record_bytes = chunk.source.len()? + 52;
+                let record_bytes = chunk.source.len()? + scheduler::CHUNK_RECORD_BYTES;
                 if 24 + record_bytes > pack_max {
                     return Err(StateError::Invalid(
                         "streaming chunk exceeds transfer byte budget".into(),
@@ -925,16 +1098,11 @@ pub(super) async fn run(
                         index: next_plan,
                         chunks: std::mem::take(&mut builders[kind]),
                     };
-                    write_batch(
-                        &directory.join("plans").join(format!("{next_plan}.enc")),
-                        &format!("backup-stream:{operation}:plan:{next_plan}"),
-                        master,
-                        &plan,
-                    )?;
+                    plan_writer.submit(plan)?;
+                    plan_persisting = true;
                     next_plan += 1;
                     builder_bytes[kind] = 24;
                     builder_started[kind] = None;
-                    plans.push_back(plan);
                     advanced = true;
                     break;
                 }
@@ -948,77 +1116,75 @@ pub(super) async fn run(
                         index: next_plan,
                         chunks: std::mem::take(&mut builders[kind]),
                     };
-                    write_batch(
-                        &directory.join("plans").join(format!("{next_plan}.enc")),
-                        &format!("backup-stream:{operation}:plan:{next_plan}"),
-                        master,
-                        &plan,
-                    )?;
+                    plan_writer.submit(plan)?;
+                    plan_persisting = true;
                     next_plan += 1;
                     builder_bytes[kind] = 24;
                     builder_started[kind] = None;
-                    plans.push_back(plan);
                     advanced = true;
                     break;
                 }
             }
-            if pending_chunks.is_empty() {
+            if !plan_persisting && pending_chunks.is_empty() {
                 for kind in 0..2 {
-                    if !builders[kind].is_empty()
-                        && plans.len() < capacity
-                        && (capture_closed
-                            || builder_started[kind]
-                                .is_some_and(|start| start.elapsed() >= Duration::from_secs(1)))
+                    if plans.len() < capacity
+                        && scheduler::partial_builder_due(
+                            !builders[kind].is_empty(),
+                            capture_closed,
+                            builder_started[kind].map(|start| {
+                                #[cfg(test)]
+                                if let Some(age) = agent.streaming_partial_builder_age {
+                                    return age;
+                                }
+                                start.elapsed()
+                            }),
+                        )
                     {
                         let plan = Plan {
                             index: next_plan,
                             chunks: std::mem::take(&mut builders[kind]),
                         };
-                        write_batch(
-                            &directory.join("plans").join(format!("{next_plan}.enc")),
-                            &format!("backup-stream:{operation}:plan:{next_plan}"),
-                            master,
-                            &plan,
-                        )?;
+                        plan_writer.submit(plan)?;
+                        plan_persisting = true;
                         next_plan += 1;
                         builder_bytes[kind] = 24;
                         builder_started[kind] = None;
-                        plans.push_back(plan);
                         advanced = true;
+                        break;
                     }
                 }
             }
         }
         while let Some(plan) = plans.front() {
-            let bytes = plan.bytes()?;
+            // A retained compressed pack may fit a smaller transfer budget even
+            // when its original plaintext estimate does not. Never rebuild it
+            // to adopt a new target or change its ciphertext identity.
+            let bytes = match sealed.get(&plan.index) {
+                Some(pack) => pack.bytes,
+                None => plan.bytes()?,
+            };
             if bytes > byte_limit {
                 return Err(StateError::Invalid(
                     "retained streaming plan exceeds transfer byte budget".into(),
                 ));
             }
-            if reserved.len() < capacity && reserved_bytes.saturating_add(bytes) <= byte_limit {
+            let (reserved_count, reserved_bytes) = reservation_snapshot(&reserved, &uploads);
+            if reserved_count < capacity && reserved_bytes.saturating_add(bytes) <= byte_limit {
                 let plan = plans.pop_front().unwrap();
                 reserved.insert(plan.index, bytes);
-                reserved_bytes += bytes;
                 advanced = true;
-                peak_reserved_bytes = peak_reserved_bytes.max(reserved_bytes);
+                peak_reserved_bytes = peak_reserved_bytes.max(reserved_bytes + bytes);
+                peak_reserved_count = peak_reserved_count.max(reserved_count + 1);
                 if let Some(pack) = sealed.remove(&plan.index) {
-                    if pack.bytes > bytes {
-                        return Err(StateError::Integrity(
-                            "retained pack exceeds its reservation".into(),
-                        ));
-                    }
-                    reserved_bytes -= bytes - pack.bytes;
-                    reserved.insert(plan.index, pack.bytes);
                     prepared_bytes += pack.bytes;
-                    ready.push_back((plan.index, pack));
+                    ready.push_back(Ready::new(plan.index, pack));
+                    peak_ready = peak_ready.max(ready.len());
                 } else {
                     codecs
                         .sender
                         .as_ref()
                         .unwrap()
-                        .send(plan)
-                        .await
+                        .try_send(plan)
                         .map_err(|_| StateError::Storage("pack workers stopped".into()))?;
                     codec_count += 1;
                 }
@@ -1026,27 +1192,106 @@ pub(super) async fn run(
                 break;
             }
         }
-        while ready
-            .front()
-            .is_some_and(|(_, pack): &(usize, BuiltPack)| uploads.can_push(pack.bytes))
-        {
-            let (index, pack) = ready.pop_front().unwrap();
+        // Other codecs can have sealed while the previous event was being
+        // handled. Include those already-ready objects in this request, but
+        // never wait for another codec merely to make a larger group.
+        while codec_count > 0 {
+            match codecs.receiver.try_recv() {
+                Ok(result) => {
+                    codec_count -= 1;
+                    accept_sealed(
+                        result,
+                        &mut reserved,
+                        &mut ready,
+                        prepared,
+                        &mut prepared_bytes,
+                    )?;
+                    peak_ready = peak_ready.max(ready.len());
+                    advanced = true;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    return Err(StateError::Storage("pack workers stopped".into()));
+                }
+            }
+        }
+        // A sealed-only tail has no future codec input to protect. Release the
+        // soft lookahead, but never the absolute object/byte bound; otherwise
+        // old frozen packs can leave a usable upload slot idle until a peer exits.
+        let prepare_more = !capture_closed
+            || !pending_chunks.is_empty()
+            || builders.iter().any(|builder| !builder.is_empty())
+            || !plans.is_empty()
+            || plan_persisting
+            || codec_count > 0;
+        loop {
+            let count =
+                scheduler::ready_group_len(&ready, &uploads, &limits, group_limit, prepare_more);
+            if count == 0 {
+                break;
+            }
+            let mut packs = Vec::with_capacity(count);
+            let mut bytes = 0u64;
+            for item in ready.drain(..count) {
+                let wait = item.since.elapsed().as_micros() as u64;
+                ready_wait_us = ready_wait_us.saturating_add(wait);
+                max_ready_wait_us = max_ready_wait_us.max(wait);
+                let owned = reserved.remove(&item.index).ok_or_else(|| {
+                    StateError::Integrity("missing ready pack reservation".into())
+                })?;
+                if owned != item.pack.bytes {
+                    return Err(StateError::Integrity(
+                        "ready pack reservation mismatch".into(),
+                    ));
+                }
+                bytes += item.pack.bytes;
+                packs.push((item.index, item.pack));
+            }
             first_upload_ms.get_or_insert(elapsed_ms(started));
             upload_started.get_or_insert_with(Instant::now);
+            if let Some(since) = refill_since.take() {
+                let wait = since.elapsed().as_micros() as u64;
+                completion_to_refill_us = completion_to_refill_us.saturating_add(wait);
+                max_completion_to_refill_us = max_completion_to_refill_us.max(wait);
+                refill_samples += 1;
+            }
             let session = &session;
-            uploads.push_tracked(1, pack.bytes, |reservation| async move {
-                session
-                    .upload_reserved(&[(pack.pack_id.clone(), pack.path.clone())], reservation)
-                    .await?;
-                Ok((index, pack))
+            uploads.push_tracked(count, bytes, |reservation| async move {
+                let files = packs
+                    .iter()
+                    .map(|(_, pack)| (pack.pack_id.clone(), pack.path.clone()))
+                    .collect::<Vec<_>>();
+                session.upload_reserved(&files, reservation).await?;
+                Ok(packs)
             })?;
+            peak_group_size = peak_group_size.max(count);
+            upload_groups += 1;
+            if count > 1 {
+                grouped_packs += count;
+            }
             peak_uploads = peak_uploads.max(uploads.len());
             advanced = true;
         }
+        let (reserved_count, reserved_bytes) = reservation_snapshot(&reserved, &uploads);
+        peak_reserved_count = peak_reserved_count.max(reserved_count);
+        peak_reserved_bytes = peak_reserved_bytes.max(reserved_bytes);
+        codec_backpressure.set(
+            !plans.is_empty()
+                && (reserved_count >= capacity
+                    || plans.front().is_some_and(|plan| {
+                        sealed
+                            .get(&plan.index)
+                            .map(|pack| pack.bytes)
+                            .or_else(|| plan.bytes().ok())
+                            .is_some_and(|bytes| reserved_bytes.saturating_add(bytes) > byte_limit)
+                    })),
+        );
+        upload_backpressure.set(!ready.is_empty());
         let finished = capture_closed
             && pending_chunks.is_empty()
             && builders.iter().all(Vec::is_empty)
             && plans.is_empty()
+            && !plan_persisting
             && codec_count == 0
             && ready.is_empty()
             && uploads.is_empty();
@@ -1057,7 +1302,7 @@ pub(super) async fn run(
         // Yield to uploads and compressors on every iteration, even if capture
         // is continuously ready, so neither producers nor a straggler monopolize.
         tokio::select! {
-            receipt = capture.receiver.recv(), if !capture_closed && pending_chunks.is_empty() && plans.len() < capacity => {
+            receipt = capture.receiver.recv(), if !capture_closed && pending_chunks.is_empty() && plans.len() + usize::from(plan_persisting) < capacity => {
                 match receipt {
                     None => capture_closed = true,
                     Some(result) => {
@@ -1071,28 +1316,33 @@ pub(super) async fn run(
                     }
                 }
             }
-            result = codecs.receiver.recv(), if codec_count > 0 => {
-                let (index, pack, milliseconds) = result.ok_or_else(|| StateError::Storage("pack workers stopped".into()))??;
-                codec_count -= 1;
-                let reservation = reserved.get_mut(&index).ok_or_else(|| StateError::Integrity("unexpected sealed pack".into()))?;
-                if pack.bytes > *reservation { return Err(StateError::Integrity("sealed pack exceeds its reservation".into())); }
-                reserved_bytes -= *reservation - pack.bytes; *reservation = pack.bytes;
-                prepared.metrics.packing_duration_ms += milliseconds;
-                prepared.metrics.bytes_packed += pack.bytes;
-                prepared_bytes += pack.bytes;
-                ready.push_back((index, pack));
+            result = plan_writer.receiver.recv(), if plan_persisting => {
+                let (plan, milliseconds) = result.ok_or_else(|| StateError::Storage("streaming plan writer stopped".into()))??;
+                plan_persisting = false;
+                plan_persist_ms = plan_persist_ms.saturating_add(milliseconds);
+                plans.push_back(plan);
             }
-            result = uploads.next(), if !uploads.is_empty() => {
-                let (index, pack) = result.unwrap()?;
-                reserved_bytes = reserved_bytes.saturating_sub(reserved.remove(&index).unwrap());
-                prepared.incremental += pack.bytes;
-                prepared.checksums.insert(pack.pack_id.clone(), pack.checksum);
-                prepared.pack_files.push((pack.pack_id, pack.path));
-                prepared.pack_index.extend(pack.entries.iter().cloned());
-                prepared.new_pack_entries.extend(pack.entries);
-                if uploads.is_empty() { upload_active_ms += upload_started.take().map(elapsed_ms).unwrap_or(0); }
+            result = codecs.receiver.recv(), if codec_count > 0 => {
+                let result = result.ok_or_else(|| StateError::Storage("pack workers stopped".into()))?;
+                codec_count -= 1;
+                accept_sealed(result, &mut reserved, &mut ready, prepared, &mut prepared_bytes)?;
+                peak_ready = peak_ready.max(ready.len());
+            }
+            event = scheduler::upload_event(&mut uploads), if !uploads.is_empty() => {
+                refill_since.get_or_insert_with(Instant::now);
+                if let UploadEvent::Completed(result) = event {
+                    for (_, pack) in result? {
+                        prepared.incremental += pack.bytes;
+                        prepared.checksums.insert(pack.pack_id.clone(), pack.checksum);
+                        prepared.pack_files.push((pack.pack_id, pack.path));
+                        prepared.pack_index.extend(pack.entries.iter().cloned());
+                        prepared.new_pack_entries.extend(pack.entries);
+                    }
+                    if uploads.is_empty() { upload_active_ms += upload_started.take().map(elapsed_ms).unwrap_or(0); }
+                }
             }
             _ = tick.tick() => {
+                let (reserved_count, reserved_bytes) = reservation_snapshot(&reserved, &uploads);
                 let mut progress = agent.db.get_operation_progress(operation)?.unwrap_or_else(|| OperationProgress::new("capture_and_upload", 0));
                 progress.phase = "capture_and_upload".into();
                 progress.unit = Some("files".into()); progress.total_units = Some(base_files + state.jobs.len() as u64);
@@ -1103,25 +1353,39 @@ pub(super) async fn run(
                     "reused_files":base_files, "reused_bytes":base_bytes, "capture_total_bytes":source_bytes,
                     "read_bytes":counters.read_bytes.load(Ordering::Relaxed), "durable_bytes":counters.durable_bytes.load(Ordering::Relaxed),
                     "completed_files":completed_files.len(), "prepared_bytes":prepared_bytes, "first_upload_ms":first_upload_ms,
-                    "active_readers":counters.active_readers.load(Ordering::Relaxed), "reader_limit":state.budget.hashing.min(4),
-                    "active_codecs":counters.active_codecs.load(Ordering::Relaxed), "codec_limit":state.budget.packing,
+                    "active_readers":counters.active_readers.load(Ordering::Relaxed), "reader_limit":ceilings.readers,
+                    "active_codecs":counters.active_codecs.load(Ordering::Relaxed), "codec_limit":ceilings.codecs,
                     "ready_packs":ready.len(), "inflight_uploads":uploads.len(), "upload_limit":slots,
                     "reserved_bytes":reserved_bytes, "reserved_byte_limit":byte_limit, "capture_wait_us":counters.capture_wait_us.load(Ordering::Relaxed),
-                    "capture_queue_limit":state.budget.hashing.min(4) * 2, "capture_segment_bytes":SEGMENT_BYTES,
-                    "codec_buffer_limit_bytes":state.budget.packing as u64 * 32 * 1024 * 1024,
+                    "capture_queue_limit":ceilings.capture_queue, "capture_segment_bytes":SEGMENT_BYTES,
+                    "codec_buffer_limit_bytes":ceilings.codecs as u64 * preparation::MEMORY_PER_WORKER,
+                    "preparation_workspace_limit_bytes":(ceilings.readers + ceilings.codecs) as u64 * preparation::MEMORY_PER_WORKER,
                     "retained_capture_logical_bytes":counters.durable_bytes.load(Ordering::Relaxed), "retained_ciphertext_bytes":prepared_bytes,
-                    "ready_ciphertext_bytes":ready.iter().map(|(_,p)| p.bytes).sum::<u64>(), "active_upload_bytes":uploads.bytes(),
+                    "ready_ciphertext_bytes":ready.iter().map(|item| item.pack.bytes).sum::<u64>(), "active_upload_bytes":uploads.bytes(),
                     "upload_slot_starvation_ms":slot_starvation_ms,
                     "peak_uploads":peak_uploads, "peak_reserved_bytes":peak_reserved_bytes, "capture_complete":capture_closed,
-                    "elapsed_ms":elapsed_ms(started), "waiting_on":if !ready.is_empty() { "upload_capacity" } else if codec_count > 0 { "compression" } else if !capture_closed { "capture" } else { "provider_completion" }
+                    "elapsed_ms":elapsed_ms(started), "waiting_on":if !ready.is_empty() { "upload_capacity" } else if codec_count > 0 { "compression" } else if plan_persisting { "plan_durability" } else if !capture_closed { "capture" } else { "provider_completion" }
                 });
+                extend_details(&mut progress.detail_json["streaming_pipeline"], serde_json::json!({
+                    "capture_durability_us":counters.capture_durability_us.load(Ordering::Relaxed),
+                    "pack_target_bytes":pack_target, "pack_max_bytes":pack_max,
+                    "codec_lookahead_bytes":limits.lookahead_bytes, "codec_lookahead_required":prepare_more, "max_chunk_pack_bytes":scheduler::MAX_CHUNK_PACK_BYTES,
+                    "reserved_count":reserved_count, "reserved_count_limit":capacity, "peak_reserved_count":peak_reserved_count,
+                    "plan_persist_pending":plan_persisting, "plan_persist_duration_ms":plan_persist_ms,
+                    "peak_codecs":counters.peak_codecs.load(Ordering::Relaxed), "peak_ready_packs":peak_ready,
+                    "upload_group_limit":group_limit, "peak_upload_group_size":peak_group_size, "upload_groups":upload_groups, "grouped_packs":grouped_packs,
+                    "ready_wait_us":ready_wait_us, "max_ready_wait_us":max_ready_wait_us,
+                    "codec_admission_backpressure_us":codec_backpressure.micros(), "upload_backpressure_us":upload_backpressure.micros(),
+                    "completion_to_refill_us":completion_to_refill_us, "max_completion_to_refill_us":max_completion_to_refill_us, "refill_samples":refill_samples
+                }));
                 progress.updated_at = Utc::now(); agent.db.set_operation_progress(operation, Some(&progress))?;
                 agent.db.set_operation_metrics(operation, &prepared.metrics)?;
             }
-            _ = tokio::task::yield_now(), if advanced || (!pending_chunks.is_empty() && plans.len() < capacity) => {}
+            _ = tokio::task::yield_now(), if advanced || (!pending_chunks.is_empty() && !plan_persisting && plans.len() < capacity) => {}
         }
     }
     // Join every producer before retiring any capture inputs.
+    drop(plan_writer);
     drop(codecs);
     drop(capture);
     drop(uploads);
@@ -1215,14 +1479,30 @@ pub(super) async fn run(
         "reused_files":base_files, "reused_bytes":base_bytes, "capture_total_bytes":source_bytes,
         "read_bytes":counters.read_bytes.load(Ordering::Relaxed), "durable_bytes":counters.durable_bytes.load(Ordering::Relaxed),
         "completed_files":completed_files.len(), "prepared_bytes":prepared_bytes, "first_upload_ms":first_upload_ms,
-        "active_readers":0, "reader_limit":state.budget.hashing.min(4), "active_codecs":0, "codec_limit":state.budget.packing,
+        "active_readers":0, "reader_limit":ceilings.readers, "active_codecs":0, "codec_limit":ceilings.codecs,
         "ready_packs":0, "inflight_uploads":0, "upload_limit":slots, "reserved_bytes":0, "reserved_byte_limit":byte_limit,
-        "capture_wait_us":counters.capture_wait_us.load(Ordering::Relaxed), "capture_queue_limit":state.budget.hashing.min(4) * 2,
-        "capture_segment_bytes":SEGMENT_BYTES, "codec_buffer_limit_bytes":state.budget.packing as u64 * 32 * 1024 * 1024,
+        "capture_wait_us":counters.capture_wait_us.load(Ordering::Relaxed), "capture_queue_limit":ceilings.capture_queue,
+        "capture_segment_bytes":SEGMENT_BYTES, "codec_buffer_limit_bytes":ceilings.codecs as u64 * preparation::MEMORY_PER_WORKER,
+        "preparation_workspace_limit_bytes":(ceilings.readers + ceilings.codecs) as u64 * preparation::MEMORY_PER_WORKER,
         "retained_capture_logical_bytes":0, "retained_ciphertext_bytes":prepared_bytes, "ready_ciphertext_bytes":0, "active_upload_bytes":0,
         "upload_slot_starvation_ms":slot_starvation_ms, "peak_uploads":peak_uploads, "peak_reserved_bytes":peak_reserved_bytes,
         "capture_complete":true, "elapsed_ms":elapsed_ms(started), "waiting_on":"manifest_commit"
     });
+    extend_details(
+        &mut progress.detail_json["streaming_pipeline"],
+        serde_json::json!({
+            "capture_durability_us":counters.capture_durability_us.load(Ordering::Relaxed),
+            "pack_target_bytes":pack_target, "pack_max_bytes":pack_max,
+            "codec_lookahead_bytes":limits.lookahead_bytes, "codec_lookahead_required":false, "max_chunk_pack_bytes":scheduler::MAX_CHUNK_PACK_BYTES,
+            "reserved_count":0, "reserved_count_limit":capacity, "peak_reserved_count":peak_reserved_count,
+            "plan_persist_pending":false, "plan_persist_duration_ms":plan_persist_ms,
+            "peak_codecs":counters.peak_codecs.load(Ordering::Relaxed), "peak_ready_packs":peak_ready,
+            "upload_group_limit":group_limit, "peak_upload_group_size":peak_group_size, "upload_groups":upload_groups, "grouped_packs":grouped_packs,
+            "ready_wait_us":ready_wait_us, "max_ready_wait_us":max_ready_wait_us,
+            "codec_admission_backpressure_us":codec_backpressure.micros(), "upload_backpressure_us":upload_backpressure.micros(),
+            "completion_to_refill_us":completion_to_refill_us, "max_completion_to_refill_us":max_completion_to_refill_us, "refill_samples":refill_samples
+        }),
+    );
     progress.updated_at = Utc::now();
     prepared.release_capture = Some(Cleanup {
         leases: leases.into_iter().collect(),

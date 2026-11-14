@@ -159,7 +159,23 @@ async fn complete_capture_restores_symlinks_without_reading_or_including_their_t
 
     // Capture must reject the same unsupported link text as restore, before
     // advancing the committed revision or ever opening a target.
-    for target in ["/proc/self/mem", "/sys/kernel", "/dev/null", "../outside"] {
+    let relative_link = changed
+        .files
+        .iter()
+        .find(|file| file.relative_path.ends_with("/relative-link"))
+        .unwrap();
+    // LinkFixture is itself inside $GAMES. One parent remains within that
+    // logical root (as needed by Proton); two parents actually escape it.
+    for target in [
+        "/proc/self/mem",
+        "/sys/kernel",
+        "/dev/null",
+        "../../outside",
+    ] {
+        assert!(
+            validate_symlink_target_within_root(&relative_link.relative_path, target).is_err(),
+            "invalid-target fixture must violate the shared capture/restore policy"
+        );
         std::fs::remove_file(install.join("relative-link")).unwrap();
         symlink(target, install.join("relative-link")).unwrap();
         let result = run_backup(

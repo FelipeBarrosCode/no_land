@@ -3,6 +3,8 @@
 //! committed, and retries never recapture a batch that has a durable receipt.
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(test)]
+mod automatic_ceilings;
 mod streaming;
 
 const BATCH_FILES: usize = 1024;
@@ -52,18 +54,22 @@ impl State {
             }
             next = end;
         }
-        if next != self.jobs.len()
-            || self.budget.hashing == 0
-            || self.budget.hashing > 32
-            || self.budget.packing == 0
-            || self.budget.packing > 32
-        {
+        if next != self.jobs.len() || self.budget.hashing == 0 || self.budget.packing == 0 {
             return Err(StateError::Integrity(
                 "invalid partial capture worker budget".into(),
             ));
         }
         Ok(())
     }
+
+    fn admitted(mut self, current: preparation::Budget) -> Result<Self> {
+        // Validate before lowering: a zero saved count is corrupt, while a large
+        // positive count is only an upper bound, not permission to spawn a pool.
+        self.validate()?;
+        self.budget = self.budget.admitted(current);
+        Ok(self)
+    }
+
     pub fn new(
         mut jobs: Vec<HashJob>,
         snapshot: Option<PathBuf>,
@@ -212,6 +218,9 @@ impl Drop for Capture {
     }
 }
 
+// Dependencies, frozen range state and current admission intentionally stay
+// separate; grouping the latter into State would blur the checkpoint boundary.
+#[allow(clippy::too_many_arguments)]
 fn start(
     agent: &StateAgent,
     master: &MasterKey,
@@ -220,6 +229,7 @@ fn start(
     index: usize,
     inherited: std::collections::HashSet<String>,
     binding: Option<String>,
+    current: preparation::Budget,
 ) -> Result<Capture> {
     let range = state.ranges[index];
     let jobs = state.jobs[range.0..range.1].to_vec();
@@ -229,7 +239,7 @@ fn start(
     let db = agent.db.clone();
     let master = master.clone();
     let operations = agent.operations.clone();
-    let workers = state.budget.hashing;
+    let workers = state.budget.admitted(current).hashing.min(jobs.len());
     let stop = Arc::new(AtomicBool::new(false));
     let stopped = stop.clone();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -276,6 +286,7 @@ fn start(
             hash_files_parallel(
                 jobs.iter().map(|(job, _)| job.clone()).collect(),
                 workers,
+                current,
                 lease.clone(),
                 inherited,
                 remote,
@@ -334,14 +345,16 @@ pub(super) async fn run(
     master: &MasterKey,
     operation: Uuid,
     prepared: &mut PreparedBackup,
+    current: preparation::Budget,
 ) -> Result<()> {
     let Some(state) = prepared.capture.take() else {
         return cleanup(agent, operation, prepared);
     };
-    state.validate()?;
     if state.streaming {
-        return streaming::run(agent, provider, master, operation, prepared, state).await;
+        state.validate()?;
+        return streaming::run(agent, provider, master, operation, prepared, current, state).await;
     }
+    let state = state.admitted(current)?;
     let binding = repository_cache_binding(provider.storage_identity(), master);
     let mut inherited = prepared
         .pack_index
@@ -374,6 +387,7 @@ pub(super) async fn run(
             0,
             inherited.clone(),
             binding.clone(),
+            current,
         )?)
     };
     let mut next_index = 0;
@@ -394,7 +408,7 @@ pub(super) async fn run(
             let session = &session;
             uploads.push_count(count, bytes, async move {
                 packing::pack_and_upload_in_session(
-                    agent, provider, master, operation, &mut part, session,
+                    agent, provider, master, operation, &mut part, session, current,
                 )
                 .await?;
                 Ok((batch, part))
@@ -408,6 +422,7 @@ pub(super) async fn run(
                     next_index,
                     inherited.clone(),
                     binding.clone(),
+                    current,
                 )?);
             }
         }
@@ -573,6 +588,20 @@ mod tests {
     use async_trait::async_trait;
     use noland_storage::{Health, RemoteEntry, RemoteKey, RemoteMeta};
     use std::sync::atomic::AtomicUsize;
+
+    pub(super) fn admission() -> preparation::Budget {
+        // These protocol fixtures own two readers/codecs; do not let the test
+        // runner's host or unrelated sessions alter their concurrency.
+        preparation::Budget::for_worker_resources(
+            noland_rclone_adapter::WorkerResources {
+                logical_cpus: 8,
+                available_memory: Some(8 << 30),
+                io_pressure: false,
+            },
+            BackupPerformanceMode::Balanced,
+            false,
+        )
+    }
 
     struct Probe {
         inner: LocalStorage,
@@ -757,9 +786,16 @@ mod tests {
             uploads: 0.into(),
             fail: true,
         };
-        assert!(run(&agent, &provider, &master, operation, &mut prepared)
-            .await
-            .is_err());
+        assert!(run(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut prepared,
+            admission()
+        )
+        .await
+        .is_err());
         assert!(provider.capture_dir.join("0.enc").exists());
         assert!(provider.capture_dir.join("1.enc").exists());
         assert!(!provider.capture_dir.join("3.enc").exists());
@@ -783,9 +819,16 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        run(&agent, &provider, &master, operation, &mut resumed)
-            .await
-            .unwrap();
+        run(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut resumed,
+            admission(),
+        )
+        .await
+        .unwrap();
         assert_eq!(resumed.manifest.files.len(), BATCH_FILES * 3 + 2);
         for file in &resumed.manifest.files {
             let entry = resumed
@@ -832,6 +875,7 @@ mod tests {
             0,
             Default::default(),
             None,
+            admission(),
         )
         .unwrap()
         .finish()
@@ -856,6 +900,7 @@ mod tests {
             0,
             Default::default(),
             None,
+            admission(),
         )
         .unwrap()
         .finish()
@@ -873,7 +918,8 @@ mod tests {
             state,
             0,
             Default::default(),
-            None
+            None,
+            admission(),
         )
         .unwrap()
         .finish()

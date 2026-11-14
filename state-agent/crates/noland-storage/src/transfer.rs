@@ -691,6 +691,7 @@ mod tests {
     struct ConcurrencyProvider {
         active: AtomicUsize,
         peak: AtomicUsize,
+        download_gate: Option<tokio::sync::Barrier>,
     }
 
     #[async_trait]
@@ -718,8 +719,24 @@ mod tests {
                 size: std::fs::metadata(local)?.len(),
             })
         }
-        async fn download(&self, _key: &RemoteKey, _dest: &std::path::Path) -> Result<()> {
-            unreachable!()
+        async fn download(&self, _key: &RemoteKey, dest: &std::path::Path) -> Result<()> {
+            struct Active<'a>(&'a AtomicUsize);
+            impl Drop for Active<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            let _active = Active(&self.active);
+            self.peak.fetch_max(active, Ordering::SeqCst);
+            if let Some(gate) = &self.download_gate {
+                gate.wait().await;
+            }
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(dest, b"downloaded")?;
+            Ok(())
         }
         async fn list_prefix(&self, _prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {
             unreachable!()
@@ -800,6 +817,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_downloads_use_the_full_object_ceiling_not_rclone_stream_division() {
+        let root =
+            std::env::temp_dir().join(format!("noland-parallel-download-{}", uuid::Uuid::new_v4()));
+        let provider = Arc::new(ConcurrencyProvider {
+            active: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            download_gate: Some(tokio::sync::Barrier::new(12)),
+        });
+        let downloads = (0..12)
+            .map(|index| {
+                DownloadRequest::new(
+                    RemoteKey::new(format!("packs/{index}")),
+                    root.join(index.to_string()),
+                )
+            })
+            .collect();
+        let tuning = TransferTuning {
+            max_parallel_downloads: 12,
+            rclone_download_streams: 4,
+            ..Default::default()
+        };
+        let report = tokio::time::timeout(
+            Duration::from_secs(5),
+            download_bounded(
+                Arc::clone(&provider),
+                downloads,
+                tuning,
+                TransferJournalCallbacks::default(),
+            ),
+        )
+        .await
+        .expect("all twelve object workers must enter before the first may finish")
+        .unwrap();
+        assert_eq!(report.downloaded.len(), 12);
+        assert_eq!(provider.peak.load(Ordering::SeqCst), 12);
+        assert_eq!(provider.active.load(Ordering::SeqCst), 0);
+        for index in 0..12 {
+            assert_eq!(
+                std::fs::read(root.join(index.to_string())).unwrap(),
+                b"downloaded"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn bounded_downloads_honor_resume_callback() {
         let root = std::env::temp_dir().join(format!("noland-download-{}", uuid::Uuid::new_v4()));
         let remote = root.join("remote");
@@ -841,6 +904,7 @@ mod tests {
         let provider = Arc::new(ConcurrencyProvider {
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            download_gate: None,
         });
         let journal = TransferJournalCallbacks::new()
             .with_should_transfer(|_, key| Ok(key.as_str() != "packs/0"));

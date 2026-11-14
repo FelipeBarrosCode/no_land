@@ -15,6 +15,8 @@ use noland_state_core::{ManifestFile, Result, StateError};
 use super::{elapsed_us, open_partial, PendingFile, PipelineProgress, MAX_UNPUBLISHED_FILES};
 use crate::identity::VerifiedIdentity;
 
+pub(super) const BUFFER_BYTES: usize = 256 * 1024;
+
 pub(super) struct VerificationTask {
     pub pending: PendingFile,
     size: u64,
@@ -45,6 +47,16 @@ pub(super) struct VerificationStats {
     verified_files: AtomicU64,
     verify_us: AtomicU64,
     sync_us: AtomicU64,
+    active: AtomicU64,
+    peak: AtomicU64,
+}
+
+struct ActiveVerification(Arc<VerificationStats>);
+
+impl Drop for ActiveVerification {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 pub(super) fn verify_file(
@@ -181,7 +193,10 @@ impl VerificationPool {
             stats: Arc::new(VerificationStats::default()),
         };
         let verify = Arc::new(verify);
-        for index in 0..workers.clamp(1, 16) {
+        // Production admission already apportions the shared resource budget.
+        // Do not hide another CPU ceiling here; explicit fixture pools must also
+        // remain deterministic independently of the test runner's host size.
+        for index in 0..workers.max(1) {
             let receiver = Arc::clone(&receiver);
             let completed = completed.clone();
             let stopped = Arc::clone(&pool.stopped);
@@ -191,7 +206,7 @@ impl VerificationPool {
                 std::thread::Builder::new()
                     .name(format!("restore-verify-{index}"))
                     .spawn(move || {
-                        let mut buffer = vec![0u8; 256 * 1024];
+                        let mut buffer = vec![0u8; BUFFER_BYTES];
                         loop {
                             let task = match receiver.lock() {
                                 Ok(receiver) => receiver.recv(),
@@ -201,6 +216,9 @@ impl VerificationPool {
                             if stopped.load(Ordering::Acquire) {
                                 return;
                             }
+                            let active = stats.active.fetch_add(1, Ordering::Relaxed) + 1;
+                            stats.peak.fetch_max(active, Ordering::Relaxed);
+                            let active = ActiveVerification(Arc::clone(&stats));
                             // Turn a worker panic into a result: otherwise one
                             // lost task could leave the assembler waiting forever.
                             let result = catch_unwind(AssertUnwindSafe(|| {
@@ -215,6 +233,7 @@ impl VerificationPool {
                                 pending: task.pending,
                                 identity,
                             });
+                            drop(active);
                             let failed = result.is_err();
                             if completed.send(result).is_err() || failed {
                                 return;
@@ -251,6 +270,7 @@ impl VerificationPool {
         progress.io.file_syncs = self.stats.verified_files.load(Ordering::Relaxed);
         progress.io.verify_us = self.stats.verify_us.load(Ordering::Relaxed);
         progress.io.file_sync_us = self.stats.sync_us.load(Ordering::Relaxed);
+        progress.io.peak_verification_workers = self.stats.peak.load(Ordering::Relaxed);
     }
 }
 

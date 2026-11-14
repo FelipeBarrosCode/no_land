@@ -7,6 +7,8 @@ mod decode;
 mod locality_tests;
 #[cfg(test)]
 mod publication_tests;
+#[cfg(test)]
+mod resource_tests;
 mod verification;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -26,9 +28,10 @@ use std::time::{Duration, Instant};
 use decode::{DecodeStats, StreamConsumer};
 use noland_crypto::MasterKey;
 use noland_pack::PackIndexEntry;
+use noland_rclone_adapter::{TransferTuning, TransferWorkload, WorkerResources};
 use noland_state_core::{
-    constants::PACK_MAX, pack_key, ContentObjectKind, Result, StateError, SyncDirection,
-    SyncJournalEntry,
+    constants::{FASTCDC_MAX, PACK_MAX},
+    pack_key, ContentObjectKind, Result, StateError, SyncDirection, SyncJournalEntry,
 };
 use noland_state_db::StateDb;
 #[cfg(test)]
@@ -61,6 +64,16 @@ const MAX_ASSEMBLY_HANDLES: usize = 32;
 // Shared first chunks can leave arbitrarily many files incomplete. Hash state
 // has its own budget; eviction forces mandatory full-file readback verification.
 const MAX_ACTIVE_HASHERS: usize = 128;
+// Ciphertext, decrypted compressed bytes and plaintext can coexist at a record
+// boundary. The input pipe and queued authenticated chunks are separate budgets.
+const DECODER_RECORD_BYTES: u64 = 3 * FASTCDC_MAX + 2 * decode::INPUT_BYTES as u64 + 1024;
+// Account conservatively for restore-owned thread stacks, not just heap buffers.
+const WORKER_STACK_BYTES: u64 = 2 * 1024 * 1024;
+const DECODER_WORKING_BYTES: u64 = DECODER_RECORD_BYTES + WORKER_STACK_BYTES;
+const VERIFIER_WORKING_BYTES: u64 = verification::BUFFER_BYTES as u64 + WORKER_STACK_BYTES;
+const ASSEMBLY_WORKING_BYTES: u64 = FASTCDC_MAX
+    + WORKER_STACK_BYTES
+    + MAX_ACTIVE_HASHERS as u64 * std::mem::size_of::<blake3::Hasher>() as u64;
 
 pub(super) fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
@@ -68,29 +81,196 @@ pub(super) fn elapsed_us(started: Instant) -> u64 {
 
 #[derive(Debug, Clone, Copy)]
 pub struct PipelineOptions {
+    /// Active-transfer admission policy retained through the final resource probe.
+    /// GameplaySafe is normalized to Throughput for this operation only. Explicit
+    /// worker counts remain upper bounds, including when IO pressure changes.
+    /// Default/manual throughput callers use `Throughput`; full struct literals
+    /// must state their policy (or inherit it with `..PipelineOptions::default()`).
+    pub workload: TransferWorkload,
+    /// Upper bound on active packs, each of which owns one decoder. Provider
+    /// connection limits are applied here too, never multiplied by this count.
     pub max_parallel_packs: usize,
     /// Bounds encrypted scratch on non-streaming backends. Streaming uses pipes.
     pub max_inflight_pack_bytes: u64,
+    /// Upper bound on the independent file-verification pool. Admission shares
+    /// one CPU/memory allowance with decoders and the authenticated-chunk queue.
     pub reconstruction_workers: usize,
     /// Overlap assembly with the previous window's file flushes. Enabled for
     /// Linux cloud agents. APFS serializes small writes behind concurrent fsyncs,
     /// so other hosts retain staged writes while reusing the same worker pool.
     pub overlap_file_syncs: bool,
-    /// Each authenticated record is at most FASTCDC_MAX bytes.
+    /// Upper bound on queued authenticated records, each at most FASTCDC_MAX.
     pub buffered_chunks: usize,
 }
 
 impl Default for PipelineOptions {
     fn default() -> Self {
-        Self {
-            max_parallel_packs: 4,
-            max_inflight_pack_bytes: PACK_MAX,
-            reconstruction_workers: std::thread::available_parallelism()
-                .map_or(1, usize::from)
-                .min(4),
+        Self::automatic(TransferWorkload::Throughput)
+    }
+}
+
+impl PipelineOptions {
+    /// Provider-neutral automatic admission. No host CPU quotas or affinities
+    /// are changed; these counts only bound work owned by this restore.
+    pub fn automatic(workload: TransferWorkload) -> Self {
+        Self::for_resources(WorkerResources::detect(), workload)
+    }
+
+    pub fn for_resources(resources: WorkerResources, workload: TransferWorkload) -> Self {
+        Self::automatic_bounded(resources, workload, usize::MAX)
+    }
+
+    /// Use the provider's actual connection ceiling before splitting the CPU
+    /// allowance. Spare CPU capacity can therefore serve verification instead.
+    pub fn for_transfer_tuning(
+        resources: WorkerResources,
+        workload: TransferWorkload,
+        tuning: &TransferTuning,
+    ) -> Self {
+        Self::automatic_bounded(resources, workload, tuning.max_parallel_downloads.max(1))
+    }
+
+    fn automatic_bounded(
+        resources: WorkerResources,
+        workload: TransferWorkload,
+        download_slots: usize,
+    ) -> Self {
+        let workload = workload.for_active_transfer();
+        let workers = resources.cpu_workers(workload, 1);
+        let requested = Self {
+            workload,
+            max_parallel_packs: download_slots.min(workers).max(1),
+            max_inflight_pack_bytes: PACK_MAX.saturating_mul(workers as u64),
+            reconstruction_workers: workers,
             overlap_file_syncs: cfg!(target_os = "linux"),
-            buffered_chunks: 8,
+            buffered_chunks: workers,
+        };
+        let mut effective = requested.admit(resources, true);
+        effective.max_inflight_pack_bytes =
+            PACK_MAX.saturating_mul(effective.max_parallel_packs as u64);
+        effective
+    }
+
+    fn working_bytes(&self) -> u64 {
+        ASSEMBLY_WORKING_BYTES
+            .saturating_add(DECODER_WORKING_BYTES.saturating_mul(self.max_parallel_packs as u64))
+            .saturating_add(
+                VERIFIER_WORKING_BYTES.saturating_mul(self.reconstruction_workers as u64),
+            )
+            .saturating_add(FASTCDC_MAX.saturating_mul(self.buffered_chunks as u64))
+    }
+
+    fn admit(self, resources: WorkerResources, streaming: bool) -> Self {
+        let pack_weight = if streaming {
+            DECODER_RECORD_BYTES
+        } else {
+            PACK_MAX
+        };
+        let packs = self
+            .max_parallel_packs
+            .min(usize::try_from(self.max_inflight_pack_bytes / pack_weight).unwrap_or(usize::MAX))
+            .max(1);
+        let cpu_budget = resources.cpu_workers(self.workload, 1);
+        // The assembler hashes and places data too. Reserve its CPU slot before
+        // dividing the remaining slots, rather than giving both pools a whole
+        // machine's budget. One decoder and verifier are the irreducible floor
+        // on tiny/unknown hosts; their blocking I/O still uses distinct threads.
+        let pool_budget = cpu_budget.saturating_sub(1).max(2);
+        for width in (2..=pool_budget).rev() {
+            let mut decoders = packs.min(width.div_ceil(2));
+            let verifiers = self
+                .reconstruction_workers
+                // Only one durable publication window is verified at a time.
+                // More threads cannot consume any additional tasks.
+                .min(PUBLICATION_BATCH)
+                .min(width.saturating_sub(decoders))
+                .max(1);
+            decoders = packs.min(width.saturating_sub(verifiers)).max(1);
+            for buffered_chunks in (1..=self.buffered_chunks.min(decoders).max(1)).rev() {
+                let effective = Self {
+                    max_parallel_packs: decoders,
+                    reconstruction_workers: verifiers,
+                    buffered_chunks,
+                    max_inflight_pack_bytes: self
+                        .max_inflight_pack_bytes
+                        .min(pack_weight.saturating_mul(decoders as u64)),
+                    ..self
+                };
+                // Convert the *aggregate* working set into a per-slot charge for
+                // the shared policy. Pass RAW available memory: its safety fraction
+                // and finite unknown-memory fallback are applied there exactly once.
+                // Rounding up accounts conservatively for assembler/queue memory
+                // without giving either an independent memory allowance.
+                let slots = decoders + verifiers + 1;
+                let memory_per_slot = effective.working_bytes().div_ceil(slots as u64);
+                if slots <= resources.cpu_workers(self.workload, memory_per_slot)
+                    || (width == 2 && buffered_chunks == 1)
+                {
+                    return effective;
+                }
+            }
         }
+        unreachable!("the minimum bounded pipeline is always considered")
+    }
+
+    fn resolve(
+        mut self,
+        resources: WorkerResources,
+        provider: &dyn SharedStorageProvider,
+    ) -> Result<(Self, PipelineIoMetrics)> {
+        // Raw/manual options can retain a baseline GameplaySafe policy. Normalize
+        // before admission and diagnostics, without raising any requested counts.
+        self.workload = self.workload.for_active_transfer();
+        if self.max_parallel_packs == 0
+            || self.max_inflight_pack_bytes < PACK_MAX
+            || self.reconstruction_workers == 0
+            || self.buffered_chunks == 0
+        {
+            return Err(StateError::Invalid(
+                "invalid bounded restore pipeline options".into(),
+            ));
+        }
+        // Enforce the backend contract here, even for manual/default options
+        // and typed wrappers. This is a raw object/network-slot ceiling, never
+        // divided by a copyto process's preferred range-stream width.
+        let provider_slots = provider.transfer_tuning().max_parallel_downloads.max(1);
+        let options = Self {
+            max_parallel_packs: self.max_parallel_packs.min(provider_slots),
+            ..self
+        }
+        .admit(resources, provider.supports_streaming_downloads());
+        let slots = options.max_parallel_packs + options.reconstruction_workers + 1;
+        let io = PipelineIoMetrics {
+            workload: format!("{:?}", self.workload),
+            overlap_file_syncs: options.overlap_file_syncs,
+            logical_cpus: resources.logical_cpus as u64,
+            available_memory_bytes: resources.available_memory,
+            io_pressure: resources.io_pressure,
+            cpu_worker_budget: resources.cpu_workers(self.workload, 1) as u64,
+            admission_memory_budget_bytes: resources.memory_budget_bytes(),
+            minimum_worker_floor: slots
+                > resources.cpu_workers(
+                    self.workload,
+                    options.working_bytes().div_ceil(slots as u64),
+                ),
+            provider_download_slots: provider_slots as u64,
+            requested_parallel_packs: self.max_parallel_packs as u64,
+            effective_parallel_packs: options.max_parallel_packs as u64,
+            requested_verification_workers: self.reconstruction_workers as u64,
+            effective_verification_workers: options.reconstruction_workers as u64,
+            requested_buffered_chunks: self.buffered_chunks as u64,
+            effective_buffered_chunks: options.buffered_chunks as u64,
+            estimated_working_set_bytes: options.working_bytes(),
+            active_decoder_memory_bytes: DECODER_WORKING_BYTES
+                .saturating_mul(options.max_parallel_packs as u64),
+            queued_chunk_memory_bytes: FASTCDC_MAX.saturating_mul(options.buffered_chunks as u64),
+            verification_memory_bytes: VERIFIER_WORKING_BYTES
+                .saturating_mul(options.reconstruction_workers as u64),
+            requested_inflight_pack_bytes: self.max_inflight_pack_bytes,
+            max_inflight_pack_bytes: options.max_inflight_pack_bytes,
+            ..PipelineIoMetrics::default()
+        };
+        Ok((options, io))
     }
 }
 
@@ -98,7 +278,35 @@ impl Default for PipelineOptions {
 /// workers and overlap assembly, so they must not be added to elapsed time.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PipelineIoMetrics {
+    pub workload: String,
     pub overlap_file_syncs: bool,
+    pub logical_cpus: u64,
+    pub available_memory_bytes: Option<u64>,
+    pub io_pressure: bool,
+    pub cpu_worker_budget: u64,
+    pub admission_memory_budget_bytes: u64,
+    /// One decoder, one verifier and the assembler are the irreducible pipeline
+    /// floor when a resource estimate cannot admit three simultaneous slots.
+    pub minimum_worker_floor: bool,
+    pub provider_download_slots: u64,
+    pub requested_parallel_packs: u64,
+    pub effective_parallel_packs: u64,
+    pub requested_verification_workers: u64,
+    /// Resource-admitted ceiling, before preflight counts eligible files.
+    pub effective_verification_workers: u64,
+    /// Pool width selected after preflight; zero before that width is known.
+    /// The current pool retains one idle worker when there are no eligible files.
+    pub verification_pool_workers: u64,
+    pub requested_buffered_chunks: u64,
+    pub effective_buffered_chunks: u64,
+    /// Decoder records/stacks, verifier buffers/stacks, queued authenticated
+    /// chunks and assembler working memory, admitted as one aggregate.
+    pub estimated_working_set_bytes: u64,
+    pub active_decoder_memory_bytes: u64,
+    pub queued_chunk_memory_bytes: u64,
+    pub verification_memory_bytes: u64,
+    pub requested_inflight_pack_bytes: u64,
+    pub max_inflight_pack_bytes: u64,
     pub write_us: u64,
     pub inline_hash_us: u64,
     pub verify_us: u64,
@@ -124,6 +332,7 @@ pub struct PipelineIoMetrics {
     pub pack_decode_us: u64,
     pub decode_dispatch_wait_us: u64,
     pub peak_decode_workers: u64,
+    pub peak_verification_workers: u64,
     pub peak_active_hashers: u64,
     pub hash_state_evictions: u64,
     pub commit: super::RestoreCommitMetrics,
@@ -259,6 +468,7 @@ struct Pipeline<'tx, 'plan, F> {
     unpublished_bytes: u64,
     verification: VerificationPool,
     overlap_file_syncs: bool,
+    publication_delay: Duration,
     tombstones: Vec<PlannedTombstone>,
     critical: BTreeSet<usize>,
     progress: PipelineProgress,
@@ -298,16 +508,52 @@ fn open_partial(pending: &PendingFile) -> Result<(fs::File, fs::Metadata)> {
 }
 
 impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 'plan, F> {
+    #[cfg(test)]
     fn new(
         transaction: &'tx mut RestoreTransaction<'plan>,
         workers: usize,
+        on_progress: F,
+    ) -> Result<Self> {
+        Self::with_io(
+            transaction,
+            workers,
+            PipelineIoMetrics {
+                overlap_file_syncs: cfg!(target_os = "linux"),
+                ..PipelineIoMetrics::default()
+            },
+            on_progress,
+        )
+    }
+
+    fn with_io(
+        transaction: &'tx mut RestoreTransaction<'plan>,
+        workers: usize,
+        io: PipelineIoMetrics,
+        on_progress: F,
+    ) -> Result<Self> {
+        Self::with_verification_factory(
+            transaction,
+            workers,
+            io,
+            VerificationPool::new,
+            on_progress,
+        )
+    }
+
+    fn with_verification_factory(
+        transaction: &'tx mut RestoreTransaction<'plan>,
+        workers: usize,
+        io: PipelineIoMetrics,
+        verification_factory: impl FnOnce(usize) -> Result<VerificationPool>,
         mut on_progress: F,
     ) -> Result<Self> {
         transaction.begin_index_observation()?;
         let started = Instant::now();
+        let overlap_file_syncs = io.overlap_file_syncs;
         let mut initial = PipelineProgress {
             phase: "checking_existing_files".into(),
             total_entries: transaction.priorities.entries.len() as u64,
+            io,
             ..PipelineProgress::default()
         };
         on_progress(initial.clone())?;
@@ -317,6 +563,18 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 initial.elapsed_ms = started.elapsed().as_millis() as u64;
                 on_progress(initial.clone())
             })?;
+        let eligible_files = planned
+            .iter()
+            .filter(|entry| {
+                !entry.identical
+                    && transaction.plan.manifest.files[entry.manifest_index].file_type == "file"
+            })
+            .count();
+        // The admission ceiling is not a mandate to create idle workers for
+        // reused files, directories, or a tiny restore. Keep the required idle
+        // pool floor separate from its resource ceiling in diagnostics.
+        let pool_workers = workers.min(PUBLICATION_BATCH).min(eligible_files).max(1);
+        initial.io.verification_pool_workers = pool_workers as u64;
         initial.preflight_duration_ms = started.elapsed().as_millis() as u64;
         initial.phase = "preparing_rollback".into();
         initial.elapsed_ms = started.elapsed().as_millis() as u64;
@@ -351,6 +609,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
                 .iter()
                 .map(|entry| transaction.plan.manifest.files[entry.manifest_index].size)
                 .sum(),
+            io: initial.io,
             ..PipelineProgress::default()
         };
         let mut this = Self {
@@ -367,8 +626,9 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             verifying_files: 0,
             unpublished_files: 0,
             unpublished_bytes: 0,
-            verification: VerificationPool::new(workers)?,
-            overlap_file_syncs: PipelineOptions::default().overlap_file_syncs,
+            verification: verification_factory(pool_workers)?,
+            overlap_file_syncs,
+            publication_delay: PUBLICATION_DELAY,
             tombstones,
             critical,
             progress,
@@ -661,7 +921,7 @@ impl<'tx, 'plan, F: FnMut(PipelineProgress) -> Result<()> + Send> Pipeline<'tx, 
             || self.assembled_bytes >= PUBLICATION_BYTES
             || self
                 .assembled_since
-                .is_some_and(|since| since.elapsed() >= PUBLICATION_DELAY)
+                .is_some_and(|since| since.elapsed() >= self.publication_delay)
         {
             self.dispatch_assembled()?;
         }
@@ -1097,6 +1357,11 @@ async fn run_weighted<T, Fut: Future<Output = Result<()>>>(
     budget: u64,
     mut operation: impl FnMut(T) -> Fut,
 ) -> Result<()> {
+    if limit == 0 || budget == 0 || jobs.iter().any(|(_, size)| *size > budget) {
+        return Err(StateError::Invalid(
+            "invalid weighted restore admission".into(),
+        ));
+    }
     let mut jobs = jobs.into_iter().peekable();
     let mut active: Vec<(u64, Pin<Box<Fut>>)> = Vec::new();
     let mut used = 0u64;
@@ -1105,7 +1370,7 @@ async fn run_weighted<T, Fut: Future<Output = Result<()>>>(
             let Some((_, size)) = jobs.peek() else {
                 break;
             };
-            if !active.is_empty() && used.saturating_add(*size) > budget {
+            if used.checked_add(*size).is_none_or(|next| next > budget) {
                 break;
             }
             let (job, size) = jobs.next().expect("peeked job");
@@ -1141,18 +1406,39 @@ pub async fn restore_pipelined(
     db: Option<&StateDb>,
     journal: Option<DownloadJournal<'_>>,
     options: PipelineOptions,
+    on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
+) -> Result<PipelineReport> {
+    restore_pipelined_for_resources(
+        provider,
+        master,
+        plan,
+        index,
+        roots,
+        db,
+        journal,
+        options,
+        WorkerResources::detect(),
+        on_progress,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn restore_pipelined_for_resources(
+    provider: &dyn SharedStorageProvider,
+    master: &MasterKey,
+    plan: impl Into<SharedRestorePlan>,
+    index: &[PackIndexEntry],
+    roots: &LogicalRootMap,
+    db: Option<&StateDb>,
+    journal: Option<DownloadJournal<'_>>,
+    requested: PipelineOptions,
+    resources: WorkerResources,
     mut on_progress: impl FnMut(PipelineProgress) -> Result<()> + Send,
 ) -> Result<PipelineReport> {
-    if options.max_parallel_packs == 0
-        || options.max_inflight_pack_bytes < PACK_MAX
-        || options.reconstruction_workers == 0
-        || options.buffered_chunks == 0
-        || options.buffered_chunks > 32
-    {
-        return Err(StateError::Invalid(
-            "invalid bounded restore pipeline options".into(),
-        ));
-    }
+    // Normalize the operation policy while retaining each explicit upper bound
+    // when resources or pressure changed during manifest/index preparation.
+    let (options, admission_io) = requested.resolve(resources, provider)?;
     let plan = plan.into();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(options.buffered_chunks);
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(32);
@@ -1184,9 +1470,10 @@ pub async fn restore_pipelined(
                 false,
             );
             let pipeline_started = Instant::now();
-            let mut pipeline = match Pipeline::new(
+            let mut pipeline = match Pipeline::with_io(
                 &mut transaction,
-                options.reconstruction_workers.min(16),
+                options.reconstruction_workers,
+                admission_io,
                 |sample| {
                     if worker_cancelled.load(Ordering::Acquire) {
                         return Err(StateError::Storage("restore cancelled".into()));
@@ -1201,7 +1488,6 @@ pub async fn restore_pipelined(
                     return Err(error);
                 }
             };
-            pipeline.overlap_file_syncs = options.overlap_file_syncs;
             pipeline.queue_wait_us = worker_queue_wait_us;
             pipeline.decode_stats = worker_decode_stats;
             let needed = pipeline.consumers.keys().cloned().collect::<BTreeSet<_>>();
@@ -1306,16 +1592,14 @@ pub async fn restore_pipelined(
                 let size = if provider.supports_streaming_downloads() {
                     // A pipe never retains a whole pack. Bound actual active records;
                     // the assembly channel separately bounds queued plaintext.
-                    3 * noland_state_core::constants::FASTCDC_MAX
-                        + 2 * decode::INPUT_BYTES as u64
-                        + 1024
+                    DECODER_RECORD_BYTES
                 } else {
                     PACK_MAX
                 };
                 (job, size)
             })
             .collect(),
-        options.max_parallel_packs.min(32),
+        options.max_parallel_packs,
         options.max_inflight_pack_bytes,
         |job| {
             stream_pack(

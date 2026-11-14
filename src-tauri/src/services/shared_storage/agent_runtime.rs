@@ -4,13 +4,41 @@ use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
 const REQUIRED_AGENT_API_VERSION: u64 = 22;
+
+type AgentEndpoint = (String, u16);
+type AgentAccessRegistry = Mutex<std::collections::HashMap<AgentEndpoint, Weak<RwLock<()>>>>;
+
+// All SSH identities for an endpoint use the same daemon/socket. RPCs may run
+// concurrently, but deployment must wait for their complete correlated replies.
+// Weak entries avoid retaining credentials or an unbounded history of instances.
+fn agent_access(remote: &RemoteExec) -> Arc<RwLock<()>> {
+    static ACCESS: OnceLock<AgentAccessRegistry> = OnceLock::new();
+    let mut entries = ACCESS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    entries.retain(|_, entry| entry.strong_count() > 0);
+    let endpoint = (remote.ssh_host.to_ascii_lowercase(), remote.ssh_port);
+    if let Some(access) = entries.get(&endpoint).and_then(Weak::upgrade) {
+        return access;
+    }
+    let access = Arc::new(RwLock::new(()));
+    entries.insert(endpoint, Arc::downgrade(&access));
+    access
+}
+
+fn deployment_stamp() -> String {
+    uuid::Uuid::new_v4().as_u128().to_string()
+}
 
 // Keep this aligned with install-lifecycle-agent.sh. A healthy running agent
 // does not imply its shared installation workspace is safe to reuse as root.
@@ -31,7 +59,17 @@ test -z "$untrusted"
 "#;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-    let health = probe_agent(remote).await.ok();
+    let access = agent_access(remote);
+    let _deployment = access.write().await;
+    ensure_state_agent_exclusive(remote, target_user).await
+}
+
+async fn ensure_state_agent_exclusive(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+    // Recheck only after gaining exclusivity. A concurrent caller may already
+    // have installed the exact sources while this caller was waiting.
+    let health = call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+        .await
+        .ok();
     let active = deployment_has_active_work(remote, health.as_ref()).await?;
     let compatible = health.as_ref().and_then(|health| {
         health
@@ -50,14 +88,23 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     }
 
     let local_src = find_state_agent_source_dir()?;
+    let source_fingerprint = state_agent_source_fingerprint(&local_src)?;
 
-    let stamp = chrono::Utc::now().timestamp();
+    // Numeric UUIDs retain the trusted workspace naming contract, without the
+    // same-second collisions of wall-clock stamps across concurrent clients.
+    let stamp = deployment_stamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
     let source = local_src.clone();
     let archive_path = local_tar.clone();
     tokio::task::spawn_blocking(move || pack_state_agent_sources(&source, &archive_path))
         .await
         .map_err(|error| AppError::Command(format!("agent archive join failure: {error}")))??;
+    if state_agent_source_fingerprint(&local_src)? != source_fingerprint {
+        let _ = fs::remove_file(&local_tar);
+        return Err(AppError::State(
+            "State-agent sources changed while preparing the update; try again.".into(),
+        ));
+    }
 
     let remote_tar = format!("/tmp/noland-state-agent-{stamp}.tar.gz");
     {
@@ -84,7 +131,6 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         normalized_bootstrap.as_bytes(),
     );
     let sudo = remote.sudo_prefix();
-    let source_fingerprint = state_agent_source_fingerprint(&local_src)?;
     let worker = format!(
         "flock -w 1200 /run/lock/noland-state-agent-bootstrap.lock bash {script} {src} /usr/local/bin/noland-state-agent {user}; code=$?; if [ \"$code\" = 0 ]; then printf %s {fingerprint} > {src}/.noland-source-fingerprint || code=$?; fi; printf '%s\\n' \"$code\" > {status}",
         script = shell_escape(&remote_script),
@@ -100,7 +146,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         worker = shell_escape(&worker),
     );
     let setup = format!(
-        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && {sudo}find {src} -xdev \\( -type f -o -type d \\) -exec chmod go-w {{}} + && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
+        "{sudo}mkdir -p /opt/noland && {sudo}mkdir {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && {sudo}find {src} -xdev \\( -type f -o -type d \\) -exec chmod go-w {{}} + && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
         sudo = sudo,
         src = shell_escape(&remote_src),
         tar = shell_escape(&remote_tar),
@@ -141,7 +187,8 @@ async fn deployment_has_active_work(
     }
     // Older agents count INTERRUPTED rows as unfinished. Inspect actual managed
     // work rather than letting historical interruptions block every update.
-    let recent = call_agent_raw(
+    // Called under ensure_state_agent's deployment write guard.
+    let recent = call_agent_raw_unlocked(
         remote,
         "ListRecentOperations",
         serde_json::json!({"projection":"matching", "limit":1000}),
@@ -425,14 +472,6 @@ async fn wait_for_bootstrap(
     let mut last_connection_error = None;
 
     while tokio::time::Instant::now() < deadline {
-        if probe_agent(remote)
-            .await
-            .ok()
-            .is_some_and(|health| agent_api_is_compatible(&health))
-        {
-            return Ok(());
-        }
-
         match ssh_command(remote, status_command.clone(), Duration::from_secs(20)).await {
             Ok(output) if output.status_code == 0 => {
                 let status = output.stdout.trim();
@@ -442,6 +481,17 @@ async fn wait_for_bootstrap(
                         return Err(AppError::Provisioning(format!(
                             "Failed to install or start state-agent (exit {exit_code}): {log}"
                         )));
+                    }
+                    // A still-running *old* API-compatible daemon is not evidence
+                    // that this installation has finished. Its own status receipt
+                    // must be successful before checking the replacement's health.
+                    // The deployment write guard is already held here.
+                    let health =
+                        call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+                            .await
+                            .ok();
+                    if bootstrap_is_ready(Some(exit_code), health.as_ref()) {
+                        return Ok(());
                     }
                 }
             }
@@ -465,6 +515,10 @@ async fn wait_for_bootstrap(
         last_connection_error.unwrap_or_else(|| "none".to_string()),
         log
     )))
+}
+
+fn bootstrap_is_ready(exit_code: Option<i32>, health: Option<&serde_json::Value>) -> bool {
+    exit_code == Some(0) && health.is_some_and(agent_api_is_compatible)
 }
 
 async fn read_bootstrap_log(remote: &RemoteExec, remote_log: &str) -> String {
@@ -498,6 +552,19 @@ pub async fn probe_agent(remote: &RemoteExec) -> AppResult<serde_json::Value> {
 }
 
 pub async fn call_agent_raw(
+    remote: &RemoteExec,
+    method: &str,
+    params: serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    let access = agent_access(remote);
+    let _request = access.read().await;
+    call_agent_raw_unlocked(remote, method, params).await
+}
+
+// Transport implementation for callers that already hold an access guard.
+// Only deployment's own probes bypass the public read wrapper, under its write
+// guard. User operations must always go through call_agent_raw.
+async fn call_agent_raw_unlocked(
     remote: &RemoteExec,
     method: &str,
     params: serde_json::Value,
@@ -684,6 +751,16 @@ fn parse_rpc_response(
     request_id: &str,
     method: &str,
 ) -> AppResult<serde_json::Value> {
+    if output.is_empty() {
+        let recovery = if method == "PrepareDeletion" {
+            "Reopen the deletion preview to try again."
+        } else {
+            "Check the operation status before retrying a confirmed action."
+        };
+        return Err(AppError::State(format!(
+            "state-agent closed the RPC connection before replying; it may have restarted. {recovery}"
+        )));
+    }
     if output.last() != Some(&b'\n') {
         return Err(AppError::State(
             "state-agent returned a truncated RPC response frame".into(),
@@ -721,6 +798,140 @@ mod tests {
     use super::{is_state_agent_source_dir, pack_state_agent_sources};
     use flate2::read::GzDecoder;
     use std::{fs, path::PathBuf};
+
+    fn remote_fixture() -> crate::services::remote_exec::RemoteExec {
+        crate::services::remote_exec::RemoteExec {
+            ssh_host: format!("rpc-guard-{}.invalid", uuid::Uuid::new_v4()),
+            ssh_port: 22,
+            ssh_user: "fixture".into(),
+            private_key_path: "unused-test-key".into(),
+            ssh_password: String::new(),
+        }
+    }
+
+    #[test]
+    fn compatible_old_daemon_cannot_complete_an_unfinished_bootstrap() {
+        let old_health = serde_json::json!({
+            "agent_api_version": super::REQUIRED_AGENT_API_VERSION,
+            "active_operations": 0
+        });
+        assert!(!super::bootstrap_is_ready(None, Some(&old_health)));
+        assert!(!super::bootstrap_is_ready(Some(1), Some(&old_health)));
+        assert!(!super::bootstrap_is_ready(Some(0), None));
+        assert!(!super::bootstrap_is_ready(
+            Some(0),
+            Some(&serde_json::json!({"agent_api_version": 1}))
+        ));
+        assert!(super::bootstrap_is_ready(Some(0), Some(&old_health)));
+    }
+
+    #[test]
+    fn bootstrap_attempts_have_distinct_numeric_workspace_names() {
+        let first = super::deployment_stamp();
+        let second = super::deployment_stamp();
+        assert_ne!(first, second);
+        assert!(first.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(second.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+
+    #[test]
+    fn daemon_access_is_shared_across_identities_but_not_instances() {
+        let remote = remote_fixture();
+        let access = super::agent_access(&remote);
+        let mut other_identity = remote.clone();
+        other_identity.ssh_user = "another-fixture".into();
+        other_identity.private_key_path = "another-unused-key".into();
+        assert!(std::sync::Arc::ptr_eq(
+            &access,
+            &super::agent_access(&other_identity)
+        ));
+        other_identity.ssh_port += 1;
+        assert!(!std::sync::Arc::ptr_eq(
+            &access,
+            &super::agent_access(&other_identity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deployment_waits_for_rpc_reply_and_later_rpcs_wait_for_deployment() {
+        use std::task::Poll;
+        let access = super::agent_access(&remote_fixture());
+        let first_rpc = access.read().await;
+        let second_rpc = access.try_read().expect("RPC reads can overlap");
+        let mut deployment = Box::pin(access.write());
+        assert!(matches!(
+            futures_util::poll!(deployment.as_mut()),
+            Poll::Pending
+        ));
+        let mut later_rpc = Box::pin(access.read());
+        assert!(matches!(
+            futures_util::poll!(later_rpc.as_mut()),
+            Poll::Pending
+        ));
+        drop(first_rpc);
+        assert!(matches!(
+            futures_util::poll!(deployment.as_mut()),
+            Poll::Pending
+        ));
+        drop(second_rpc);
+        let installation = tokio::time::timeout(std::time::Duration::from_secs(2), deployment)
+            .await
+            .expect("deployment must acquire after complete RPC replies");
+        assert!(matches!(
+            futures_util::poll!(later_rpc.as_mut()),
+            Poll::Pending
+        ));
+        drop(installation);
+        let _reply = tokio::time::timeout(std::time::Duration::from_secs(2), later_rpc)
+            .await
+            .expect("RPC must resume after deployment finishes");
+    }
+
+    #[tokio::test]
+    async fn cancelled_update_waiter_does_not_stick_the_rpc_gate() {
+        let access = super::agent_access(&remote_fixture());
+        let request = access.read().await;
+        let mut deployment = Box::pin(access.write());
+        assert!(futures_util::poll!(deployment.as_mut()).is_pending());
+        drop(deployment);
+        let another_request = access
+            .try_read()
+            .expect("cancelled update must not block RPCs");
+        drop(another_request);
+        drop(request);
+        let update = access
+            .try_write()
+            .expect("cancelled RPCs release admission");
+        drop(update);
+        assert!(access.try_read().is_ok());
+    }
+
+    #[test]
+    fn lost_preview_reply_is_actionable_but_partial_frames_remain_rejected() {
+        let empty = super::parse_rpc_response(b"", "request", "PrepareDeletion")
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("before replying"));
+        assert!(empty.contains("Reopen the deletion preview"));
+        let partial = b"{\"id\":\"request\",\"result\":{\"planId\":\"fixture\"}}";
+        assert!(
+            super::parse_rpc_response(partial, "request", "PrepareDeletion")
+                .unwrap_err()
+                .to_string()
+                .contains("truncated")
+        );
+        assert!(super::parse_rpc_response(
+            b"{\"id\":\"request\",\"result\":{\"planId\":\"fixture\"}}\n",
+            "request",
+            "PrepareDeletion"
+        )
+        .is_ok());
+        let confirmed = super::parse_rpc_response(b"", "request", "StartDeletion")
+            .unwrap_err()
+            .to_string();
+        assert!(confirmed.contains("Check the operation status"));
+        assert!(!confirmed.contains("Reopen the deletion preview"));
+    }
 
     #[test]
     fn status_and_admission_deadlines_are_bounded_independently_of_remote_work() {

@@ -17,6 +17,14 @@ struct UploadProgressState {
     in_flight_bytes: HashMap<Uuid, u64>,
     completed_in_transfer: HashMap<Uuid, u64>,
     last_flush: Option<std::time::Instant>,
+    pending_diagnostics: HashMap<Uuid, PendingUploadDiagnostics>,
+    diagnostic_phases: HashMap<Uuid, (u32, String)>,
+}
+
+struct PendingUploadDiagnostics {
+    keys: Vec<String>,
+    attempt: u32,
+    detail: serde_json::Value,
 }
 
 struct JournalUploadObserver<'a> {
@@ -35,6 +43,27 @@ impl JournalUploadObserver<'_> {
                 .is_some_and(|last| last.elapsed() < std::time::Duration::from_millis(500))
         {
             return Ok(());
+        }
+        // One operation-wide transaction per sample, rather than one SQLite
+        // transaction for every rclone process's timer tick. This telemetry is
+        // best-effort: a bad sample must not block progress cleanup or poison
+        // later groups. Completion receipts are persisted separately.
+        if !state.pending_diagnostics.is_empty() {
+            let updates = state
+                .pending_diagnostics
+                .values()
+                .map(|pending| (pending.keys.as_slice(), pending.attempt, &pending.detail))
+                .collect::<Vec<_>>();
+            let persisted = self
+                .db
+                .update_upload_diagnostics_batch(self.operation_id, &updates);
+            state.pending_diagnostics.clear();
+            if persisted.is_err() {
+                tracing::debug!(
+                    operation_id = %self.operation_id,
+                    "discarded an upload diagnostic sample; completion receipts remain authoritative"
+                );
+            }
         }
         let summary = self
             .db
@@ -97,13 +126,33 @@ impl ImmutableUploadObserver for JournalUploadObserver<'_> {
         detail["group_id"] = serde_json::json!(self.transfer_id);
         detail["group_objects"] = serde_json::json!(self.keys.len());
         // Group timings/traffic are shared measurements, not additive per-pack bytes.
-        self.db.update_upload_diagnostics(
-            self.operation_id,
-            &self.keys,
-            diagnostics.attempt,
-            &detail,
-        )?;
-        self.transfer_progress(diagnostics.attempt_bytes)
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StateError::Storage("upload progress lock was poisoned".into()))?;
+        let phase = (diagnostics.attempt, diagnostics.phase.clone());
+        let transition = state.diagnostic_phases.get(&self.transfer_id) != Some(&phase);
+        state.diagnostic_phases.insert(self.transfer_id, phase);
+        state.pending_diagnostics.insert(
+            self.transfer_id,
+            PendingUploadDiagnostics {
+                keys: self.keys.clone(),
+                attempt: diagnostics.attempt,
+                detail,
+            },
+        );
+        let bytes = diagnostics.attempt_bytes.saturating_sub(
+            state
+                .completed_in_transfer
+                .get(&self.transfer_id)
+                .copied()
+                .unwrap_or(0),
+        );
+        let in_flight = state.in_flight_bytes.entry(self.transfer_id).or_default();
+        *in_flight = (*in_flight).max(bytes);
+        // Retry/phase boundaries must be visible immediately; only repeated
+        // samples within the same phase are coalesced.
+        self.persist_progress(&mut state, transition)
     }
 
     fn completed(
@@ -149,6 +198,7 @@ impl Drop for JournalUploadObserver<'_> {
         if let Ok(mut state) = self.state.lock() {
             state.in_flight_bytes.remove(&self.transfer_id);
             state.completed_in_transfer.remove(&self.transfer_id);
+            state.diagnostic_phases.remove(&self.transfer_id);
             let _ = self.persist_progress(&mut state, true);
         }
     }
@@ -1494,6 +1544,235 @@ mod tests {
             .unwrap()
             .as_str()
             .ends_with(COMMITTED_MARKER));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_diagnostic_samples_do_not_poison_cancellation_or_other_groups() {
+        let (root, memory, operation) = fixture();
+        let db_path = root.join("state.db");
+        let db = noland_state_db::StateDb::open(&db_path).unwrap();
+        db.upsert_operation(&memory.get_operation(operation).unwrap().unwrap())
+            .unwrap();
+        db.set_operation_progress(operation, Some(&OperationProgress::new("uploading", 0)))
+            .unwrap();
+        let a = pack(&root, &[0; 20]);
+        let b = pack(&root, &[1; 20]);
+        for (id, path) in [&a, &b] {
+            db.start_sync_journal_item(
+                operation,
+                &pack_key(id),
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+                None,
+                None,
+                Some(std::fs::metadata(path).unwrap().len()),
+            )
+            .unwrap();
+        }
+        let state = Arc::new(Mutex::new(UploadProgressState::default()));
+        let first = JournalUploadObserver {
+            db: &db,
+            operation_id: operation,
+            state: Arc::clone(&state),
+            transfer_id: Uuid::new_v4(),
+            keys: vec![pack_key(&a.0)],
+        };
+        let second = JournalUploadObserver {
+            db: &db,
+            operation_id: operation,
+            state: Arc::clone(&state),
+            transfer_id: Uuid::new_v4(),
+            keys: vec![pack_key(&b.0)],
+        };
+        first.transfer_started().unwrap();
+        second.transfer_started().unwrap();
+        let mut diagnostics = crate::UploadTransferDiagnostics {
+            attempt: 1,
+            phase: "transferring".into(),
+            attempt_bytes: 4,
+            sent_bytes: 4,
+            ..Default::default()
+        };
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        let fault = rusqlite::Connection::open(&db_path).unwrap();
+        fault.execute_batch(&format!(
+            "CREATE TRIGGER reject_cancelled_group_diagnostic BEFORE UPDATE OF detail_json ON sync_journal_items WHEN OLD.item_key='{}' BEGIN SELECT RAISE(ABORT, 'fixture diagnostic failure'); END;",
+            pack_key(&a.0)
+        )).unwrap();
+        diagnostics.phase = "provider_finalizing".into();
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        state.lock().unwrap().last_flush =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        diagnostics.attempt_bytes = 5;
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        assert_eq!(state.lock().unwrap().pending_diagnostics.len(), 1);
+        drop(first);
+        assert!(state.lock().unwrap().pending_diagnostics.is_empty());
+        assert_eq!(
+            db.get_operation_progress(operation)
+                .unwrap()
+                .unwrap()
+                .completed_units,
+            0,
+            "failed telemetry must not retain cancelled in-flight bytes"
+        );
+        diagnostics.phase = "transferring".into();
+        diagnostics.attempt_bytes = 6;
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        second
+            .completed(
+                &[ImmutableUpload::new(b.1, RemoteKey::new(pack_key(&b.0)))],
+                ImmutableUploadCompletion::Uploaded,
+            )
+            .unwrap();
+        assert!(db
+            .sync_journal_completed(operation, &pack_key(&b.0))
+            .unwrap());
+        drop(second);
+        assert_eq!(
+            db.get_operation_progress(operation)
+                .unwrap()
+                .unwrap()
+                .completed_units,
+            20
+        );
+        assert!(state.lock().unwrap().pending_diagnostics.is_empty());
+        assert!(state.lock().unwrap().in_flight_bytes.is_empty());
+        assert_eq!(
+            db.get_sync_journal_entry(operation, &pack_key(&b.0))
+                .unwrap()
+                .unwrap()
+                .detail_json["upload"]["attempt_bytes"],
+            6
+        );
+        drop(fault);
+        drop(db);
+        drop(memory);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn upload_diagnostics_coalesce_group_ticks_but_preserve_receipts_and_boundaries() {
+        let (root, db, operation) = fixture();
+        let a = pack(&root, &[0; 20]);
+        let b = pack(&root, &[1; 20]);
+        for (id, path) in [&a, &b] {
+            db.start_sync_journal_item(
+                operation,
+                &pack_key(id),
+                ContentObjectKind::Pack,
+                SyncDirection::Upload,
+                None,
+                None,
+                Some(std::fs::metadata(path).unwrap().len()),
+            )
+            .unwrap();
+        }
+        let state = Arc::new(Mutex::new(UploadProgressState::default()));
+        let first = JournalUploadObserver {
+            db: &db,
+            operation_id: operation,
+            state: Arc::clone(&state),
+            transfer_id: Uuid::new_v4(),
+            keys: vec![pack_key(&a.0)],
+        };
+        let second = JournalUploadObserver {
+            db: &db,
+            operation_id: operation,
+            state: Arc::clone(&state),
+            transfer_id: Uuid::new_v4(),
+            keys: vec![pack_key(&b.0)],
+        };
+        first.transfer_started().unwrap();
+        second.transfer_started().unwrap();
+        let mut diagnostics = crate::UploadTransferDiagnostics {
+            attempt: 1,
+            phase: "transferring".into(),
+            attempt_bytes: 3,
+            sent_bytes: 3,
+            ..Default::default()
+        };
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        // Hold the sample interval closed even if this fixture is descheduled.
+        state.lock().unwrap().last_flush =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        diagnostics.attempt_bytes = 7;
+        diagnostics.sent_bytes = 7;
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        diagnostics.attempt_bytes = 8;
+        diagnostics.sent_bytes = 8;
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        assert_eq!(state.lock().unwrap().pending_diagnostics.len(), 2);
+        assert_eq!(
+            db.get_sync_journal_entry(operation, &pack_key(&a.0))
+                .unwrap()
+                .unwrap()
+                .detail_json["upload"]["attempt_bytes"],
+            3,
+            "same-phase ticks do not synchronously write each group"
+        );
+        // Expire the shared interval without a scheduler-dependent sleep.
+        state.lock().unwrap().last_flush =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(501));
+        first.transfer_progress(8).unwrap();
+        assert!(state.lock().unwrap().pending_diagnostics.is_empty());
+        for id in [&a.0, &b.0] {
+            assert_eq!(
+                db.get_sync_journal_entry(operation, &pack_key(id))
+                    .unwrap()
+                    .unwrap()
+                    .detail_json["upload"]["attempt_bytes"],
+                8
+            );
+        }
+        state.lock().unwrap().last_flush =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        diagnostics.attempt_bytes = 10;
+        diagnostics.sent_bytes = 10;
+        first.transfer_diagnostics(&diagnostics).unwrap();
+        first
+            .completed(
+                &[ImmutableUpload::new(a.1, RemoteKey::new(pack_key(&a.0)))],
+                ImmutableUploadCompletion::Uploaded,
+            )
+            .unwrap();
+        assert!(db
+            .sync_journal_completed(operation, &pack_key(&a.0))
+            .unwrap());
+        assert_eq!(state.lock().unwrap().pending_diagnostics.len(), 1);
+        diagnostics.attempt = 2;
+        diagnostics.phase = "starting".into();
+        diagnostics.attempt_bytes = 0;
+        second.transfer_started().unwrap();
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        let retry = db
+            .get_sync_journal_entry(operation, &pack_key(&b.0))
+            .unwrap()
+            .unwrap();
+        assert_eq!(retry.attempts, 2);
+        assert_eq!(retry.detail_json["upload"]["phase"], "starting");
+        assert!(state.lock().unwrap().pending_diagnostics.is_empty());
+        diagnostics.phase = "transferring".into();
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        state.lock().unwrap().last_flush =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+        diagnostics.sent_bytes = 12;
+        second.transfer_diagnostics(&diagnostics).unwrap();
+        drop(second);
+        assert!(state.lock().unwrap().pending_diagnostics.is_empty());
+        assert_eq!(
+            db.get_sync_journal_entry(operation, &pack_key(&b.0))
+                .unwrap()
+                .unwrap()
+                .detail_json["upload"]["sent_bytes"],
+            12,
+            "cancellation/drop flushes the latest noncritical diagnostic"
+        );
+        drop(first);
+        assert!(state.lock().unwrap().diagnostic_phases.is_empty());
         std::fs::remove_dir_all(root).unwrap();
     }
 

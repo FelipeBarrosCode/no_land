@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS session_pids (
     FOREIGN KEY(session_id) REFERENCES app_sessions(session_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_session_pids_session_id ON session_pids(session_id, pid);
+
 CREATE TABLE IF NOT EXISTS paths (
     path_id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_path TEXT NOT NULL UNIQUE,

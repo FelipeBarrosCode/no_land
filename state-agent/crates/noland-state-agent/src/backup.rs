@@ -558,9 +558,38 @@ fn capture_symlink(
     Ok((file, state))
 }
 
+fn hash_pool_limits(
+    requested: usize,
+    jobs: usize,
+    current: preparation::Budget,
+) -> Result<(usize, usize)> {
+    if requested == 0 || current.hashing == 0 || current.packing == 0 {
+        return Err(StateError::Integrity(
+            "invalid hashing worker budget".into(),
+        ));
+    }
+    // Re-admit only the reader share, not a fresh whole preparation allowance.
+    // The caller's gameplay/benchmark lowering remains an immutable upper bound.
+    let workers = preparation::Budget {
+        hashing: requested,
+        packing: 1,
+    }
+    .admitted(current)
+    .hashing
+    .min(jobs);
+    let capacity = workers
+        .checked_mul(2)
+        .ok_or_else(|| StateError::Invalid("hash worker channel capacity overflow".into()))?;
+    Ok((workers, capacity))
+}
+
+// Keep frozen requested width and fresh admission explicit, independently of
+// the owned cache inputs and cancellation/completion callbacks.
+#[allow(clippy::too_many_arguments)]
 fn hash_files_parallel(
     jobs: Vec<HashJob>,
     worker_count: usize,
+    current: preparation::Budget,
     cas: Arc<CasLease>,
     inherited_hashes: std::collections::HashSet<String>,
     remote_chunks: RemoteChunkIndex,
@@ -573,9 +602,15 @@ fn hash_files_parallel(
         mpsc, Arc, Mutex,
     };
 
-    let worker_count = worker_count.max(1);
-    let (job_tx, job_rx) = mpsc::sync_channel::<HashJob>(worker_count * 2);
-    let (result_tx, result_rx) = mpsc::sync_channel::<Result<HashResult>>(worker_count * 2);
+    let (worker_count, capacity) = hash_pool_limits(worker_count, jobs.len(), current)?;
+    if cancelled() {
+        return Err(cancellation_error());
+    }
+    if worker_count == 0 {
+        return Ok(());
+    }
+    let (job_tx, job_rx) = mpsc::sync_channel::<HashJob>(capacity);
+    let (result_tx, result_rx) = mpsc::sync_channel::<Result<HashResult>>(capacity);
     let job_rx = Arc::new(Mutex::new(job_rx));
     let inherited_hashes = Arc::new(inherited_hashes);
     let remote_chunks = Arc::new(remote_chunks);
@@ -830,8 +865,17 @@ async fn run_backup_inner(
                 "backup retry cache policy differs from its captured revision".into(),
             ));
         }
-        return finish_prepared_backup(agent, provider, master, op, prepared, total_started, true)
-            .await;
+        return finish_prepared_backup(
+            agent,
+            provider,
+            master,
+            op,
+            prepared,
+            total_started,
+            true,
+            performance,
+        )
+        .await;
     }
     persist_operation(agent, &mut op, BackupState::Discovering, &metrics)?;
 
@@ -1587,14 +1631,25 @@ async fn run_backup_inner(
             std::fs::File::open(&agent.config.paths.snapshots)?.sync_all()?;
         }
         write_prepared_backup(agent, master, op_id, &prepared)?;
-        return finish_prepared_backup(agent, provider, master, op, prepared, total_started, false)
-            .await;
+        return finish_prepared_backup(
+            agent,
+            provider,
+            master,
+            op,
+            prepared,
+            total_started,
+            false,
+            performance,
+        )
+        .await;
     }
     let mut new_chunk_paths = BTreeMap::<String, ChunkSource>::new();
     let mut small_file_chunk_hashes = BTreeSet::<String>::new();
+    let current = preparation::Budget::detect(agent, performance)?;
     hash_files_parallel(
         jobs,
         preparation_budget.hashing,
+        current,
         Arc::clone(&cas_lease),
         inherited_hashes,
         remote_chunks,
@@ -1745,7 +1800,17 @@ async fn run_backup_inner(
     if prepared.storage_id.is_some() {
         cas_lease.retain_for_retry();
     }
-    finish_prepared_backup(agent, provider, master, op, prepared, total_started, false).await
+    finish_prepared_backup(
+        agent,
+        provider,
+        master,
+        op,
+        prepared,
+        total_started,
+        false,
+        performance,
+    )
+    .await
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1873,6 +1938,9 @@ fn read_prepared_backup(
     Ok(Some(prepared))
 }
 
+// Keep current performance explicit alongside dependencies and frozen operation
+// state: replay must not recover its live admission policy from the checkpoint.
+#[allow(clippy::too_many_arguments)]
 async fn finish_prepared_backup(
     agent: &StateAgent,
     provider: &dyn SharedStorageProvider,
@@ -1881,6 +1949,7 @@ async fn finish_prepared_backup(
     mut prepared: PreparedBackup,
     total_started: Instant,
     resumed: bool,
+    performance: BackupPerformanceMode,
 ) -> Result<BundleManifest> {
     if agent.operations.cancel_requested(op.operation_id) {
         return Err(cancellation_error());
@@ -1919,7 +1988,19 @@ async fn finish_prepared_backup(
             }
         }
     }
-    capture_pipeline::run(agent, provider, master, op.operation_id, &mut prepared).await?;
+    // Resolve after repository checks, immediately before allocating any worker
+    // pools. Both first-finish and replay retain the caller's CURRENT mode, game
+    // and IO profile; saved counts must not replace Balanced with Automatic.
+    let current = preparation::Budget::detect(agent, performance)?;
+    capture_pipeline::run(
+        agent,
+        provider,
+        master,
+        op.operation_id,
+        &mut prepared,
+        current,
+    )
+    .await?;
     packing::pack_and_upload(
         agent,
         provider,
@@ -1927,6 +2008,7 @@ async fn finish_prepared_backup(
         op.operation_id,
         &mut prepared,
         resumed,
+        current,
     )
     .await?;
     if agent.operations.cancel_requested(op.operation_id) {
@@ -2917,7 +2999,28 @@ fn transfer_tuning(
     session: &EphemeralRcloneSession,
 ) -> TransferTuning {
     let provider = ProviderKind::parse(&session.provider).unwrap_or(ProviderKind::Local);
-    let workload = if agent.has_latency_sensitive_sessions().unwrap_or(true) {
+    let (baseline_workload, workload) = backup_transfer_workloads(
+        performance,
+        agent.has_latency_sensitive_sessions().unwrap_or(true),
+    );
+    let requested = std::env::var("NOLAND_UPLOAD_WORKERS")
+        .ok()
+        .and_then(|value| value.parse().ok());
+    let tuning = upload_tuning_for_resources(
+        provider,
+        workload,
+        noland_rclone_adapter::WorkerResources::detect(),
+        requested,
+    );
+    log_transfer_tuning(provider, baseline_workload, workload, &tuning);
+    tuning
+}
+
+fn backup_transfer_workloads(
+    performance: BackupPerformanceMode,
+    gameplay: bool,
+) -> (TransferWorkload, TransferWorkload) {
+    let baseline = if gameplay {
         TransferWorkload::GameplaySafe
     } else {
         match performance {
@@ -2927,36 +3030,55 @@ fn transfer_tuning(
             BackupPerformanceMode::Balanced => TransferWorkload::Balanced,
         }
     };
-    let cpus = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(4);
-    let mut tuning = TransferTuning::for_resources(
-        provider,
-        workload,
-        cpus,
-        Some(TransferTuning::preparation_memory_bytes().unwrap_or(512 * 1024 * 1024) / 2),
-    );
-    // Conservative starting range; optional benchmark overrides only lower it.
-    tuning.max_parallel_uploads = tuning.max_parallel_uploads.min(8);
-    if let Ok(limit) = std::env::var("NOLAND_UPLOAD_WORKERS")
-        .unwrap_or_default()
-        .parse::<usize>()
-    {
+    // This operation-local policy never changes session classification or global
+    // protection. Explicit Balanced remains a user-requested ceiling.
+    let effective = if performance == BackupPerformanceMode::Balanced {
+        TransferWorkload::Balanced
+    } else {
+        baseline.for_active_transfer()
+    };
+    (baseline, effective)
+}
+
+fn upload_tuning_for_resources(
+    provider: ProviderKind,
+    workload: TransferWorkload,
+    resources: noland_rclone_adapter::WorkerResources,
+    requested: Option<usize>,
+) -> TransferTuning {
+    // Keep raw memory and the detected/injected pressure signal together.
+    with_upload_worker_limit(
+        TransferTuning::from_worker_resources(provider, workload.for_active_transfer(), resources),
+        requested,
+    )
+}
+
+fn with_upload_worker_limit(
+    mut tuning: TransferTuning,
+    requested: Option<usize>,
+) -> TransferTuning {
+    // The shared resolver owns resource headroom and provider ceilings. Local
+    // benchmark controls can only lower that admission, never replace it.
+    if let Some(limit) = requested {
         tuning.max_parallel_uploads = limit.clamp(1, tuning.max_parallel_uploads);
     }
     tuning.rclone_transfers = tuning.max_parallel_uploads;
-    log_transfer_tuning(provider, workload, &tuning);
     tuning
 }
 
+#[cfg(test)]
+mod automatic_upload_ceilings;
+
 fn log_transfer_tuning(
     provider: ProviderKind,
+    baseline_workload: TransferWorkload,
     workload: TransferWorkload,
     tuning: &TransferTuning,
 ) {
     tracing::info!(
         provider = provider.as_str(),
-        ?workload,
+        ?baseline_workload,
+        effective_workload = ?workload,
         uploads = tuning.max_parallel_uploads,
         downloads = tuning.max_parallel_downloads,
         rclone_transfers = tuning.rclone_transfers,
@@ -3056,6 +3178,10 @@ mod tests {
         let result = hash_files_parallel(
             jobs,
             4,
+            preparation::Budget {
+                hashing: 4,
+                packing: 1,
+            },
             lease.clone(),
             Default::default(),
             RemoteChunkIndex::empty(),
@@ -3314,7 +3440,7 @@ mod tests {
     #[tokio::test]
     async fn tiny_assets_use_one_regular_pack_while_small_saves_stay_separate() {
         let root = test_root("asset-pack-locality");
-        let agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
+        let mut agent = StateAgent::boot(AgentConfig::isolated(root.clone())).unwrap();
         let app = AppId::desktop("asset-pack-locality");
         agent
             .db
@@ -3324,12 +3450,11 @@ mod tests {
         std::fs::create_dir_all(&install).unwrap();
         // >32 MiB of individually small assets formerly needed three compact
         // packs. They now share one normal pack, apart from the compact save.
+        let mut expected_asset_hashes = BTreeSet::new();
         for index in 0..132u8 {
-            std::fs::write(
-                install.join(format!("asset-{index}.bin")),
-                vec![index; 256 * 1024],
-            )
-            .unwrap();
+            let bytes = vec![index; 256 * 1024];
+            assert!(expected_asset_hashes.insert(noland_cas::blake3_hex(&bytes)));
+            std::fs::write(install.join(format!("asset-{index}.bin")), bytes).unwrap();
         }
         agent
             .db
@@ -3338,6 +3463,11 @@ mod tests {
         tracked_save(&agent, &app, "progress.sav", b"save-locality");
         let storage = LocalStorage::new(root.join("cloud"));
         let master = MasterKey::generate();
+        // This checks size/role coalescing, not whether 33 MiB of capture and
+        // durable handoffs beat the production one-second latency flush. Keep
+        // this fixture's partial builders below that age until capture EOF;
+        // byte limits, role separation, real workers and fsyncs stay unchanged.
+        agent.streaming_partial_builder_age = Some(Duration::ZERO);
         let manifest = run_backup(
             &agent,
             &app,
@@ -3355,10 +3485,22 @@ mod tests {
         let by_hash = noland_pack::index_by_hash(&index);
         let mut asset_packs = BTreeSet::new();
         let mut save_packs = BTreeSet::new();
+        let mut asset_hashes = BTreeSet::new();
         for file in &manifest.files {
+            assert_eq!(file.chunks.len(), 1);
+            assert_eq!(file.chunks[0].hash, file.file_hash);
+            assert_eq!(file.chunks[0].size, file.size);
+            assert_eq!(
+                u64::from(by_hash[&file.chunks[0].hash].plaintext_len),
+                file.size
+            );
             let target = if file.semantic_role == SemanticRole::AppContent {
+                assert_eq!(file.size, 256 * 1024);
+                assert!(asset_hashes.insert(file.file_hash.clone()));
                 &mut asset_packs
             } else {
+                assert_eq!(file.file_hash, noland_cas::blake3_hex(b"save-locality"));
+                assert_eq!(file.size, b"save-locality".len() as u64);
                 &mut save_packs
             };
             for chunk in &file.chunks {
@@ -3366,6 +3508,7 @@ mod tests {
             }
         }
         assert_eq!(manifest.files.len(), 133);
+        assert_eq!(asset_hashes, expected_asset_hashes);
         assert_eq!(asset_packs.len(), 1);
         assert_eq!(save_packs.len(), 1);
         assert!(asset_packs.is_disjoint(&save_packs));

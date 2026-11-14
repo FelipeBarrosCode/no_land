@@ -9,6 +9,15 @@ use std::sync::{
     Condvar, Mutex,
 };
 
+#[cfg(test)]
+mod automatic_ceilings;
+
+fn admitted_pack_workers(saved: usize, current: preparation::Budget, jobs: usize) -> usize {
+    // Frozen legacy counts remain an upper bound (including benchmark lowering),
+    // while host resources and actual pending plans bound the pool on replay.
+    saved.max(1).min(current.packing).min(jobs)
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(super) struct PackingState {
     pub plans: Vec<PackPlan>,
@@ -413,9 +422,13 @@ pub(super) async fn pack_and_upload(
     operation: Uuid,
     prepared: &mut PreparedBackup,
     _resumed: bool,
+    current: preparation::Budget,
 ) -> Result<()> {
     let session = PackUploadSession::new(provider, Some(&agent.db), Some(operation));
-    pack_and_upload_in_session(agent, provider, master, operation, prepared, &session).await
+    pack_and_upload_in_session(
+        agent, provider, master, operation, prepared, &session, current,
+    )
+    .await
 }
 
 pub(super) async fn pack_and_upload_in_session(
@@ -425,6 +438,7 @@ pub(super) async fn pack_and_upload_in_session(
     operation: Uuid,
     prepared: &mut PreparedBackup,
     session: &PackUploadSession<'_>,
+    current: preparation::Budget,
 ) -> Result<()> {
     let Some(packing) = prepared.packing.take() else {
         return release_prepared_lease(agent, operation, prepared);
@@ -523,7 +537,7 @@ pub(super) async fn pack_and_upload_in_session(
     // Estimate the complete output without holding the same bytes that each
     // bounded pack writer will reserve and consume as it allocates ciphertext.
     disk::check_admission(&[(directory.clone(), pending_bytes)])?;
-    let count = packing.workers.clamp(1, 32).min(pending.len().max(1));
+    let count = admitted_pack_workers(packing.workers, current, pending.len());
     // Network capacity, not CPU worker count, determines the upload/ready windows.
     let (sender, receiver) = tokio::sync::mpsc::channel(upload_count);
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1154,11 +1168,20 @@ mod tests {
         }
         provider.release_first.add_permits(1);
         provider.fail_on_call.store(2, Ordering::SeqCst);
-        assert!(
-            pack_and_upload(&agent, &provider, &master, operation, &mut prepared, true)
-                .await
-                .is_err()
-        );
+        assert!(pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut prepared,
+            true,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1
+            }
+        )
+        .await
+        .is_err());
         assert_eq!(provider.groups.lock().unwrap()[0], 2);
         let completed = provider.keys.lock().unwrap()[0].clone();
         assert!(agent
@@ -1175,9 +1198,20 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        pack_and_upload(&agent, &provider, &master, operation, &mut retry, true)
-            .await
-            .unwrap();
+        pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut retry,
+            true,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(retry.pack_files.len(), 6);
         assert_eq!(
             provider
@@ -1211,7 +1245,18 @@ mod tests {
                 .unwrap());
             provider.release_first.add_permits(1);
         };
-        let run = pack_and_upload(&agent, &provider, &master, operation, &mut prepared, false);
+        let run = pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut prepared,
+            false,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1,
+            },
+        );
         tokio::time::timeout(Duration::from_secs(10), async {
             let (result, ()) = tokio::join!(run, release);
             result.unwrap();
@@ -1272,11 +1317,20 @@ mod tests {
         let mut corrupt = original.clone();
         corrupt[0] ^= 1;
         std::fs::write(&source, corrupt).unwrap();
-        assert!(
-            pack_and_upload(&agent, &provider, &master, operation, &mut prepared, true)
-                .await
-                .is_err()
-        );
+        assert!(pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut prepared,
+            true,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1
+            }
+        )
+        .await
+        .is_err());
         assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
         assert!(!receipt_path(&agent, operation, 0).exists());
         std::fs::write(source, original).unwrap();
@@ -1291,9 +1345,20 @@ mod tests {
         .unwrap()
         .unwrap();
         provider.release_first.add_permits(1);
-        pack_and_upload(&agent, &provider, &master, operation, &mut retry, true)
-            .await
-            .unwrap();
+        pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut retry,
+            true,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(retry.pack_files.len(), 6);
         drop(agent);
         std::fs::remove_dir_all(root).unwrap();
@@ -1344,6 +1409,10 @@ mod tests {
             operation,
             &mut prepared,
             false,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1,
+            },
         ));
         tokio::time::timeout(Duration::from_secs(10), async {
             tokio::select! {
@@ -1382,9 +1451,20 @@ mod tests {
             }
         }
         assert!(!completed.is_empty());
-        pack_and_upload(&agent, &provider, &master, operation, &mut resumed, true)
-            .await
-            .unwrap();
+        pack_and_upload(
+            &agent,
+            &provider,
+            &master,
+            operation,
+            &mut resumed,
+            true,
+            preparation::Budget {
+                hashing: 1,
+                packing: 1,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(resumed.pack_files.len(), plans);
         let keys = provider.keys.lock().unwrap();
         assert_eq!(keys.iter().filter(|key| **key == first_key).count(), 2);

@@ -278,8 +278,11 @@ upload latency, slot starvation, capture backpressure and peak reserved/upload
 usage. Cumulative worker time is not elapsed wall time.
 The final snapshot clears live worker/queue counts through manifest commit, and
 completed-operation details retain the streaming diagnostics after live progress
-is cleared. First-upload latency is measured from the streaming pipeline's start;
-discovery and reconciliation have separate timing counters.
+is cleared. First-upload latency is measured from the streaming pipeline's start
+to upload-task admission, not a verified network first byte. Upload gauges count
+reservations, not simultaneously sending sockets. The streaming
+`hashing_duration_ms` includes pipeline waits; overlapping phase counters must not
+be summed. Discovery and reconciliation have separate timing counters.
 
 Regression fixtures cover >2 GiB pre-EOF upload, a slow first upload with one
 packer/two slots, durable-handoff cancellation, partial-source changes, receipt and
@@ -290,6 +293,302 @@ measured on the same PC/provider/application with cold and warm runs. Compare
 record first-upload latency, total wall time, source throughput, network payload,
 provider finalization, CPU/disk pressure and restore verification. No measured
 speedup multiplier is claimed from synthetic correctness fixtures.
+
+### Upload utilization follow-up (2026-11-14)
+
+The desktop PR branch now preserves preparation lookahead inside the existing
+operation-wide byte budget. New pack targets use at most
+`budget / (upload_slots + 1)`, leaving room for the next codec input instead of
+letting uploads consume the entire window. Admission accounts for indivisible
+maximum-size chunks, not just nominal targets. Tiny budgets cannot guarantee
+overlap, and oversized frozen
+packs may drain alone: retries never change an existing pack ID or ciphertext to
+adopt a new target. Already-sealed compressed packs use their actual byte size for
+admission; an unsealed frozen plan over the absolute budget still fails explicitly.
+Once capture/planning/sealing finishes, the sealed-only tail can spend the soft
+lookahead too, while retaining the absolute object/byte bounds. Frozen packs that
+fit together do not unnecessarily drain one at a time.
+
+Only already-ready small ciphertext packs are grouped (up to 64 MiB and a bounded
+share of object slots); a first pack never waits to form a batch. Each object
+reserves capacity. Durable member receipts release shared bytes and surplus
+object slots immediately while the child's final process slot remains occupied
+until exit. Weighted backend admission can grant the currently free width rather
+than waiting for a group's entire requested width; rclone's transfer/checker
+arguments use that actual grant.
+
+Authenticated plan persistence runs through one bounded, owned writer, so the
+coordinator can continue driving uploads during plan fsync. Codecs cannot consume
+a plan until its receipt is durable. Cancellation closes and joins the writer
+before capture cleanup; no fire-and-forget persistence was introduced. Reuse
+lookups prefetch and consume matching windows of at most 256 hashes while keeping
+the 4,096-entry authenticated, repository/key-bound positive/negative cache.
+
+Preparation is proportional to resources rather than a fixed reader/codec pair.
+The automatic upload/download policy below supersedes the old four-reader,
+12-preparation-worker and eight-upload caps. For 19 CPUs with sufficient memory,
+active Automatic uploads admit ten readers and nine codecs, even with a game
+session; memory or I/O pressure can lower admission. The operation-scoped gameplay
+bypass is described below. Overrides only lower admission. An old session is ignored
+only with positive absence evidence for root/tracked processes and an empty
+cgroup-v2 subtree; live children and uncertain process identities remain protected.
+The tracked-PID lookup uses a covering index. No runtime CPU/GPU quota or affinity
+setting is changed.
+
+Noncritical diagnostic ticks are coalesced into operation-wide SQLite batches.
+Phase/retry boundaries flush immediately, and completion receipts are still
+persisted before capacity release. Failed diagnostic samples are discarded rather
+than blocking cancellation cleanup or poisoning another group's accounting.
+Additional credential-free counters separate capture durability, channel waits,
+plan persistence, codec admission, ready queues, grouping and completion-to-refill
+waits. They do not measure NIC traffic or prove provider throughput.
+
+Regressions include incompressible input with exact byte-budget saturation,
+codec progress while every upload slot is held, upload completion during blocked
+plan persistence, ready-group member refill before straggler exit, frozen retry
+and corruption rejection, conservative session liveness, bounded batch lookups,
+partial backend grants and diagnostic-write failure during cancellation.
+At the upload-only validation checkpoint the app was stopped and changes were
+not deployed. A matched
+same-provider cold/warm throughput comparison on an explicitly authorized instance
+is still required before claiming a measured speedup.
+
+The earlier upload-only verification passed **577 library tests, with six opt-in tests ignored**,
+plus **10 testkit integration tests** and **10 JavaScript contract/progress tests**.
+Production workspace binaries type-check; workspace formatting and diff checks
+pass. On macOS, use a canonical `TMPDIR` to avoid the `/var` symlink alias in
+anchored-path fixtures. An existing traversal fixture was corrected to actually
+escape its logical root; production symlink validation was not weakened.
+Clippy completed with existing baseline warnings and no diagnostics overlapping
+the changed/new source lines; this is not a clean strict-warning baseline.
+
+### Automatic upload and download ceilings
+
+Both directions now use the same `WorkerResources` model. CPU detection accounts
+for OS affinity/quota. Raw available memory comes from host availability and the
+tightest visible Linux cgroup-v1/v2 ancestor (including nested/delegated mounts),
+macOS free/inactive/speculative pages, or Windows available physical memory.
+Unknown memory retains a finite 512 MiB fallback rather than assuming all RAM is
+free. Resource detection never reads application state or credentials.
+
+Each workspace/buffer admission class uses one quarter of raw available memory.
+Throughput CPU admission uses the effective CPU count and Balanced uses half.
+Normal GameplaySafe uses a quarter outside transfers, but active uploads and
+downloads bypass it as described below. I/O pressure halves the resulting ceiling.
+Memory costs and a high 128-worker emergency guard further bound CPU pools.
+Backup readers and compressors share one admitted total, preserve the minimum
+reader/codec pair, and are bounded by actual jobs/ranges. Saved counts and optional
+benchmark overrides remain lowering-only upper bounds; large saved counts are
+re-admitted before allocating channels or threads.
+Resumed captures retain the current requested performance mode: a Balanced
+checkpoint with 32 readers/32 codecs on 128 CPUs re-admits at 16/16 on 64 CPUs,
+or less with memory or I/O pressure, without changing frozen ciphertext IDs.
+
+Transfer admission additionally respects unchanged provider limits: Drive and
+OneDrive allow at most 16, object-storage providers at most 32, and smaller
+providers retain their existing limits. The logical staged-ciphertext byte window
+is derived from available memory and transfer count, not a fixed profile-sized
+1/2/4 GiB window. It is still distinct from process RSS and disk-retained retry data.
+Explicit serialized tuning defaults remain compatible; fresh automatic requests
+resolve the resource model instead of treating those defaults as their ceiling.
+For example, 64 CPUs and 64 GiB available memory admit 32 readers/32 codecs and
+up to 32 object-storage transfers (16 for Drive/OneDrive) in active throughput mode.
+Those are ceilings, not a claim that every worker or socket stays active.
+
+Restore admission accounts for all active decoders, verification buffers/stacks,
+the assembler and queued authenticated records as one CPU/memory working set.
+Provider slots and explicit pipeline options remain upper bounds. The old four
+default workers and hidden 16-verifier cap no longer prevent larger hosts from
+using parallel decoding and readback. Publication windows, checksummed journals,
+hash verification, rollback and joined cancellation retain their existing bounds.
+Low-resource cases expose their minimum-pipeline-floor exception explicitly.
+Final execution independently enforces provider slots and the requested workload,
+normalizing GameplaySafe to operation-local Throughput and respecting pressure
+changes during manifest preparation. Preflight limits the
+verification pool to eligible files; diagnostics distinguish that actual pool
+width from the resource ceiling and the observed busy-worker peak.
+
+Generic download workers no longer divide their object ceiling by rclone's range
+stream count. Rclone copy-to downloads instead acquire weighted slots and set
+their actual range-stream width from the grant. Ordered pack streams acquire one
+slot from that same controller, preventing the two modes from multiplying the
+provider budget. Preferred copy-to width scales approximately with the square
+root of the budget; a partial final grant still uses spare slots.
+
+Transfer concurrency adapts below its admitted ceiling: provider errors reduce
+the remote target, while local I/O pressure applies a noncompounding half-ceiling
+cap. Fresh healthy observations spanning five quiet seconds remove that cap
+without requiring pack completion or undoing remote backoff. FIFO weighted
+admission prevents new arrivals from overtaking waiting packs. Recovery never
+exceeds the resource/provider ceiling and does not kill active children.
+Slow local progress/journal callbacks are excluded from download network feedback.
+Ceilings are resolved per operation/resume; running CPU pools are not live-resized.
+No application CPU/GPU quotas, affinities or cgroup limits are imposed.
+
+Numeric diagnostics distinguish requested ceilings, effective limits, occupied
+slots and actual worker peaks. These are not simultaneous-socket measurements.
+Fixtures cover high-compute/resource-poor profiles, nested memory limits, provider
+caps, parallel generic downloads, multi-decoder/readback overlap, pressure
+hysteresis, recovery, cancellation and exact authenticated restore. A real matched
+provider benchmark is still required before claiming a throughput improvement.
+
+Local automatic-ceiling validation passed **656 library tests** (six opt-in tests
+ignored), **10 testkit integration tests**, and **10 JavaScript contract/progress
+tests**. Nested child-process test output is not double-counted. Production
+workspace binaries type-check, and formatting/diff checks pass. Concurrency
+fixtures exercise 12 generic downloads, five authenticated pack decoders and 24
+readback verifiers, rather than checking displayed worker counts alone.
+Normal workspace/all-target Clippy completes with 33 existing diagnostic locations
+and no primary diagnostic spans overlapping changed or new source lines. The
+repository is not a strict warning-free baseline.
+
+The pack-locality fixture now controls only its own partial-builder age, retaining
+its exact one-asset-pack/one-save-pack assertions under full-suite load. A separate
+boundary test preserves the real one-second flush deadline and immediate EOF
+flush; production timing and checkpoint/pack formats are unchanged.
+
+This automatic-ceiling pass modifies desktop sources only and remains local and
+uncommitted. At that validation checkpoint the native application was stopped.
+No instance provisioning, agent
+restart, remote deployment or new cloud benchmark was performed in this pass.
+
+### GameplaySafe bypass during uploads and downloads
+
+Active storage operations now resolve `GameplaySafe` to `Throughput` with
+`TransferWorkload::for_active_transfer()`. Explicit Balanced backup requests remain
+Balanced. The bypass applies to upload preparation (readers/codecs), upload network
+tuning, download tuning, restore constructors and final restore admission, so a
+saved/manual GameplaySafe value cannot silently restore the quarter-CPU policy.
+Explicit worker-count upper bounds and frozen replay limits remain lowering-only.
+
+This is an operation-local value, not a mutable global or persisted setting.
+Normal session classification and GameplaySafe resource rules are unchanged.
+When a transfer finishes, fails or is cancelled, normal protection is already
+intact; there is no cleanup flag to forget or a first-finishing transfer that can
+throttle an overlapping transfer. Diagnostics distinguish baseline and effective
+workloads.
+
+On a 30-CPU host with 20 GiB available memory and no I/O pressure, normal
+GameplaySafe still admits eight CPU slots outside transfers. An active Automatic
+upload admits 15 readers and 15 codecs; a restore has a 30-slot aggregate CPU
+budget instead of eight. Network ceilings remain provider-bounded: up to 30 for
+S3-like providers, 16 for Drive/OneDrive and eight for smaller providers. Actual
+decoder/transfer occupancy is still limited by work, memory and provider capacity.
+Memory pressure, I/O backpressure, retry pacing, authenticated verification,
+durability and application CPU/GPU freedom are not disabled.
+
+Regression coverage includes the 30-CPU profile, explicit Balanced requests,
+provider/memory/pressure bounds, raw restore options, frozen ceilings, and normal
+session protection before/during/after success, failure, cancellation and
+overlapping transfers. This follow-up changes code only; it does not deploy or
+restart the remote agent or start a new transfer.
+Local follow-up validation passed **665 library tests** (six opt-in tests ignored),
+**10 integration tests**, **10 JavaScript contract/progress tests**, production
+binary checks, formatting and diff checks. Normal all-target Clippy completed
+with the same 33 baseline diagnostic locations and no diagnostics overlapping
+changed/new source lines.
+
+### Deletion-preview RPC readiness repair
+
+A reported cloud-deletion preview failed with a truncated RPC response while the
+agent service restarted. Read-only follow-up found a healthy API 22 agent, a
+complete health response, no active/unfinished operations, and a trusted source
+marker matching the checkout. This does not prove that any cloud object was deleted.
+
+The client updater previously returned as soon as it saw an API-compatible agent,
+even when that was the old daemon and its detached replacement was still building.
+The next preview could therefore lose its RPC connection when installation
+eventually restarted the service. Readiness now requires the specific bootstrap's
+successful exit receipt before checking replacement health.
+
+Per-endpoint read/write admission permits concurrent RPCs but makes deployments
+wait for complete replies and prevents later RPCs from entering during an update.
+Waiting updaters recheck the installed version after gaining exclusivity. Numeric
+UUID workspace names avoid same-second collisions; setup creates its own directory
+without removing an existing workspace. A changed source snapshot is rejected
+before upload rather than stamped with a fingerprint from different bytes.
+
+Empty replies explain that the agent may have restarted. Partial frames, mismatched
+request IDs and invalid JSON still fail closed. Confirmed deletion is never
+automatically repeated with a new plan or treated as definitely rejected merely
+because its reply was lost.
+
+Validation passed **66 native Shared Storage tests**, including **14 agent-runtime
+tests**, and **21 JavaScript contract/progress/deletion checks**. Rust formatting
+and diff checks pass. The local development app reloaded the client fix. These
+checks did not confirm or execute cloud deletion; reopening and accepting a fresh
+preview remains a human-controlled step.
+
+### Adaptive upload and download controller follow-up
+
+Read-only diagnostics for completed upload
+`39bfcf7c-249d-4a02-84c0-d91adfe925b6` on instance 60691161 established the
+controller bottleneck before this follow-up: 98 packs totaling 25,596,732,844 bytes
+completed in 1,073,975 ms, with 1,004,486 ms attributed to upload. Although the
+backend ceiling was 16, 71 pack completions sampled an effective limit of one.
+One pack waited 934.818 seconds for admission before spending 4.499 seconds in
+the transferring phase. Thirteen slow-peer restarts and one idle restart sent
+896 MiB of extra payload. Aggregate limiter wait was 11,953.826 worker-seconds,
+not wall time; overlapping worker durations must not be summed into a timeline.
+
+The shared controller and rclone supervision now apply the following in both
+directions:
+
+- **Fair weighted admission:** first-polled requests reserve capacity in FIFO
+  order, including before a woken task runs. A group gets the smaller of its
+  requested width and available capacity rather than waiting to fill a group.
+  Cancelling head, middle or reserved-but-unpolled requests releases ownership
+  and wakes successors. Completed upload members still release capacity early,
+  retaining one process slot until the child exits.
+- **Separate local and remote limits:** pressure caps new admission at
+  `max(minimum, ceil(ceiling / 2))`; repeated pressure cannot halve that result
+  again. The effective limit is the smaller of this cap and the remote target.
+  A false pressure observation starts a five-second quiet period, and a later
+  fresh false observation removes the cap. Stale pressure never expires just
+  because time passed. Clearing pressure does not undo rate-limit/backoff
+  penalties. Real rate limiting halves the remote target; other retryable remote
+  errors subtract one. Four successful saturated attempts after the remote
+  cooldown recover one slot, never exceeding the provider/resource ceiling.
+- **No historical-rate throttling:** different pack sizes, concurrency regimes
+  and group widths cannot lower global admission merely because individual
+  per-pack rates differ. Temporary local-pressure recovery does not wait for
+  four large packs to finish.
+- **Context-aware isolated replays:** healthy peer history is bounded to 16
+  entries and 120 seconds, with exact generation/concurrency/width matching.
+  Slow-peer decisions require two complete consecutive network-time windows,
+  independent live reserved slots and three credible healthy samples. Pressure,
+  concurrency changes and meaningful local consumer backpressure discard mixed
+  samples. A solo flow cannot be speculatively restarted against past full-link
+  speeds. Watchdog/straggler replays do not also reduce global admission as if
+  they were provider-wide errors; actual provider failures still do.
+- **Recovery while blocked:** upload progress ticks, copy-to downloads without
+  observers, and ordered download waits (including blocked consumers) keep
+  sampling pressure. Download kernel probes are interval-cached rather than
+  reading `/proc/pressure/io` for every 256 KiB decoder handoff. Observer/context
+  work is excluded from measured download network time.
+- **Honest diagnostics:** defaulted numeric fields now include queued admission
+  requests and controller generation, alongside effective limits and reserved
+  slots. These are admission samples, not simultaneous sending/socket counts.
+
+Provider/memory ceilings, source-generation checks, immutable ciphertext IDs,
+authenticated receipts, retry bounds, child reaping, publication barriers and
+deletion safeguards are unchanged. No application CPU/GPU limits are imposed.
+No deployment, remote restart or new transfer was performed for this follow-up,
+and a matched live upload/download speedup remains unmeasured.
+
+Local validation passed **700 library tests** (six opt-in tests ignored),
+**12 integration tests** (including two provider-compatibility tests), and
+**21 JavaScript safety/progress checks**. Production workspace binaries and the
+desktop client/test sources type-check; Rust formatting and diff checks pass.
+All-target Clippy retains the same 33 baseline diagnostic locations, with none
+in the four controller/integration source files changed by this follow-up.
+A repeat exposed a macOS fixture-launch
+race in the deletion deadline test; test-only scripts now run through the system
+shell, and the complete workspace suite passed again without changing production
+deletion behavior. The separate desktop test rebuild with
+`NOLAND_SKIP_NATIVE_BUILD=1` could not link the omitted Moonlight native symbols;
+it did not execute client tests. This does not replace the earlier native
+readiness validation or establish a native desktop packaging result.
 
 ### API 20 validation results
 
@@ -528,9 +827,12 @@ hashes, file syncs, directory barriers and prerequisite rollback remain mandator
 
 Rclone streams have a 60-second network-idle deadline and a 30-second EOF/exit
 deadline. These clocks exclude consumer/decoder/publication waits. An individual
-trickling stream can be restarted once when a 30-second receiving window is at
-least eight times slower than several healthy peers and local work is not the
-dominant wait. Uniformly slow links do not qualify. Retries retain the normal
+trickling stream can be restarted once after two consecutive 30-second network
+windows at least eight times slower than three recent healthy samples matching
+the controller generation, reserved concurrency and transfer width. Samples need
+at least 1 MiB/250 ms of weight, with local consumer time below one-third of
+network time and no sampled I/O pressure. A lone flow or group occupying every
+reserved slot cannot qualify. Retries retain the normal
 attempt/backoff bounds, kill and reap the old child before restarting, and replay
 only the same authenticated immutable pack. Consumer/integrity failures are not
 network-retry candidates. No speculative parallel duplicate is started.

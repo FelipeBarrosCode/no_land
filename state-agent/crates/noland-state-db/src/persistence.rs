@@ -1165,17 +1165,33 @@ impl StateDb {
         attempt: u32,
         diagnostics: &serde_json::Value,
     ) -> Result<()> {
+        self.update_upload_diagnostics_batch(operation_id, &[(keys, attempt, diagnostics)])
+    }
+
+    /// Coalesced, non-authoritative telemetry for concurrent upload groups.
+    /// Completion receipts use their own immediate transaction and are never
+    /// delayed by the diagnostic sampling interval.
+    pub fn update_upload_diagnostics_batch(
+        &self,
+        operation_id: Uuid,
+        updates: &[(&[String], u32, &serde_json::Value)],
+    ) -> Result<()> {
+        if updates.is_empty() {
+            return Ok(());
+        }
         let mut connection = self.lock()?;
         let transaction = connection.transaction().map_err(db_err)?;
         {
             let mut statement = transaction.prepare_cached("UPDATE sync_journal_items SET attempts=CASE WHEN state='COMPLETED' THEN attempts ELSE MAX(attempts, ?3) END, detail_json=json_set(detail_json, '$.upload', json(?4)), updated_at_ms=?5 WHERE operation_id=?1 AND item_key=?2").map_err(db_err)?;
             let operation = operation_id.to_string();
-            let json = serde_json::to_string(diagnostics)?;
             let now = Utc::now().timestamp_millis();
-            for key in keys {
-                statement
-                    .execute(params![operation, key, attempt, json, now])
-                    .map_err(db_err)?;
+            for (keys, attempt, diagnostics) in updates {
+                let json = serde_json::to_string(diagnostics)?;
+                for key in *keys {
+                    statement
+                        .execute(params![operation, key, attempt, json, now])
+                        .map_err(db_err)?;
+                }
             }
         }
         transaction.commit().map_err(db_err)
@@ -1561,6 +1577,89 @@ mod tests {
     use chrono::Duration;
 
     use super::*;
+
+    #[test]
+    fn upload_workload_member_lookup_uses_a_covering_session_index() {
+        let db = StateDb::open_in_memory().unwrap();
+        let plan: String = db
+            .lock()
+            .unwrap()
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT pid FROM session_pids WHERE session_id=?1 ORDER BY pid",
+                [Uuid::new_v4().to_string()],
+                |row| row.get(3),
+            )
+            .unwrap();
+        assert!(plan.contains("idx_session_pids_session_id"), "{plan}");
+        assert!(!plan.contains("USE TEMP B-TREE"), "{plan}");
+    }
+
+    #[test]
+    fn coalesced_upload_diagnostics_are_atomic_and_do_not_change_completion_receipts() {
+        let db = StateDb::open_in_memory().unwrap();
+        let operation = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        for (id, key) in [
+            (operation, "packs/a"),
+            (operation, "packs/b"),
+            (other, "packs/a"),
+        ] {
+            let mut entry =
+                SyncJournalEntry::pending(id, key, ContentObjectKind::Pack, SyncDirection::Upload);
+            entry.detail_json = serde_json::json!({"retained": true});
+            db.upsert_sync_journal_entry(&entry).unwrap();
+        }
+        let a = vec!["packs/a".into()];
+        let b = vec!["packs/b".into()];
+        db.update_upload_diagnostics(operation, &a, 1, &serde_json::json!({"sent_bytes": 10}))
+            .unwrap();
+        db.complete_sync_journal_items(operation, &[("packs/a".into(), 10, 10)])
+            .unwrap();
+        let first = serde_json::json!({"group_id": "first", "sent_bytes": 10});
+        let second = serde_json::json!({"group_id": "second", "sent_bytes": 7});
+        let updates = [(a.as_slice(), 3, &first), (b.as_slice(), 2, &second)];
+        db.lock().unwrap().execute_batch("CREATE TRIGGER fail_second_diagnostic BEFORE UPDATE ON sync_journal_items WHEN NEW.item_key='packs/b' BEGIN SELECT RAISE(ABORT, 'fixture interruption'); END;").unwrap();
+        assert!(db
+            .update_upload_diagnostics_batch(operation, &updates)
+            .is_err());
+        assert!(db
+            .get_sync_journal_entry(operation, "packs/a")
+            .unwrap()
+            .unwrap()
+            .detail_json["upload"]
+            .get("group_id")
+            .is_none());
+        db.lock()
+            .unwrap()
+            .execute_batch("DROP TRIGGER fail_second_diagnostic;")
+            .unwrap();
+        db.update_upload_diagnostics_batch(operation, &updates)
+            .unwrap();
+        let first = db
+            .get_sync_journal_entry(operation, "packs/a")
+            .unwrap()
+            .unwrap();
+        assert_eq!(first.state, SyncJournalState::Completed);
+        assert_eq!(first.attempts, 1);
+        assert_eq!(first.bytes_transferred, 10);
+        assert_eq!(first.detail_json["retained"], true);
+        assert_eq!(first.detail_json["upload"]["group_id"], "first");
+        let second = db
+            .get_sync_journal_entry(operation, "packs/b")
+            .unwrap()
+            .unwrap();
+        assert_eq!(second.state, SyncJournalState::Pending);
+        assert_eq!(second.attempts, 2);
+        assert_eq!(second.bytes_transferred, 0);
+        assert_eq!(second.detail_json["upload"]["sent_bytes"], 7);
+        assert!(db
+            .get_sync_journal_entry(other, "packs/a")
+            .unwrap()
+            .unwrap()
+            .detail_json
+            .get("upload")
+            .is_none());
+    }
 
     #[test]
     fn grouped_upload_completion_rolls_back_atomically_and_preserves_diagnostics() {
