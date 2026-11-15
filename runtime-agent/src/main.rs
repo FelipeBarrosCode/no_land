@@ -69,6 +69,15 @@ enum Action {
         #[arg(long)]
         app_id: String,
     },
+    /// Seed a private save/cache view without changing original application files.
+    ConfigureWrites {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long, required = true)]
+        writable_path: Vec<String>,
+        #[arg(long)]
+        approve: bool,
+    },
     CreateShortcut {
         #[arg(long)]
         app_id: Option<String>,
@@ -140,6 +149,16 @@ fn run() -> Result<()> {
             make_executable,
         } => print_json(&engine::register_selected(&store, &file, make_executable)?),
         Action::Launch { app_id } => print_json(&engine::launch(&store, &app_id)?),
+        Action::ConfigureWrites {
+            app_id,
+            writable_path,
+            approve,
+        } => print_json(&noland_runtime::portable::configure(
+            &store,
+            &app_id,
+            writable_path,
+            approve,
+        )?),
         Action::CreateShortcut { app_id } => {
             print_json(&engine::create_shortcut(&store, app_id.as_deref())?)
         }

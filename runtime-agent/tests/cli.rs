@@ -45,6 +45,76 @@ fn rejects_unapproved_install_and_arbitrary_app_ids() {
 }
 
 #[test]
+fn configure_writes_cli_is_explicit_persistent_and_reports_private_policy() {
+    let home = tempfile::tempdir().unwrap();
+    let home_path = home.path().canonicalize().unwrap();
+    let source = home_path.join("game");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("main"), b"fixture").unwrap();
+    fs::create_dir(source.join("user")).unwrap();
+    fs::write(source.join("user/save"), b"original").unwrap();
+    let store = noland_runtime::store::Store {
+        data: home_path.join(".local/share/noland-runtime"),
+        state: home_path.join(".local/state/noland-runtime"),
+    };
+    store.init().unwrap();
+    noland_runtime::store::atomic_json(
+        &store.data.join("apps/fixture.json"),
+        &serde_json::json!({
+            "id": "fixture", "name": "Fixture", "file": source.join("main"),
+            "profile": noland_runtime::PROFILE, "appimage": false
+        }),
+    )
+    .unwrap();
+    let args = [
+        "configure-writes",
+        "--app-id",
+        "fixture",
+        "--writable-path",
+        "user",
+        "--writable-path",
+        "new-cache",
+    ];
+    assert!(!cli(&home_path, &args).status.success());
+    let mut approved = args.to_vec();
+    approved.push("--approve");
+    let output = cli(&home_path, &approved);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let policy: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(policy["policy"], "private-writable-view-v1");
+    assert_eq!(
+        policy["writablePaths"],
+        serde_json::json!(["user", "new-cache"])
+    );
+    let private = std::path::PathBuf::from(policy["dataRoot"].as_str().unwrap());
+    fs::write(private.join("user/save"), b"changed").unwrap();
+    assert!(cli(&home_path, &approved).status.success());
+    assert_eq!(fs::read(private.join("user/save")).unwrap(), b"changed");
+    assert_eq!(fs::read(source.join("user/save")).unwrap(), b"original");
+    assert_eq!(
+        store.app("fixture").unwrap().writable_paths,
+        ["user", "new-cache"]
+    );
+    assert!(!cli(
+        &home_path,
+        &[
+            "configure-writes",
+            "--app-id",
+            "fixture",
+            "--writable-path",
+            "../escape",
+            "--approve"
+        ]
+    )
+    .status
+    .success());
+}
+
+#[test]
 fn windows_or_32bit_files_are_not_registered() {
     let home = tempfile::tempdir().unwrap();
     let file = home.path().join("game.exe");

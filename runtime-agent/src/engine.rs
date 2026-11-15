@@ -104,6 +104,7 @@ pub fn register_selected(store: &Store, file: &Path, make_executable: bool) -> R
         file,
         profile: PROFILE.into(),
         appimage,
+        writable_paths: Vec::new(),
     };
     atomic_json(
         &store.data.join("apps").join(format!("{}.json", app.id)),
@@ -314,6 +315,17 @@ fn bwrap(
     data: &Path,
     app_directory: &Path,
 ) -> Result<Command> {
+    bwrap_with_view(store, session, gpu, data, app_directory, None)
+}
+
+fn bwrap_with_view(
+    store: &Store,
+    session: &Session,
+    gpu: &Gpu,
+    data: &Path,
+    app_directory: &Path,
+    view: Option<(&App, &Path)>,
+) -> Result<Command> {
     let root = store.root()?;
     artifact::validate_root(&root)?;
     gpu.validate_dependencies(&root)?;
@@ -400,15 +412,11 @@ fn bwrap(
     .arg("--ro-bind")
     .arg(session.dir.join("group"))
     .arg("/etc/group")
-    .args(["--bind", "/dev/shm", "/dev/shm", "--bind"])
-    .arg(data)
-    .arg("/home/runtime")
-    .arg("--ro-bind")
-    .arg(app_directory)
-    .arg("/app")
-    .arg("--ro-bind")
-    .arg(&gpu.directory)
-    .arg("/opt/noland-driver");
+    .args(["--bind", "/dev/shm", "/dev/shm"]);
+    bind_application_paths(&mut c, data, app_directory);
+    c.arg("--ro-bind")
+        .arg(&gpu.directory)
+        .arg("/opt/noland-driver");
     bind_gpu_devices(&mut c, &gpu.devices);
     bind_input_devices(
         &mut c,
@@ -480,13 +488,110 @@ fn bwrap(
         "--setenv",
         "PULSE_COOKIE",
         "/run/noland/pulse-cookie",
-        "--chdir",
-        "/app",
-        "--",
-        "/usr/bin/dbus-run-session",
-        "--",
     ]);
+    finish_bwrap_command(&mut c, data, view)?;
     Ok(c)
+}
+
+fn bind_application_paths(c: &mut Command, data: &Path, app_directory: &Path) {
+    c.arg("--bind")
+        .arg(data)
+        .arg("/home/runtime")
+        .arg("--ro-bind")
+        .arg(app_directory)
+        .arg("/app");
+}
+
+// All optional mounts belong before the first command terminator. Keep the
+// original Command so clean_command's environment is preserved.
+fn finish_bwrap_command(c: &mut Command, data: &Path, view: Option<(&App, &Path)>) -> Result<()> {
+    if let Some((app, view)) = view {
+        crate::portable::bind_view(c, app, view, data)?;
+    }
+    c.args(["--chdir", "/app", "--", "/usr/bin/dbus-run-session", "--"]);
+    Ok(())
+}
+
+#[cfg(test)]
+mod bwrap_layout_tests {
+    use super::*;
+
+    #[test]
+    fn production_mount_and_command_tail_keep_portable_mounts_before_terminator() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let data = root.join("home");
+        let source = root.join("game");
+        let view = root.join("view");
+        for path in [&data, &source, &view] {
+            private_dir(path).unwrap();
+        }
+        let app = App {
+            id: "layout-test".into(),
+            name: "Layout".into(),
+            file: source.join("main"),
+            profile: PROFILE.into(),
+            appimage: false,
+            writable_paths: vec!["user".into()],
+        };
+        // Compose the same mount-prefix and actual DBus-tail builders used by
+        // bwrap_with_view, then append the executable exactly as supervise does.
+        for enabled in [false, true] {
+            let mut command = clean_command("timeout");
+            command
+                .env("NOLAND_LAYOUT_TEST", "preserved")
+                .args(["30", "bwrap"]);
+            bind_application_paths(&mut command, &data, &source);
+            finish_bwrap_command(
+                &mut command,
+                &data,
+                enabled.then_some((&app, view.as_path())),
+            )
+            .unwrap();
+            command.arg("/app/main");
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let boundary = args.iter().position(|arg| arg == "--").unwrap();
+            assert_eq!(
+                &args[boundary..],
+                ["--", "/usr/bin/dbus-run-session", "--", "/app/main"]
+            );
+            assert_eq!(&args[boundary - 2..boundary], ["--chdir", "/app"]);
+            let mut expected = vec![
+                "30",
+                "bwrap",
+                "--bind",
+                data.to_str().unwrap(),
+                "/home/runtime",
+                "--ro-bind",
+                source.to_str().unwrap(),
+                "/app",
+            ];
+            if enabled {
+                expected.extend([
+                    "--ro-bind",
+                    source.to_str().unwrap(),
+                    "/home/runtime/.noland-source",
+                    "--bind",
+                    view.to_str().unwrap(),
+                    "/app",
+                    "--ro-bind",
+                    app.file.to_str().unwrap(),
+                    "/app/main",
+                ]);
+            }
+            // Exact prefix also proves asset binding follows HOME, and the
+            // private /app view follows the default read-only /app bind.
+            assert_eq!(&args[..boundary - 2], expected);
+            assert_eq!(command.get_program(), "timeout");
+            assert!(command
+                .get_envs()
+                .any(|(key, value)| key == "NOLAND_LAYOUT_TEST"
+                    && value == Some(std::ffi::OsStr::new("preserved"))));
+        }
+    }
 }
 
 fn check(name: &str, result: Result<String>) -> Check {
@@ -693,6 +798,7 @@ pub fn process_start_identity(pid: u32) -> Option<String> {
 }
 
 pub fn supervise(store: &Store, id: &str) -> Result<()> {
+    let _app_lock = crate::portable::lock(store, id)?;
     let app = store.app(id)?;
     let session = Session::discover(store)?;
     session.refresh_authority()?;
@@ -700,7 +806,19 @@ pub fn supervise(store: &Store, id: &str) -> Result<()> {
     let data = store.data.join("app-data").join(id);
     private_dir(&data)?;
     let (app_directory, executable) = materialize_application(store, &app, &session, &gpu)?;
-    let c = bwrap(store, &session, &gpu, &data, &app_directory)?;
+    let view = if app.writable_paths.is_empty() {
+        None
+    } else {
+        Some(crate::portable::prepare(store, &app)?)
+    };
+    let c = bwrap_with_view(
+        store,
+        &session,
+        &gpu,
+        &data,
+        &app_directory,
+        view.as_deref().map(|view| (&app, view)),
+    )?;
     let mut args = c.get_args().map(|s| s.to_os_string()).collect::<Vec<_>>();
     let index = args
         .iter()

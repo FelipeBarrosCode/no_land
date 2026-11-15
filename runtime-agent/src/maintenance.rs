@@ -364,6 +364,7 @@ mod tests {
             file: app_dir.join("main"),
             profile: PROFILE.into(),
             appimage: false,
+            writable_paths: Vec::new(),
         };
         fs::write(&app.file, crate::elf::tests::elf(b"libopenal.so.1\0")).unwrap();
         atomic_json(&store.data.join("apps/fixture-app.json"), &app).unwrap();

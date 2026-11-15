@@ -23,6 +23,8 @@ pub struct App {
     pub file: PathBuf,
     pub profile: String,
     pub appimage: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_paths: Vec<String>,
 }
 
 #[derive(Default, Debug, Clone, Serialize, Deserialize)]
