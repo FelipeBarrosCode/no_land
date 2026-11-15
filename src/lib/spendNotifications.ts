@@ -1,8 +1,5 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
+import { ensureNotificationPermission } from "./notificationPermission";
 import { isNotificationEnabled } from "./notificationPreferences";
 import { translate } from "./i18n";
 import type { SpendAlert } from "./types";
@@ -27,10 +24,7 @@ export async function notifySpendAlert(alert: SpendAlert): Promise<boolean> {
     return true;
   }
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
+    const granted = await ensureNotificationPermission();
     if (!granted) {
       return true;
     }

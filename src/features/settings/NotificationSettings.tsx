@@ -6,6 +6,7 @@ import {
   type NotificationKind,
 } from "../../lib/notificationPreferences";
 import { useLocalization } from "../../lib/i18n";
+import { ensureNotificationPermission } from "../../lib/notificationPermission";
 
 const SETTINGS: Array<{ kind: NotificationKind; title: string; description: string }> = [
   {
@@ -65,9 +66,14 @@ export function NotificationSettings() {
               type="checkbox"
               className="mt-1 h-5 w-5 accent-[#7bff48]"
               checked={preferences[kind]}
-              onChange={(event) =>
-                setPreferences(setNotificationPreference(kind, event.target.checked))
-              }
+              onChange={(event) => {
+                const enabled = event.target.checked;
+                setPreferences(setNotificationPreference(kind, enabled));
+                if (enabled) {
+                  void ensureNotificationPermission(true).catch((error) =>
+                    console.warn("[notifications] permission request failed", error));
+                }
+              }}
             />
           </label>
         ))}

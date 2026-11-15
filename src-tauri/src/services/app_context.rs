@@ -222,11 +222,13 @@ impl AppContext {
     }
 
     pub async fn reload_state_from_disk(&self) -> AppResult<PersistedAppState> {
+        // Loading also migrates/saves the document. Serialize the entire reload
+        // with updates so an older snapshot cannot erase a just-saved choice.
+        let mut state = self.state.write().await;
         let fresh_state = self.state_store.load_state().await?;
-        {
-            let mut state = self.state.write().await;
-            *state = fresh_state.clone();
-        }
+        *state = fresh_state.clone();
+        self.feedback
+            .publish_local_permission(&fresh_state.feedback_program);
         Ok(fresh_state)
     }
 

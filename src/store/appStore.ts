@@ -1,10 +1,7 @@
 import { create } from "zustand";
 import { translate, translateSource } from "../lib/i18n";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
+import { ensureNotificationPermission } from "../lib/notificationPermission";
 import { playArcadeSuccess } from "../lib/arcadeAudio";
 import { isNotificationEnabled } from "../lib/notificationPreferences";
 import { notifyProvisioningUpdate } from "../lib/provisioningNotifications";
@@ -760,10 +757,7 @@ async function notifyStorageCompletion(body: string) {
   }
   playArcadeSuccess();
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
+    const granted = await ensureNotificationPermission();
     if (granted) {
       await sendNotification({
         title: "Noland Connect",

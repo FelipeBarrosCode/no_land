@@ -260,6 +260,32 @@ mod tests {
     }
 
     #[test]
+    fn saved_grants_and_denials_round_trip_without_expanding_scopes() {
+        for enabled in [false, true] {
+            let saved = Config {
+                enabled,
+                port: 47832,
+                instances: vec![42, 73],
+                control: true,
+                dialogs: true,
+                local_roots: vec!["/explicit/transfer/scope".into()],
+                ..Default::default()
+            };
+            let document = serde_json::to_value(&saved).unwrap();
+            assert_eq!(document["allInstances"], false);
+            assert_eq!(document["localRoots"], serde_json::json!(saved.local_roots));
+            let restarted: Config = serde_json::from_value(document).unwrap();
+            assert_eq!(restarted, saved);
+            assert_eq!(restarted.enabled, enabled);
+            assert!(restarted.allows_instance(42));
+            assert!(!restarted.allows_instance(99));
+            assert!(!restarted.shell);
+            assert!(!restarted.elevated);
+            assert!(!restarted.desktop);
+        }
+    }
+
+    #[test]
     fn tokens_are_random_and_not_fingerprints() {
         let token = generate_token();
         assert_ne!(token, generate_token());

@@ -354,6 +354,7 @@ fn main() {
                 reqwest::Client::new(),
                 app_data_dir.join("software-artwork-cache.json"),
             );
+            let mcp_config = initial_state.mcp.clone();
             let context = AppContext::new(config, state_store, initial_state);
             let automatic_network_context = context.clone();
             tauri::async_runtime::spawn(async move {
@@ -428,7 +429,7 @@ fn main() {
             });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
-            mcp::initialize(app.handle(), context.clone());
+            mcp::initialize(app.handle(), context.clone(), mcp_config);
             services::feedback::FeedbackProgramService::start(app.handle().clone(), context.clone());
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 

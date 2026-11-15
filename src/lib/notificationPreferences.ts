@@ -10,20 +10,23 @@ const DEFAULTS: NotificationPreferences = {
   provisioning: true,
   budget: true,
 };
+let current = { ...DEFAULTS };
+let unsaved: Partial<NotificationPreferences> = {};
 
 export function getNotificationPreferences(): NotificationPreferences {
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null") as Partial<NotificationPreferences> | null;
-    return {
-      network: parsed?.network ?? DEFAULTS.network,
-      storage: parsed?.storage ?? DEFAULTS.storage,
-      instances: parsed?.instances ?? DEFAULTS.instances,
-      provisioning: parsed?.provisioning ?? DEFAULTS.provisioning,
-      budget: parsed?.budget ?? DEFAULTS.budget,
-    };
+    const parsed: unknown = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? "null");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const kind of Object.keys(DEFAULTS) as NotificationKind[]) {
+        const value = (parsed as Record<string, unknown>)[kind];
+        if (typeof value === "boolean") current[kind] = value;
+      }
+    }
   } catch {
-    return { ...DEFAULTS };
+    // Retain the user's current choice instead of reverting a denial to defaults.
   }
+  current = { ...current, ...unsaved };
+  return { ...current };
 }
 
 export function isNotificationEnabled(kind: NotificationKind): boolean {
@@ -32,10 +35,13 @@ export function isNotificationEnabled(kind: NotificationKind): boolean {
 
 export function setNotificationPreference(kind: NotificationKind, enabled: boolean): NotificationPreferences {
   const next = { ...getNotificationPreferences(), [kind]: enabled };
+  current = next;
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    unsaved = {};
   } catch {
     // Keep the preference effective for the current process even if storage is unavailable.
+    unsaved[kind] = enabled;
   }
-  return next;
+  return { ...next };
 }
