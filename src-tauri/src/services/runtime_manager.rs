@@ -109,8 +109,24 @@ const SOURCES: &[(&str, &[u8])] = &[
         include_bytes!("../../../runtime-agent/src/session.rs"),
     ),
     (
+        "runtime-agent/src/elf.rs",
+        include_bytes!("../../../runtime-agent/src/elf.rs"),
+    ),
+    (
+        "runtime-agent/src/maintenance.rs",
+        include_bytes!("../../../runtime-agent/src/maintenance.rs"),
+    ),
+    (
         "runtime-agent/src/store.rs",
         include_bytes!("../../../runtime-agent/src/store.rs"),
+    ),
+    (
+        "runtime-agent/src/portable.rs",
+        include_bytes!("../../../runtime-agent/src/portable.rs"),
+    ),
+    (
+        "runtime-agent/src/workspace.rs",
+        include_bytes!("../../../runtime-agent/src/workspace.rs"),
     ),
     (
         "runtime-agent/src/artifact.rs",
@@ -131,6 +147,14 @@ const SOURCES: &[(&str, &[u8])] = &[
     (
         "runtime-images/ubuntu24/packages.txt",
         include_bytes!("../../../runtime-images/ubuntu24/packages.txt"),
+    ),
+    (
+        "runtime-images/ubuntu24/prerequisites.json",
+        include_bytes!("../../../runtime-images/ubuntu24/prerequisites.json"),
+    ),
+    (
+        "scripts/runtime/maintain-runtime.py",
+        include_bytes!("../../../scripts/runtime/maintain-runtime.py"),
     ),
     (
         "runtime-images/ubuntu24/glibc-probe.c",
@@ -230,6 +254,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(paths.contains(&"runtime-agent/src/gui.py".into()));
         assert!(paths.contains(&"runtime-agent/Cargo.lock".into()));
+        assert!(paths.contains(&"runtime-agent/src/portable.rs".into()));
+        assert!(paths.contains(&"runtime-agent/src/workspace.rs".into()));
         assert!(paths.contains(&"runtime-contracts/src/lib.rs".into()));
         assert!(paths.contains(&"scripts/runtime/install-cloud-runtime.sh".into()));
         assert!(paths

@@ -460,11 +460,13 @@ mod tests {
     }
 
     fn test_home(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "noland-discovery-{name}-{}-{}",
-            std::process::id(),
-            uuid::Uuid::new_v4()
-        ))
+        std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!(
+                "noland-discovery-{name}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ))
     }
 
     fn native_identity(executable: PathBuf) -> AppIdentity {

@@ -291,6 +291,10 @@ mod platform {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::thread::{self, JoinHandle};
+    use std::time::Instant;
+
+    use crate::host_path::platform::{context_matches, process_identity, ProcessIdentity};
+    use crate::{HostPathResolver, PathContext};
 
     use libbpf_rs::{
         Link, MapCore, MapFlags, Object, ObjectBuilder, OpenObject, RingBufferBuilder,
@@ -458,10 +462,16 @@ mod platform {
                 .add(&events_map, move |bytes| {
                     match parse_record(bytes) {
                         Ok(mut raw) => {
-                            path_resolver.enrich(&mut raw);
+                            if !path_resolver.enrich(&mut raw) {
+                                callback_hub.report_filesystem_gap(raw.tgid as i32);
+                                return 0;
+                            }
                             let at = clock.at(raw.timestamp_ns);
+                            let pid = raw.tgid as i32;
                             if let Some(event) = normalize(raw, at) {
                                 dispatch(&callback_hub, event);
+                            } else {
+                                callback_hub.report_filesystem_gap(pid);
                             }
                         }
                         Err(error) => {
@@ -540,23 +550,63 @@ mod platform {
 
     #[derive(Default)]
     struct ProcPathResolver {
-        cache: HashMap<(i32, u64, u64), PathBuf>,
+        cache: HashMap<(ProcessIdentity, u64, u64), (PathBuf, Instant)>,
+        host_paths: HostPathResolver,
     }
 
     impl ProcPathResolver {
         const MAX_CACHE_ENTRIES: usize = 16_384;
 
-        fn cache_path(&mut self, key: (i32, u64, u64), path: PathBuf) {
+        fn cache_path(&mut self, key: (ProcessIdentity, u64, u64), path: PathBuf) {
             if self.cache.len() >= Self::MAX_CACHE_ENTRIES && !self.cache.contains_key(&key) {
                 if let Some(expired) = self.cache.keys().next().copied() {
                     self.cache.remove(&expired);
                 }
             }
-            self.cache.insert(key, path);
+            self.cache.insert(key, (path, Instant::now()));
         }
 
-        fn enrich(&mut self, raw: &mut RawEvent) {
+        fn enrich(&mut self, raw: &mut RawEvent) -> bool {
             let tgid = i32::try_from(raw.tgid).unwrap_or(i32::MAX);
+            if matches!(
+                raw.kind,
+                RawEventKind::ProcessExec | RawEventKind::ProcessFork | RawEventKind::ProcessExit
+            ) {
+                self.cache
+                    .retain(|(identity, _, _), _| identity.pid != tgid);
+                self.host_paths.invalidate_pid(tgid);
+                return true;
+            }
+            // Threads can have a different mount namespace from their leader.
+            // Use the originating task for procfs, retaining TGID for attribution.
+            let tgid = if raw.pid != 0 {
+                i32::try_from(raw.pid).unwrap_or(i32::MAX)
+            } else {
+                tgid
+            };
+            let context = PathContext {
+                mount_namespace: (raw.mnt_ns != 0).then_some(raw.mnt_ns as u64),
+                monotonic_ns: Some(raw.timestamp_ns),
+                inode: (raw.ino != 0).then_some(raw.ino),
+                device: (raw.dev != 0).then_some(raw.dev),
+                parent_identity: raw.flags & FLAG_PARENT_AND_NAME != 0,
+                allow_missing: matches!(
+                    raw.kind,
+                    RawEventKind::FsRename
+                        | RawEventKind::FsUnlink
+                        | RawEventKind::FsRmdir
+                        | RawEventKind::FsMkdir
+                ),
+                ..PathContext::default()
+            };
+            if process_identity(std::path::Path::new("/proc"), tgid)
+                .is_some_and(|identity| !context_matches(identity, context))
+            {
+                self.cache
+                    .retain(|(identity, _, _), _| identity.pid != tgid);
+                self.host_paths.invalidate_pid(tgid);
+                return false;
+            }
             if !raw.path.is_empty()
                 && matches!(raw.kind, RawEventKind::FsOpen | RawEventKind::FsCreate)
             {
@@ -566,15 +616,17 @@ mod platform {
                     .or_else(|| resolve_open_input(tgid, raw.offset as i64 as i32, &supplied))
                 {
                     if metadata_matches_for_process(tgid, &path, raw.dev, raw.ino) {
-                        self.cache_path((tgid, raw.dev, raw.ino), path.clone());
+                        if let Some(identity) =
+                            process_identity(std::path::Path::new("/proc"), tgid)
+                        {
+                            self.cache_path((identity, raw.dev, raw.ino), path.clone());
+                        }
                     }
                     raw.path = path_bytes(path);
                 }
             } else if raw.path.is_empty() {
-                if let Some(mut path) = self.resolve(tgid, raw.dev, raw.ino) {
-                    if raw.flags & FLAG_PARENT_AND_NAME != 0 && !raw.name.is_empty() {
-                        path.push(bytes_path(raw.name.clone()).unwrap_or_default());
-                    }
+                if let Some(path) = self.resolve(tgid, raw.dev, raw.ino) {
+                    // Keep the anchor separate: event_path appends the name once.
                     raw.path = path_bytes(path);
                 } else if raw.flags & FLAG_PARENT_AND_NAME != 0 {
                     raw.name.clear();
@@ -585,22 +637,56 @@ mod platform {
                 && raw.dest_path.is_empty()
                 && !raw.dest_name.is_empty()
             {
-                if let Some(mut path) = self.resolve(tgid, raw.offset, raw.length) {
-                    path.push(bytes_path(raw.dest_name.clone()).unwrap_or_default());
+                if let Some(path) = self.resolve(tgid, raw.offset, raw.length) {
                     raw.dest_path = path_bytes(path);
                 } else {
                     raw.dest_name.clear();
                 }
             }
+            let path = event_path(&raw.path, &raw.name, raw.flags);
+            let Ok(path) = self.host_paths.resolve(tgid, &path, context) else {
+                return false;
+            };
+            let destination = if raw.kind == RawEventKind::FsRename {
+                let destination = event_path(&raw.dest_path, &raw.dest_name, raw.flags);
+                let destination_context = PathContext {
+                    device: (raw.offset != 0).then_some(raw.offset),
+                    inode: (raw.length != 0).then_some(raw.length),
+                    ..context
+                };
+                let Ok(destination) =
+                    self.host_paths
+                        .resolve(tgid, &destination, destination_context)
+                else {
+                    return false;
+                };
+                Some(destination)
+            } else {
+                None
+            };
+            raw.path = path_bytes(path);
+            raw.dest_path = destination.map(path_bytes).unwrap_or_default();
+            raw.name.clear();
+            raw.dest_name.clear();
+            raw.flags &= !FLAG_PARENT_AND_NAME;
+            // Parent anchor metadata is not the mutated leaf's metadata.
+            if context.parent_identity {
+                raw.ino = 0;
+                raw.dev = 0;
+            }
+            true
         }
 
         fn resolve(&mut self, tgid: i32, device: u64, inode: u64) -> Option<PathBuf> {
             if tgid <= 0 || device == 0 || inode == 0 {
                 return None;
             }
-            let key = (tgid, device, inode);
-            if let Some(path) = self.cache.get(&key) {
-                if metadata_matches_for_process(tgid, path, device, inode) {
+            let identity = process_identity(std::path::Path::new("/proc"), tgid)?;
+            let key = (identity, device, inode);
+            if let Some((path, cached_at)) = self.cache.get(&key) {
+                if cached_at.elapsed() < Duration::from_secs(30)
+                    && metadata_matches_for_process(tgid, path, device, inode)
+                {
                     return Some(path.clone());
                 }
                 self.cache.remove(&key);
@@ -610,7 +696,7 @@ mod platform {
             for special in ["cwd", "root", "exe"] {
                 let link = proc_root.join(special);
                 if metadata_matches(&link, device, inode) {
-                    let path = clean_proc_link(fs::read_link(&link).ok()?);
+                    let path = live_proc_link(fs::read_link(&link).ok()?)?;
                     self.cache_path(key, path.clone());
                     return Some(path);
                 }
@@ -622,7 +708,9 @@ mod platform {
                 if !metadata_matches(&link, device, inode) {
                     continue;
                 }
-                let path = clean_proc_link(fs::read_link(&link).ok()?);
+                let Some(path) = fs::read_link(&link).ok().and_then(live_proc_link) else {
+                    continue;
+                };
                 self.cache_path(key, path.clone());
                 return Some(path);
             }
@@ -635,7 +723,7 @@ mod platform {
             return None;
         }
         if supplied.is_absolute() {
-            return Some(normalize_lexically(supplied));
+            return Some(supplied.to_path_buf());
         }
 
         let base_link = if dfd == libc::AT_FDCWD {
@@ -645,26 +733,9 @@ mod platform {
         } else {
             return None;
         };
-        let base = clean_proc_link(fs::read_link(base_link).ok()?);
-        Some(normalize_lexically(&base.join(supplied)))
-    }
-
-    fn normalize_lexically(path: &std::path::Path) -> PathBuf {
-        use std::path::Component;
-
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                Component::CurDir => {}
-                Component::ParentDir => {
-                    normalized.pop();
-                }
-                Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
-                    normalized.push(component.as_os_str());
-                }
-            }
-        }
-        normalized
+        let base = live_proc_link(fs::read_link(base_link).ok()?)?;
+        // Do not erase '..' across a symlink before namespace validation.
+        Some(base.join(supplied))
     }
 
     fn metadata_matches_for_process(
@@ -673,7 +744,7 @@ mod platform {
         device: u64,
         inode: u64,
     ) -> bool {
-        if metadata_matches(path, device, inode) {
+        if !crate::is_runtime_namespace_path(path) && metadata_matches(path, device, inode) {
             return true;
         }
         if !path.is_absolute() || tgid <= 0 {
@@ -690,12 +761,8 @@ mod platform {
             .unwrap_or(false)
     }
 
-    fn clean_proc_link(path: PathBuf) -> PathBuf {
-        const DELETED: &str = " (deleted)";
-        let text = path.to_string_lossy();
-        text.strip_suffix(DELETED)
-            .map(PathBuf::from)
-            .unwrap_or(path)
+    fn live_proc_link(path: PathBuf) -> Option<PathBuf> {
+        (!path.as_os_str().as_encoded_bytes().ends_with(b" (deleted)")).then_some(path)
     }
 
     fn path_bytes(path: PathBuf) -> Vec<u8> {
@@ -1010,7 +1077,7 @@ mod platform {
         fn new() -> Self {
             Self {
                 wall: Utc::now(),
-                boot_ns: boottime_ns(),
+                boot_ns: monotonic_ns(),
             }
         }
 
@@ -1021,13 +1088,13 @@ mod platform {
         }
     }
 
-    fn boottime_ns() -> u64 {
+    fn monotonic_ns() -> u64 {
         let mut time = libc::timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
         // SAFETY: `time` is a valid writable timespec pointer.
-        let result = unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut time) };
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time) };
         if result == 0 {
             (time.tv_sec as u64)
                 .saturating_mul(1_000_000_000)

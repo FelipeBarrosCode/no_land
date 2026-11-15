@@ -16,6 +16,48 @@ keys, or manual activation are required. The normal **Launch PC** and Steam
 routes are unchanged. Windows `.exe`, ARM and 32-bit applications are not
 supported by this runtime route.
 
+### Runtime updates and app prerequisites
+
+The cloud launcher has **Update Runtime** and **Roll Back** actions. Updates fetch
+Ubuntu 24.04 library/security packages from the official, signature-verified
+Ubuntu repositories. They prepare and validate a **new, inactive image** before
+activation. Running applications retain their old image; the previous image and
+all app registrations, saves and application files are preserved. This updates
+the runtime environment, **not the Noland Connect app or launcher binary**.
+
+Dropping an app or selecting **Run** first inspects its ELF dependency metadata
+without executing `ldd` or app-provided installation scripts. AppImages are
+extracted using the existing unprivileged runtime route before inspecting their
+payload. Missing supported libraries are mapped to a bundled, approved Ubuntu
+package catalog. The launcher shows the package list and requires approval before
+downloading. Installation affects only a new runtime image, not the host libc,
+NVIDIA driver, Sunshine or desktop services. A changed app/dependency plan requires
+fresh approval. Unknown libraries are reported rather than guessed or installed
+from arbitrary URLs; the user may explicitly try launching without installation.
+
+Inspection is bounded and best-effort: dynamically chosen plugins, `dlopen`
+dependencies, custom launch wrappers, unsupported ABI versions and non-Ubuntu
+dependencies may still need app-specific attention. No generic compatibility
+guarantee is implied. Failed package operations never activate an incomplete
+image. Root-owned diagnostic output is in
+`/var/log/noland-runtime-maintenance.log`.
+
+The maintenance helper and catalog are installed by the new provisioning bundle;
+older companions must be updated through Noland Connect provisioning first. No
+extra runtime release server or signing configuration is required. The fixed
+helper accepts only a protected system-image ID and allowlisted package IDs,
+never a dropped app path or application command. Downloads may finish if the
+launcher window closes; existing applications are not stopped.
+
+Equivalent cloud-PC commands:
+
+```sh
+noland-runtime update --approve
+noland-runtime inspect-app --app-id <registered-id>
+noland-runtime install-prerequisites --app-id <registered-id> --approve --expected-plan <approvalDigest>
+noland-runtime rollback
+```
+
 ## Automatic provisioning
 
 Both the new-instance and existing-instance provisioning flows:
@@ -69,6 +111,23 @@ X11/audio session are required. Diagnostics check glibc, X11, hardware OpenGL,
 Vulkan, PulseAudio and a small visible GPU-rendered surface before a launch.
 Unsupported hosts produce an error instead of being labelled gaming-ready.
 
+### CPU and GPU access
+
+The runtime adds no CPU quota, core pinning, low-priority scheduling, application
+thread-count cap, GPU/VRAM quota, power/clock limit or forced FPS limit. Apps run
+natively on the parent's permitted CPUs and access its granted NVIDIA/render
+devices directly with matching host driver libraries. The clean environment does
+not inherit software-rendering or thread-limit overrides. Diagnostics compare
+CPU affinity inside/outside the runtime and require hardware OpenGL/Vulkan; a
+software renderer is rejected, not silently used as a fallback.
+
+The allocated cloud-PC resources remain the ceiling: provider/parent cgroups,
+device permissions, driver limits and contention with streaming or other apps
+still apply. Game-selected FPS/VSync settings are not overridden. Bounded Shared
+Storage workers are separate from application CPU/GPU access; their limits must
+not be applied to runtime games. No host scheduling, GPU clocks or power settings
+are changed automatically.
+
 One live cloud session and Lichii startup were verified on 2026-11-09 after
 repairing image/driver dependencies and a timezone bind target. See
 [the validation record](runtime-lichii-validation.md). No game was loaded;
@@ -88,12 +147,23 @@ testing. Session checks are not general application-compatibility guarantees.
 ~/.local/share/noland-runtime/app-data/<id>/     per-app HOME and saves
 ~/.local/share/noland-runtime/cache/             extracted AppImages
 ~/.local/state/noland-runtime/                  diagnostics and launch logs
-/run/user/<uid>/noland-runtime/<session>/        ephemeral display credentials/driver bindings
+~/.local/state/noland-runtime/sessions/<id>/     ephemeral display credentials/driver bindings
 ```
 
-When `/run/user/<uid>` is unavailable, private session resources use the user's
-state directory. A supervisor owns them until the app exits; closing the launcher
-does not kill the application. A hard crash may leave stale session directories.
+Private session resources always share the user's state filesystem, without a
+separate Noland capacity limit. Large driver copies must not consume the small
+system-managed `/run/user/<uid>` tmpfs quota. Available disk capacity and OS memory
+limits still apply; this does not reserve RAM or change system-wide tmpfs limits.
+A supervisor owns each workspace until the app exits; closing the launcher does
+not kill the application. A hard crash may leave stale session directories. Old
+`/run/user/<uid>/noland-runtime` workspaces are not automatically deleted or moved,
+because an older running supervisor may still own them.
+
+Runtime storage capacity is not additional RAM. A large tmpfs can still exhaust
+physical memory, particularly on machines without swap. An application's OOM
+kill may also restart a desktop service configured with `OOMPolicy=stop` and
+`Restart=on-failure`; that is a session restart, not necessarily a machine reboot.
+Changing service isolation or swap requires a separate, explicit operation.
 
 Back up app metadata, source applications and `app-data`, not runtime images,
 caches, machine-specific drivers or credentials. Automatic per-runtime-app
@@ -121,3 +191,9 @@ permission changes, runtime registration and provisioning wiring. Linux CI opens
 the actual GTK drop window under Xvfb before an image is installed. Full cloud
 provisioning (package downloads/chroot permissions), GPU launch, audible audio,
 stream capture and persistence must also be tested on a live supported instance.
+
+Local validation on 2026-11-12 passed 32 Rust tests, nine provisioning-policy
+tests and 13 Python tests; runtime Clippy passed with warnings denied. CPU-access
+fixtures cover sparse/full allocations and narrowing failures, and GPU binding
+tests preserve the entire granted device set. These checks do not establish live
+CPU/GPU throughput; no remote scheduling, power setting or service was changed.

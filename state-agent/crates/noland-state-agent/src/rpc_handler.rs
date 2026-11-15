@@ -12,16 +12,23 @@ use noland_rpc::{
     RpcRequest, VerifyBackupCommitResult,
 };
 use noland_state_core::*;
-use noland_storage::{
-    load_catalog, write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider,
-};
+use noland_storage::{write_guarded_ephemeral_session, RcloneStorage, SharedStorageProvider};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::operation_manager::{CancelOutcome, OperationLane};
 use crate::StateAgent;
 
-const AGENT_API_VERSION: u64 = 18;
+mod deletion;
+mod retry;
+mod submission;
+
+#[cfg(test)]
+mod progress_tests;
+
+use retry::{overlay_retry_secrets, retry_descriptor_for, sanitize_retry_params};
+
+const AGENT_API_VERSION: u64 = 22;
 const DEFAULT_RECENT_OPERATION_LIMIT: usize = 50;
 const MAX_DIAGNOSTIC_OPERATION_LIMIT: usize = 1_000;
 
@@ -32,8 +39,10 @@ impl RpcHandler for AgentRpc {
     async fn handle(&self, request: &RpcRequest) -> Result<serde_json::Value> {
         let agent = &self.0;
         match request.method.as_str() {
+            "PrepareDeletion" => deletion::prepare(agent, &request.params).await,
+            "StartDeletion" => deletion::start(agent, &request.params).await,
             "GetHealth" => {
-                let unfinished = agent.db.unfinished_operations()?.len();
+                let unfinished = agent.db.unfinished_operation_count()?;
                 let observer = agent.observer.status(agent.hub.queue.dropped());
                 let mut health = serde_json::to_value(HealthStatus {
                     status: if observer.state == crate::observer::ObserverCapabilityState::Active {
@@ -51,6 +60,10 @@ impl RpcHandler for AgentRpc {
                     .as_object_mut()
                     .expect("HealthStatus serializes as an object");
                 fields.insert("agent_api_version".into(), AGENT_API_VERSION.into());
+                fields.insert(
+                    "active_operations".into(),
+                    json!(agent.operations.running_snapshots().len()),
+                );
                 fields.insert("observer".into(), serde_json::to_value(observer)?);
                 Ok(health)
             }
@@ -117,48 +130,95 @@ impl RpcHandler for AgentRpc {
             }
             "GetDirtyApps" => Ok(serde_json::to_value(agent.db.list_dirty_apps()?)?),
             "StartBackup" => {
+                let _submission = submission::CREATION.lock();
+                let retry_operation_id = internal_retry_operation_id(&request.params)?;
+                let submission_id = request
+                    .params
+                    .get("client_operation_id")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|id| Uuid::parse_str(id).ok());
+                let prior_submission = retry_operation_id
+                    .or(submission_id)
+                    .map(|id| agent.db.get_operation(id))
+                    .transpose()?
+                    .flatten();
+                // New backups have one complete selection. Existing identities
+                // retain their historical settings for replay/resume validation.
+                let legacy_selection = prior_submission.as_ref().is_some_and(|operation| {
+                    operation.detail_json["performance_mode"].as_str() != Some("automatic")
+                });
+                let cache_policy = crate::backup_policy::RegenerableCachePolicy::from_value(
+                    legacy_selection
+                        .then(|| request.params.get("regenerable_caches"))
+                        .flatten(),
+                )?;
                 let app_id_raw = request
                     .params
                     .get("app_id")
                     .and_then(|v| v.as_str())
                     .unwrap_or("*");
-                let mode = BackupMode::parse(
-                    request
-                        .params
-                        .get("mode")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("personal_state"),
-                );
-                let performance = BackupPerformanceMode::parse(
-                    request
-                        .params
-                        .get("performance_mode")
-                        .and_then(|value| value.as_str())
-                        .unwrap_or("balanced"),
-                );
+                let mode = if legacy_selection {
+                    BackupMode::parse(
+                        request
+                            .params
+                            .get("mode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("personal_state"),
+                    )
+                } else {
+                    BackupMode::CompleteApplication
+                };
+                let performance = if legacy_selection {
+                    BackupPerformanceMode::parse(
+                        request
+                            .params
+                            .get("performance_mode")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("balanced"),
+                    )
+                } else {
+                    BackupPerformanceMode::Automatic
+                };
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                let retry_operation_id = internal_retry_operation_id(&request.params)?;
-                let op_id = retry_operation_id.unwrap_or_else(uuid::Uuid::new_v4);
                 let app_id = if app_id_raw == "*" || app_id_raw == "_all" {
                     None
                 } else {
                     Some(AppId(app_id_raw.into()))
                 };
-                upsert_queued_operation(
+                let detail = json!({
+                    "app_id": app_id.as_ref().map(|id| id.as_str()).unwrap_or("*"),
+                    "mode": mode.as_str(),
+                    "performance_mode": performance.as_str(),
+                    "regenerable_caches": cache_policy.as_str(),
+                });
+                let (op_id, binding) = match submission::resolve(
+                    &agent.db,
+                    &request.params,
+                    &session,
+                    &master,
+                    "backup",
+                    &detail,
+                    retry_operation_id,
+                )? {
+                    submission::Claim::Replay(operation) => {
+                        return serialize_operation(agent, operation, false)
+                    }
+                    submission::Claim::New {
+                        operation_id,
+                        binding,
+                    } => (operation_id, binding),
+                };
+                let reset_journal_entries = upsert_queued_operation(
                     agent,
                     op_id,
                     "backup",
                     app_id.clone(),
                     BackupState::Queued.as_str(),
-                    json!({
-                        "app_id": app_id_raw,
-                        "mode": mode.as_str(),
-                        "performance_mode": performance.as_str(),
-                    }),
+                    submission::bind_details(detail, op_id, binding),
                     retry_operation_id.is_some(),
                 )?;
-                remember_retry_request(agent, op_id, "StartBackup", &request.params);
+                remember_retry_request(agent, op_id, "StartBackup", &request.params)?;
 
                 let all_apps = app_id.is_none();
                 let task_agent = Arc::clone(agent);
@@ -259,9 +319,11 @@ impl RpcHandler for AgentRpc {
                     "operation_id": op_id,
                     "state": BackupState::Queued.as_str(),
                     "stage": BackupState::Queued.as_str(),
+                    "reset_journal_entries": reset_journal_entries,
                 }))
             }
             "StartSeal" => {
+                let _submission = submission::CREATION.lock();
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
                 let mode = BackupMode::parse(
@@ -272,25 +334,47 @@ impl RpcHandler for AgentRpc {
                         .unwrap_or("personal_state"),
                 );
                 let retry_operation_id = internal_retry_operation_id(&request.params)?;
-                let operation_id = retry_operation_id.unwrap_or_else(uuid::Uuid::new_v4);
-                upsert_queued_operation(
+                let selection = json!({"app_id": "*", "mode": mode.as_str()});
+                let (operation_id, binding) = match submission::resolve(
+                    &agent.db,
+                    &request.params,
+                    &session,
+                    &master,
+                    "seal",
+                    &selection,
+                    retry_operation_id,
+                )? {
+                    submission::Claim::Replay(operation) => {
+                        return serialize_operation(agent, operation, false)
+                    }
+                    submission::Claim::New {
+                        operation_id,
+                        binding,
+                    } => (operation_id, binding),
+                };
+                let mut detail = submission::bind_details(selection, operation_id, binding);
+                detail["session_operation"] = json!(session.operation_id);
+                let reset_journal_entries = upsert_queued_operation(
                     agent,
                     operation_id,
                     "seal",
                     None,
                     SealState::Requested.as_str(),
-                    json!({"session_operation": session.operation_id}),
+                    detail,
                     retry_operation_id.is_some(),
                 )?;
                 set_operation_phase(agent, operation_id, "queued", "Seal queued")?;
-                remember_retry_request(agent, operation_id, "StartSeal", &request.params);
+                remember_retry_request(agent, operation_id, "StartSeal", &request.params)?;
 
                 let task_agent = Arc::clone(agent);
                 let cancelled_agent = Arc::clone(agent);
                 let terminated_agent = Arc::clone(agent);
                 let started = Instant::now();
-                let spawned = agent.operations.spawn_cancellable(
+                // A seal performs backups and mutates the catalog. Share the
+                // transfer lane, including queueing/cancellation, with backups.
+                let spawned = agent.operations.spawn_cancellable_on_lane(
                     operation_id,
+                    OperationLane::Transfer,
                     async move {
                         set_operation_phase_best_effort(
                             &task_agent,
@@ -298,11 +382,12 @@ impl RpcHandler for AgentRpc {
                             "sealing",
                             "Seal in progress",
                         );
-                        match crate::seal::run_seal_with_session(
+                        match crate::seal::run_seal_with_session_for_operation(
                             &task_agent,
                             &session,
                             &master,
                             mode,
+                            Some(operation_id),
                         )
                         .await
                         {
@@ -317,6 +402,9 @@ impl RpcHandler for AgentRpc {
                                 }),
                                 started,
                             ),
+                            Err(_) if task_agent.operations.cancel_requested(operation_id) => {
+                                mark_operation_cancelled(&task_agent, operation_id);
+                            }
                             Err(error) => mark_operation_failed(
                                 &task_agent,
                                 operation_id,
@@ -335,7 +423,11 @@ impl RpcHandler for AgentRpc {
                         "operation {operation_id} is already running"
                     )));
                 }
-                Ok(queued_response(operation_id, SealState::Requested.as_str()))
+                Ok(queued_response(
+                    operation_id,
+                    SealState::Requested.as_str(),
+                    reset_journal_entries,
+                ))
             }
             "StartCheckpoint" => {
                 let session = optional_session(&request.params)?;
@@ -345,7 +437,7 @@ impl RpcHandler for AgentRpc {
                     .transpose()?;
                 let retry_operation_id = internal_retry_operation_id(&request.params)?;
                 let operation_id = retry_operation_id.unwrap_or_else(uuid::Uuid::new_v4);
-                upsert_queued_operation(
+                let reset_journal_entries = upsert_queued_operation(
                     agent,
                     operation_id,
                     "checkpoint",
@@ -358,7 +450,7 @@ impl RpcHandler for AgentRpc {
                     retry_operation_id.is_some(),
                 )?;
                 set_operation_phase(agent, operation_id, "queued", "Checkpoint queued")?;
-                remember_retry_request(agent, operation_id, "StartCheckpoint", &request.params);
+                remember_retry_request(agent, operation_id, "StartCheckpoint", &request.params)?;
 
                 let task_agent = Arc::clone(agent);
                 let cancelled_agent = Arc::clone(agent);
@@ -422,9 +514,14 @@ impl RpcHandler for AgentRpc {
                         "operation {operation_id} is already running"
                     )));
                 }
-                Ok(queued_response(operation_id, BackupState::Queued.as_str()))
+                Ok(queued_response(
+                    operation_id,
+                    BackupState::Queued.as_str(),
+                    reset_journal_entries,
+                ))
             }
             "StartRestore" => {
+                let _submission = submission::CREATION.lock();
                 let app_id = AppId(req_str(&request.params, "app_id")?);
                 let bundle_id = uuid::Uuid::parse_str(&req_str(&request.params, "bundle_id")?)
                     .map_err(|e| StateError::Invalid(e.to_string()))?;
@@ -441,25 +538,42 @@ impl RpcHandler for AgentRpc {
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
                 let retry_operation_id = internal_retry_operation_id(&request.params)?;
-                let operation_id = retry_operation_id.unwrap_or_else(uuid::Uuid::new_v4);
-                upsert_queued_operation(
+                let detail = json!({
+                    "app_id": app_id.0.clone(),
+                    "mode": match mode {
+                        RestoreMode::CompleteApplication => "complete_application",
+                        RestoreMode::Custom => "custom",
+                        RestoreMode::PersonalState => "personal_state",
+                    },
+                    "bundle_id": bundle_id,
+                });
+                let (operation_id, binding) = match submission::resolve(
+                    &agent.db,
+                    &request.params,
+                    &session,
+                    &master,
+                    "restore",
+                    &detail,
+                    retry_operation_id,
+                )? {
+                    submission::Claim::Replay(operation) => {
+                        return serialize_operation(agent, operation, false)
+                    }
+                    submission::Claim::New {
+                        operation_id,
+                        binding,
+                    } => (operation_id, binding),
+                };
+                let reset_journal_entries = upsert_queued_operation(
                     agent,
                     operation_id,
                     "restore",
                     Some(app_id.clone()),
                     RestoreState::Queued.as_str(),
-                    json!({
-                        "app_id": app_id.0.clone(),
-                        "mode": match mode {
-                            RestoreMode::CompleteApplication => "complete_application",
-                            RestoreMode::Custom => "custom",
-                            RestoreMode::PersonalState => "personal_state",
-                        },
-                        "bundle_id": bundle_id,
-                    }),
+                    submission::bind_details(detail, operation_id, binding),
                     retry_operation_id.is_some(),
                 )?;
-                remember_retry_request(agent, operation_id, "StartRestore", &request.params);
+                remember_retry_request(agent, operation_id, "StartRestore", &request.params)?;
 
                 let task_agent = Arc::clone(agent);
                 let cancelled_agent = Arc::clone(agent);
@@ -504,10 +618,26 @@ impl RpcHandler for AgentRpc {
                     "operation_id": operation_id,
                     "state": RestoreState::Queued.as_str(),
                     "stage": RestoreState::Queued.as_str(),
+                    "reset_journal_entries": reset_journal_entries,
                 }))
             }
             "GetOperationStatus" | "GetBackupStatus" | "GetRestoreStatus" | "GetSealStatus" => {
                 let operation_id = operation_id_from_params(&request.params)?;
+                let projection = request
+                    .params
+                    .get("projection")
+                    .and_then(serde_json::Value::as_str);
+                if matches!(projection, Some("progress" | "matching")) {
+                    let operation = agent
+                        .db
+                        .projected_operation(operation_id, projection == Some("matching"))?
+                        .ok_or_else(|| StateError::NotFound(operation_id.to_string()))?;
+                    return if projection == Some("matching") {
+                        Ok(serialize_matching_operation(agent, &operation))
+                    } else {
+                        serialize_operation_progress(agent, &operation)
+                    };
+                }
                 let operation = agent
                     .db
                     .get_operation(operation_id)?
@@ -569,7 +699,7 @@ impl RpcHandler for AgentRpc {
                         operation.state
                     )));
                 }
-                let descriptor = retry_descriptor_for(agent, &operation)?;
+                let descriptor = retry_descriptor_for(&operation)?;
                 let mut params = descriptor.params;
                 overlay_retry_secrets(&mut params, &request.params)?;
                 let object = params.as_object_mut().ok_or_else(|| {
@@ -584,7 +714,6 @@ impl RpcHandler for AgentRpc {
                     "_retry_operation_id".into(),
                     serde_json::Value::String(operation_id.to_string()),
                 );
-                let reset_journal_entries = reset_retryable_journal_entries(agent, operation_id)?;
                 let retry_request = RpcRequest {
                     id: request.id.clone(),
                     method: descriptor.method,
@@ -594,7 +723,6 @@ impl RpcHandler for AgentRpc {
                 if let Some(fields) = response.as_object_mut() {
                     fields.insert("retried".into(), true.into());
                     fields.insert("retried_operation_id".into(), json!(operation_id));
-                    fields.insert("reset_journal_entries".into(), reset_journal_entries.into());
                 }
                 Ok(response)
             }
@@ -605,7 +733,11 @@ impl RpcHandler for AgentRpc {
                     .get("app_id")
                     .and_then(|value| value.as_str())
                     .map(|value| AppId(value.to_string()));
-                let operations = if let Some(app_id) = app_id.as_ref() {
+                let operations = if matching_projection(&request.params) {
+                    agent
+                        .db
+                        .recent_matching_operations(app_id.as_ref(), limit)?
+                } else if let Some(app_id) = app_id.as_ref() {
                     agent.db.recent_operations_for_app(app_id, limit)?
                 } else {
                     agent.db.recent_operations(limit)?
@@ -617,7 +749,13 @@ impl RpcHandler for AgentRpc {
                     .unwrap_or(false);
                 let operations = operations
                     .into_iter()
-                    .map(|operation| serialize_operation(agent, operation, include_journal))
+                    .map(|operation| {
+                        if matching_projection(&request.params) {
+                            Ok(serialize_matching_operation(agent, &operation))
+                        } else {
+                            serialize_operation(agent, operation, include_journal)
+                        }
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 Ok(json!({
                     "operations": operations,
@@ -634,11 +772,7 @@ impl RpcHandler for AgentRpc {
             "ListCloudCatalog" => {
                 let session = parse_session(&request.params)?;
                 let master = master_from_params(&request.params, agent)?;
-                let (config, _session_guard) =
-                    write_guarded_ephemeral_session(&agent.config.paths.run_root, &session)?;
-                let storage = RcloneStorage::try_from_session(&session, &config)?;
-                let catalog = load_catalog(&storage, &master).await;
-                Ok(serde_json::to_value(catalog?)?)
+                crate::cloud_catalog::load(agent, &session, &master).await
             }
             "GetStorageHealth" => {
                 if let Ok(session) = parse_session(&request.params) {
@@ -652,7 +786,7 @@ impl RpcHandler for AgentRpc {
             }
             "ReconcileApp" => {
                 let app_id = AppId(req_str(&request.params, "app_id")?);
-                let n = crate::reconcile::reconcile_app(agent, &app_id)?;
+                let n = crate::reconcile::reconcile_app_for_refresh(agent, &app_id)?;
                 Ok(json!({"reconciled": n}))
             }
             "RefreshIndex" => {
@@ -674,7 +808,8 @@ impl RpcHandler for AgentRpc {
                 for action in actions {
                     match action {
                         ReconciliationAction::Reconcile(app_id) => {
-                            reconciled_paths += crate::reconcile::reconcile_app(agent, &app_id)?;
+                            reconciled_paths +=
+                                crate::reconcile::reconcile_app_for_refresh(agent, &app_id)?;
                             apps_reconciled += 1;
                         }
                         ReconciliationAction::ClearExcluded(app_id) => {
@@ -754,11 +889,16 @@ fn requested_limit(params: &serde_json::Value, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn queued_response(operation_id: uuid::Uuid, state: &str) -> serde_json::Value {
+fn queued_response(
+    operation_id: uuid::Uuid,
+    state: &str,
+    reset_journal_entries: usize,
+) -> serde_json::Value {
     json!({
         "operation_id": operation_id,
         "state": state,
         "stage": state,
+        "reset_journal_entries": reset_journal_entries,
     })
 }
 
@@ -767,20 +907,21 @@ fn remember_retry_request(
     operation_id: uuid::Uuid,
     method: &str,
     params: &serde_json::Value,
-) {
-    let mut in_memory = params.clone();
-    if let Some(fields) = in_memory.as_object_mut() {
-        fields.remove("_retry_operation_id");
-    }
+) -> Result<()> {
+    let sanitized = sanitize_retry_params(params);
     agent
         .operations
-        .remember_retry(operation_id, method, &in_memory);
-    let sanitized = sanitize_retry_params(params);
-    if let Ok(Some(mut operation)) = agent.db.get_operation(operation_id) {
+        .remember_retry(operation_id, method, &sanitized);
+    if let Some(mut operation) = agent.db.get_operation(operation_id)? {
         if !operation.detail_json.is_object() {
             operation.detail_json = json!({});
         }
         if let Some(fields) = operation.detail_json.as_object_mut() {
+            for key in ["client_storage_identity", "client_operation_id"] {
+                if let Some(value) = sanitized.get(key) {
+                    fields.entry(key).or_insert_with(|| value.clone());
+                }
+            }
             fields.insert(
                 "retry".into(),
                 json!({
@@ -789,101 +930,9 @@ fn remember_retry_request(
                 }),
             );
         }
-        if let Err(error) = agent.db.upsert_operation(&operation) {
-            tracing::warn!(%operation_id, %error, "failed to persist retry context");
-        }
-    }
-}
-
-fn sanitize_retry_params(params: &serde_json::Value) -> serde_json::Value {
-    let mut sanitized = params.clone();
-    if let Some(fields) = sanitized.as_object_mut() {
-        fields.remove("_retry_operation_id");
-        fields.remove("session");
-        fields.remove("master_key_hex");
-    }
-    sanitized
-}
-
-fn overlay_retry_secrets(
-    stored: &mut serde_json::Value,
-    incoming: &serde_json::Value,
-) -> Result<()> {
-    let Some(fields) = stored.as_object_mut() else {
-        return Err(StateError::Invalid(
-            "stored retry parameters are not an object".into(),
-        ));
-    };
-    if let Some(session) = incoming.get("session") {
-        fields.insert("session".into(), session.clone());
-    }
-    if let Some(master_key) = incoming.get("master_key_hex") {
-        fields.insert("master_key_hex".into(), master_key.clone());
+        agent.db.upsert_operation(&operation)?;
     }
     Ok(())
-}
-
-fn retry_descriptor_for(
-    agent: &StateAgent,
-    operation: &OperationRecord,
-) -> Result<crate::operation_manager::RetryDescriptor> {
-    let detail = &operation.detail_json;
-    let (method, params) = match operation.kind.as_str() {
-        "backup" => {
-            let app_id = detail
-                .get("app_id")
-                .and_then(|value| value.as_str())
-                .or_else(|| operation.app_id.as_ref().map(|app_id| app_id.0.as_str()))
-                .unwrap_or("*");
-            (
-                "StartBackup",
-                json!({
-                    "app_id": app_id,
-                    "mode": detail.get("mode").and_then(|value| value.as_str()).unwrap_or("personal_state"),
-                    "performance_mode": detail.get("performance_mode").and_then(|value| value.as_str()).unwrap_or("balanced"),
-                }),
-            )
-        }
-        "restore" => {
-            let app_id = detail
-                .get("app_id")
-                .and_then(|value| value.as_str())
-                .or_else(|| operation.app_id.as_ref().map(|app_id| app_id.0.as_str()))
-                .ok_or_else(|| StateError::Invalid("persisted restore app_id is missing".into()))?;
-            let bundle_id = detail
-                .get("bundle_id")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| {
-                    StateError::Invalid("persisted restore bundle_id is missing".into())
-                })?;
-            (
-                "StartRestore",
-                json!({
-                    "app_id": app_id,
-                    "mode": detail.get("mode").and_then(|value| value.as_str()).unwrap_or("personal_state"),
-                    "bundle_id": bundle_id,
-                }),
-            )
-        }
-        kind => {
-            return Err(StateError::Invalid(format!(
-                "operation {} of kind {kind} cannot be reconstructed for retry",
-                operation.operation_id
-            )))
-        }
-    };
-    agent
-        .operations
-        .remember_retry(operation.operation_id, method, &params);
-    agent
-        .operations
-        .retry_descriptor(operation.operation_id)
-        .ok_or_else(|| {
-            StateError::Invalid(format!(
-                "retry context for operation {} is unavailable",
-                operation.operation_id
-            ))
-        })
 }
 
 fn upsert_queued_operation(
@@ -894,7 +943,7 @@ fn upsert_queued_operation(
     state: &str,
     detail: serde_json::Value,
     retry: bool,
-) -> Result<()> {
+) -> Result<usize> {
     let now = chrono::Utc::now();
     let mut operation = if retry {
         let existing = agent
@@ -905,6 +954,12 @@ fn upsert_queued_operation(
             return Err(StateError::Invalid(format!(
                 "operation {operation_id} is {}, not {kind}",
                 existing.kind
+            )));
+        }
+        if agent.operations.is_running(operation_id) || !is_retryable_state(&existing.state) {
+            return Err(StateError::Invalid(format!(
+                "operation {operation_id} is running or cannot be retried from state {}",
+                existing.state
             )));
         }
         existing
@@ -920,10 +975,20 @@ fn upsert_queued_operation(
             detail_json: json!({}),
         }
     };
+    // Admission (including repository/key/selection binding) has succeeded before
+    // touching the journal. A rejected retry must not reset transfer state.
+    let reset_journal_entries = if retry {
+        reset_retryable_journal_entries(agent, operation_id)?
+    } else {
+        0
+    };
     operation.app_id = app_id;
     operation.state = state.to_string();
     operation.updated_at = now;
     operation.last_error = None;
+    if retry {
+        crate::operation_diagnostics::begin_retry(&mut operation);
+    }
     if !operation.detail_json.is_object() {
         operation.detail_json = json!({});
     }
@@ -955,7 +1020,8 @@ fn upsert_queued_operation(
         } else {
             "Operation queued"
         },
-    )
+    )?;
+    Ok(reset_journal_entries)
 }
 
 fn set_operation_phase(
@@ -980,6 +1046,60 @@ fn set_operation_phase_best_effort(
     if let Err(error) = set_operation_phase(agent, operation_id, phase, message) {
         tracing::warn!(%operation_id, %error, "failed to persist operation progress");
     }
+}
+
+fn matching_projection(params: &serde_json::Value) -> bool {
+    params.get("projection").and_then(serde_json::Value::as_str) == Some("matching")
+}
+
+/// Credential-free metadata for reattachment. In particular, do not query
+/// metrics, progress, or journal aggregates for each row of a matching list.
+fn serialize_matching_operation(
+    agent: &StateAgent,
+    operation: &OperationRecord,
+) -> serde_json::Value {
+    let mut detail = retry::matching_params(operation);
+    if let Ok(descriptor) = retry_descriptor_for(operation) {
+        detail["retry"] = json!({"method": descriptor.method, "params": descriptor.params});
+    }
+    json!({
+        "operation_id": operation.operation_id,
+        "kind": operation.kind,
+        "app_id": operation.app_id,
+        "state": operation.state,
+        "created_at": operation.created_at,
+        "updated_at": operation.updated_at,
+        "running": agent.operations.is_running(operation.operation_id),
+        "cancel_requested": agent.operations.cancel_requested(operation.operation_id),
+        "detail_json": detail,
+    })
+}
+
+/// Polling projection: keep correlation, lifecycle and the exact progress data,
+/// including pipeline counters/milestones, without serializing operation results.
+/// Only the pack journal summary is needed by the client progress event.
+fn serialize_operation_progress(
+    agent: &StateAgent,
+    operation: &OperationRecord,
+) -> Result<serde_json::Value> {
+    let operation_id = operation.operation_id;
+    let progress = agent.db.get_operation_progress(operation_id)?;
+    let pack_transfer = agent
+        .db
+        .sync_journal_summary_for_kind(operation_id, ContentObjectKind::Pack)?;
+    Ok(json!({
+        "operation_id": operation_id,
+        "kind": operation.kind,
+        "app_id": operation.app_id,
+        "state": operation.state,
+        "created_at": operation.created_at,
+        "updated_at": operation.updated_at,
+        "last_error": operation.last_error,
+        "running": agent.operations.is_running(operation_id),
+        "cancel_requested": agent.operations.cancel_requested(operation_id),
+        "progress": progress,
+        "pack_transfer": pack_transfer,
+    }))
 }
 
 fn serialize_operation(
@@ -1021,6 +1141,12 @@ fn serialize_operation(
         serde_json::to_value(journal_summary)?,
     );
     fields.insert("pack_transfer".into(), serde_json::to_value(pack_transfer)?);
+    let admission = fields
+        .get("detail_json")
+        .and_then(|detail| detail.get("repository_admission"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    fields.insert("repository_admission".into(), admission);
     if include_journal {
         fields.insert(
             "sync_journal_entries".into(),
@@ -1388,7 +1514,8 @@ fn mark_all_backup_completed(
         detail.insert("count".into(), count.into());
         detail.insert("bundle_ids".into(), serde_json::to_value(bundle_ids)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        agent.db.set_operation_progress(operation_id, None)?;
+        crate::operation_diagnostics::retain(agent, &mut op)?;
+        crate::operation_diagnostics::clear_completed_progress(agent, &op)?;
         agent.db.upsert_operation(&op)
     })();
     if let Err(error) = result {
@@ -1426,7 +1553,8 @@ fn mark_operation_completed(
         }
         fields.insert("metrics".into(), serde_json::to_value(&metrics)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        agent.db.set_operation_progress(operation_id, None)?;
+        crate::operation_diagnostics::retain(agent, &mut operation)?;
+        crate::operation_diagnostics::clear_completed_progress(agent, &operation)?;
         agent.db.upsert_operation(&operation)
     })();
     if let Err(error) = result {
@@ -1455,9 +1583,15 @@ fn mark_operation_cancelled(agent: &StateAgent, operation_id: uuid::Uuid) {
             .expect("operation detail is an object");
         fields.insert("cancelled_at".into(), json!(now));
         fields.insert("cooperative_cancellation".into(), true.into());
+        crate::operation_diagnostics::retain(agent, &mut operation)?;
         agent.db.upsert_operation(&operation)?;
 
-        let mut progress = OperationProgress::new("cancelled", 0);
+        let mut progress = agent
+            .db
+            .get_operation_progress(operation_id)?
+            .unwrap_or_else(|| OperationProgress::new("cancelled", 0));
+        progress.phase = "cancelled".into();
+        progress.updated_at = now;
         progress.message = Some("Operation stopped at an async cancellation point".into());
         agent
             .db
@@ -1493,6 +1627,14 @@ fn mark_operation_failed(
         if is_terminal_state(&op.state) {
             return Ok(());
         }
+        if op.detail_json["completion"]["durable"] == true {
+            // A finalization/diagnostic persistence failure is not a failed
+            // transfer or evidence of rollback. Do not make it retryable.
+            op.detail_json["completion"]["warning_code"] = json!("OPERATION_FINALIZATION_REQUIRED");
+            op.updated_at = chrono::Utc::now();
+            agent.db.upsert_operation(&op)?;
+            return Ok(());
+        }
         let mut metrics = operation_metrics(agent, &op)?;
         metrics.total_duration_ms = elapsed_ms(started);
         op.state = BackupState::Failed.as_str().into();
@@ -1506,7 +1648,13 @@ fn mark_operation_failed(
             .expect("operation detail is an object")
             .insert("metrics".into(), serde_json::to_value(&metrics)?);
         agent.db.set_operation_metrics(operation_id, &metrics)?;
-        let mut progress = OperationProgress::new("failed", 0);
+        crate::operation_diagnostics::retain(agent, &mut op)?;
+        let mut progress = agent
+            .db
+            .get_operation_progress(operation_id)?
+            .unwrap_or_else(|| OperationProgress::new("failed", 0));
+        progress.phase = "failed".into();
+        progress.updated_at = op.updated_at;
         progress.message = op.last_error.clone();
         agent
             .db
@@ -1757,17 +1905,19 @@ fn reconciliation_actions(
     candidate_ids: &HashSet<AppId>,
     dirty_apps: Vec<DirtyState>,
 ) -> Vec<ReconciliationAction> {
-    dirty_apps
+    let mut candidates = candidate_ids.iter().cloned().collect::<Vec<_>>();
+    candidates.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut actions = candidates
         .into_iter()
-        .filter(|dirty| dirty.requires_reconciliation)
-        .map(|dirty| {
-            if candidate_ids.contains(&dirty.app_id) {
-                ReconciliationAction::Reconcile(dirty.app_id)
-            } else {
-                ReconciliationAction::ClearExcluded(dirty.app_id)
-            }
-        })
-        .collect()
+        .map(ReconciliationAction::Reconcile)
+        .collect::<Vec<_>>();
+    actions.extend(
+        dirty_apps
+            .into_iter()
+            .filter(|dirty| dirty.requires_reconciliation && !candidate_ids.contains(&dirty.app_id))
+            .map(|dirty| ReconciliationAction::ClearExcluded(dirty.app_id)),
+    );
+    actions
 }
 
 fn decode_hex_key(hex: &str) -> Result<Vec<u8>> {
@@ -1905,7 +2055,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_index_only_reconciles_flagged_candidates() {
+    fn refresh_index_reconciles_candidates_even_without_dirty_flags() {
         let candidate = AppId("app:candidate".into());
         let unflagged_candidate = AppId("app:unflagged".into());
         let excluded = AppId("exe:noland-state-agent".into());
@@ -1923,7 +2073,7 @@ mod tests {
             &candidate_ids,
             vec![
                 dirty(candidate.clone(), true),
-                dirty(unflagged_candidate, false),
+                dirty(unflagged_candidate.clone(), false),
                 dirty(excluded.clone(), true),
             ],
         );
@@ -1932,6 +2082,7 @@ mod tests {
             actions,
             vec![
                 ReconciliationAction::Reconcile(candidate),
+                ReconciliationAction::Reconcile(unflagged_candidate),
                 ReconciliationAction::ClearExcluded(excluded),
             ]
         );

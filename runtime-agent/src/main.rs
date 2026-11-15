@@ -24,6 +24,23 @@ enum Action {
         #[arg(long)]
         json: bool,
     },
+    /// Update Ubuntu libraries in a new isolated image; never upgrade the host.
+    Update {
+        #[arg(long)]
+        approve: bool,
+    },
+    InspectApp {
+        #[arg(long)]
+        app_id: String,
+    },
+    InstallPrerequisites {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long)]
+        approve: bool,
+        #[arg(long)]
+        expected_plan: Option<String>,
+    },
     Plan {
         #[arg(long, default_value = PROFILE)]
         profile: String,
@@ -52,6 +69,18 @@ enum Action {
         #[arg(long)]
         app_id: String,
     },
+    /// Import a fully writable app, or configure legacy selected save/cache paths.
+    ConfigureWrites {
+        #[arg(long)]
+        app_id: String,
+        #[arg(long, required_unless_present = "all", conflicts_with = "all")]
+        writable_path: Vec<String>,
+        /// Copy the whole application; preserve any existing private saves.
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        approve: bool,
+    },
     CreateShortcut {
         #[arg(long)]
         app_id: Option<String>,
@@ -79,6 +108,22 @@ fn run() -> Result<()> {
         Action::Gui => gui(&store),
         Action::Status { .. } => print_json(&engine::status(&store)?),
         Action::Doctor { .. } => print_json(&engine::doctor(&store)?),
+        Action::Update { approve } => {
+            print_json(&noland_runtime::maintenance::update(&store, approve)?)
+        }
+        Action::InspectApp { app_id } => {
+            print_json(&noland_runtime::maintenance::inspect(&store, &app_id)?)
+        }
+        Action::InstallPrerequisites {
+            app_id,
+            approve,
+            expected_plan,
+        } => print_json(&noland_runtime::maintenance::install_prerequisites(
+            &store,
+            &app_id,
+            approve,
+            expected_plan.as_deref(),
+        )?),
         Action::Plan { profile } => {
             anyhow::ensure!(profile == PROFILE, "Unsupported runtime profile");
             print_json(&serde_json::json!({
@@ -107,6 +152,25 @@ fn run() -> Result<()> {
             make_executable,
         } => print_json(&engine::register_selected(&store, &file, make_executable)?),
         Action::Launch { app_id } => print_json(&engine::launch(&store, &app_id)?),
+        Action::ConfigureWrites {
+            app_id,
+            writable_path,
+            all,
+            approve,
+        } => {
+            if all {
+                print_json(&noland_runtime::workspace::configure(
+                    &store, &app_id, approve,
+                )?)
+            } else {
+                print_json(&noland_runtime::portable::configure(
+                    &store,
+                    &app_id,
+                    writable_path,
+                    approve,
+                )?)
+            }
+        }
         Action::CreateShortcut { app_id } => {
             print_json(&engine::create_shortcut(&store, app_id.as_deref())?)
         }

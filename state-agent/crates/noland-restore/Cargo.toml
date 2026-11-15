@@ -12,6 +12,7 @@ libc = "0.2"
 noland-cas.workspace = true
 noland-crypto.workspace = true
 noland-pack.workspace = true
+noland-rclone-adapter.workspace = true
 noland-snapshot.workspace = true
 noland-state-core.workspace = true
 noland-state-db.workspace = true
@@ -21,3 +22,6 @@ serde_json.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+bytes.workspace = true

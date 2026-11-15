@@ -182,7 +182,7 @@ export function SoftwareLaunchCard({
       <div className="flex flex-1 flex-col p-4">
         <div className="flex flex-wrap gap-2">
           {item.installed ? <Badge tone="green">{translate("generated.f8b32f4e92bd84ce")}</Badge> : <Badge>{translate("generated.25a4c55bd7fc946a")}</Badge>}
-          {item.inSharedStorage ? <Badge>{translate("generated.7d6d3b3158b0ee5f")}</Badge> : null}
+          {item.inSharedStorage ? <Badge>{translate("generated.9644abb4fc9584d2")}</Badge> : null}
           {item.restoreRequired ? <Badge tone="amber">{translate("generated.0d020c02b73983d3")}</Badge> : null}
         </div>
 

@@ -1043,7 +1043,7 @@ pub struct SharedStorageInstanceStatus {
     pub last_backup_error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageObjectEntry {
     pub path: String,
@@ -1052,13 +1052,23 @@ pub struct SharedStorageObjectEntry {
     pub is_dir: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Display-only metadata. Neither a scope nor cached entries authorize an
+/// upload, restore or deletion; those paths perform their own current checks.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SharedStorageBrowseSnapshot {
+    pub entries: Vec<SharedStorageObjectEntry>,
+    pub scope: String,
+    pub observed_at: Option<String>,
+    pub freshness: SharedStorageBrowseFreshness,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum BackupPerformanceMode {
-    Fast,
-    #[default]
-    Balanced,
-    Full,
+pub enum SharedStorageBrowseFreshness {
+    Cached,
+    Fresh,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1071,8 +1081,6 @@ pub struct SharedStorageSyncSelectionRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SharedStorageBackupSelectionRequest {
     pub selected_paths: Vec<String>,
-    #[serde(default)]
-    pub performance_mode: BackupPerformanceMode,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1314,8 +1322,8 @@ pub struct MicSessionResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        AutoShutdownSettings, AutoShutdownState, BackupPerformanceMode, MicQualityProfile,
-        PersistedAppState, SharedStorageBackupSelectionRequest,
+        AutoShutdownSettings, AutoShutdownState, MicQualityProfile, PersistedAppState,
+        SharedStorageBackupSelectionRequest,
     };
 
     #[test]
@@ -1364,22 +1372,20 @@ mod tests {
     }
 
     #[test]
-    fn backup_performance_mode_defaults_to_balanced() {
+    fn backup_selection_contains_only_application_selection() {
         let request: SharedStorageBackupSelectionRequest =
             serde_json::from_str(r#"{"selectedPaths":["/apps/example"]}"#).unwrap();
-
-        assert_eq!(request.performance_mode, BackupPerformanceMode::Balanced);
-    }
-
-    #[test]
-    fn backup_performance_modes_use_provider_neutral_values() {
-        for (mode, expected) in [
-            (BackupPerformanceMode::Fast, r#""fast""#),
-            (BackupPerformanceMode::Balanced, r#""balanced""#),
-            (BackupPerformanceMode::Full, r#""full""#),
-        ] {
-            assert_eq!(serde_json::to_string(&mode).unwrap(), expected);
-        }
+        assert_eq!(
+            serde_json::to_value(request).unwrap(),
+            serde_json::json!({"selectedPaths":["/apps/example"]})
+        );
+        let legacy: SharedStorageBackupSelectionRequest = serde_json::from_value(serde_json::json!({
+            "selectedPaths":["/apps/example"], "performanceMode":"balanced", "regenerableCaches":"exclude"
+        })).unwrap();
+        assert_eq!(
+            serde_json::to_value(legacy).unwrap(),
+            serde_json::json!({"selectedPaths":["/apps/example"]})
+        );
     }
 
     #[test]

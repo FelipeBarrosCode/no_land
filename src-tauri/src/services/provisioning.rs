@@ -1,7 +1,15 @@
 //! Timing and structured concurrency for provisioning dependency lanes.
-use std::{future::Future, time::Instant};
+use std::{future::Future, pin::Pin, time::Instant};
 
 use crate::errors::AppResult;
+
+/// Keep construction of a large stage future out of its caller's poll frame.
+/// `Box::pin(async { ... })` heaps the saved state, but debug builds can still
+/// reserve the entire construction temporary on the caller's worker stack.
+#[inline(never)]
+pub fn boxed_stage<F: Future>(make: impl FnOnce() -> F) -> Pin<Box<F>> {
+    Box::pin(make())
+}
 
 pub fn measure<T>(
     stage: &'static str,
@@ -62,6 +70,33 @@ mod tests {
         assert!(std::mem::size_of_val(&timed) < 1024);
         let joined = join_lanes(large_stage(), large_stage());
         assert!(std::mem::size_of_val(&joined) < 1024);
+    }
+
+    #[test]
+    fn large_nested_stage_construction_fits_a_worker_stack() {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                // Construct each child in a separate frame rather than reserving
+                // all three large temporaries in the parent's debug poll frame.
+                let mut work = boxed_stage(|| async {
+                    let first = boxed_stage(large_stage);
+                    let second = boxed_stage(large_stage);
+                    let third = boxed_stage(large_stage);
+                    join_lanes(first, join_lanes(second, third)).await
+                });
+                let waker = std::task::Waker::noop();
+                let mut context = std::task::Context::from_waker(waker);
+                loop {
+                    if let std::task::Poll::Ready(result) = work.as_mut().poll(&mut context) {
+                        assert_eq!(result.unwrap(), (42, (42, 42)));
+                        break;
+                    }
+                }
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[tokio::test]

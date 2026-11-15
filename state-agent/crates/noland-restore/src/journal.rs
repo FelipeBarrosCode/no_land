@@ -163,6 +163,7 @@ mod tests {
                 created_paths: vec![],
                 created_directories: vec![],
                 partial_paths: vec![],
+                tombstone_guards: vec![],
             },
         )
         .unwrap();

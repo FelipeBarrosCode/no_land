@@ -193,39 +193,14 @@ impl StorageProvider {
                 category: self.category(),
                 is_oauth: self.is_oauth(),
                 description: "Microsoft OneDrive for your application backups".to_string(),
-                fields: vec![
-                    ProviderField {
-                        key: "drive_type".to_string(),
-                        label: "Drive Type".to_string(),
-                        field_type: ProviderFieldType::Select {
-                            options: vec![
-                                ProviderSelectOption {
-                                    value: "personal".to_string(),
-                                    label: "Personal OneDrive".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "business".to_string(),
-                                    label: "OneDrive for Business".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "sharepoint".to_string(),
-                                    label: "SharePoint Document Library".to_string(),
-                                },
-                            ],
-                        },
-                        required: true,
-                        placeholder: None,
-                        help_text: None,
-                    },
-                    ProviderField {
-                        key: "folder".to_string(),
-                        label: "Folder Name".to_string(),
-                        field_type: ProviderFieldType::Text,
-                        required: false,
-                        placeholder: Some("Noland Shared Storage".to_string()),
-                        help_text: None,
-                    },
-                ],
+                fields: vec![ProviderField {
+                    key: "folder".to_string(),
+                    label: "Folder Name".to_string(),
+                    field_type: ProviderFieldType::Text,
+                    required: false,
+                    placeholder: Some("Noland Shared Storage".to_string()),
+                    help_text: None,
+                }],
             },
             Self::Dropbox => ProviderDefinition {
                 provider: self.clone(),
@@ -557,11 +532,29 @@ impl StorageProvider {
                     },
                     ProviderField {
                         key: "password".to_string(),
-                        label: "Password (or leave empty for key auth)".to_string(),
+                        label: "Password".to_string(),
                         field_type: ProviderFieldType::Password,
                         required: false,
                         placeholder: None,
-                        help_text: Some("Leave empty to use SSH key authentication".to_string()),
+                        help_text: Some(
+                            "Provide either a password or a PEM private key below".to_string(),
+                        ),
+                    },
+                    ProviderField {
+                        key: "private_key".to_string(),
+                        label: "PEM Private Key".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: Some("-----BEGIN ... PRIVATE KEY-----".to_string()),
+                        help_text: Some("Leave password empty to use this key".to_string()),
+                    },
+                    ProviderField {
+                        key: "passphrase".to_string(),
+                        label: "Private Key Passphrase".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: None,
+                        help_text: None,
                     },
                     ProviderField {
                         key: "remote_path".to_string(),
@@ -572,12 +565,15 @@ impl StorageProvider {
                         help_text: None,
                     },
                     ProviderField {
-                        key: "host_key".to_string(),
-                        label: "Host Key Fingerprint".to_string(),
+                        key: "host_keys".to_string(),
+                        label: "Pinned Host Public Keys".to_string(),
                         field_type: ProviderFieldType::Text,
                         required: false,
-                        placeholder: Some("SHA256:...".to_string()),
-                        help_text: Some("Pin the server host key for security".to_string()),
+                        placeholder: Some("ssh-ed25519 AAAAC3...".to_string()),
+                        help_text: Some(
+                            "Complete public keys separated by commas, not SHA256 fingerprints"
+                                .to_string(),
+                        ),
                     },
                 ],
             },
@@ -665,4 +661,29 @@ pub fn list_all_providers() -> Vec<ProviderDefinition> {
         StorageProvider::Sftp.definition(),
         StorageProvider::Webdav.definition(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sftp_form_exposes_secure_key_and_password_alternatives_and_adapter_pin_name() {
+        let fields = StorageProvider::Sftp.definition().fields;
+        for key in ["password", "private_key", "passphrase"] {
+            let field = fields.iter().find(|field| field.key == key).unwrap();
+            assert!(!field.required);
+            assert!(matches!(field.field_type, ProviderFieldType::Password));
+        }
+        assert!(fields.iter().any(|field| field.key == "host_keys"));
+        assert!(!fields.iter().any(|field| field.key == "host_key"));
+    }
+
+    #[test]
+    fn onedrive_drive_identity_is_discovered_rather_than_user_guessed() {
+        let fields = StorageProvider::MicrosoftOneDrive.definition().fields;
+        assert!(!fields
+            .iter()
+            .any(|field| matches!(field.key.as_str(), "drive_id" | "drive_type")));
+    }
 }

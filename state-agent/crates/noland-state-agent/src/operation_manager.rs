@@ -47,6 +47,7 @@ pub struct OperationManager {
 #[derive(Default)]
 struct ManagerState {
     running: HashMap<Uuid, RunningOperation>,
+    parents: HashMap<Uuid, Uuid>,
     retry_descriptors: HashMap<Uuid, RetryDescriptor>,
     retry_order: VecDeque<Uuid>,
 }
@@ -56,6 +57,7 @@ struct RunningOperation {
     cancel_requested: bool,
     queued_at: Instant,
     started_at: Option<Instant>,
+    finalizers: usize,
 }
 
 impl Default for OperationManager {
@@ -124,6 +126,7 @@ impl OperationManager {
                     cancel_requested: false,
                     queued_at: Instant::now(),
                     started_at: None,
+                    finalizers: 0,
                 },
             );
         }
@@ -151,12 +154,26 @@ impl OperationManager {
                 operation.started_at = Some(Instant::now());
             }
 
+            let worker_state = Arc::clone(&state);
             let worker = tokio::spawn(async move {
                 let _permit = permit;
+                tokio::pin!(future);
                 tokio::select! {
                     biased;
-                    _ = wait_for_cancellation(&mut cancellation) => WorkerOutcome::Cancelled,
-                    _ = future => WorkerOutcome::Completed,
+                    _ = wait_for_cancellation(&mut cancellation) => {
+                        let finalizing = worker_state.lock().running.get(&operation_id)
+                            .is_some_and(|operation| operation.finalizers != 0);
+                        if finalizing {
+                            // Data is already durable. Dropping the release
+                            // future here would recreate a completed stale claim.
+                            // Drain cleanup and terminal publication.
+                            future.await;
+                            WorkerOutcome::Completed
+                        } else {
+                            WorkerOutcome::Cancelled
+                        }
+                    }
+                    _ = &mut future => WorkerOutcome::Completed,
                 }
             });
             match worker.await {
@@ -190,11 +207,54 @@ impl OperationManager {
     }
 
     pub fn cancel_requested(&self, operation_id: Uuid) -> bool {
-        self.state
-            .lock()
-            .running
-            .get(&operation_id)
-            .is_some_and(|operation| operation.cancel_requested)
+        let state = self.state.lock();
+        let mut id = operation_id;
+        for _ in 0..8 {
+            if state
+                .running
+                .get(&id)
+                .is_some_and(|operation| operation.cancel_requested)
+            {
+                return true;
+            }
+            let Some(parent) = state.parents.get(&id) else {
+                return false;
+            };
+            id = *parent;
+        }
+        true // Fail closed for a corrupt/cyclic relationship.
+    }
+
+    pub(crate) fn child_scope(&self, parent: Uuid, child: Uuid) -> ChildScope {
+        self.state.lock().parents.insert(child, parent);
+        ChildScope {
+            state: self.state.clone(),
+            child,
+        }
+    }
+
+    /// Once publication is durable, cancellation must not drop claim release.
+    /// Child transfers protect their managed parent only through finalization;
+    /// a group still observes cancellation before starting its next child.
+    pub(crate) fn finalization_scope(&self, operation_id: Uuid) -> FinalizationScope {
+        let mut state = self.state.lock();
+        let mut id = operation_id;
+        let mut root = None;
+        for _ in 0..8 {
+            if let Some(operation) = state.running.get_mut(&id) {
+                operation.finalizers = operation.finalizers.saturating_add(1);
+                root = Some(id);
+                break;
+            }
+            let Some(parent) = state.parents.get(&id) else {
+                break;
+            };
+            id = *parent;
+        }
+        FinalizationScope {
+            state: self.state.clone(),
+            operation_id: root,
+        }
     }
 
     pub fn running_snapshots(&self) -> Vec<ManagedOperationSnapshot> {
@@ -246,6 +306,36 @@ impl OperationManager {
         let _permit = self.control_gate.lock().await;
         future.await
     }
+
+    pub(crate) fn try_transfer_guard(&self) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+        self.transfer_gate.clone().try_lock_owned().ok()
+    }
+}
+
+pub(crate) struct ChildScope {
+    state: Arc<Mutex<ManagerState>>,
+    child: Uuid,
+}
+
+pub(crate) struct FinalizationScope {
+    state: Arc<Mutex<ManagerState>>,
+    operation_id: Option<Uuid>,
+}
+
+impl Drop for FinalizationScope {
+    fn drop(&mut self) {
+        if let Some(id) = self.operation_id {
+            if let Some(operation) = self.state.lock().running.get_mut(&id) {
+                operation.finalizers = operation.finalizers.saturating_sub(1);
+            }
+        }
+    }
+}
+
+impl Drop for ChildScope {
+    fn drop(&mut self) {
+        self.state.lock().parents.remove(&self.child);
+    }
 }
 
 async fn wait_for_cancellation(cancellation: &mut watch::Receiver<bool>) {
@@ -288,6 +378,20 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[tokio::test]
+    async fn nested_child_work_observes_parent_cancellation_until_joined() {
+        let manager = OperationManager::default();
+        let parent = Uuid::new_v4();
+        let child = Uuid::new_v4();
+        assert!(manager.spawn_cancellable(parent, std::future::pending::<()>(), || {}, |_| {}));
+        let scope = manager.child_scope(parent, child);
+        assert!(!manager.cancel_requested(child));
+        assert_eq!(manager.cancel(parent), CancelOutcome::Requested);
+        assert!(manager.cancel_requested(child));
+        drop(scope);
+        assert!(!manager.cancel_requested(child));
+    }
 
     #[tokio::test]
     async fn serializes_catalog_mutating_operations() {

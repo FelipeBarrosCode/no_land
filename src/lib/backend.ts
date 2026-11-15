@@ -25,10 +25,11 @@ import type {
   SharedStorageTestResult,
   ProviderDefinition,
   ProfileReference,
-  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
+  SharedStorageBrowseSnapshot,
+  SharedStorageBrowseTarget,
   SharedStorageProgressEvent,
   SharedStorageRestoreCompletedEvent,
   DirectUploadProgressEvent,
@@ -841,6 +842,20 @@ export async function listInstanceSharedStorageObjects(instanceId: number) {
   );
 }
 
+export async function getInstanceStorageBrowseSnapshot(
+  instanceId: number,
+  target: SharedStorageBrowseTarget,
+  refresh = false,
+): Promise<SharedStorageBrowseSnapshot> {
+  return invokeSafe<SharedStorageBrowseSnapshot>("get_instance_storage_browse_snapshot", {
+    instanceId, target, refresh,
+  });
+}
+
+export async function prepareInstanceStorageHelper(instanceId: number): Promise<void> {
+  return invokeSafe<void>("prepare_instance_storage_helper", { instanceId });
+}
+
 export async function syncInstanceFromSharedStorageSelected(
   instanceId: number,
   selectedPaths: string[],
@@ -856,6 +871,29 @@ export async function listInstanceExportableStorageObjects(instanceId: number) {
     "list_instance_exportable_storage_objects",
     { instanceId },
   );
+}
+
+export interface StorageDeletionPreview {
+  planId: string;
+  target: "remote_pc" | "cloud";
+  names: string[];
+  items: number;
+  bytes: number;
+  skipped: number;
+  retainsSharedPacks: boolean;
+  fullDeletion?: boolean;
+  physicalBytes?: number;
+  packCount?: number;
+  dependentBundles?: number;
+  samplePaths: string[];
+}
+
+export async function prepareStorageDeletion(instanceId: number, target: StorageDeletionPreview["target"], selectedPaths: string[]) {
+  return invokeSafe<StorageDeletionPreview>("prepare_storage_deletion", { instanceId, target, selectedPaths });
+}
+
+export async function confirmStorageDeletion(instanceId: number, preview: StorageDeletionPreview) {
+  return invokeSafe<unknown>("confirm_storage_deletion", { instanceId, target: preview.target, planId: preview.planId });
 }
 
 export async function subscribeSharedStorageRestoreCompleted(
@@ -888,18 +926,18 @@ export async function subscribeSharedStorageProgress(
 
 export async function cancelSharedStorageOperation(
   instanceId: number,
+  operationId?: string | null,
 ): Promise<string> {
-  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId });
+  return invokeSafe<string>("cancel_shared_storage_operation", { instanceId, operationId });
 }
 
 export async function saveInstanceToSharedStorageSelected(
   instanceId: number,
   selectedPaths: string[],
-  performanceMode: BackupPerformanceMode = "balanced",
 ): Promise<string> {
   return invokeSafe<string>("save_instance_to_shared_storage_selected", {
     instanceId,
-    payload: { selectedPaths, performanceMode },
+    payload: { selectedPaths },
   });
 }
 

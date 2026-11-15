@@ -3,10 +3,12 @@ import { useEffect, useMemo, useState } from "react";
 import { BlockingLoaderOverlay, type BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { StorageDeleteAction } from "./StorageDeleteAction";
 import type {
-  BackupPerformanceMode,
   SharedStorageObjectEntry,
 } from "../../lib/types";
+import { StorageBrowseStatus } from "./StorageBrowseStatus";
+import { useStorageBrowse } from "./useStorageBrowse";
 
 interface Props {
   open: boolean;
@@ -16,7 +18,6 @@ interface Props {
   onLoadObjects: (instanceId: number) => Promise<SharedStorageObjectEntry[] | null>;
   onConfirmExport: (
     selectedPaths: string[],
-    performanceMode: BackupPerformanceMode,
   ) => Promise<void>;
   onRefreshIndexing?: (instanceId: number) => Promise<void>;
 }
@@ -43,47 +44,26 @@ export function SharedStorageExportModal({
   busy,
   instanceId,
   onClose,
-  onLoadObjects,
   onConfirmExport,
   onRefreshIndexing
 }: Props) {
-  const [entries, setEntries] = useState<SharedStorageObjectEntry[]>([]);
+  const browse = useStorageBrowse(open, instanceId, "remote_pc");
+  const entries = browse.entries;
   const [loading, setLoading] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState<string[]>([]);
-  const [performanceMode, setPerformanceMode] =
-    useState<BackupPerformanceMode>("balanced");
   const [expanded, setExpanded] = useState<Record<string, boolean>>({ "/": true });
   const [pendingAction, setPendingAction] = useState<BlockingActionState | null>(null);
 
   useEffect(() => {
-    if (!open || instanceId === null) return;
-    let active = true;
-    setLoading(true);
-    setPendingAction({
-      key: "export-modal.load",
-      label: "Loading instance files",
-      detail: "Asking the state agent which applications it has learned.",
-      mode: "indeterminate",
-      progress: null,
-      startedAt: Date.now()
-    });
     setSelectedPaths([]);
-    setPerformanceMode("balanced");
-    void onLoadObjects(instanceId)
-      .then((result) => {
-        if (!active) return;
-        setEntries(result ?? []);
-      })
-      .finally(() => {
-        if (active) {
-          setLoading(false);
-          setPendingAction(null);
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [open, instanceId, onLoadObjects]);
+  }, [open, instanceId, browse.snapshot?.scope]);
+
+  useEffect(() => {
+    if (browse.snapshot?.freshness === "fresh") {
+      const available = new Set(entries.map(entry => entry.path));
+      setSelectedPaths(paths => paths.filter(path => available.has(path)));
+    }
+  }, [browse.snapshot, entries]);
 
   const childrenMap = useMemo(() => buildChildrenMap(entries), [entries]);
   if (!open) return null;
@@ -126,48 +106,35 @@ export function SharedStorageExportModal({
     <ModalFrame panelClassName="glass-panel pixel-frame max-w-3xl">
         <div className="shrink-0 flex items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
           <div>
-            <h2 className="font-display text-base text-white">{translate("generated.0dceb770d4a955fe")}</h2>
-            <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.38d2e6068bcfc7ab")}</p>
+            <h2 className="font-display text-base text-white">{translate("storage.games.upload")}</h2>
+            <p className="text-[1.2rem] text-[#b4c8de]">{translate("storage.backup.select")}</p>
           </div>
           <Button variant="ghost" onClick={onClose} disabled={busy || loading}>{translate("generated.7d9eb7acb13e2462")}</Button>
         </div>
         <ModalBody className="px-5 py-4">
-          {loading ? (
+          <StorageBrowseStatus {...browse} onRefresh={browse.reload} onPrepareHelper={browse.prepareHelper} />
+          {loading || (!browse.snapshot && browse.refreshing) ? (
             pendingAction ? <BlockingLoaderOverlay action={pendingAction} inline className="max-w-none p-4" /> : <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.db69feb354d65693")}</p>
-          ) : roots.length === 0 ? (
+          ) : roots.length === 0 && browse.snapshot ? (
             <p className="text-[1.2rem] text-[#b4c8de]">{translate("generated.648afc13de8af296")}</p>
           ) : (
             <div className="space-y-1">{roots.map((entry) => renderNode(entry, 0))}</div>
           )}
+          <p className="mt-4 text-[1.1rem] text-[#9ec0e4]">{translate("storage.backup.completeHelp")}</p>
         </ModalBody>
         <div className="shrink-0 flex flex-wrap items-end justify-between gap-3 border-t-2 border-[#3e4270] px-5 py-4">
           <div className="flex items-end gap-4">
-            <label className="flex flex-col gap-1">
-              <span className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                {translate("generated.71ed8028334c4e88")}
-              </span>
-              <select
-                className="h-10 border border-[#3f476c] bg-[#0b0f23] px-3 text-[1.15rem] text-[#dff8ff] outline-none focus:border-neon-cyan"
-                value={performanceMode}
-                disabled={busy || loading}
-                onChange={(event) =>
-                  setPerformanceMode(event.target.value as BackupPerformanceMode)
-                }
-              >
-                <option value="fast">{translate("generated.ca85e53c44cd9df6")}</option>
-                <option value="balanced">{translate("generated.0637fc5e37f3ded2")}</option>
-                <option value="full">{translate("generated.0746b3ba22bbfa4f")}</option>
-              </select>
-            </label>
             <p className="pb-2 text-[1.1rem] text-[#9ec0e4]">
               {translate("generated.bef9d85df8ea13fe")} {selectedPaths.length}
             </p>
           </div>
           <div className="flex items-center gap-2">
+            <StorageDeleteAction instanceId={instanceId} target="remote_pc" selectedPaths={selectedPaths}
+              disabled={busy || loading || browse.preparingHelper || browse.refreshing || browse.snapshot?.freshness !== "fresh" || !!browse.error} onBusyChange={setLoading} onStarted={onClose} />
             {onRefreshIndexing && (
               <Button
                 variant="ghost"
-                disabled={busy || loading}
+                disabled={busy || loading || browse.preparingHelper || browse.refreshing}
                 onClick={async () => {
                   if (instanceId !== null) {
                     setLoading(true);
@@ -181,8 +148,7 @@ export function SharedStorageExportModal({
                     });
                     try {
                       await onRefreshIndexing(instanceId);
-                      const result = await onLoadObjects(instanceId);
-                      setEntries(result ?? []);
+                      browse.reload();
                       setSelectedPaths([]);
                     } finally {
                       setLoading(false);
@@ -196,23 +162,23 @@ export function SharedStorageExportModal({
             )}
             <Button variant="ghost" onClick={onClose} disabled={busy || loading}>{translate("generated.19766ed6ccb2f4a3")}</Button>
             <Button
-              disabled={busy || loading || selectedPaths.length === 0}
+              disabled={busy || loading || browse.preparingHelper || browse.refreshing || browse.snapshot?.freshness !== "fresh" || !!browse.error || selectedPaths.length === 0}
               loading={busy}
-              loadingText={translate("generated.639e45361badf069")}
+              loadingText={`${translate("storage.games.upload")}…`}
               onClick={async () => {
                 setPendingAction({
                   key: "export-modal.run",
-                  label: "Exporting selected files",
-                  detail: "Backing up selected application state through the state agent.",
+                  label: translate("storage.games.upload"),
+                  detail: translate("storage.backup.completeHelp"),
                   mode: "indeterminate",
                   progress: null,
                   startedAt: Date.now()
                 });
-                await onConfirmExport(selectedPaths, performanceMode);
+                await onConfirmExport(selectedPaths);
                 setPendingAction(null);
               }}
             >
-              {translate("generated.7065bfb98240f7ba")}
+              {translate("storage.games.upload")}
             </Button>
           </div>
         </div>

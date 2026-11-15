@@ -46,7 +46,11 @@ pub fn discover_steam(home: &Path) -> Option<SteamDiscovery> {
     let mut roots = Vec::new();
     let mut seen_roots = BTreeSet::new();
     for (root_id, root) in candidates {
-        if root.exists() && seen_roots.insert(path_identity(&root)) {
+        // Steam commonly exposes .steam/steam as an alias. Emit the resolved
+        // root as well as resolved library paths, so userdata scans do not
+        // traverse that alias after the no-follow capture boundary is established.
+        let root = path_identity(&root);
+        if root.exists() && seen_roots.insert(root.clone()) {
             roots.push((root_id, root));
         }
     }
@@ -229,7 +233,9 @@ mod tests {
     use super::*;
 
     fn temp_home(label: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("noland-steam-{label}-{}", uuid::Uuid::new_v4()))
+        std::fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("noland-steam-{label}-{}", uuid::Uuid::new_v4()))
     }
 
     fn write_manifest(steamapps: &Path, app_id: u32, name: &str, install_dir: &str) {
@@ -360,7 +366,7 @@ mod tests {
         let discovery = discover_steam(&home).expect("symlinked Steam root should be discovered");
         let canonical_apps = std::fs::canonicalize(&real_apps).unwrap();
 
-        assert_eq!(discovery.root, linked_root);
+        assert_eq!(discovery.root, std::fs::canonicalize(&real_root).unwrap());
         assert_eq!(
             discovery.libraries,
             vec![("0".into(), canonical_apps.clone())]

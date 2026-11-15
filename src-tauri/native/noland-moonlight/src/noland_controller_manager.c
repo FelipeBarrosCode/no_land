@@ -10,6 +10,10 @@
 
 #include <SDL.h>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 #define NL_MAX_GAMEPADS 16
 
 #define NL_A_FLAG 0x1000
@@ -502,7 +506,28 @@ static void nl_detach_controller(nl_controller_manager_t* manager, nl_gamepad_st
 static void nl_sync_controllers(nl_controller_manager_t* manager) {
   int i;
 
+#if defined(_WIN32)
+  // SDL creates its Raw Input and HID discovery message windows on the
+  // joystick-initializing thread. SDL_GameControllerUpdate() only polls; it
+  // does not dispatch their messages. The stream window's event pump runs on
+  // a different thread and cannot service this queue.
+  MSG message;
+  while (PeekMessageW(&message, NULL, 0, 0, PM_REMOVE)) {
+    TranslateMessage(&message);
+    DispatchMessageW(&message);
+  }
+#endif
+
   SDL_GameControllerUpdate();
+
+  // Release removed devices before assigning slots to arrivals in the same
+  // poll, so a reconnect does not silently move player one to another slot.
+  for (i = 0; i < NL_MAX_GAMEPADS; i++) {
+    nl_gamepad_state_t* state = &manager->gamepads[i];
+    if (state->controller != NULL && !SDL_GameControllerGetAttached(state->controller)) {
+      nl_detach_controller(manager, state);
+    }
+  }
 
   for (i = 0; i < SDL_NumJoysticks(); i++) {
     if (SDL_IsGameController(i)) {
@@ -533,12 +558,16 @@ static void nl_sync_controllers(nl_controller_manager_t* manager) {
 
 static int SDLCALL nl_controller_thread_main(void* context) {
   nl_controller_manager_t* manager = (nl_controller_manager_t*)context;
+  SDL_version version;
 
   SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
   SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS4_RUMBLE, "1");
   SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1");
 
-  SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "[noland-controller] thread starting");
+  SDL_GetVersion(&version);
+  SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+              "[noland-controller] thread starting SDL=%u.%u.%u platform=%s",
+              version.major, version.minor, version.patch, SDL_GetPlatform());
 
   if (SDL_InitSubSystem(SDL_INIT_JOYSTICK) != 0) {
     SDL_LogError(SDL_LOG_CATEGORY_APPLICATION,
@@ -564,11 +593,22 @@ static int SDLCALL nl_controller_thread_main(void* context) {
               SDL_NumJoysticks());
   for (int i = 0; i < SDL_NumJoysticks(); i++) {
     const char* joy_name = SDL_JoystickNameForIndex(i);
+    char guid[33];
+    bool mapped = SDL_IsGameController(i) == SDL_TRUE;
+    SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof(guid));
     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                "[noland-controller] joystick index=%d is_game_controller=%d name=%s",
+                "[noland-controller] joystick index=%d is_game_controller=%d name=%s vid=0x%04x pid=0x%04x guid=%s",
                 i,
-                SDL_IsGameController(i),
-                joy_name != NULL ? joy_name : "<unknown>");
+                mapped,
+                joy_name != NULL ? joy_name : "<unknown>",
+                SDL_JoystickGetDeviceVendor(i),
+                SDL_JoystickGetDeviceProduct(i),
+                guid);
+    if (!mapped) {
+      SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION,
+                  "[noland-controller] unmapped joystick ignored guid=%s; a matching SDL_GAMECONTROLLERCONFIG mapping is required",
+                  guid);
+    }
   }
 
   while (1) {

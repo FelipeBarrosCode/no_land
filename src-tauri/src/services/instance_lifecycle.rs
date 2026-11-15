@@ -12,8 +12,8 @@ use crate::{
     errors::{AppError, AppResult},
     models::{
         app_state::{
-            BackupPerformanceMode, InstanceState, MoonlightState, OrchestrationState,
-            PostWireGuardSetupState, ProvisionedServerState, WireGuardState,
+            InstanceState, MoonlightState, OrchestrationState, PostWireGuardSetupState,
+            ProvisionedServerState, WireGuardState,
         },
         vast::VastInstance,
     },
@@ -522,7 +522,8 @@ impl InstanceLifecycleService {
         result
     }
 
-    /// Destroy a provisioned instance. Runs backup first if available.
+    /// Manually destroy a provisioned instance without a Shared Storage backup.
+    /// Automatic lifecycle actions must keep their own seal/backup safeguards.
     pub async fn destroy_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
         let _action = Self::begin_action(context, instance_id, "destroy").await?;
         let feedback_context = context.clone();
@@ -532,9 +533,6 @@ impl InstanceLifecycleService {
         .await;
 
         let result = async {
-            // Run backup first if shared storage is configured
-            Self::maybe_run_backup_first(context, instance_id).await?;
-
             let (wireguard_config_path, should_clear_active_wireguard_state) = {
                 let state = context.state.read().await;
                 let record_path = state
@@ -640,7 +638,7 @@ impl InstanceLifecycleService {
         result
     }
 
-    /// Run backup before pause/destroy if shared storage is configured.
+    /// Run backup before pause if shared storage is configured.
     async fn maybe_run_backup_first(context: &AppContext, instance_id: u64) -> AppResult<()> {
         let state = context.state.read().await;
         let provisioning_completed = state
@@ -852,7 +850,6 @@ impl InstanceLifecycleService {
             &target_user,
             &["*".to_string()],
             "manual",
-            BackupPerformanceMode::Balanced,
         )
         .await?;
         SharedStorageManager::get_backup_status(context).await
@@ -873,39 +870,11 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        info!(
-            instance_id = instance_id,
-            "instance lifecycle list_shared_storage_objects start"
-        );
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        let result =
-            SharedStorageManager::list_remote_objects(context, &remote, &target_user).await;
-        if let Ok(entries) = &result {
-            info!(
-                instance_id = instance_id,
-                count = entries.len(),
-                "instance lifecycle list_shared_storage_objects complete"
-            );
-        }
-        result
+        super::shared_storage::browse::list(
+            context,
+            instance_id,
+            super::shared_storage::browse::BrowseTarget::Cloud,
+        ).await
     }
 
     pub async fn sync_instance_from_shared_storage_selected(
@@ -959,32 +928,17 @@ impl InstanceLifecycleService {
         context: &AppContext,
         instance_id: u64,
     ) -> AppResult<Vec<crate::models::app_state::SharedStorageObjectEntry>> {
-        let api_key = {
-            let state = context.state.read().await;
-            state.credentials.vast_api_key.clone()
-        };
-        if api_key.trim().is_empty() {
-            return Err(AppError::InvalidInput(
-                "Vast API key is missing.".to_string(),
-            ));
-        }
-
-        let vast = VastApiClient::new(
-            context.http_client.clone(),
-            context.config.vast_base_url.clone(),
-            api_key,
-        );
-
-        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        SharedStorageManager::list_local_objects(context, &remote, &target_user).await
+        super::shared_storage::browse::list(
+            context,
+            instance_id,
+            super::shared_storage::browse::BrowseTarget::RemotePc,
+        ).await
     }
 
     pub async fn save_instance_to_shared_storage_selected(
         context: &AppContext,
         instance_id: u64,
         selected_paths: Vec<String>,
-        performance_mode: BackupPerformanceMode,
     ) -> AppResult<String> {
         let _action = Self::begin_action(context, instance_id, "storage backup").await?;
         let api_key = {
@@ -1011,7 +965,6 @@ impl InstanceLifecycleService {
             instance_id,
             &target_user,
             &selected_paths,
-            performance_mode,
         )
         .await
     }
@@ -1019,19 +972,22 @@ impl InstanceLifecycleService {
     pub async fn cancel_shared_storage_operation(
         context: &AppContext,
         instance_id: u64,
+        operation_id: Option<&str>,
     ) -> AppResult<String> {
-        let operation = context
-            .active_agent_operation
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                AppError::InvalidInput("No shared storage operation is running.".into())
-            })?;
+        let operation = match operation_id {
+            Some(id) => context.agent_operation_by_id(instance_id, id).await,
+            None => context.active_agent_operation(instance_id, None).await,
+        }
+        .ok_or_else(|| AppError::InvalidInput("No shared storage operation is running.".into()))?;
         if operation.instance_id != instance_id {
             return Err(AppError::InvalidInput(
                 "The running shared storage operation belongs to a different instance.".into(),
             ));
+        }
+        // A user's cancellation intent must also veto the local lifecycle
+        // continuation if the cancel RPC is lost or races terminal completion.
+        if operation.kind == "seal" {
+            SharedStorageManager::request_seal_cancellation(instance_id, &operation.operation_id);
         }
         let api_key = {
             let state = context.state.read().await;
@@ -1046,9 +1002,6 @@ impl InstanceLifecycleService {
             api_key,
         );
         let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
-        let target_user = context.config.audio_target_user.clone();
-        crate::services::shared_storage::agent_runtime::ensure_state_agent(&remote, &target_user)
-            .await?;
         info!(
             instance_id,
             operation_id = %operation.operation_id,
@@ -1062,6 +1015,36 @@ impl InstanceLifecycleService {
         )
         .await?;
         Ok(result.to_string())
+    }
+
+    pub async fn storage_deletion(
+        context: &AppContext,
+        instance_id: u64,
+        target: &str,
+        selected_paths: Option<&[String]>,
+        plan_id: Option<&str>,
+    ) -> AppResult<serde_json::Value> {
+        let _action = Self::begin_action(context, instance_id, "storage deletion").await?;
+        let api_key = context.state.read().await.credentials.vast_api_key.clone();
+        if api_key.trim().is_empty() {
+            return Err(AppError::InvalidInput("Vast API key is missing.".into()));
+        }
+        let vast = VastApiClient::new(
+            context.http_client.clone(),
+            context.config.vast_base_url.clone(),
+            api_key,
+        );
+        let remote = build_remote_exec_for_instance(context, &vast, instance_id).await?;
+        SharedStorageManager::deletion_request(
+            context,
+            &remote,
+            instance_id,
+            &context.config.audio_target_user,
+            target,
+            selected_paths,
+            plan_id,
+        )
+        .await
     }
 }
 

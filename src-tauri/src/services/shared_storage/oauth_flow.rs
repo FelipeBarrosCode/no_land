@@ -82,7 +82,9 @@ pub fn get_oauth_config(
             token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             client_id: client_id.to_string(),
             client_secret: client_secret.map(String::from),
-            scopes: "Files.ReadWrite.AppFolder User.Read offline_access",
+            // rclone addresses the selected drive by ID and performs normal
+            // filesystem operations, which AppFolder-only permission cannot do.
+            scopes: "Files.ReadWrite User.Read offline_access",
             extra_auth_params: &[],
         }),
         crate::models::application_bundle::StorageProvider::Dropbox => Some(OAuthProviderConfig {
@@ -136,6 +138,7 @@ pub async fn exchange_code(
         ("client_id", &config.client_id),
         ("code_verifier", code_verifier),
     ];
+    add_token_scopes(config, &mut params);
 
     // Some providers require client_secret for confidential clients
     let secret_holder;
@@ -154,15 +157,14 @@ pub async fn exchange_code(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        tracing::warn!("OAuth token exchange HTTP {status}: {body}");
+        tracing::warn!("OAuth token exchange HTTP {status}");
         // Try to extract error from JSON body
         if let Ok(err_resp) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(err) = err_resp.get("error").and_then(|v| v.as_str()) {
-                let desc = err_resp
-                    .get("error_description")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                return Err(format!("Token exchange failed: {err} — {desc}"));
+            if err_resp.get("error").and_then(|v| v.as_str()) == Some("invalid_grant") {
+                return Err(
+                    "Token exchange failed: authorization expired or was revoked; authorize again."
+                        .into(),
+                );
             }
         }
         return Err(format!("Token exchange failed: HTTP {status}"));
@@ -178,11 +180,7 @@ pub async fn exchange_code(
 
     // Check if the response contains an error
     if token.error.is_some() {
-        return Err(format!(
-            "Token exchange returned error: {} — {}",
-            token.error.unwrap_or_default(),
-            token.error_description.unwrap_or_default()
-        ));
+        return Err("Token exchange returned an OAuth error; authorize again.".into());
     }
 
     Ok(token)
@@ -199,6 +197,7 @@ pub async fn refresh_token(
         ("refresh_token", refresh_token),
         ("client_id", &config.client_id),
     ];
+    add_token_scopes(config, &mut params);
 
     let secret_holder;
     if let Some(secret) = &config.client_secret {
@@ -215,8 +214,7 @@ pub async fn refresh_token(
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        tracing::warn!("OAuth token refresh HTTP {status}: {body}");
+        tracing::warn!("OAuth token refresh HTTP {status}");
         return Err(format!("Token refresh failed: HTTP {status}"));
     }
 
@@ -228,13 +226,51 @@ pub async fn refresh_token(
         .map_err(|e| format!("Failed to parse token refresh response: {e}"))?;
 
     if token.error.is_some() {
-        return Err(format!(
-            "Token refresh returned error: {}",
-            token.error.unwrap_or_default()
-        ));
+        return Err("Token refresh returned an OAuth error; authorize again.".into());
     }
 
     Ok(token)
+}
+
+fn add_token_scopes<'a>(config: &'a OAuthProviderConfig, params: &mut Vec<(&'a str, &'a str)>) {
+    if !config.scopes.is_empty() {
+        params.push(("scope", config.scopes));
+    }
+}
+
+/// Resolve the concrete drive selected by Microsoft for the authorized user.
+/// Rclone cannot construct a OneDrive filesystem from an OAuth token alone.
+pub async fn discover_onedrive_drive(access_token: &str) -> Result<(String, String), String> {
+    let response = reqwest::Client::new()
+        .get("https://graph.microsoft.com/v1.0/me/drive")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| "OneDrive metadata request failed".to_string())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("OneDrive metadata request failed: HTTP {status}"));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| "Invalid OneDrive metadata response".to_string())?;
+    parse_onedrive_drive(&value)
+}
+
+fn parse_onedrive_drive(value: &serde_json::Value) -> Result<(String, String), String> {
+    let drive_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !id.chars().any(char::is_control))
+        .ok_or_else(|| "OneDrive metadata did not contain a valid drive ID.".to_string())?;
+    let drive_type = value
+        .get("driveType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "personal" | "business" | "documentLibrary"))
+        .ok_or_else(|| "OneDrive metadata contained an unsupported drive type.".to_string())?;
+    Ok((drive_id.to_owned(), drive_type.to_owned()))
 }
 
 #[cfg(test)]
@@ -272,5 +308,56 @@ mod tests {
         assert!(get_oauth_config(&StorageProvider::BackblazeB2, "", None).is_none());
         assert!(get_oauth_config(&StorageProvider::AmazonS3, "", None).is_none());
         assert!(get_oauth_config(&StorageProvider::GoogleDrive, "id", None).is_some());
+    }
+
+    #[test]
+    fn onedrive_scope_is_consistent_for_authorize_exchange_and_refresh() {
+        use crate::models::application_bundle::StorageProvider;
+        let config = get_oauth_config(
+            &StorageProvider::MicrosoftOneDrive,
+            "synthetic-client",
+            None,
+        )
+        .unwrap();
+        for redirect in ["http://127.0.0.1:17770/callback", "noland://oauth/callback"] {
+            let url =
+                config.build_authorization_url(redirect, "synthetic-state", "synthetic-challenge");
+            assert!(url.contains(&format!("redirect_uri={}", urlencoding(redirect))));
+            assert!(url.contains(&format!("scope={}", urlencoding(config.scopes))));
+            assert!(url.contains("code_challenge_method=S256"));
+        }
+        assert!(config
+            .scopes
+            .split_whitespace()
+            .any(|scope| scope == "Files.ReadWrite"));
+        assert!(config.scopes.contains("offline_access"));
+        assert!(!config.scopes.contains("AppFolder"));
+        for grant in ["authorization_code", "refresh_token"] {
+            let mut params = vec![("grant_type", grant)];
+            add_token_scopes(&config, &mut params);
+            assert_eq!(params.last(), Some(&("scope", config.scopes)));
+        }
+    }
+
+    #[test]
+    fn onedrive_metadata_requires_supported_concrete_drive_identity() {
+        for drive_type in ["personal", "business", "documentLibrary"] {
+            assert_eq!(
+                parse_onedrive_drive(
+                    &serde_json::json!({"id":"synthetic-drive", "driveType":drive_type})
+                )
+                .unwrap(),
+                ("synthetic-drive".into(), drive_type.into())
+            );
+        }
+        for value in [
+            serde_json::json!({"driveType":"personal"}),
+            serde_json::json!({"id":" ", "driveType":"business"}),
+            serde_json::json!({"id":"drive\nconfiguration", "driveType":"personal"}),
+            serde_json::json!({"id":"drive", "driveType":"sharepoint"}),
+            serde_json::json!({"id":"drive", "driveType":7}),
+        ] {
+            assert!(parse_onedrive_drive(&value).is_err());
+        }
     }
 }

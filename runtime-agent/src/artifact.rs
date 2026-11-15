@@ -305,7 +305,7 @@ pub fn rollback(store: &Store) -> Result<()> {
         .as_deref()
         .context("No previous runtime available")?;
     anyhow::ensure!(crate::valid_id(previous), "Invalid previous runtime ID");
-    validate_root(&store.data.join("images").join(previous))?;
+    validate_root(&store.root_for_id(previous)?)?;
     std::mem::swap(&mut activation.current, &mut activation.previous);
     atomic_json(&store.data.join("activation.json"), &activation)?;
     store.progress(

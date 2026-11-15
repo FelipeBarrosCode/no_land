@@ -1,10 +1,7 @@
 import { create } from "zustand";
 import { translate, translateSource } from "../lib/i18n";
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
+import { ensureNotificationPermission } from "../lib/notificationPermission";
 import { playArcadeSuccess } from "../lib/arcadeAudio";
 import { isNotificationEnabled } from "../lib/notificationPreferences";
 import { notifyProvisioningUpdate } from "../lib/provisioningNotifications";
@@ -33,6 +30,8 @@ import {
   subscribeSharedStorageRestoreCompleted,
   subscribeDirectUploadProgress,
   cancelSharedStorageOperation,
+  confirmStorageDeletion,
+  type StorageDeletionPreview,
   verifyWireguard,
   getSetupStatus,
   verifySunshine,
@@ -98,6 +97,8 @@ import {
 import { PROVISIONING_ORDER } from "../lib/constants";
 import { useFeedbackStore } from "../features/feedback/feedbackStore";
 import type { BlockingActionState } from "../components/ui/BlockingLoaderOverlay";
+import { canClearStorageCompletion, correlateStorageProgress, settleBackgroundRequest } from "../lib/sharedStorageProgress";
+import { deletionProgressFor } from "../lib/storageDeletionProgress";
 import type {
   AutoShutdownSettings,
   ManualLocationInput,
@@ -114,7 +115,6 @@ import type {
   SshCredentialsUpdate,
   SharedStorageSettingsUpdate,
   SharedStorageSettingsResponse,
-  BackupPerformanceMode,
   BackupStatusResponse,
   SharedStorageInstanceStatus,
   SharedStorageObjectEntry,
@@ -162,6 +162,7 @@ interface AppStore {
   offersHasNextPage: boolean;
   busy: boolean;
   blockingAction: BlockingActionState | null;
+  backgroundStorageAction: BlockingActionState | null;
   isBlocking: boolean;
   provisioningModalDismissed: boolean;
   provisioningStopRequested: boolean;
@@ -289,10 +290,10 @@ interface AppStore {
   saveInstanceStorageSelected: (
     instanceId: number,
     selectedPaths: string[],
-    performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
   cancelSharedStorageOperation: (instanceId: number) => Promise<void>;
   clearBackgroundStorageAction: (operationId: string) => void;
+  startStorageDeletion: (instanceId: number, preview: StorageDeletionPreview) => Promise<void>;
   uploadPathsToRemoteInstance: (
     instanceId: number,
     localPaths: string[],
@@ -464,6 +465,8 @@ interface AsyncActionOptions {
   detail?: string;
   blocking?: boolean;
   background?: boolean;
+  instanceId?: number;
+  deletionPlan?: BlockingActionState["deletionPlan"];
 }
 
 const PROVISIONING_INTERACTIVE_STATES = new Set<OrchestrationState>([
@@ -754,10 +757,7 @@ async function notifyStorageCompletion(body: string) {
   }
   playArcadeSuccess();
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
+    const granted = await ensureNotificationPermission();
     if (granted) {
       await sendNotification({
         title: "Noland Connect",
@@ -778,7 +778,7 @@ async function handleSharedStorageRestoreCompleted(
   event: import("../lib/types").SharedStorageRestoreCompletedEvent,
   get: () => AppStore,
 ) {
-  const blockingAction = get().blockingAction;
+  const blockingAction = get().backgroundStorageAction;
   if (blockingAction &&
     ((blockingAction.operationId && blockingAction.operationId !== event.operationId) ||
       (blockingAction.instanceId != null && blockingAction.instanceId !== event.instanceId))
@@ -790,7 +790,7 @@ async function handleSharedStorageRestoreCompleted(
   }
   notifiedRestoreOperations.add(event.operationId);
   get().clearBackgroundStorageAction(event.operationId);
-  await notifyStorageCompletion(`${event.displayName || "Your shared storage restore"} restore completed.`);
+  await notifyStorageCompletion(`${event.displayName || "Your cloud storage download"} restore completed.`);
 }
 
 function applySharedStorageProgress(
@@ -798,21 +798,43 @@ function applySharedStorageProgress(
   set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
 ) {
   set((state) => {
+    const action = state.backgroundStorageAction;
+    if (action?.key === "instance.storage.delete") {
+      if (!action.deletionPlan || !deletionProgressFor(action.deletionPlan, event)) return {};
+      const deletion = event.deletion!;
+      const percent = deletion.total_objects > 0
+        ? Math.min(100, deletion.completed_objects / deletion.total_objects * 100) : null;
+      return {
+        backgroundStorageAction: {
+          ...action,
+          stage: event.state,
+          label: event.state === "MONITORING_PAUSED" ? translate("storage.monitoringPaused")
+            : event.state === "RECONNECTING" ? event.message || translate(`storage.delete.phase.${deletion.phase}`)
+              : translate(`storage.delete.phase.${deletion.phase}`),
+          detail: [translate("storage.delete.progress", {
+            objects: deletion.completed_objects, total: deletion.total_objects,
+            packs: deletion.completed_packs, totalPacks: deletion.total_packs,
+            bytes: deletion.verified_absent_bytes.toLocaleString(),
+          }), translate("storage.delete.quotaNote")].join(" · "),
+          lastProgressAt: deletion.last_success_at,
+          mode: percent == null ? "indeterminate" : "determinate",
+          progress: percent,
+          cancellable: false,
+        },
+      };
+    }
     if (
-      !state.blockingAction ||
-      !SHARED_STORAGE_ACTION_KEYS.has(state.blockingAction.key)
+      !action ||
+      !SHARED_STORAGE_ACTION_KEYS.has(action.key)
     ) {
       return {};
     }
-    if (
-      (state.blockingAction.operationId &&
-        state.blockingAction.operationId !== event.operationId) ||
-      (state.blockingAction.instanceId != null &&
-        state.blockingAction.instanceId !== event.instanceId)
-    ) {
+    const operation = correlateStorageProgress(action, event);
+    if (!operation) {
       return {};
     }
     const transferPhase = /upload|download/i.test(event.phase ?? event.state);
+    const pipeline = event.kind === "backup" ? event.backupPipeline : null;
     const transferFraction = transferPhase
       ? event.completedBytes != null && event.totalBytes != null && event.totalBytes > 0
         ? event.completedBytes / event.totalBytes
@@ -822,7 +844,7 @@ function applySharedStorageProgress(
           ? event.completedObjects / event.totalObjects
           : null
       : null;
-    const percent =
+    const percent = pipeline ? null :
       typeof transferFraction === "number"
         ? Math.round(Math.max(0, Math.min(1, transferFraction)) * 100)
         : typeof event.fraction === "number"
@@ -833,7 +855,7 @@ function applySharedStorageProgress(
         ? `${event.completedObjects}/${event.totalObjects} ${event.objectUnit ?? "objects"}`
         : null;
     const isDownloadPhase = event.kind === "restore" || /download/i.test(event.phase ?? event.state);
-    const completedBytesLabel = isDownloadPhase ? "downloaded" : "ready";
+    const completedBytesLabel = event.kind === "restore" ? "restored" : "ready";
     const bytes =
       event.completedBytes != null
         ? event.totalBytes != null && event.totalBytes > 0
@@ -850,26 +872,38 @@ function applySharedStorageProgress(
         ? `${event.completedUnits}/${event.totalUnits}${event.unit ? ` ${event.unit}` : ""}`
         : null;
     const units = transferPhase ? (objects ?? operationUnits) : operationUnits;
-    const phaseLabel = event.readyToLaunch
-      ? "Ready to launch"
-      : event.phase
-        ? event.phase.replace(/_/g, " ")
-        : event.state;
+    const pipelineDetail = pipeline ? [
+      `${pipeline.selected_files} files · ${formatTransferBytes(pipeline.source_total_bytes)} selected`,
+      `${pipeline.completed_files + pipeline.reused_files}/${pipeline.selected_files} files captured or reused`,
+      `${formatTransferBytes(pipeline.durable_bytes)}/${formatTransferBytes(pipeline.capture_total_bytes)} captured`,
+      `${formatTransferBytes(pipeline.prepared_bytes)} prepared`,
+      `${formatTransferBytes(event.transferredBytes ?? 0)} uploaded`,
+      `${event.completedObjects ?? 0} packs confirmed`,
+      `${pipeline.active_readers} readers · ${pipeline.active_codecs} packers · ${pipeline.inflight_uploads}/${pipeline.upload_limit} uploads`,
+      `Waiting: ${pipeline.waiting_on.replace(/_/g, " ")}`,
+    ].join(" · ") : null;
+    const phaseLabel = event.state === "MONITORING_PAUSED"
+      ? translate("storage.monitoringPaused")
+      : event.readyToLaunch
+        ? "Ready to launch"
+        : event.phase
+          ? event.phase.replace(/_/g, " ")
+          : event.state;
     return {
-      blockingAction: {
-        ...state.blockingAction,
+      backgroundStorageAction: {
+        ...action,
         label: phaseLabel,
+        stage: event.state,
         detail:
-          [event.message, units, bytes, transferPhase ? transferred : null]
+          (pipelineDetail ?? [event.message, units, bytes, transferPhase ? transferred : null]
             .filter(Boolean)
-            .join(" · ") ||
-          state.blockingAction.detail,
+            .join(" · ")) ||
+          action.detail,
         progress: percent,
         mode: percent == null ? "indeterminate" : "determinate",
         cancellable: event.cancellable,
         cancelRequested: event.cancelRequested,
-        operationId: event.operationId,
-        instanceId: event.instanceId,
+        ...operation,
       },
     };
   });
@@ -880,13 +914,13 @@ function applyDirectUploadProgress(
   set: (partial: Partial<AppStore> | ((state: AppStore) => Partial<AppStore>)) => void,
 ) {
   set((state) => {
-    const action = state.blockingAction;
+    const action = state.backgroundStorageAction;
     if (!action || action.key !== "instance.files.upload") return {};
     if (action.instanceId != null && action.instanceId !== event.instanceId) return {};
     const objects = `${event.completedObjects}/${event.totalObjects} items`;
     const bytes = `${formatTransferBytes(event.completedBytes)}/${formatTransferBytes(event.totalBytes)}`;
     return {
-      blockingAction: {
+      backgroundStorageAction: {
         ...action,
         operationId: event.operationId,
         instanceId: event.instanceId,
@@ -988,35 +1022,58 @@ export const useAppStore = create<AppStore>((set, get) => {
     task: () => Promise<T>,
     fallback: T,
   ): Promise<T> => {
-    set({ instanceActionRunning: true, error: null });
+    const requestId = crypto.randomUUID();
+    if (options.background && get().backgroundStorageAction) {
+      set({ error: translate("storage.operation.running") });
+      return fallback;
+    }
+    set(options.background ? { error: null } : { instanceActionRunning: true, error: null });
 
     if (options.background || options.blocking) {
-      set((state) => ({
-        blockingAction: createBlockingAction(state, {
+      set(() => ({
+        [options.background ? "backgroundStorageAction" : "blockingAction"]: {
           key: options.key,
           label: options.label,
           detail: options.detail,
+          requestId,
+          instanceId: options.instanceId,
+          operationId: options.deletionPlan?.planId,
+          deletionPlan: options.deletionPlan,
+          pendingStorageRequest: options.background &&
+            (SHARED_STORAGE_ACTION_KEYS.has(options.key) || options.key === "instance.storage.delete"),
           progress: null,
           mode: "indeterminate",
-        }),
-        isBlocking: options.blocking === true,
+          startedAt: Date.now(),
+        },
+        ...(options.background ? {} : { isBlocking: options.blocking === true }),
       }));
     }
 
     if (options.background) {
-      set({ instanceActionRunning: false, busy: false });
       void task()
         .catch((error) => {
+          const action = get().backgroundStorageAction;
+          if (action?.requestId === requestId && action.stage === "MONITORING_PAUSED") {
+            return;
+          }
           const message = mapError(error);
           set({ error: message });
+          if (options.key === "instance.storage.delete") {
+            set((state) => state.backgroundStorageAction?.requestId === requestId ? {
+              backgroundStorageAction: { ...state.backgroundStorageAction, stage: "FAILED", detail: message, cancellable: false },
+            } : {});
+          }
           void createCrashReport(options.key, serializeErrorForReport(error));
         })
         .finally(() => {
-          set((state) => ({
-            ...(state.blockingAction?.key === options.key
-              ? { blockingAction: null }
-              : {}),
-          }));
+          set((state) => {
+            const action = state.backgroundStorageAction;
+            if (action?.requestId !== requestId) return {};
+            if (action.key === "instance.storage.delete" && action.stage === "FAILED") {
+              return { backgroundStorageAction: { ...action, pendingStorageRequest: false } };
+            }
+            return { backgroundStorageAction: settleBackgroundRequest(action, requestId) };
+          });
         });
       return fallback;
     }
@@ -1083,6 +1140,7 @@ export const useAppStore = create<AppStore>((set, get) => {
     offersHasNextPage: false,
     busy: false,
     blockingAction: null,
+    backgroundStorageAction: null,
     isBlocking: false,
     provisioningModalDismissed: false,
     provisioningStopRequested: false,
@@ -1868,7 +1926,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.settings.load",
-          label: translate("generated.87ac872c323d842b"),
+          label: translate("generated.acd624b78590f09f"),
           detail: translate("generated.addaa0f4cf57fd2e"),
         },
         async () => {
@@ -1898,7 +1956,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       await runBusyTask(
         {
           key: "storage.settings.save",
-          label: translate("generated.b935b0e63f135682"),
+          label: translate("generated.4e7235e5aebbbf08"),
           detail: translate("generated.c57f7dddbf6b4327"),
           blocking: true,
         },
@@ -1915,7 +1973,7 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runBusyTask(
         {
           key: "storage.settings.test",
-          label: translate("generated.eb27b7e8ded23881"),
+          label: translate("generated.c30b3446eeef7617"),
           detail: translate("generated.2ccad01060281a32"),
         },
         async () => await testSharedStorageConfig(),
@@ -2020,7 +2078,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           key: "storage.sync.active-instance",
           label: translate("generated.42e34f252c7666b0"),
           detail:
-            translate("generated.33116ae646f2cd4e"),
+            translate("generated.881c512bbcc9164d"),
           blocking: true,
         },
         async () => {
@@ -2031,7 +2089,7 @@ export const useAppStore = create<AppStore>((set, get) => {
             );
           }
           throw new Error(
-            translate("generated.7083e842fe19eac2"),
+            translate("generated.e738424fa5134686"),
           );
         },
         null,
@@ -2132,7 +2190,8 @@ export const useAppStore = create<AppStore>((set, get) => {
       return await runInstanceTask(
         {
           key: "instance.storage.sync",
-          label: translate("generated.38928c388adf6720"),
+          instanceId,
+          label: translate("storage.games.download"),
           detail:
             translate("generated.ddf87f6b45c36b44"),
           blocking: false,
@@ -2185,12 +2244,12 @@ export const useAppStore = create<AppStore>((set, get) => {
     saveInstanceStorageSelected: async (
       instanceId,
       selectedPaths,
-      performanceMode,
     ) => {
       return await runInstanceTask(
         {
           key: "instance.storage.export",
-          label: translate("generated.6e9fc8a84aaaa28a"),
+          instanceId,
+          label: translate("storage.games.upload"),
           detail: translate("generated.744d5005ed49ebf5"),
           blocking: false,
           background: true,
@@ -2199,9 +2258,10 @@ export const useAppStore = create<AppStore>((set, get) => {
           const result = await saveInstanceToSharedStorageSelected(
             instanceId,
             selectedPaths,
-            performanceMode,
           );
-          await notifyStorageCompletion(translate("generated.57893731ab390a3d"));
+          if (get().backgroundStorageAction?.stage !== "MONITORING_PAUSED") {
+            await notifyStorageCompletion(translate("generated.57893731ab390a3d"));
+          }
           return result;
         },
         null,
@@ -2210,16 +2270,22 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     cancelSharedStorageOperation: async (instanceId) => {
       try {
-        await cancelSharedStorageOperation(instanceId);
+        const action = get().backgroundStorageAction;
+        if (!action || action.instanceId !== instanceId || !action.operationId ||
+          action.key === "instance.storage.delete") {
+          throw new Error(translate("generated.7275272a8ba73ed2"));
+        }
+        const operationId = action.operationId;
+        await cancelSharedStorageOperation(instanceId, operationId);
         set((state) => ({
-          blockingAction: state.blockingAction
+          backgroundStorageAction: state.backgroundStorageAction && state.backgroundStorageAction.requestId === action?.requestId && state.backgroundStorageAction.operationId === operationId
             ? {
-                ...state.blockingAction,
+                ...state.backgroundStorageAction,
                 cancelRequested: true,
                 cancellable: false,
                 detail: translate("generated.acf1e4361a83466b"),
               }
-            : null,
+            : state.backgroundStorageAction,
         }));
       } catch (error) {
         set({ error: mapError(error) });
@@ -2228,17 +2294,37 @@ export const useAppStore = create<AppStore>((set, get) => {
 
     clearBackgroundStorageAction: (operationId) => {
       set((state) => {
-        const action = state.blockingAction;
-        return action?.operationId === operationId && SHARED_STORAGE_ACTION_KEYS.has(action.key)
-          ? { blockingAction: null }
+        const action = state.backgroundStorageAction;
+        return canClearStorageCompletion(action, operationId)
+          ? { backgroundStorageAction: null }
           : {};
       });
+    },
+
+    startStorageDeletion: async (instanceId, preview) => {
+      if (get().backgroundStorageAction) throw new Error(translate("storage.operation.running"));
+      // The preview's frozen plan is the only destructive request authorized here.
+      // Starting/closing the dialog never generates a replacement deletion plan.
+      await runInstanceTask({
+        key: "instance.storage.delete",
+        label: translate("storage.delete.working"),
+        detail: translate("storage.delete.quotaNote"),
+        instanceId,
+        deletionPlan: { instanceId, planId: preview.planId, target: preview.target },
+        background: true,
+      }, async () => {
+        await confirmStorageDeletion(instanceId, preview);
+        if (get().backgroundStorageAction?.stage !== "MONITORING_PAUSED") {
+          await notifyStorageCompletion(translate("storage.delete.completed"));
+        }
+      }, undefined);
     },
 
     uploadPathsToRemoteInstance: async (instanceId, localPaths, destination) => {
       await runInstanceTask(
         {
           key: "instance.files.upload",
+          instanceId,
           label: translate("generated.e91ca92cc5ad0131"),
           detail: translate("generated.f49ff416f3bf8c04"),
           blocking: false,
@@ -2513,7 +2599,7 @@ export const useAppStore = create<AppStore>((set, get) => {
           key: "instance.destroy",
           label: translate("generated.0c9df74dc6eeab50"),
           detail:
-            translate("generated.9bb868b4f3f40791"),
+            translate("instance.destroy.noBackup"),
           blocking: true,
         },
         async () => {

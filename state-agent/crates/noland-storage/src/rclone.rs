@@ -4,20 +4,26 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::stream::{
+    self, PeerContext, PeerRates, StreamPolicy, StreamReadFailure, StreamTransferDiagnostics,
+};
 use async_trait::async_trait;
 use bytes::Bytes;
 use noland_rclone_adapter::{
     classify_remote_error, EphemeralRcloneSession, ProviderCapabilities, ProviderKind,
-    ProviderRootIdentity, RemoteErrorClass, TransferProfile, TransferTuning,
+    ProviderRootIdentity, RcloneRoot, RemoteErrorClass, TransferProfile, TransferTuning,
 };
 use noland_state_core::{Result, StateError};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
+mod fetch;
+pub(crate) mod upload;
+
 use crate::{
-    compare_remote_known, forbid_rclone_sync, transfer::validate_remote_key, AdaptiveConcurrency,
-    DownloadObserver, DownloadStreamConsumer, Health, ImmutableUpload, ImmutableUploadCompletion,
+    forbid_rclone_sync, transfer::validate_remote_key, AdaptiveConcurrency, DownloadObserver,
+    DownloadStreamConsumer, Health, ImmutableUpload, ImmutableUploadCompletion,
     ImmutableUploadObserver, MetadataBatch, MetadataWrite, RemoteEntry, RemoteKey, RemoteMeta,
     SharedRetryGate, SharedStorageProvider, StorageOperationMetrics,
 };
@@ -32,6 +38,7 @@ struct StorageCounters {
     remote_download_calls: AtomicU64,
     bytes_uploaded: AtomicU64,
     bytes_downloaded: AtomicU64,
+    metadata_reads: fetch::MetadataReadCounters,
 }
 
 impl StorageCounters {
@@ -61,6 +68,117 @@ impl RcloneFailure {
             self.class, self.message
         ))
     }
+}
+
+struct DownloadAttemptTiming {
+    elapsed: std::time::Duration,
+    observer_wait: std::time::Duration,
+}
+
+impl DownloadAttemptTiming {
+    fn network_sample(&self) -> Option<std::time::Duration> {
+        let network = self.elapsed.saturating_sub(self.observer_wait);
+        // Local journal/progress work is not provider congestion. As with
+        // ordered downloads, discard significantly backpressured samples.
+        (!network.is_zero() && self.observer_wait <= network / 3).then_some(network)
+    }
+}
+
+/// Tokio's kill_on_drop prevents detached work, but reaping normally happens
+/// later. Keep staging/lease cleanup behind a bounded kill-and-reap on cancelled
+/// futures as well. The runtime reaper remains the fallback for an unkillable OS
+/// process; no unbounded wait is performed on an executor thread.
+struct ReapedChild(tokio::process::Child);
+
+impl std::ops::Deref for ReapedChild {
+    type Target = tokio::process::Child;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapedChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapedChild {
+    fn drop(&mut self) {
+        if self.0.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        let _ = self.0.start_kill();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while std::time::Instant::now() < deadline {
+            match self.0.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(2)),
+            }
+        }
+    }
+}
+
+async fn read_error_tail(
+    mut stream: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    let mut tail = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let count = stream.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(tail);
+        }
+        tail.extend_from_slice(&buffer[..count]);
+        if tail.len() > 16 * 1024 {
+            tail.drain(..tail.len() - 16 * 1024);
+        }
+    }
+}
+
+async fn drain_stream_errors(
+    stderr: impl tokio::io::AsyncRead + Unpin,
+    done: tokio::sync::oneshot::Receiver<std::time::Instant>,
+    exit_timeout: std::time::Duration,
+) -> (std::io::Result<Vec<u8>>, u64) {
+    let tail = read_error_tail(stderr);
+    tokio::pin!(tail);
+    tokio::select! {
+        result = &mut tail => (result, 0),
+        ended = done => {
+            let ended = ended.unwrap_or_else(|_| std::time::Instant::now());
+            let result = tokio::time::timeout(exit_timeout, &mut tail).await
+                .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "rclone stderr did not close after the stream ended")));
+            (result, stream::micros(ended.elapsed()))
+        }
+    }
+}
+
+async fn kill_and_reap_for_retry(child: &mut ReapedChild) -> Result<()> {
+    let _ = child.start_kill();
+    tokio::time::timeout(std::time::Duration::from_secs(5), child.wait())
+        .await
+        .map_err(|_| {
+            StateError::Storage("rclone did not exit; refusing an overlapping retry".into())
+        })??;
+    Ok(())
+}
+
+async fn reaped_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    let mut child = ReapedChild(command.kill_on_drop(true).spawn()?);
+    let mut stdout = child.stdout.take().expect("piped rclone stdout");
+    let stderr = child.stderr.take().expect("piped rclone stderr");
+    let output = async {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).await?;
+        Ok::<_, std::io::Error>(bytes)
+    };
+    let (stdout, stderr, status) = tokio::try_join!(output, read_error_tail(stderr), child.wait())?;
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 /// Builds safe rclone argument lists from provider-neutral operations and a
@@ -121,7 +239,12 @@ impl RcloneCommandBuilder {
             "--stats-one-line".into(),
             "--use-json-log".into(),
             "--multi-thread-streams".into(),
-            tuning.rclone_download_streams.max(1).to_string(),
+            tuning
+                .rclone_download_streams
+                .max(1)
+                .min(tuning.max_parallel_downloads.max(1))
+                .min(ProviderCapabilities::for_provider(self.provider).max_download_concurrency)
+                .to_string(),
         ];
         self.push_backend_options(&mut args);
         args.extend([source, destination]);
@@ -134,6 +257,32 @@ impl RcloneCommandBuilder {
         let mut args = vec!["cat".into()];
         self.push_backend_options(&mut args);
         args.push(source);
+        args
+    }
+
+    pub fn read_small_args(&self, source_root: String) -> Vec<String> {
+        // Supply exactly one literal key via stdin. Unlike `cat remote:key`,
+        // files-from cannot turn a directory into concatenated descendants, and
+        // directly opens the requested object rather than traversing history.
+        let mut args = vec![
+            "cat".into(),
+            "--files-from-raw".into(),
+            "-".into(),
+            "--no-traverse".into(),
+            "--error-on-no-transfer".into(),
+            "--checkers".into(),
+            "1".into(),
+            "--transfers".into(),
+            "1".into(),
+            "--buffer-size".into(),
+            "0".into(),
+            "--retries".into(),
+            "1".into(),
+            "--low-level-retries".into(),
+            "1".into(),
+        ];
+        self.push_backend_options(&mut args);
+        args.push(source_root);
         args
     }
 
@@ -177,6 +326,7 @@ impl RcloneCommandBuilder {
         tuning
             .rclone_transfers
             .max(1)
+            .min(tuning.max_parallel_uploads.max(1))
             .min(ProviderCapabilities::for_provider(self.provider).max_upload_concurrency)
     }
 
@@ -199,8 +349,20 @@ pub struct RcloneStorage {
     tuning: TransferTuning,
     retry_gate: Arc<SharedRetryGate>,
     upload_limiter: Arc<AdaptiveConcurrency>,
+    upload_peers: PeerRates,
+    #[cfg(test)]
+    upload_executable: Option<PathBuf>,
     download_limiter: Arc<AdaptiveConcurrency>,
-    stream_limiter: Arc<AdaptiveConcurrency>,
+    stream_peers: PeerRates,
+    stream_policy: StreamPolicy,
+    control_timeout: std::time::Duration,
+    deletion_control: bool,
+    #[cfg(test)]
+    control_executable: Option<PathBuf>,
+    #[cfg(test)]
+    stream_executable: Option<PathBuf>,
+    #[cfg(test)]
+    progress_executable: Option<PathBuf>,
     root_ready: OnceCell<()>,
     metrics: StorageCounters,
 }
@@ -226,8 +388,20 @@ impl RcloneStorage {
             command_builder,
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
             upload_limiter: AdaptiveConcurrency::for_uploads(&tuning),
+            upload_peers: PeerRates::default(),
+            #[cfg(test)]
+            upload_executable: None,
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
-            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
+            stream_peers: PeerRates::default(),
+            stream_policy: StreamPolicy::default(),
+            control_timeout: std::time::Duration::from_secs(120),
+            deletion_control: false,
+            #[cfg(test)]
+            control_executable: None,
+            #[cfg(test)]
+            stream_executable: None,
+            #[cfg(test)]
+            progress_executable: None,
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -273,8 +447,20 @@ impl RcloneStorage {
             extra_args,
             retry_gate: Arc::new(SharedRetryGate::new(tuning.clone())),
             upload_limiter: AdaptiveConcurrency::for_uploads(&tuning),
+            upload_peers: PeerRates::default(),
+            #[cfg(test)]
+            upload_executable: None,
             download_limiter: AdaptiveConcurrency::for_downloads(&tuning),
-            stream_limiter: AdaptiveConcurrency::for_streams(&tuning),
+            stream_peers: PeerRates::default(),
+            stream_policy: StreamPolicy::default(),
+            control_timeout: std::time::Duration::from_secs(120),
+            deletion_control: false,
+            #[cfg(test)]
+            control_executable: None,
+            #[cfg(test)]
+            stream_executable: None,
+            #[cfg(test)]
+            progress_executable: None,
             tuning,
             root_ready: OnceCell::new(),
             metrics: StorageCounters::default(),
@@ -282,11 +468,24 @@ impl RcloneStorage {
     }
 
     pub fn with_transfer_tuning(mut self, tuning: TransferTuning) -> Self {
-        let tuning = tuning.normalized();
+        let mut tuning = tuning.normalized();
+        tuning.max_parallel_uploads = tuning
+            .max_parallel_uploads
+            .min(self.capabilities.max_upload_concurrency)
+            .clamp(1, 32);
+        tuning.max_parallel_downloads = tuning
+            .max_parallel_downloads
+            .min(self.capabilities.max_download_concurrency)
+            .clamp(1, 32);
+        tuning.rclone_download_streams = tuning
+            .rclone_download_streams
+            .min(tuning.max_parallel_downloads)
+            .max(1);
         self.retry_gate = Arc::new(SharedRetryGate::new(tuning.clone()));
         self.upload_limiter = AdaptiveConcurrency::for_uploads(&tuning);
+        self.upload_peers = PeerRates::default();
         self.download_limiter = AdaptiveConcurrency::for_downloads(&tuning);
-        self.stream_limiter = AdaptiveConcurrency::for_streams(&tuning);
+        self.stream_peers = PeerRates::default();
         self.tuning = tuning;
         self
     }
@@ -295,8 +494,35 @@ impl RcloneStorage {
         &self.tuning
     }
 
+    /// Scope finite command deadlines to manual maintenance, never to long pack
+    /// transfers or application runtimes sharing this provider implementation.
+    pub fn for_deletion(mut self) -> Self {
+        self.deletion_control = true;
+        self
+    }
+
     pub fn provider_kind(&self) -> ProviderKind {
         self.provider_kind
+    }
+
+    fn deletion_args(&self, key: &RemoteKey) -> Result<Vec<String>> {
+        crate::deletion::validate_deletable_key(key)?;
+        let mut args = vec!["deletefile".into(), self.remote_path(key)];
+        args.extend(
+            self.permanent_delete_flags()
+                .iter()
+                .map(|flag| (*flag).into()),
+        );
+        Ok(args)
+    }
+
+    fn permanent_delete_flags(&self) -> &'static [&'static str] {
+        match self.provider_kind() {
+            ProviderKind::GoogleDrive => &["--drive-use-trash=false"],
+            ProviderKind::BackblazeB2 => &["--b2-hard-delete"],
+            ProviderKind::MicrosoftOneDrive => &["--onedrive-hard-delete"],
+            _ => &[],
+        }
     }
 
     pub fn capabilities(&self) -> &ProviderCapabilities {
@@ -320,26 +546,23 @@ impl RcloneStorage {
     }
 
     pub fn remote_path(&self, key: &RemoteKey) -> String {
-        format!(
-            "{}:{}/{}",
-            self.remote,
-            self.root.trim_end_matches('/'),
-            key.as_str().trim_start_matches('/')
-        )
+        self.remote_root().key_path(key.as_str())
     }
 
     fn root_remote(&self) -> String {
-        if self.root.trim().is_empty() {
-            format!("{}:", self.remote)
-        } else {
-            format!("{}:{}", self.remote, self.root.trim_end_matches('/'))
+        self.remote_root().remote_path()
+    }
+
+    fn remote_root(&self) -> RcloneRoot {
+        RcloneRoot {
+            remote_name: self.remote.clone(),
+            root: self.root.clone(),
         }
     }
 
     fn record_remote_error(&self, class: RemoteErrorClass) {
         self.upload_limiter.record_error(class);
         self.download_limiter.record_error(class);
-        self.stream_limiter.record_error(class);
     }
 
     async fn run(&self, args: Vec<String>) -> Result<String> {
@@ -348,10 +571,57 @@ impl RcloneStorage {
             .map_err(RcloneFailure::into_state_error)
     }
 
+    async fn run_timed(&self, args: Vec<String>) -> Result<(String, std::time::Duration)> {
+        self.run_classified_timed(args)
+            .await
+            .map_err(RcloneFailure::into_state_error)
+    }
+
     async fn run_classified(
         &self,
         args: Vec<String>,
     ) -> std::result::Result<String, RcloneFailure> {
+        self.run_classified_timed(args)
+            .await
+            .map(|(output, _)| output)
+    }
+
+    async fn run_classified_timed(
+        &self,
+        args: Vec<String>,
+    ) -> std::result::Result<(String, std::time::Duration), RcloneFailure> {
+        self.run_classified_with_deadline(
+            args,
+            self.deletion_control.then_some(self.control_timeout),
+        )
+        .await
+    }
+
+    async fn run_control(&self, args: Vec<String>) -> std::result::Result<String, RcloneFailure> {
+        self.run_classified_with_deadline(args, Some(self.control_timeout))
+            .await
+            .map(|(output, _)| output)
+    }
+
+    fn command(&self, _control: bool) -> Command {
+        #[cfg(test)]
+        if _control {
+            if let Some(executable) = &self.control_executable {
+                // Avoid macOS validation of a freshly written executable script;
+                // fixture deadlines must exercise the command, not its launch.
+                let mut command = Command::new("/bin/sh");
+                command.arg(executable);
+                return command;
+            }
+        }
+        Command::new("rclone")
+    }
+
+    async fn run_classified_with_deadline(
+        &self,
+        args: Vec<String>,
+        deadline: Option<std::time::Duration>,
+    ) -> std::result::Result<(String, std::time::Duration), RcloneFailure> {
         forbid_rclone_sync(&args).map_err(|error| RcloneFailure {
             class: RemoteErrorClass::Permanent,
             message: error.to_string(),
@@ -372,6 +642,7 @@ impl RcloneStorage {
         let max_attempts = self.tuning.max_attempts.max(1);
         for attempt in 1..=max_attempts {
             self.retry_gate.wait_for_turn().await;
+            let started = std::time::Instant::now();
             self.metrics
                 .rclone_invocations
                 .fetch_add(1, Ordering::Relaxed);
@@ -380,12 +651,25 @@ impl RcloneStorage {
                     .remote_mkdir_calls
                     .fetch_add(1, Ordering::Relaxed);
             }
-            let mut cmd = Command::new("rclone");
+            let mut cmd = self.command(deadline.is_some());
             cmd.args(&self.extra_args)
                 .args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            let output = match cmd.output().await {
+            let output = match deadline {
+                Some(deadline) => match tokio::time::timeout(deadline, reaped_output(&mut cmd)).await {
+                    Ok(output) => output,
+                    // The child future is killed/reaped before this return. A
+                    // provider may already have accepted the DELETE: do not
+                    // overlap a retry or claim rollback of its remote effects.
+                    Err(_) => return Err(RcloneFailure {
+                        class: RemoteErrorClass::Retryable,
+                        message: "deletion control request timed out; cloud outcome is unknown; resume only the same confirmed deletion plan".into(),
+                    }),
+                },
+                None => reaped_output(&mut cmd).await,
+            };
+            let output = match output {
                 Ok(output) => output,
                 Err(error) => {
                     let failure = RcloneFailure {
@@ -401,7 +685,10 @@ impl RcloneStorage {
                 }
             };
             if output.status.success() {
-                return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+                return Ok((
+                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                    started.elapsed(),
+                ));
             }
             let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let failure = RcloneFailure {
@@ -418,11 +705,51 @@ impl RcloneStorage {
         unreachable!("rclone retry count is always at least one")
     }
 
+    async fn stat_inner(&self, key: &RemoteKey, control: bool) -> Result<Option<RemoteMeta>> {
+        validate_remote_key(key)?;
+        let _permit = self.download_limiter.acquire().await?;
+        self.metrics
+            .remote_stat_calls
+            .fetch_add(1, Ordering::Relaxed);
+        let args = vec![
+            "lsjson".into(),
+            "--stat".into(),
+            "--no-modtime".into(),
+            "--no-mimetype".into(),
+            self.remote_path(key),
+        ];
+        let result = if control {
+            self.run_control(args).await
+        } else {
+            self.run_classified(args).await
+        };
+        match result {
+            Ok(out) => {
+                let object: ListedObject = serde_json::from_str(&out)
+                    .map_err(|_| StateError::Integrity("cloud object stat is malformed".into()))?;
+                if object.is_dir {
+                    Ok(None)
+                } else if object.size < 0 {
+                    Err(StateError::Integrity(
+                        "cloud object has an unknown size".into(),
+                    ))
+                } else {
+                    Ok(Some(RemoteMeta {
+                        key: key.clone(),
+                        size: object.size as u64,
+                    }))
+                }
+            }
+            Err(failure) if failure.class == RemoteErrorClass::NotFound => Ok(None),
+            Err(failure) => Err(failure.into_state_error()),
+        }
+    }
+
     async fn run_with_progress(
         &self,
         args: Vec<String>,
         mut on_progress: impl FnMut(u64) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<DownloadAttemptTiming> {
         forbid_rclone_sync(&args)?;
         if let Some(arg) =
             self.extra_args.iter().chain(args.iter()).find(|arg| {
@@ -438,17 +765,24 @@ impl RcloneStorage {
         let max_attempts = self.tuning.max_attempts.max(1);
         for attempt in 1..=max_attempts {
             self.retry_gate.wait_for_turn().await;
+            let started = std::time::Instant::now();
+            let mut observer_wait = std::time::Duration::ZERO;
             self.metrics
                 .rclone_invocations
                 .fetch_add(1, Ordering::Relaxed);
             let mut cmd = Command::new("rclone");
+            #[cfg(test)]
+            if let Some(executable) = &self.progress_executable {
+                cmd = Command::new("/bin/sh");
+                cmd.arg(executable);
+            }
             cmd.args(&self.extra_args)
                 .args(&args)
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
             let mut child = match cmd.spawn() {
-                Ok(child) => child,
+                Ok(child) => ReapedChild(child),
                 Err(error) => {
                     let failure = RcloneFailure {
                         class: classify_remote_error(None, &error.to_string()),
@@ -467,9 +801,27 @@ impl RcloneStorage {
             })?;
             let mut lines = BufReader::new(stderr).lines();
             let mut error_output = String::new();
-            while let Some(line) = lines.next_line().await? {
+            let mut pressure_tick = tokio::time::interval(
+                self.stream_policy
+                    .observation_interval
+                    .max(std::time::Duration::from_millis(1)),
+            );
+            pressure_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let line = tokio::select! {
+                    line = lines.next_line() => line?,
+                    _ = pressure_tick.tick() => {
+                        self.download_limiter
+                            .observe_local_pressure((self.stream_policy.io_pressure)());
+                        continue;
+                    }
+                };
+                let Some(line) = line else { break };
                 if let Some(bytes) = parse_rclone_stats_bytes(&line) {
-                    if let Err(error) = on_progress(bytes) {
+                    let local = std::time::Instant::now();
+                    let observed = on_progress(bytes);
+                    observer_wait = observer_wait.saturating_add(local.elapsed());
+                    if let Err(error) = observed {
                         let _ = child.kill().await;
                         return Err(error);
                     }
@@ -478,11 +830,21 @@ impl RcloneStorage {
                         error_output.push('\n');
                     }
                     error_output.push_str(&line);
+                    if error_output.len() > 16 * 1024 {
+                        let mut start = error_output.len() - 16 * 1024;
+                        while !error_output.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        error_output.drain(..start);
+                    }
                 }
             }
             let status = child.wait().await?;
             if status.success() {
-                return Ok(());
+                return Ok(DownloadAttemptTiming {
+                    elapsed: started.elapsed(),
+                    observer_wait,
+                });
             }
             let failure = RcloneFailure {
                 class: classify_remote_error(status.code(), error_output.trim()),
@@ -498,82 +860,50 @@ impl RcloneStorage {
         unreachable!("rclone retry count is always at least one")
     }
 
-    async fn compare_bulk_known(
-        &self,
-        uploads: &[ImmutableUpload],
-    ) -> Result<crate::RemoteKnownComparison> {
-        let mut groups: HashMap<String, Vec<ImmutableUpload>> = HashMap::new();
-        for upload in uploads {
-            validate_remote_key(&upload.key)?;
-            let prefix = upload
-                .key
-                .as_str()
-                .split_once('/')
-                .map(|(prefix, _)| prefix)
-                .unwrap_or(upload.key.as_str());
-            groups
-                .entry(prefix.to_string())
-                .or_default()
-                .push(upload.clone());
-        }
-
-        let mut combined = crate::RemoteKnownComparison::default();
-        for (prefix, candidates) in groups {
-            if candidates.len() == 1 && candidates[0].key.as_str() == prefix {
-                let candidate = &candidates[0];
-                let local_size = std::fs::metadata(&candidate.local)?.len();
-                match self.stat(&candidate.key).await? {
-                    Some(remote) if remote.size == local_size => combined.known.push(remote),
-                    Some(remote) => combined.size_conflicts.push(crate::RemoteSizeConflict {
-                        key: candidate.key.clone(),
-                        local_size,
-                        remote_size: remote.size,
-                    }),
-                    None => combined.missing.push(candidate.clone()),
-                }
-            } else {
-                let comparison =
-                    compare_remote_known(self, &RemoteKey::new(prefix), &candidates).await?;
-                combined.known.extend(comparison.known);
-                combined.missing.extend(comparison.missing);
-                combined.size_conflicts.extend(comparison.size_conflicts);
-            }
-        }
-        Ok(combined)
-    }
-
     async fn copy_staged(
         &self,
         stage: &StagingTree,
         immutable: bool,
         observer: Option<&(dyn ImmutableUploadObserver + '_)>,
     ) -> Result<()> {
-        let permit = self.upload_limiter.acquire().await?;
-        let started = std::time::Instant::now();
+        let waiting = std::time::Instant::now();
+        let mut permit = self
+            .upload_limiter
+            .acquire_slots(stage.files.min(self.tuning.rclone_transfers))
+            .await?;
+        let limiter_wait = waiting.elapsed();
         let mut current_tuning = self.tuning.clone();
-        current_tuning.rclone_transfers = self.upload_limiter.current();
-        current_tuning.rclone_checkers = current_tuning
-            .rclone_checkers
-            .min(self.upload_limiter.current().max(1));
-        let args = self.command_builder.upload_copy_args(
+        current_tuning.rclone_transfers = permit.slots();
+        current_tuning.max_parallel_uploads = permit.slots();
+        current_tuning.rclone_checkers = current_tuning.rclone_checkers.min(permit.slots());
+        let mut args = self.command_builder.upload_copy_args(
             &current_tuning,
             stage.root.display().to_string(),
             self.root_remote(),
             immutable,
         )?;
-        let result = match observer {
-            Some(observer) => {
-                observer.transfer_started()?;
-                self.run_with_progress(args, |bytes| observer.transfer_progress(bytes))
-                    .await
-            }
-            None => self.run(args).await.map(|_| ()),
-        };
-        if result.is_ok() {
-            self.upload_limiter.record_success(started.elapsed());
-        }
+        args.push("--no-traverse".into());
+        let mut remaining = stage.files;
+        let result = self
+            .run_upload(
+                args,
+                &stage.objects,
+                observer,
+                |_, _| {
+                    remaining = remaining.saturating_sub(1);
+                    permit.retain_slots(remaining);
+                    Ok(())
+                },
+                limiter_wait,
+                upload::UploadPolicy {
+                    io_pressure: self.stream_policy.io_pressure,
+                    transfer_slots: current_tuning.rclone_transfers,
+                    ..upload::UploadPolicy::default()
+                },
+            )
+            .await;
         drop(permit);
-        result
+        result.map(|_| ())
     }
 
     async fn put_metadata_entries(&self, entries: &[MetadataWrite]) -> Result<Vec<RemoteMeta>> {
@@ -586,16 +916,13 @@ impl RcloneStorage {
         while offset < entries.len() {
             let end = (offset + tuning.max_bulk_files).min(entries.len());
             let chunk = &entries[offset..end];
-            let stage = StagingTree::new("metadata")?;
+            let mut stage = StagingTree::new("metadata")?;
             for entry in chunk {
                 validate_remote_key(&entry.key)?;
                 stage.write(&entry.key, &entry.bytes)?;
             }
             self.copy_staged(&stage, false, None).await?;
             for entry in chunk {
-                self.metrics
-                    .bytes_uploaded
-                    .fetch_add(entry.bytes.len() as u64, Ordering::Relaxed);
                 output.push(RemoteMeta {
                     key: entry.key.clone(),
                     size: entry.bytes.len() as u64,
@@ -605,10 +932,125 @@ impl RcloneStorage {
         }
         Ok(output)
     }
+
+    async fn upload_compared(
+        &self,
+        uploads: &[ImmutableUpload],
+        comparison: crate::RemoteKnownComparison,
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<Vec<RemoteMeta>> {
+        comparison.ensure_immutable()?;
+        self.metrics
+            .remote_upload_calls
+            .fetch_add(uploads.len() as u64, Ordering::Relaxed);
+        let tuning = self.tuning.normalized();
+        let mut uploaded_by_key: HashMap<RemoteKey, RemoteMeta> = comparison
+            .known
+            .into_iter()
+            .map(|meta| (meta.key.clone(), meta))
+            .collect();
+        if let Some(observer) = observer {
+            let known = uploads
+                .iter()
+                .filter(|upload| uploaded_by_key.contains_key(&upload.key))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !known.is_empty() {
+                observer.completed(&known, ImmutableUploadCompletion::ReusedRemote)?;
+            }
+        }
+        let mut offset = 0;
+        while offset < comparison.missing.len() {
+            let mut end = offset;
+            let mut bytes = 0u64;
+            while end < comparison.missing.len() && end - offset < tuning.max_bulk_files {
+                let size = std::fs::metadata(&comparison.missing[end].local)?.len();
+                if size > tuning.max_bulk_bytes {
+                    return Err(StateError::Invalid(
+                        "immutable object exceeds transfer byte budget".into(),
+                    ));
+                }
+                if bytes.saturating_add(size) > tuning.max_bulk_bytes {
+                    break;
+                }
+                bytes += size;
+                end += 1;
+            }
+            let mut stage = StagingTree::near("immutable", &comparison.missing[offset].local)?;
+            for upload in &comparison.missing[offset..end] {
+                stage.link_or_copy(&upload.local, &upload.key)?;
+            }
+            // Even keys absent from the inventory go through --immutable. The
+            // listing is an optimization, never permission to overwrite a race.
+            self.copy_staged(&stage, true, observer).await?;
+            for upload in &comparison.missing[offset..end] {
+                uploaded_by_key.insert(
+                    upload.key.clone(),
+                    RemoteMeta {
+                        key: upload.key.clone(),
+                        size: std::fs::metadata(&upload.local)?.len(),
+                    },
+                );
+            }
+            offset = end;
+        }
+        uploads
+            .iter()
+            .map(|upload| {
+                uploaded_by_key.remove(&upload.key).ok_or_else(|| {
+                    StateError::Storage(format!(
+                        "bulk upload produced no result for {}",
+                        upload.key.as_str()
+                    ))
+                })
+            })
+            .collect()
+    }
 }
 
 struct StagingTree {
     root: PathBuf,
+    files: usize,
+    bytes: u64,
+    objects: Vec<ImmutableUpload>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct ListedObject {
+    path: String,
+    size: i64,
+    is_dir: bool,
+}
+
+fn parse_listing(prefix: &RemoteKey, output: &str) -> Result<Vec<RemoteEntry>> {
+    let objects: Vec<ListedObject> = serde_json::from_str(output)
+        .map_err(|_| StateError::Integrity("cloud inventory is malformed or incomplete".into()))?;
+    let mut seen = std::collections::HashSet::new();
+    objects
+        .into_iter()
+        .map(|object| {
+            if object.path.split('/').any(|p| {
+                p.is_empty() || matches!(p, "." | "..") || p.contains(['\\', '\0', '\n', '\r'])
+            }) {
+                return Err(StateError::UnsafePath(
+                    "noncanonical cloud inventory path".into(),
+                ));
+            }
+            crate::transfer::validate_remote_key(&RemoteKey::new(&object.path))?;
+            let key = prefix.join(&object.path);
+            if !seen.insert(key.clone()) || (!object.is_dir && object.size < 0) {
+                return Err(StateError::Integrity(
+                    "cloud inventory contains ambiguous objects or sizes".into(),
+                ));
+            }
+            Ok(RemoteEntry {
+                key,
+                size: object.size.max(0) as u64,
+                is_prefix: object.is_dir,
+            })
+        })
+        .collect()
 }
 
 impl StagingTree {
@@ -628,7 +1070,12 @@ impl StagingTree {
     fn create_under(parent: &Path, label: &str) -> Result<Self> {
         let root = parent.join(format!(".noland-rclone-{label}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root)?;
-        Ok(Self { root })
+        Ok(Self {
+            root,
+            files: 0,
+            bytes: 0,
+            objects: Vec::new(),
+        })
     }
 
     fn path_for(&self, key: &RemoteKey) -> Result<PathBuf> {
@@ -636,23 +1083,31 @@ impl StagingTree {
         Ok(self.root.join(key.as_str()))
     }
 
-    fn link_or_copy(&self, source: &Path, key: &RemoteKey) -> Result<()> {
+    fn link_or_copy(&mut self, source: &Path, key: &RemoteKey) -> Result<()> {
         let destination = self.path_for(key)?;
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
         if std::fs::hard_link(source, &destination).is_err() {
-            std::fs::copy(source, destination)?;
+            std::fs::copy(source, &destination)?;
         }
+        self.objects
+            .push(ImmutableUpload::new(destination, key.clone()));
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(std::fs::metadata(source)?.len());
         Ok(())
     }
 
-    fn write(&self, key: &RemoteKey, bytes: &[u8]) -> Result<()> {
+    fn write(&mut self, key: &RemoteKey, bytes: &[u8]) -> Result<()> {
         let destination = self.path_for(key)?;
         if let Some(parent) = destination.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(destination, bytes)?;
+        std::fs::write(&destination, bytes)?;
+        self.objects
+            .push(ImmutableUpload::new(destination, key.clone()));
+        self.files += 1;
+        self.bytes = self.bytes.saturating_add(bytes.len() as u64);
         Ok(())
     }
 }
@@ -665,6 +1120,68 @@ impl Drop for StagingTree {
 
 #[async_trait]
 impl SharedStorageProvider for RcloneStorage {
+    async fn check_full_deletion_support(&self) -> Result<()> {
+        if self.permanent_delete_flags().is_empty() {
+            return Ok(());
+        }
+        let mut args = vec!["deletefile".into(), "--help".into()];
+        args.extend(
+            self.permanent_delete_flags()
+                .iter()
+                .map(|flag| (*flag).into()),
+        );
+        // Help parses flags without accessing any objects or cloud credentials.
+        self.run(args).await.map_err(|_|StateError::Storage("installed rclone lacks the provider's permanent-delete options; update rclone before deleting (no deletion started)".into()))?;
+        Ok(())
+    }
+    async fn remove_empty_bundle(
+        &self,
+        app: &noland_state_core::AppId,
+        bundle: uuid::Uuid,
+    ) -> Result<()> {
+        let key = RemoteKey::new(noland_state_core::bundle_dir(app, bundle));
+        crate::transfer::validate_remote_key(&key)?;
+        let mut args = vec!["rmdir".into(), self.remote_path(&key)];
+        args.extend(
+            self.permanent_delete_flags()
+                .iter()
+                .map(|flag| (*flag).into()),
+        );
+        match self.run_classified(args).await {
+            Ok(_) => {}
+            Err(failure) if failure.class == RemoteErrorClass::NotFound => {}
+            Err(failure) => return Err(failure.into_state_error()),
+        }
+        Ok(())
+    }
+    async fn delete_object(&self, key: &RemoteKey) -> Result<()> {
+        crate::deletion::validate_deletable_key(key)?;
+        if self.stat_for_deletion(key).await?.is_some() {
+            // Trash still consumes Drive quota; delete this exact object permanently.
+            self.run_control(self.deletion_args(key)?)
+                .await
+                .map_err(RcloneFailure::into_state_error)?;
+        }
+        if self.stat_for_deletion(key).await?.is_some() {
+            return Err(StateError::Storage(
+                "deleted object is still present".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn delete_prevalidated(&self, object: &crate::PrevalidatedDeletion) -> Result<()> {
+        match self.run_control(self.deletion_args(object.key())?).await {
+            Ok(_) => Ok(()),
+            Err(failure) if failure.class == RemoteErrorClass::NotFound => Ok(()),
+            Err(failure) => Err(failure.into_state_error()),
+        }
+    }
+
+    async fn stat_for_deletion(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>> {
+        self.stat_inner(key, true).await
+    }
+
     async fn health_check(&self) -> Result<Health> {
         match self.run(vec!["lsd".into(), self.root_remote()]).await {
             Ok(detail) => Ok(Health {
@@ -699,59 +1216,18 @@ impl SharedStorageProvider for RcloneStorage {
     }
 
     async fn stat(&self, key: &RemoteKey) -> Result<Option<RemoteMeta>> {
-        self.metrics
-            .remote_stat_calls
-            .fetch_add(1, Ordering::Relaxed);
-        match self
-            .run_classified(vec![
-                "lsf".into(),
-                "--format".into(),
-                "s".into(),
-                self.remote_path(key),
-            ])
-            .await
-        {
-            Ok(out) => {
-                let size = out
-                    .lines()
-                    .next()
-                    .and_then(|s| s.trim().parse().ok())
-                    .unwrap_or(0);
-                if out.trim().is_empty() {
-                    Ok(None)
-                } else {
-                    Ok(Some(RemoteMeta {
-                        key: key.clone(),
-                        size,
-                    }))
-                }
-            }
-            Err(failure) if failure.class == RemoteErrorClass::NotFound => Ok(None),
-            Err(failure) => Err(failure.into_state_error()),
-        }
+        self.stat_inner(key, false).await
     }
 
     async fn upload_immutable(&self, local: &Path, key: &RemoteKey) -> Result<RemoteMeta> {
+        validate_remote_key(key)?;
         let size = std::fs::metadata(local)?.len();
         self.metrics
             .remote_upload_calls
             .fetch_add(1, Ordering::Relaxed);
-        let permit = self.upload_limiter.acquire().await?;
-        let started = std::time::Instant::now();
-        let args = self.command_builder.upload_copyto_args(
-            local.display().to_string(),
-            self.remote_path(key),
-            true,
-        )?;
-        let result = self.run(args).await;
-        if result.is_ok() {
-            self.upload_limiter.record_success(started.elapsed());
-        }
-        drop(permit);
-        result?;
-        self.metrics
-            .bytes_uploaded
-            .fetch_add(size, Ordering::Relaxed);
+        let mut stage = StagingTree::near("single", local)?;
+        stage.link_or_copy(local, key)?;
+        self.copy_staged(&stage, true, None).await?;
         Ok(RemoteMeta {
             key: key.clone(),
             size,
@@ -770,96 +1246,41 @@ impl SharedStorageProvider for RcloneStorage {
         if uploads.is_empty() {
             return Ok(Vec::new());
         }
-        self.metrics
-            .remote_upload_calls
-            .fetch_add(uploads.len() as u64, Ordering::Relaxed);
-        let comparison = self.compare_bulk_known(uploads).await?;
-        if !comparison.size_conflicts.is_empty() {
-            let keys = comparison
-                .size_conflicts
-                .iter()
-                .map(|conflict| {
-                    format!(
-                        "{} (local {}, remote {})",
-                        conflict.key.as_str(),
-                        conflict.local_size,
-                        conflict.remote_size
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(StateError::Conflict(format!(
-                "immutable remote objects differ: {keys}"
-            )));
-        }
+        let comparison = crate::RemoteKnownComparison {
+            missing: uploads.to_vec(),
+            ..Default::default()
+        };
+        self.upload_compared(uploads, comparison, observer).await
+    }
 
-        let tuning = self.tuning.normalized();
-        let mut uploaded_by_key: HashMap<RemoteKey, RemoteMeta> = comparison
-            .known
-            .into_iter()
-            .map(|meta| (meta.key.clone(), meta))
-            .collect();
-        if let Some(observer) = observer {
-            let known = uploads
-                .iter()
-                .filter(|upload| uploaded_by_key.contains_key(&upload.key))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !known.is_empty() {
-                observer.completed(&known, ImmutableUploadCompletion::ReusedRemote)?;
-            }
-        }
-        let mut offset = 0;
-        while offset < comparison.missing.len() {
-            let mut end = offset;
-            let mut bytes = 0u64;
-            while end < comparison.missing.len() && end - offset < tuning.max_bulk_files {
-                let size = std::fs::metadata(&comparison.missing[end].local)?.len();
-                if end > offset && bytes.saturating_add(size) > tuning.max_bulk_bytes {
-                    break;
-                }
-                bytes = bytes.saturating_add(size);
-                end += 1;
-            }
-            let stage = StagingTree::near("immutable", &comparison.missing[offset].local)?;
-            for upload in &comparison.missing[offset..end] {
-                stage.link_or_copy(&upload.local, &upload.key)?;
-            }
-            self.copy_staged(&stage, true, observer).await?;
-            self.metrics
-                .bytes_uploaded
-                .fetch_add(bytes, Ordering::Relaxed);
-            if let Some(observer) = observer {
-                observer.completed(
-                    &comparison.missing[offset..end],
-                    ImmutableUploadCompletion::Uploaded,
-                )?;
-            }
-            for upload in &comparison.missing[offset..end] {
-                let meta = RemoteMeta {
-                    key: upload.key.clone(),
-                    size: std::fs::metadata(&upload.local)?.len(),
-                };
-                uploaded_by_key.insert(meta.key.clone(), meta);
-            }
-            offset = end;
-        }
+    async fn upload_immutable_bulk_known_observed(
+        &self,
+        uploads: &[ImmutableUpload],
+        known: &crate::RemoteKnownSet,
+        observer: Option<&(dyn ImmutableUploadObserver + '_)>,
+    ) -> Result<Vec<RemoteMeta>> {
+        self.upload_compared(uploads, known.compare(uploads)?, observer)
+            .await
+    }
 
-        uploads
-            .iter()
-            .map(|upload| {
-                uploaded_by_key.remove(&upload.key).ok_or_else(|| {
-                    StateError::Storage(format!(
-                        "bulk upload produced no result for {}",
-                        upload.key.as_str()
-                    ))
-                })
-            })
-            .collect()
+    fn transfer_tuning(&self) -> TransferTuning {
+        self.tuning.clone()
+    }
+
+    fn supports_parallel_upload_groups(&self) -> bool {
+        true
+    }
+
+    fn supports_targeted_uploads(&self) -> bool {
+        true
     }
 
     async fn download(&self, key: &RemoteKey, dest: &Path) -> Result<()> {
         self.download_observed(key, dest, None).await
+    }
+
+    async fn read_small(&self, key: &RemoteKey, limit: u64) -> Result<Vec<u8>> {
+        self.read_small_bounded(key, limit).await
     }
 
     async fn download_observed(
@@ -868,29 +1289,45 @@ impl SharedStorageProvider for RcloneStorage {
         dest: &Path,
         observer: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
-        let permit = self.download_limiter.acquire().await?;
-        let started = std::time::Instant::now();
+        self.download_limiter
+            .observe_local_pressure((self.stream_policy.io_pressure)());
+        let permit = self
+            .download_limiter
+            .acquire_slots(self.tuning.rclone_download_streams)
+            .await?;
         self.metrics
             .remote_download_calls
             .fetch_add(1, Ordering::Relaxed);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        let mut current_tuning = self.tuning.clone();
+        current_tuning.rclone_download_streams = permit.slots();
         let args = self.command_builder.download_copyto_args(
-            &self.tuning,
+            &current_tuning,
             self.remote_path(key),
             dest.display().to_string(),
         );
-        let result = match observer {
-            Some(observer) => {
-                observer.transfer_started()?;
-                self.run_with_progress(args, |bytes| observer.transfer_progress(bytes))
-                    .await
+        if let Some(observer) = observer {
+            observer.transfer_started()?;
+        }
+        // Even callers without a UI observer need bounded, periodic pressure
+        // observations so a temporary local cap can clear before file EOF.
+        let result = self
+            .run_with_progress(args, |bytes| {
+                observer.map_or(Ok(()), |observer| observer.transfer_progress(bytes))
+            })
+            .await;
+        if let Ok(timing) = &result {
+            let bytes = std::fs::metadata(dest).map(|meta| meta.len()).unwrap_or(0);
+            let pressured = (self.stream_policy.io_pressure)();
+            self.download_limiter.observe_local_pressure(pressured);
+            if !pressured {
+                if let Some(network) = timing.network_sample() {
+                    self.download_limiter
+                        .record_success(bytes / permit.slots() as u64, network);
+                }
             }
-            None => self.run(args).await.map(|_| ()),
-        };
-        if result.is_ok() {
-            self.download_limiter.record_success(started.elapsed());
         }
         drop(permit);
         result?;
@@ -914,8 +1351,19 @@ impl SharedStorageProvider for RcloneStorage {
         observer: Option<&(dyn DownloadObserver + '_)>,
     ) -> Result<()> {
         validate_remote_key(key)?;
-        let _permit = self.stream_limiter.acquire().await?;
-        let started = std::time::Instant::now();
+        let waiting = std::time::Instant::now();
+        self.download_limiter
+            .observe_local_pressure((self.stream_policy.io_pressure)());
+        let _permit = self.download_limiter.acquire().await?;
+        let mut diagnostics = StreamTransferDiagnostics {
+            worker_ceiling: self.download_limiter.max(),
+            effective_worker_limit: self.download_limiter.current(),
+            reserved_transfer_slots: self.download_limiter.active(),
+            queued_transfer_requests: self.download_limiter.queued(),
+            controller_epoch: self.download_limiter.epoch(),
+            limiter_wait_us: stream::micros(waiting.elapsed()),
+            ..StreamTransferDiagnostics::default()
+        };
         let args = self
             .command_builder
             .download_stream_args(self.remote_path(key));
@@ -933,150 +1381,303 @@ impl SharedStorageProvider for RcloneStorage {
             .remote_download_calls
             .fetch_add(1, Ordering::Relaxed);
         for attempt in 1..=self.tuning.max_attempts.max(1) {
+            let waiting = std::time::Instant::now();
             self.retry_gate.wait_for_turn().await;
-            consumer.restart()?;
+            diagnostics.retry_wait_us = diagnostics
+                .retry_wait_us
+                .saturating_add(stream::micros(waiting.elapsed()));
+            diagnostics.attempt = attempt;
+            diagnostics.attempt_bytes = 0;
+            diagnostics.phase = "receiving".into();
+            diagnostics.effective_worker_limit = self.download_limiter.current();
+            diagnostics.reserved_transfer_slots = self.download_limiter.active();
+            diagnostics.queued_transfer_requests = self.download_limiter.queued();
+            diagnostics.controller_epoch = self.download_limiter.epoch();
+            let processing = std::time::Instant::now();
+            consumer.restart().await?;
+            diagnostics.consumer_us = diagnostics
+                .consumer_us
+                .saturating_add(stream::micros(processing.elapsed()));
             if let Some(observer) = observer {
                 observer.transfer_started()?;
             }
+            stream::observe(observer, &diagnostics)?;
             self.metrics
                 .rclone_invocations
                 .fetch_add(1, Ordering::Relaxed);
+            #[cfg(not(test))]
             let mut cmd = Command::new("rclone");
+            #[cfg(test)]
+            let mut cmd = if let Some(script) = self.stream_executable.as_deref() {
+                // Invoke the system shell directly. Executing a freshly written
+                // script can trigger macOS validation delays unrelated to I/O.
+                let mut command = Command::new("/bin/sh");
+                command.arg(script);
+                command
+            } else {
+                Command::new("rclone")
+            };
             cmd.args(&self.extra_args)
                 .args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .kill_on_drop(true);
-            let mut child = cmd.spawn()?;
+            let mut child = ReapedChild(cmd.spawn()?);
             let mut stdout = child
                 .stdout
                 .take()
                 .ok_or_else(|| StateError::Storage("rclone stdout missing".into()))?;
-            let mut stderr = child
+            let stderr = child
                 .stderr
                 .take()
                 .ok_or_else(|| StateError::Storage("rclone stderr missing".into()))?;
-            // Drain stderr concurrently, but retain only a bounded diagnostic tail.
-            let errors = async {
-                let mut tail = Vec::new();
-                let mut buffer = [0u8; 4096];
-                loop {
-                    let n = stderr.read(&mut buffer).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    tail.extend_from_slice(&buffer[..n]);
-                    if tail.len() > 16 * 1024 {
-                        tail.drain(..tail.len() - 16 * 1024);
-                    }
+            let before_network = diagnostics.network_wait_us;
+            let before_consumer = diagnostics.consumer_us;
+            let allow_slow_restart =
+                diagnostics.slow_restarts == 0 && attempt < self.tuning.max_attempts.max(1);
+            let starting_pressure = (self.stream_policy.io_pressure)();
+            self.download_limiter
+                .observe_local_pressure(starting_pressure);
+            let initial_context = PeerContext::new(
+                self.download_limiter.active(),
+                1,
+                self.download_limiter.epoch(),
+            );
+            let sample_stable = std::sync::atomic::AtomicBool::new(!starting_pressure);
+            let stable = &sample_stable;
+            let pressure_cache =
+                std::cell::Cell::new((std::time::Instant::now(), starting_pressure));
+            let observation_interval = self
+                .stream_policy
+                .observation_interval
+                .max(std::time::Duration::from_millis(1));
+            let observe_context = move || {
+                let (observed, mut pressured) = pressure_cache.get();
+                if observed.elapsed() >= observation_interval {
+                    pressured = (self.stream_policy.io_pressure)();
+                    pressure_cache.set((std::time::Instant::now(), pressured));
+                    self.download_limiter.observe_local_pressure(pressured);
                 }
-                Ok::<_, std::io::Error>(tail)
+                let context = PeerContext::new(
+                    self.download_limiter.active(),
+                    1,
+                    self.download_limiter.epoch(),
+                );
+                if pressured || context != initial_context {
+                    stable.store(false, Ordering::Relaxed);
+                }
+                context
             };
+            let (done, ended) = tokio::sync::oneshot::channel();
+            // No detached tasks. An unsuccessful read kills the child before
+            // draining stderr; successful EOF bounds only exit housekeeping.
             let stream = async {
-                let mut bytes = 0u64;
-                let mut last = std::time::Instant::now();
-                let mut buffer = vec![0u8; 256 * 1024];
-                loop {
-                    let count = stdout.read(&mut buffer).await?;
-                    if count == 0 {
-                        break;
-                    }
-                    self.metrics
-                        .bytes_downloaded
-                        .fetch_add(count as u64, Ordering::Relaxed);
-                    consumer.write(&buffer[..count]).await?;
-                    bytes = bytes.saturating_add(count as u64);
-                    if last.elapsed() >= std::time::Duration::from_millis(500) {
-                        if let Some(observer) = observer {
-                            observer.transfer_progress(bytes)?;
+                let result = stream::read_attempt(
+                    &mut stdout,
+                    consumer,
+                    observer,
+                    &mut diagnostics,
+                    &self.stream_peers,
+                    self.stream_policy,
+                    allow_slow_restart,
+                    &self.metrics.bytes_downloaded,
+                    observe_context,
+                )
+                .await;
+                if result.is_err() {
+                    let _ = child.start_kill();
+                }
+                let _ = done.send(std::time::Instant::now());
+                result
+            };
+            let (read, (tail, exit_wait)) = tokio::join!(
+                stream,
+                drain_stream_errors(stderr, ended, self.stream_policy.exit_timeout)
+            );
+            diagnostics.process_exit_wait_us =
+                diagnostics.process_exit_wait_us.saturating_add(exit_wait);
+            let mut reason = None;
+            let mut retry_class = RemoteErrorClass::Retryable;
+            let bytes = match read {
+                Ok(bytes) => bytes,
+                Err(StreamReadFailure::Local(error)) => {
+                    kill_and_reap_for_retry(&mut child).await?;
+                    diagnostics.phase = "consumer_error".into();
+                    let _ = stream::observe(observer, &diagnostics);
+                    return Err(error);
+                }
+                Err(error) => {
+                    match error {
+                        StreamReadFailure::Idle => {
+                            diagnostics.idle_restarts +=
+                                u32::from(attempt < self.tuning.max_attempts.max(1))
                         }
-                        last = std::time::Instant::now();
+                        StreamReadFailure::SlowPeer => diagnostics.slow_restarts += 1,
+                        StreamReadFailure::Local(_) => unreachable!(),
+                    }
+                    reason = Some(error.message());
+                    0
+                }
+            };
+            let tail = match tail {
+                Ok(tail) => tail,
+                Err(_) => {
+                    diagnostics.exit_restarts +=
+                        u32::from(attempt < self.tuning.max_attempts.max(1));
+                    reason.get_or_insert("rclone stderr did not finish after stream EOF");
+                    Vec::new()
+                }
+            };
+            if reason.is_none() {
+                let waiting = std::time::Instant::now();
+                let status =
+                    tokio::time::timeout(self.stream_policy.exit_timeout, child.wait()).await;
+                diagnostics.process_exit_wait_us = diagnostics
+                    .process_exit_wait_us
+                    .saturating_add(stream::micros(waiting.elapsed()));
+                match status {
+                    Ok(status) => {
+                        let status = status?;
+                        if status.success() {
+                            let receive = std::time::Duration::from_micros(
+                                diagnostics.network_wait_us.saturating_sub(before_network),
+                            );
+                            let consumed = std::time::Duration::from_micros(
+                                diagnostics.consumer_us.saturating_sub(before_consumer),
+                            );
+                            let processing = std::time::Instant::now();
+                            let finished = consumer.finish().await;
+                            diagnostics.consumer_us = diagnostics
+                                .consumer_us
+                                .saturating_add(stream::micros(processing.elapsed()));
+                            if let Err(error) = finished {
+                                diagnostics.phase = "consumer_error".into();
+                                let _ = stream::observe(observer, &diagnostics);
+                                return Err(error);
+                            }
+                            // Disk/decoder backpressure is not provider congestion.
+                            let pressured = (self.stream_policy.io_pressure)();
+                            self.download_limiter.observe_local_pressure(pressured);
+                            if !pressured && consumed <= receive / 3 {
+                                self.download_limiter.record_success(bytes, receive);
+                                if sample_stable.load(Ordering::Relaxed)
+                                    && PeerContext::new(
+                                        self.download_limiter.active(),
+                                        1,
+                                        self.download_limiter.epoch(),
+                                    ) == initial_context
+                                {
+                                    self.stream_peers.record_with_context(
+                                        bytes,
+                                        receive,
+                                        consumed,
+                                        initial_context,
+                                    );
+                                }
+                            }
+                            diagnostics.effective_worker_limit = self.download_limiter.current();
+                            diagnostics.reserved_transfer_slots = self.download_limiter.active();
+                            diagnostics.queued_transfer_requests = self.download_limiter.queued();
+                            diagnostics.controller_epoch = self.download_limiter.epoch();
+                            diagnostics.phase = "completed".into();
+                            stream::observe(observer, &diagnostics)?;
+                            return Ok(());
+                        }
+                        let failure = RcloneFailure {
+                            class: classify_remote_error(
+                                status.code(),
+                                &String::from_utf8_lossy(&tail),
+                            ),
+                            message: String::from_utf8_lossy(&tail).trim().to_string(),
+                        };
+                        self.record_remote_error(failure.class);
+                        if !failure.class.is_retryable()
+                            || attempt == self.tuning.max_attempts.max(1)
+                        {
+                            diagnostics.phase = "failed".into();
+                            let _ = stream::observe(observer, &diagnostics);
+                            return Err(failure.into_state_error());
+                        }
+                        retry_class = failure.class;
+                        reason = Some("retryable provider failure");
+                    }
+                    Err(_) => {
+                        diagnostics.exit_restarts +=
+                            u32::from(attempt < self.tuning.max_attempts.max(1));
+                        reason = Some("rclone did not exit after stream EOF");
                     }
                 }
-                if let Some(observer) = observer {
-                    observer.transfer_progress(bytes)?;
-                }
-                Ok::<_, StateError>(())
-            };
-            // A consumer/integrity failure cancels stderr draining and kills the child.
-            let (_, tail) =
-                tokio::try_join!(stream, async { errors.await.map_err(StateError::from) })?;
-            let status = child.wait().await?;
-            if status.success() {
-                consumer.finish().await?;
-                self.stream_limiter.record_success(started.elapsed());
-                return Ok(());
             }
-            let failure = RcloneFailure {
-                class: classify_remote_error(status.code(), &String::from_utf8_lossy(&tail)),
-                message: String::from_utf8_lossy(&tail).trim().to_string(),
-            };
-            self.record_remote_error(failure.class);
-            if failure.class.is_retryable() && attempt < self.tuning.max_attempts.max(1) {
-                self.retry_gate.wait_for_retry(attempt, failure.class).await;
+            let reason = reason.expect("unsuccessful stream has a retry reason");
+            // Never race two readers/decoders for the same pack, or abandon a
+            // child using the ephemeral session while starting another attempt.
+            kill_and_reap_for_retry(&mut child).await?;
+            diagnostics.phase = if attempt < self.tuning.max_attempts.max(1) {
+                "retrying"
             } else {
-                return Err(failure.into_state_error());
+                "failed"
             }
+            .into();
+            stream::observe(observer, &diagnostics)?;
+            if attempt == self.tuning.max_attempts.max(1) {
+                return Err(StateError::Storage(reason.into()));
+            }
+            tracing::warn!(object = %key.as_str(), attempt, reason,
+                network_wait_us = diagnostics.network_wait_us,
+                consumer_us = diagnostics.consumer_us, "restarting stalled pack stream");
+            if let Some(observer) = observer {
+                observer.transfer_retrying(reason)?;
+            }
+            let waiting = std::time::Instant::now();
+            self.retry_gate.wait_for_retry(attempt, retry_class).await;
+            diagnostics.retry_wait_us = diagnostics
+                .retry_wait_us
+                .saturating_add(stream::micros(waiting.elapsed()));
         }
         unreachable!("rclone always makes at least one attempt")
     }
 
     async fn list_prefix(&self, prefix: &RemoteKey) -> Result<Vec<RemoteEntry>> {
+        validate_remote_key(prefix)?;
+        let _permit = self.download_limiter.acquire().await?;
         self.metrics
             .remote_list_calls
             .fetch_add(1, Ordering::Relaxed);
         let out = match self
             .run_classified(vec![
-                "lsf".into(),
+                "lsjson".into(),
                 "-R".into(),
-                "--format".into(),
-                "ps".into(),
+                "--no-modtime".into(),
+                "--no-mimetype".into(),
                 self.remote_path(prefix),
             ])
             .await
         {
             Ok(out) => out,
-            Err(failure) if failure.class == RemoteErrorClass::NotFound => String::new(),
+            Err(failure) if failure.class == RemoteErrorClass::NotFound => "[]".into(),
             Err(failure) => return Err(failure.into_state_error()),
         };
-        let mut entries = Vec::new();
-        for line in out.lines() {
-            let mut parts = line.splitn(2, ';');
-            let name = parts.next().unwrap_or_default();
-            let size = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-            if name.is_empty() {
-                continue;
-            }
-            entries.push(RemoteEntry {
-                key: prefix.join(name.trim_end_matches('/')),
-                size,
-                is_prefix: name.ends_with('/'),
-            });
-        }
-        Ok(entries)
+        parse_listing(prefix, &out)
     }
 
     async fn put_small_versioned(&self, bytes: Bytes, key: &RemoteKey) -> Result<RemoteMeta> {
         self.metrics
             .remote_upload_calls
             .fetch_add(1, Ordering::Relaxed);
-        let tmp = std::env::temp_dir().join(format!(
-            "noland-rclone-{}-{}",
-            uuid::Uuid::new_v4(),
-            key.as_str().replace('/', "_")
-        ));
-        std::fs::write(&tmp, &bytes)?;
+        let mut stage = StagingTree::new("metadata-single")?;
+        stage.write(key, &bytes)?;
+        let tmp = stage.path_for(key)?;
         let result = async {
             let permit = self.upload_limiter.acquire().await?;
-            let started = std::time::Instant::now();
             let args = self.command_builder.upload_copyto_args(
                 tmp.display().to_string(),
                 self.remote_path(key),
                 false,
             )?;
-            let result = self.run(args).await;
-            if result.is_ok() {
-                self.upload_limiter.record_success(started.elapsed());
+            let result = self.run_timed(args).await;
+            if let Ok((_, elapsed)) = &result {
+                self.upload_limiter
+                    .record_success(bytes.len() as u64, *elapsed);
             }
             drop(permit);
             result
@@ -1091,7 +1692,6 @@ impl SharedStorageProvider for RcloneStorage {
                 size: bytes.len() as u64,
             }
         });
-        let _ = std::fs::remove_file(tmp);
         result
     }
 
@@ -1125,16 +1725,19 @@ impl SharedStorageProvider for RcloneStorage {
     fn operation_metrics(&self) -> StorageOperationMetrics {
         self.metrics.snapshot()
     }
+
+    fn metadata_read_metrics(&self) -> crate::MetadataReadMetrics {
+        self.metrics.metadata_reads.snapshot()
+    }
 }
 
 pub struct EphemeralSessionGuard {
-    run_root: PathBuf,
-    operation_id: String,
+    directory: PathBuf,
 }
 
 impl Drop for EphemeralSessionGuard {
     fn drop(&mut self) {
-        let _ = shred_ephemeral_session(&self.run_root, &self.operation_id);
+        let _ = shred_owned_session_dir(&self.directory);
     }
 }
 
@@ -1142,42 +1745,162 @@ pub fn write_guarded_ephemeral_session(
     run_root: &Path,
     session: &EphemeralRcloneSession,
 ) -> Result<(PathBuf, EphemeralSessionGuard)> {
-    let config_path = write_ephemeral_session(run_root, session)?;
-    Ok((
-        config_path,
-        EphemeralSessionGuard {
-            run_root: run_root.to_path_buf(),
-            operation_id: session.operation_id.clone(),
-        },
-    ))
+    validate_session_component(&session.operation_id)?;
+    std::fs::create_dir_all(run_root)?;
+    // The caller supplies a trusted root. Resolve macOS's /var -> /private
+    // alias before no-follow file opens, not any untrusted session component.
+    let run_root = std::fs::canonicalize(run_root)?;
+    // A logical session can be reused by nested callers or separate processes
+    // before repository admission. Never share its credential-file lifetime.
+    let execution_id = uuid::Uuid::new_v4().to_string();
+    let directory = create_private_session_dir(&run_root, &execution_id)?;
+    let guard = EphemeralSessionGuard {
+        directory: directory.clone(),
+    };
+    // Construct the guard before the first credential write, so partial writes
+    // are shredded on every error too. session.json retains the logical ID.
+    let config_path = write_session_files(&directory, session)?;
+    Ok((config_path, guard))
 }
 
 pub fn write_ephemeral_session(
     run_root: &Path,
     session: &EphemeralRcloneSession,
 ) -> Result<PathBuf> {
+    validate_session_component(&session.operation_id)?;
+    std::fs::create_dir_all(run_root)?;
+    let run_root = std::fs::canonicalize(run_root)?;
+    ensure_storage_root(&run_root)?;
+    // Retain the raw API's logical path for legacy callers.
     let dir = run_root.join("storage").join(&session.operation_id);
     std::fs::create_dir_all(&dir)?;
+    require_real_directory(&dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
     }
-    let config_path = dir.join("rclone.conf");
-    std::fs::write(&config_path, session.config_ini.as_bytes())?;
-    let session_path = dir.join("session.json");
-    std::fs::write(&session_path, serde_json::to_vec(session)?)?;
+    let result = write_session_files(&dir, session);
+    if result.is_err() {
+        let _ = shred_owned_session_dir(&dir);
+    }
+    result
+}
+
+fn validate_session_component(id: &str) -> Result<()> {
+    if id.is_empty()
+        || id.len() > 255
+        || matches!(id, "." | "..")
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(StateError::Invalid(
+            "invalid ephemeral session identity".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn require_real_directory(directory: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(directory)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(StateError::UnsafePath(
+            "ephemeral session directory is not a private directory".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_storage_root(run_root: &Path) -> Result<()> {
+    let storage_root = run_root.join("storage");
+    match std::fs::create_dir(&storage_root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    require_real_directory(&storage_root)
+}
+
+fn create_private_session_dir(run_root: &Path, execution_id: &str) -> Result<PathBuf> {
+    ensure_storage_root(run_root)?;
+    let directory = run_root.join("storage").join(execution_id);
+    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600));
-        let _ = std::fs::set_permissions(&session_path, std::fs::Permissions::from_mode(0o600));
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
     }
+    // create_dir, not create_dir_all: a UUID collision must never overwrite an
+    // execution's credentials, even across processes.
+    builder.create(&directory)?;
+    Ok(directory)
+}
+
+fn write_session_files(dir: &Path, session: &EphemeralRcloneSession) -> Result<PathBuf> {
+    let config_path = dir.join("rclone.conf");
+    let write_private = |path: &Path, contents: &[u8]| -> Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        let mut file = noland_snapshot::SourcePath::new(path)?.open_or_create_private()?;
+        #[cfg(not(unix))]
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)?;
+        file.set_len(0)?;
+        file.write_all(contents)?;
+        Ok(())
+    };
+    write_private(&config_path, session.config_ini.as_bytes())?;
+    let session_path = dir.join("session.json");
+    write_private(&session_path, &serde_json::to_vec(session)?)?;
     Ok(config_path)
 }
 
 pub fn shred_ephemeral_session(run_root: &Path, operation_id: &str) -> Result<()> {
-    crate::shred_ephemeral_auth(run_root, operation_id)
+    validate_session_component(operation_id)?;
+    if !run_root.exists() {
+        return Ok(());
+    }
+    let run_root = std::fs::canonicalize(run_root)?;
+    let storage_root = run_root.join("storage");
+    if !storage_root.exists() {
+        return Ok(());
+    }
+    require_real_directory(&storage_root)?;
+    shred_owned_session_dir(&storage_root.join(operation_id))
+}
+
+fn shred_owned_session_dir(directory: &Path) -> Result<()> {
+    if !directory.exists() {
+        return Ok(());
+    }
+    require_real_directory(directory)?;
+    for filename in ["auth.json", "rclone.conf", "session.json"] {
+        let path = directory.join(filename);
+        if std::fs::symlink_metadata(&path)
+            .is_ok_and(|meta| meta.is_file() && !meta.file_type().is_symlink())
+        {
+            use std::io::Write;
+            #[cfg(unix)]
+            let file = noland_snapshot::SourcePath::new(&path)?.open_or_create_private();
+            #[cfg(not(unix))]
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(StateError::from);
+            if let Ok(mut file) = file {
+                let len = file.metadata()?.len().min(1024 * 1024) as usize;
+                let _ = file.write_all(&vec![0; len]);
+            }
+        }
+    }
+    // remove_dir_all does not follow symlink leaves. Never canonicalize a
+    // credential filename and accidentally overwrite data outside our directory.
+    std::fs::remove_dir_all(directory)?;
+    Ok(())
 }
 
 pub fn shred_all_ephemeral_sessions(run_root: &Path) -> Result<()> {
@@ -1221,10 +1944,629 @@ mod tests {
     };
     use std::collections::BTreeMap;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metadata_batch_never_publishes_committed_until_all_ordinary_entries_succeed() {
+        for fail_ordinary in [false, true] {
+            let root = std::env::temp_dir()
+                .join(format!("noland-metadata-order-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("fixture");
+            let events = root.join("events");
+            let completed = root.join("ordinary-done");
+            let fail = root.join("fail");
+            if fail_ordinary {
+                std::fs::write(&fail, b"").unwrap();
+            }
+            std::fs::write(&script, format!(
+                "set -eu\nstage=''\nfor arg in \"$@\"; do if [ -d \"$arg\" ]; then stage=\"$arg\"; fi; done\n[ -n \"$stage\" ]\nif [ -f \"$stage/metadata/COMMITTED\" ]; then\n [ -f {completed:?} ]\n [ ! -f \"$stage/metadata/index.enc\" ]\n [ ! -f \"$stage/metadata/manifest.enc\" ]\n [ ! -f \"$stage/metadata/manifest.hash\" ]\n printf 'committed\\n' >> {events:?}\nelse\n [ -f \"$stage/metadata/index.enc\" ]\n [ -f \"$stage/metadata/manifest.enc\" ]\n [ -f \"$stage/metadata/manifest.hash\" ]\n printf 'ordinary:start\\n' >> {events:?}\n if [ -f {fail:?} ]; then exit 7; fi\n : > {completed:?}\n printf 'ordinary:done\\n' >> {events:?}\nfi\n"
+            )).unwrap();
+            let mut storage = RcloneStorage::new("fixture", "approved-root");
+            storage.upload_executable = Some(script);
+            let batch = MetadataBatch::with_committed(
+                ["index.enc", "manifest.enc", "manifest.hash"]
+                    .into_iter()
+                    .map(|name| {
+                        MetadataWrite::new(
+                            RemoteKey::new(format!("metadata/{name}")),
+                            Bytes::from_static(b"sealed"),
+                        )
+                    })
+                    .collect(),
+                MetadataWrite::new(
+                    RemoteKey::new("metadata/COMMITTED"),
+                    Bytes::from_static(b"commit-id"),
+                ),
+            );
+            let result = storage.put_metadata_batch(&batch).await;
+            let observed = std::fs::read_to_string(&events).unwrap();
+            if fail_ordinary {
+                assert!(result.is_err());
+                assert_eq!(observed, "ordinary:start\n");
+                assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+            } else {
+                assert_eq!(result.unwrap().len(), 4);
+                assert_eq!(observed, "ordinary:start\nordinary:done\ncommitted\n");
+                assert_eq!(storage.operation_metrics().rclone_invocations, 2);
+            }
+            assert_eq!(storage.upload_limiter.active(), 0);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn deletion_control_timeout_reaps_the_child_without_an_overlapping_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let root =
+            std::env::temp_dir().join(format!("noland-deletion-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("slow-control");
+        let pids = root.join("pids");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$$\" >> {pids:?}\nexec sleep 30\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut storage = RcloneStorage::new("fixture", "").for_deletion();
+        storage.control_executable = Some(script);
+        // Invoke fixtures through the system shell and leave a generous startup
+        // allowance. The intentional 30s sleep, not script validation, must be
+        // what exercises this bounded deadline.
+        storage.control_timeout = std::time::Duration::from_secs(2);
+        let result = storage
+            .stat_for_deletion(&RemoteKey::new("packs/fixture"))
+            .await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cloud outcome is unknown"));
+        let observed = std::fs::read_to_string(pids).unwrap();
+        assert_eq!(
+            observed.lines().count(),
+            1,
+            "a timed-out delete must not immediately retry an uncertain provider request"
+        );
+        let status = std::process::Command::new("kill")
+            .args(["-0", observed.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "the child must be reaped before returning"
+        );
+        assert!(
+            !RcloneStorage::new("fixture", "").deletion_control,
+            "long backup/restore transfers must not inherit maintenance deadlines"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires real rclone; fresh local fixture, no cloud credentials"]
+    async fn real_rclone_prevalidated_delete_uses_one_command_and_tolerates_absence() {
+        let root =
+            std::env::temp_dir().join(format!("noland-exact-delete-{}", uuid::Uuid::new_v4()));
+        let id = uuid::Uuid::new_v4().to_string();
+        let key = RemoteKey::new(noland_state_core::pack_key(&id));
+        let config = root.join("local.conf");
+        std::fs::create_dir_all(root.join("cloud").join(key.as_str()).parent().unwrap()).unwrap();
+        std::fs::write(&config, "[fixture]\ntype = local\n").unwrap();
+        let object = root.join("cloud").join(key.as_str());
+        std::fs::write(&object, b"fixture payload").unwrap();
+        let keep = root.join("cloud/keep");
+        std::fs::write(&keep, b"unrelated").unwrap();
+        let mut storage = RcloneStorage::new("fixture", root.join("cloud").to_string_lossy());
+        storage.extra_args = vec!["--config".into(), config.to_string_lossy().into()];
+        let capability = crate::PrevalidatedDeletion::fixture(key.clone());
+        storage.delete_prevalidated(&capability).await.unwrap();
+        assert_eq!(storage.operation_metrics().rclone_invocations, 1);
+        assert_eq!(storage.operation_metrics().remote_stat_calls, 0);
+        assert!(!object.exists());
+        storage.delete_prevalidated(&capability).await.unwrap();
+        assert!(storage.stat_for_deletion(&key).await.unwrap().is_none());
+        assert_eq!(std::fs::read(keep).unwrap(), b"unrelated");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    struct StreamFixture {
+        root: PathBuf,
+        storage: RcloneStorage,
+    }
+
+    #[cfg(unix)]
+    impl StreamFixture {
+        fn new(first_attempt: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let root = std::env::temp_dir()
+                .join(format!("noland-stream-process-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&root).unwrap();
+            let script = root.join("rclone-fixture");
+            let source = format!("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$$\" >> {pids:?}\nif [ ! -f {once:?} ]; then\n  printf '%s' \"$$\" > {first:?}\n  : > {once:?}\n  {first_attempt}\nfi\nif kill -0 \"$(cat {first:?})\" 2>/dev/null; then exit 9; fi\nprintf abcdef\n",
+                pids=root.join("pids"), once=root.join("once"), first=root.join("first-pid"));
+            std::fs::write(&script, source).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let tuning = TransferTuning {
+                max_attempts: 2,
+                initial_backoff_ms: 1,
+                max_backoff_ms: 1,
+                ..TransferTuning::default()
+            };
+            let mut storage = RcloneStorage::new("fixture", "").with_transfer_tuning(tuning);
+            storage.stream_executable = Some(script);
+            // Leave room for macOS executable validation and process startup;
+            // only the intentional sleep in the fixture should trigger a retry.
+            storage.stream_policy = StreamPolicy {
+                idle_timeout: std::time::Duration::from_secs(2),
+                exit_timeout: std::time::Duration::from_millis(500),
+                io_pressure: || false,
+                ..StreamPolicy::default()
+            };
+            Self { root, storage }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for StreamFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[derive(Default)]
+    struct StreamBuffer {
+        bytes: std::sync::Mutex<Vec<u8>>,
+        restarts: AtomicU64,
+        reject: bool,
+    }
+
+    #[async_trait]
+    impl DownloadStreamConsumer for StreamBuffer {
+        async fn restart(&self) -> Result<()> {
+            self.restarts.fetch_add(1, Ordering::Relaxed);
+            self.bytes.lock().unwrap().clear();
+            Ok(())
+        }
+        async fn write(&self, bytes: &[u8]) -> Result<()> {
+            if self.reject {
+                return Err(StateError::Integrity("fixture corruption".into()));
+            }
+            self.bytes.lock().unwrap().extend_from_slice(bytes);
+            Ok(())
+        }
+        async fn finish(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct StreamObserver(std::sync::Mutex<Vec<StreamTransferDiagnostics>>);
+    impl DownloadObserver for StreamObserver {
+        fn transfer_progress_with_diagnostics(
+            &self,
+            _: u64,
+            metrics: &StreamTransferDiagnostics,
+        ) -> Result<()> {
+            self.0.lock().unwrap().push(metrics.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn copyto_feedback_subtracts_small_observer_waits_and_rejects_local_backpressure() {
+        use std::time::Duration;
+        assert_eq!(
+            DownloadAttemptTiming {
+                elapsed: Duration::from_millis(100),
+                observer_wait: Duration::from_millis(10),
+            }
+            .network_sample(),
+            Some(Duration::from_millis(90))
+        );
+        for (elapsed, observer) in [(100, 80), (100, 100), (100, 101), (0, 0)] {
+            assert!(DownloadAttemptTiming {
+                elapsed: Duration::from_millis(elapsed),
+                observer_wait: Duration::from_millis(observer),
+            }
+            .network_sample()
+            .is_none());
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn slow_copyto_observers_do_not_reduce_the_shared_network_limit() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Duration;
+
+        struct SlowObserver(AtomicU64);
+        impl DownloadObserver for SlowObserver {
+            fn transfer_progress(&self, _bytes: u64) -> Result<()> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            }
+        }
+
+        let root =
+            std::env::temp_dir().join(format!("noland-copyto-observer-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("copyto-fixture");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\nset -eu\nfor destination in \"$@\"; do :; done\nprintf payload > \"$destination\"\nprintf '%s\\n' '{\"stats\":{\"bytes\":7}}' >&2\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut storage =
+            RcloneStorage::new("fixture", "root").with_transfer_tuning(TransferTuning {
+                max_parallel_downloads: 4,
+                rclone_download_streams: 2,
+                ..Default::default()
+            });
+        storage.progress_executable = Some(script);
+        storage.stream_policy.io_pressure = || false;
+        storage
+            .download_limiter
+            .record_success(1024 * 1024, Duration::from_millis(1));
+        storage
+            .download_limiter
+            .record_error(RemoteErrorClass::RateLimited);
+        assert_eq!(storage.download_limiter.current(), 2);
+        let observer = SlowObserver(AtomicU64::new(0));
+        for index in 0..4 {
+            let destination = root.join(format!("download/{index}"));
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                storage.download_observed(
+                    &RemoteKey::new(format!("packs/{index}")),
+                    &destination,
+                    Some(&observer),
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+        }
+        assert_eq!(observer.0.load(Ordering::SeqCst), 4);
+        assert_eq!(storage.download_limiter.current(), 2);
+        assert_eq!(storage.download_limiter.active(), 0);
+        assert_eq!(storage.operation_metrics().bytes_downloaded, 28);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unobserved_copyto_keeps_sampling_pressure_without_reducing_the_limit_to_one() {
+        static SAMPLES: AtomicU64 = AtomicU64::new(0);
+        fn pressure() -> bool {
+            SAMPLES.fetch_add(1, Ordering::SeqCst) < 2
+        }
+        let mut fixture = StreamFixture::new(
+            "for destination in \"$@\"; do :; done\nprintf payload > \"$destination\"\necho '{\"stats\":{\"bytes\":3}}' >&2\nsleep 0.08\necho '{\"stats\":{\"bytes\":7}}' >&2\nexit 0",
+        );
+        fixture.storage.progress_executable = fixture.storage.stream_executable.clone();
+        fixture.storage.stream_policy.io_pressure = pressure;
+        fixture.storage.stream_policy.observation_interval = std::time::Duration::from_millis(10);
+        let destination = fixture.root.join("copyto-result");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture
+                .storage
+                .download_observed(&RemoteKey::new("packs/fixture"), &destination, None),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read(destination).unwrap(), b"payload");
+        assert!(SAMPLES.load(Ordering::SeqCst) >= 3);
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unobserved_pack_stream_keeps_sampling_pressure_while_waiting_for_bytes() {
+        static SAMPLES: AtomicU64 = AtomicU64::new(0);
+        fn pressure() -> bool {
+            SAMPLES.fetch_add(1, Ordering::SeqCst) < 2
+        }
+        let mut fixture = StreamFixture::new("printf abc\nsleep 0.08\nprintf def\nexit 0");
+        fixture.storage.stream_policy.io_pressure = pressure;
+        fixture.storage.stream_policy.observation_interval = std::time::Duration::from_millis(10);
+        let consumer = StreamBuffer::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.storage.download_stream_observed(
+                &RemoteKey::new("packs/fixture"),
+                &fixture.root.join("unused"),
+                &consumer,
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(&*consumer.bytes.lock().unwrap(), b"abcdef");
+        assert!(SAMPLES.load(Ordering::SeqCst) >= 3);
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn actual_download_rate_limit_still_reduces_network_admission() {
+        let mut fixture = StreamFixture::new("echo '429 rate limit exceeded' >&2\nexit 5");
+        fixture.storage.progress_executable = fixture.storage.stream_executable.clone();
+        fixture.storage.tuning.max_attempts = 1;
+        let error = fixture
+            .storage
+            .download_observed(
+                &RemoteKey::new("packs/fixture"),
+                &fixture.root.join("missing"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("RateLimited"));
+        assert_eq!(fixture.storage.download_limiter.current(), 2);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+        assert_eq!(fixture.storage.operation_metrics().rclone_invocations, 1);
+    }
+
+    #[test]
+    fn automatic_or_legacy_tuning_cannot_exceed_provider_limits_in_either_direction() {
+        for provider in [
+            ProviderKind::GoogleDrive,
+            ProviderKind::MicrosoftOneDrive,
+            ProviderKind::AmazonS3,
+            ProviderKind::Sftp,
+        ] {
+            let capabilities = ProviderCapabilities::for_provider(provider);
+            let mut storage = RcloneStorage::new("fixture", "root");
+            storage.provider_kind = provider;
+            storage.capabilities = capabilities.clone();
+            storage.command_builder = RcloneCommandBuilder::new(
+                provider,
+                provider.backend_type(),
+                TransferProfile::for_provider(provider, provider.backend_type()).unwrap(),
+            )
+            .unwrap();
+            let storage = storage.with_transfer_tuning(TransferTuning {
+                max_parallel_uploads: usize::MAX,
+                max_parallel_downloads: usize::MAX,
+                rclone_download_streams: usize::MAX,
+                ..Default::default()
+            });
+            assert_eq!(
+                storage.tuning.max_parallel_uploads,
+                capabilities.max_upload_concurrency
+            );
+            assert_eq!(
+                storage.download_limiter.max(),
+                capabilities.max_download_concurrency
+            );
+            assert_eq!(
+                storage.tuning.rclone_download_streams,
+                capabilities.max_download_concurrency
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ordered_download_and_copyto_reservations_share_one_provider_ceiling() {
+        let fixture = StreamFixture::new("printf abcdef; exit 0");
+        let copyto = fixture
+            .storage
+            .download_limiter
+            .acquire_slots(3)
+            .await
+            .unwrap();
+        let target = StreamBuffer::default();
+        let observer = StreamObserver::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            fixture.storage.download_stream_observed(
+                &RemoteKey::new("packs/test"),
+                &fixture.root.join("unused"),
+                &target,
+                Some(&observer),
+            ),
+        )
+        .await
+        .expect("the ordered stream must use the single remaining connection slot")
+        .unwrap();
+        assert_eq!(&*target.bytes.lock().unwrap(), b"abcdef");
+        let first = observer.0.lock().unwrap().first().unwrap().clone();
+        assert_eq!(first.worker_ceiling, 4);
+        assert_eq!(first.reserved_transfer_slots, 4);
+        assert_eq!(fixture.storage.download_limiter.active(), 3);
+        drop(copyto);
+        assert_eq!(fixture.storage.download_limiter.active(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stalled_pack_is_killed_and_reaped_before_retry_without_losing_wire_accounting() {
+        let fixture = StreamFixture::new("printf abc; exec sleep 60");
+        let target = StreamBuffer::default();
+        let observer = StreamObserver::default();
+        fixture
+            .storage
+            .download_stream_observed(
+                &RemoteKey::new("packs/test"),
+                &fixture.root.join("unused"),
+                &target,
+                Some(&observer),
+            )
+            .await
+            .unwrap();
+        assert_eq!(&*target.bytes.lock().unwrap(), b"abcdef");
+        assert_eq!(target.restarts.load(Ordering::Relaxed), 2);
+        assert_eq!(fixture.storage.operation_metrics().bytes_downloaded, 9);
+        let metrics = observer.0.lock().unwrap().last().unwrap().clone();
+        assert_eq!(metrics.attempt, 2);
+        assert_eq!(metrics.idle_restarts, 1);
+        assert_eq!(metrics.received_bytes, 9);
+        assert_eq!(metrics.attempt_bytes, 6);
+        assert_eq!(metrics.phase, "completed");
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("pids"))
+                .unwrap()
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_integrity_error_never_restarts_the_process_or_weakens_verification() {
+        let fixture = StreamFixture::new("printf abc; exec sleep 60");
+        let target = StreamBuffer {
+            reject: true,
+            ..StreamBuffer::default()
+        };
+        let result = fixture
+            .storage
+            .download_stream_observed(
+                &RemoteKey::new("packs/test"),
+                &fixture.root.join("unused"),
+                &target,
+                None,
+            )
+            .await;
+        assert!(matches!(result, Err(StateError::Integrity(_))));
+        assert_eq!(target.restarts.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join("pids"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn eof_without_process_exit_cannot_hold_a_pack_slot_indefinitely() {
+        let fixture = StreamFixture::new("printf abc; exec 1>&-; exec sleep 60");
+        let observer = StreamObserver::default();
+        fixture
+            .storage
+            .download_stream_observed(
+                &RemoteKey::new("packs/test"),
+                &fixture.root.join("unused"),
+                &StreamBuffer::default(),
+                Some(&observer),
+            )
+            .await
+            .unwrap();
+        let metrics = observer.0.lock().unwrap().last().unwrap().clone();
+        assert_eq!(metrics.attempt, 2);
+        assert_eq!(metrics.exit_restarts, 1);
+        assert!(metrics.process_exit_wait_us > 0);
+    }
+
+    #[test]
+    fn storage_paths_preserve_absolute_and_relative_remote_roots() {
+        for (root, expected_root, expected_key) in [
+            ("", "remote:", "remote:packs/a"),
+            ("/", "remote:/", "remote:/packs/a"),
+            ("/srv/path", "remote:/srv/path", "remote:/srv/path/packs/a"),
+            ("srv/path", "remote:srv/path", "remote:srv/path/packs/a"),
+            ("/srv/path/", "remote:/srv/path", "remote:/srv/path/packs/a"),
+        ] {
+            let storage = RcloneStorage::new("remote", root);
+            assert_eq!(storage.root_remote(), expected_root);
+            assert_eq!(
+                storage.remote_path(&RemoteKey::new("packs/a")),
+                expected_key
+            );
+        }
+    }
+
     #[test]
     fn rejects_sync() {
         assert!(assert_copy_only(&["sync".into(), "src".into(), "dst".into()]).is_err());
         assert!(assert_copy_only(&["copy".into(), "src".into(), "dst".into()]).is_ok());
+    }
+
+    #[test]
+    fn destructive_inventory_rejects_truncation_duplicates_and_unsafe_or_unknown_objects() {
+        let prefix = RemoteKey::new("bundles");
+        for malformed in [
+            "",
+            "[",
+            r#"[{"Path":"a","Size":10,"IsDir":false},"#,
+            r#"[{"Path":"a","Size":10,"IsDir":false},{"Path":"a","Size":10,"IsDir":false}]"#,
+            r#"[{"Path":"../escape","Size":10,"IsDir":false}]"#,
+            r#"[{"Path":"app//id","Size":10,"IsDir":false}]"#,
+            r#"[{"Path":"app","Size":-1,"IsDir":false}]"#,
+        ] {
+            assert!(parse_listing(&prefix, malformed).is_err(), "{malformed}");
+        }
+        let entries=parse_listing(&prefix,r#"[{"Path":"app","Size":-1,"IsDir":true},{"Path":"app/data;ok","Size":7,"IsDir":false}]"#).unwrap();
+        assert_eq!(entries[1].size, 7);
+        assert_eq!(entries[1].key.as_str(), "bundles/app/data;ok");
+    }
+
+    #[test]
+    fn full_delete_is_exact_and_drive_does_not_retain_payload_in_trash() {
+        let key = RemoteKey::new(noland_state_core::pack_key(
+            &uuid::Uuid::new_v4().to_string(),
+        ));
+        let mut storage = RcloneStorage::new("remote", "approved-root");
+        for kind in [
+            ProviderKind::Local,
+            ProviderKind::GoogleDrive,
+            ProviderKind::BackblazeB2,
+            ProviderKind::MicrosoftOneDrive,
+        ] {
+            storage.provider_kind = kind;
+            let args = storage.deletion_args(&key).unwrap();
+            assert_eq!(args[0], "deletefile");
+            assert_eq!(args[1], storage.remote_path(&key));
+            assert_eq!(
+                args.iter().any(|a| a == "--drive-use-trash=false"),
+                kind == ProviderKind::GoogleDrive
+            );
+            assert_eq!(
+                args.iter().any(|a| a == "--b2-hard-delete"),
+                kind == ProviderKind::BackblazeB2
+            );
+            assert_eq!(
+                args.iter().any(|a| a == "--onedrive-hard-delete"),
+                kind == ProviderKind::MicrosoftOneDrive
+            );
+            assert!(!args
+                .iter()
+                .any(|a| matches!(a.as_str(), "purge" | "sync" | "delete")));
+        }
+        assert!(storage.deletion_args(&RemoteKey::new("packs")).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires rclone on PATH; only parses help flags with an empty config"]
+    async fn real_rclone_permanent_flags_without_remote_io() {
+        let mut storage = RcloneStorage::new("unused", "unused");
+        storage.extra_args = vec!["--config".into(), "/dev/null".into()];
+        for kind in [
+            ProviderKind::GoogleDrive,
+            ProviderKind::BackblazeB2,
+            ProviderKind::MicrosoftOneDrive,
+        ] {
+            storage.provider_kind = kind;
+            storage.check_full_deletion_support().await.unwrap();
+        }
     }
 
     #[test]
@@ -1242,16 +2584,178 @@ mod tests {
             prefix: Some("Noland Shared Storage".into()),
         };
         let session = session_from_input(&input, "op-guard", TokenMode::Ephemeral).unwrap();
-        let session_dir = run_root.join("storage/op-guard");
-
-        {
-            let (config, _guard) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
-            assert!(config.is_file());
-            assert!(session_dir.is_dir());
-        }
+        let (config, guard) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
+        let session_dir = config.parent().unwrap().to_path_buf();
+        assert!(config.is_file());
+        assert!(session_dir.is_dir());
+        assert_ne!(session_dir, run_root.join("storage/op-guard"));
+        let saved: EphemeralRcloneSession =
+            serde_json::from_slice(&std::fs::read(session_dir.join("session.json")).unwrap())
+                .unwrap();
+        assert_eq!(saved.operation_id, "op-guard");
+        drop(guard);
 
         assert!(!session_dir.exists());
         let _ = std::fs::remove_dir_all(run_root);
+    }
+
+    #[test]
+    fn guarded_sessions_with_the_same_logical_id_own_distinct_credentials() {
+        let run_root =
+            std::env::temp_dir().join(format!("noland-session-{}", uuid::Uuid::new_v4()));
+        let mut session = EphemeralRcloneSession {
+            operation_id: "same-logical-session".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n# first private config\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        for drop_first in [true, false] {
+            let (first_path, first) = write_guarded_ephemeral_session(&run_root, &session).unwrap();
+            session.config_ini = "[fixture]\ntype = local\n# second private config\n".into();
+            let (second_path, second) =
+                write_guarded_ephemeral_session(&run_root, &session).unwrap();
+            assert_ne!(first_path, second_path);
+            assert!(std::fs::read_to_string(&first_path)
+                .unwrap()
+                .contains("first private"));
+            assert!(std::fs::read_to_string(&second_path)
+                .unwrap()
+                .contains("second private"));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(&first_path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+                assert_eq!(
+                    std::fs::metadata(first_path.parent().unwrap())
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o700
+                );
+            }
+            if drop_first {
+                drop(first);
+                assert!(!first_path.parent().unwrap().exists());
+                assert!(second_path.is_file());
+                drop(second);
+            } else {
+                drop(second);
+                assert!(!second_path.parent().unwrap().exists());
+                assert!(first_path.is_file());
+                drop(first);
+            }
+            assert!(!first_path.parent().unwrap().exists());
+            assert!(!second_path.parent().unwrap().exists());
+            session.config_ini = "[fixture]\ntype = local\n# first private config\n".into();
+        }
+        std::fs::remove_dir_all(run_root).unwrap();
+    }
+
+    #[test]
+    fn ephemeral_session_id_cannot_escape_its_storage_root() {
+        let root =
+            std::env::temp_dir().join(format!("noland-session-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let sentinel = root.join("sentinel");
+        std::fs::write(&sentinel, b"keep").unwrap();
+        let mut session = EphemeralRcloneSession {
+            operation_id: String::new(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        for id in [
+            "",
+            ".",
+            "..",
+            "../sentinel",
+            "/absolute",
+            "a/b",
+            "a\\b",
+            "C:\\escape",
+            "bad\0id",
+            "bad\nid",
+            "bad\rid",
+        ] {
+            session.operation_id = id.into();
+            assert!(write_ephemeral_session(&root, &session).is_err());
+            assert!(write_guarded_ephemeral_session(&root, &session).is_err());
+            assert!(shred_ephemeral_session(&root, id).is_err());
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+            assert!(!root.join("storage").exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn forged_session_symlinks_never_write_or_shred_external_files() {
+        use std::os::unix::fs::symlink;
+        let root =
+            std::env::temp_dir().join(format!("noland-session-links-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("storage")).unwrap();
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let outside = root.join("outside/rclone.conf");
+        std::fs::write(&outside, b"keep").unwrap();
+        symlink(root.join("outside"), root.join("storage/forged")).unwrap();
+        let mut session = EphemeralRcloneSession {
+            operation_id: "forged".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        assert!(write_ephemeral_session(&root, &session).is_err());
+        assert!(shred_ephemeral_session(&root, "forged").is_err());
+        session.operation_id = "fixture".into();
+        let (config, guard) = write_guarded_ephemeral_session(&root, &session).unwrap();
+        std::fs::remove_file(&config).unwrap();
+        symlink(&outside, &config).unwrap();
+        drop(guard);
+        assert!(!config.parent().unwrap().exists());
+        assert_eq!(std::fs::read(outside).unwrap(), b"keep");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn guarded_session_accepts_trusted_var_alias_and_cleans_owned_canonical_directory() {
+        let root =
+            std::env::temp_dir().join(format!("noland-session-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let canonical = std::fs::canonicalize(&root).unwrap();
+        let alias = PathBuf::from("/var").join(canonical.strip_prefix("/private/var").unwrap());
+        let session = EphemeralRcloneSession {
+            operation_id: "operation".into(),
+            provider: "local".into(),
+            backend_type: "local".into(),
+            remote_name: "fixture".into(),
+            root: "/local-only".into(),
+            config_ini: "[fixture]\ntype = local\n".into(),
+            expires_at_unix: 0,
+            upload_concurrency: None,
+        };
+        let (config, guard) = write_guarded_ephemeral_session(&alias, &session).unwrap();
+        assert!(config.starts_with(&canonical));
+        assert!(config.is_file());
+        drop(guard);
+        assert!(!config.parent().unwrap().exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1340,11 +2844,11 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--drive-upload-cutoff", "8M"]));
-        assert!(args.windows(2).any(|pair| pair == ["--transfers", "8"]));
+        assert!(args.windows(2).any(|pair| pair == ["--transfers", "4"]));
     }
 
     #[test]
-    fn non_drive_throughput_keeps_eight_rclone_workers() {
+    fn bulk_copy_never_exceeds_the_shared_transfer_budget() {
         let profile = TransferProfile::for_provider(ProviderKind::Local, "local").unwrap();
         let builder = RcloneCommandBuilder::new(ProviderKind::Local, "local", profile).unwrap();
         let args = builder
@@ -1355,8 +2859,40 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert!(args.windows(2).any(|pair| pair == ["--transfers", "8"]));
+        assert!(args.windows(2).any(|pair| pair == ["--transfers", "4"]));
         assert!(args.windows(2).any(|pair| pair == ["--checkers", "8"]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_command_is_killed_and_reaped_before_its_owner_returns() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exec sleep 60"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let child = ReapedChild(command.spawn().unwrap());
+        let pid = child.id().unwrap();
+        let future = async move {
+            let _child = child;
+            std::future::pending::<()>().await;
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(10), future)
+                .await
+                .is_err()
+        );
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            !status.success(),
+            "cancelled child is still running or unreaped"
+        );
     }
 
     #[test]

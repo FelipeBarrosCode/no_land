@@ -7,10 +7,15 @@
 pub mod abi;
 mod bpf;
 mod cgroup;
+mod host_path;
 mod queue;
 
 pub use bpf::{BpfFeature, BpfObserver, BpfObserverConfig, CgroupObservationMode};
 pub use cgroup::{CgroupResolver, DedicatedCgroup};
+pub use host_path::{
+    is_runtime_namespace_path, runtime_private_home, HostPathResolver, PathContext,
+    PathResolutionError,
+};
 pub use queue::{EventQueue, QueuedEvent};
 
 use std::collections::HashMap;
@@ -30,6 +35,7 @@ pub struct ObserverHub {
     pub queue: EventQueue,
     pub metrics: Arc<Metrics>,
     mode: Mutex<ObservationMode>,
+    paths: Mutex<HostPathResolver>,
 }
 
 impl ObserverHub {
@@ -39,6 +45,7 @@ impl ObserverHub {
             queue: EventQueue::new(QUEUE_CAP, metrics.clone()),
             metrics,
             mode: Mutex::new(ObservationMode::Discovery),
+            paths: Mutex::new(HostPathResolver::default()),
         }
     }
 
@@ -51,31 +58,60 @@ impl ObserverHub {
     }
 
     pub fn inject_process(&self, event: ProcessEvent) {
+        self.paths.lock().invalidate_pid(event.pid);
         Metrics::inc(&self.metrics.process_events_total);
         self.processes.apply(&event);
         self.queue.push(QueuedEvent::Process(event));
     }
 
-    pub fn inject_fs(&self, event: FilesystemEvent) {
+    pub fn inject_fs(&self, mut event: FilesystemEvent) {
         if self.suppress_read(event.kind, event.sampled) {
             return;
         }
         Metrics::inc(&self.metrics.filesystem_events_total);
+        if normalize_filesystem_event(&mut self.paths.lock(), &mut event, PathContext::default())
+            .is_err()
+        {
+            self.report_filesystem_gap(event.pid);
+            return;
+        }
         self.queue.push(QueuedEvent::Filesystem(event));
     }
 
     pub fn inject_ebpf_process(&self, fact: EbpfProcessFact) {
+        self.paths.lock().invalidate_pid(fact.process_id());
         Metrics::inc(&self.metrics.process_events_total);
         self.processes.apply(&fact.as_process_event());
         self.queue.push(QueuedEvent::EbpfProcess(fact));
     }
 
-    pub fn inject_ebpf_fs(&self, fact: EbpfFilesystemFact) {
+    pub fn inject_ebpf_fs(&self, mut fact: EbpfFilesystemFact) {
+        if fact.io_result.is_some_and(|result| result < 0) {
+            return;
+        }
         if self.suppress_read(fact.kind, fact.sampled) {
             return;
         }
         Metrics::inc(&self.metrics.filesystem_events_total);
+        let mut event = fact.as_filesystem_event();
+        if fact.tid != 0 {
+            event.pid = fact.tid;
+        }
+        if normalize_filesystem_event(&mut self.paths.lock(), &mut event, PathContext::default())
+            .is_err()
+        {
+            self.report_filesystem_gap(fact.process_id());
+            return;
+        }
+        fact.path = event.path;
+        fact.second_path = event.dest_path;
         self.queue.push(QueuedEvent::EbpfFilesystem(fact));
+    }
+
+    /// Keep mapping failures in event order so attribution can invalidate the
+    /// affected session's roots even after the process has exited.
+    pub fn report_filesystem_gap(&self, pid: i32) {
+        self.queue.push(QueuedEvent::FilesystemGap { pid });
     }
 
     fn suppress_read(&self, kind: FsEventKind, sampled: bool) -> bool {
@@ -195,6 +231,16 @@ pub fn bootstrap_from_procfs() -> Vec<ProcessEvent> {
 /// Best-effort resolved files currently held open by a live process.
 /// Used only to recover dependency evidence after observer loss.
 pub fn open_files_from_procfs(pid: i32) -> Vec<PathBuf> {
+    recover_open_files_from_procfs(pid).paths
+}
+
+#[derive(Debug, Default)]
+pub struct RecoveredOpenFiles {
+    pub paths: Vec<PathBuf>,
+    pub requires_reconciliation: bool,
+}
+
+pub fn recover_open_files_from_procfs(pid: i32) -> RecoveredOpenFiles {
     #[cfg(target_os = "linux")]
     {
         linux::open_files(pid)
@@ -202,7 +248,7 @@ pub fn open_files_from_procfs(pid: i32) -> Vec<PathBuf> {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = pid;
-        Vec::new()
+        RecoveredOpenFiles::default()
     }
 }
 
@@ -211,18 +257,52 @@ mod linux {
     use super::*;
     use std::fs;
 
-    pub fn open_files(pid: i32) -> Vec<PathBuf> {
+    pub fn open_files(pid: i32) -> RecoveredOpenFiles {
+        use crate::host_path::platform::{process_identity, recover_open_file};
+
+        let mut recovered = RecoveredOpenFiles::default();
+        let proc_root = Path::new("/proc");
+        let identity = process_identity(proc_root, pid);
+        let mut resolver = HostPathResolver::default();
         let Ok(entries) = fs::read_dir(format!("/proc/{pid}/fd")) else {
-            return Vec::new();
+            recovered.requires_reconciliation = true;
+            return recovered;
         };
-        let mut paths = entries
-            .flatten()
-            .filter_map(|entry| fs::read_link(entry.path()).ok())
-            .filter(|path| path.is_absolute() && path.is_file())
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-        paths
+        for entry in entries.flatten() {
+            let Ok(metadata) = fs::metadata(entry.path()) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let Ok(path) = fs::read_link(entry.path()) else {
+                continue;
+            };
+            if !path.is_absolute() {
+                continue;
+            }
+            // An unlinked open file is evidence of a gap, not of a live leaf at
+            // its old name. Do not confuse it with a newly-created replacement.
+            match recover_open_file(
+                &mut resolver,
+                pid,
+                &path,
+                &metadata,
+                identity.map(|id| id.mount_namespace),
+            ) {
+                Ok(path) => {
+                    recovered.paths.push(path);
+                }
+                _ => recovered.requires_reconciliation = true,
+            }
+        }
+        if identity.is_none() || process_identity(proc_root, pid) != identity {
+            recovered.paths.clear();
+            recovered.requires_reconciliation = true;
+        }
+        recovered.paths.sort();
+        recovered.paths.dedup();
+        recovered
     }
 
     pub fn scan_proc() -> Vec<ProcessEvent> {
@@ -281,6 +361,42 @@ mod linux {
             "proc connector is only fully bound in the Linux runtime",
         ))
     }
+}
+
+/// Normalize both rename endpoints atomically. Callers must treat an error as a
+/// reconciliation gap; retaining just one translated endpoint is not safe.
+pub fn normalize_filesystem_event(
+    resolver: &mut HostPathResolver,
+    event: &mut FilesystemEvent,
+    mut context: PathContext,
+) -> std::result::Result<(), PathResolutionError> {
+    context.observed_at = context.observed_at.or(Some(event.at));
+    context.allow_missing |= matches!(
+        event.kind,
+        FsEventKind::Rename | FsEventKind::Unlink | FsEventKind::Rmdir | FsEventKind::Mkdir
+    );
+    let path = resolver.resolve(event.pid, &event.path, context)?;
+    let destination = event
+        .dest_path
+        .as_ref()
+        .map(|path| {
+            resolver.resolve(
+                event.pid,
+                path,
+                PathContext {
+                    inode: None,
+                    device: None,
+                    ..context
+                },
+            )
+        })
+        .transpose()?;
+    if event.kind == FsEventKind::Rename && destination.is_none() {
+        return Err(PathResolutionError::Unavailable);
+    }
+    event.path = path;
+    event.dest_path = destination;
+    Ok(())
 }
 
 pub(crate) fn process_executable(_pid: i32, kernel_executable: Option<PathBuf>) -> Option<PathBuf> {

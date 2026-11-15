@@ -1,8 +1,5 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { sendNotification } from "@tauri-apps/plugin-notification";
+import { ensureNotificationPermission } from "./notificationPermission";
 import { isNotificationEnabled } from "./notificationPreferences";
 import { translate, translateSource } from "./i18n";
 
@@ -16,10 +13,7 @@ export async function notifyProvisioningUpdate(
   }
 
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
+    const granted = await ensureNotificationPermission();
     if (!granted) {
       return;
     }

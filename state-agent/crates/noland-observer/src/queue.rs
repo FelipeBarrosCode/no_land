@@ -13,6 +13,7 @@ pub enum QueuedEvent {
     Filesystem(FilesystemEvent),
     EbpfProcess(EbpfProcessFact),
     EbpfFilesystem(EbpfFilesystemFact),
+    FilesystemGap { pid: i32 },
 }
 
 pub struct EventQueue {
@@ -24,7 +25,7 @@ pub struct EventQueue {
 
 struct Inner {
     events: VecDeque<QueuedEvent>,
-    last_write: HashMap<String, usize>,
+    last_write: HashMap<(i32, FsEventKind, std::path::PathBuf), usize>,
     dropped: u64,
     loss_detected: bool,
 }
@@ -46,9 +47,13 @@ impl EventQueue {
 
     pub fn push(&self, event: QueuedEvent) {
         let mut inner = self.inner.lock();
-        if let Some((kind, path, at)) = filesystem_identity(&event) {
-            if matches!(kind, FsEventKind::Write | FsEventKind::Truncate) {
-                let key = path.to_string_lossy().into_owned();
+        // A process boundary (including PID reuse), rename, or deletion ends a
+        // coalescing run. Never merge two apps' identical namespace-local paths.
+        if write_identity(&event).is_none() {
+            inner.last_write.clear();
+        }
+        if let Some((_, _, at)) = filesystem_identity(&event) {
+            if let Some(key) = write_identity(&event) {
                 if let Some(idx) = inner.last_write.get(&key).copied() {
                     if idx < inner.events.len() {
                         match inner.events.get_mut(idx) {
@@ -103,10 +108,7 @@ impl EventQueue {
                 return;
             }
         }
-        let write_key = filesystem_identity(&event).and_then(|(kind, path, _)| {
-            matches!(kind, FsEventKind::Write | FsEventKind::Truncate)
-                .then(|| path.to_string_lossy().into_owned())
-        });
+        let write_key = write_identity(&event);
         let idx = inner.events.len();
         if let Some(key) = write_key {
             inner.last_write.insert(key, idx);
@@ -160,8 +162,23 @@ fn filesystem_identity(
     match event {
         QueuedEvent::Filesystem(fact) => Some((fact.kind, &fact.path, fact.at)),
         QueuedEvent::EbpfFilesystem(fact) => Some((fact.kind, &fact.path, fact.at)),
-        QueuedEvent::Process(_) | QueuedEvent::EbpfProcess(_) => None,
+        QueuedEvent::Process(_)
+        | QueuedEvent::EbpfProcess(_)
+        | QueuedEvent::FilesystemGap { .. } => None,
     }
+}
+
+fn write_identity(event: &QueuedEvent) -> Option<(i32, FsEventKind, std::path::PathBuf)> {
+    let (kind, path, _) = filesystem_identity(event)?;
+    if !matches!(kind, FsEventKind::Write | FsEventKind::Truncate) {
+        return None;
+    }
+    let pid = match event {
+        QueuedEvent::Filesystem(event) => event.pid,
+        QueuedEvent::EbpfFilesystem(event) => event.process_id(),
+        _ => return None,
+    };
+    Some((pid, kind, path.to_path_buf()))
 }
 
 #[cfg(test)]
@@ -225,6 +242,48 @@ mod tests {
             }));
         }
         assert_eq!(q.drain().len(), 1);
+    }
+
+    #[test]
+    fn does_not_coalesce_apps_sharing_a_namespace_path_or_across_pid_reuse() {
+        let q = EventQueue::new(16, Arc::new(Metrics::default()));
+        for pid in [41, 42] {
+            q.push(QueuedEvent::Filesystem(crate::fs_event(
+                FsEventKind::Write,
+                pid,
+                "/home/runtime/saves/current",
+            )));
+        }
+        q.push(QueuedEvent::Process(crate::process_exec(
+            41,
+            1,
+            "/home/runtime/game",
+        )));
+        q.push(QueuedEvent::Filesystem(crate::fs_event(
+            FsEventKind::Write,
+            41,
+            "/home/runtime/saves/current",
+        )));
+        assert_eq!(q.drain().len(), 4);
+    }
+
+    #[test]
+    fn rename_and_delete_separate_write_coalescing_runs() {
+        let q = EventQueue::new(16, Arc::new(Metrics::default()));
+        for kind in [
+            FsEventKind::Write,
+            FsEventKind::Unlink,
+            FsEventKind::Write,
+            FsEventKind::Rename,
+            FsEventKind::Write,
+        ] {
+            q.push(QueuedEvent::Filesystem(crate::fs_event(
+                kind,
+                41,
+                "/home/runtime/saves/current",
+            )));
+        }
+        assert_eq!(q.drain().len(), 5);
     }
 
     #[tokio::test]

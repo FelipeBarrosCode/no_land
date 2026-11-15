@@ -155,5 +155,6 @@ ${probe.replace('link=/opt/noland/state-agent', `link="${link}"`)}
   assert.throws(() => run({ PROBE_OWNER: '501' }));
   assert.throws(() => run({ PROBE_UNTRUSTED: '/opt/noland/state-agent-123/prebuilt/x86_64/noland-lifecycle-agent' }));
   assert.throws(() => run({ PROBE_WRITABLE_PARENT: '/opt/noland' }));
-  assert.ok(runtime.includes('shell_escape(&format!("{TRUSTED_WORKSPACE_PROBE}\\n{manifest_probe}"))'));
+  assert.match(runtime, /shell_escape\(&format!\("\{TRUSTED_WORKSPACE_PROBE\}\\ntest .*\.noland-source-fingerprint.*\\n\{manifest_probe\}"/u);
+  assert.match(runtime, /shell_escape\(&fingerprint\)/u);
 });

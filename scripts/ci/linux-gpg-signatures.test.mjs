@@ -14,8 +14,13 @@ const temporary = t => {
   return path;
 };
 
-test('real OpenPGP signing and public-only verification fail closed without touching the user keyring', async t => {
-  const home = mkdtempSync(join(tmpdir(), 'noland-pgp-test-'));
+test('real OpenPGP signing and public-only verification fail closed without touching the user keyring', {
+  // Production Linux signing runs on Unix. Git for Windows' bundled GPG is not
+  // a supported isolated-agent integration host; keep the workflow policy test
+  // below and the Windows Authenticode checks enabled on Windows runners.
+  skip: process.platform === 'win32' ? 'Linux OpenPGP integration is exercised on Unix hosts' : false,
+}, async t => {
+  const home = mkdtempSync(join(tmpdir(), 'ngpg-'));
   t.after(() => {
     spawnSync('gpgconf', ['--homedir', home, '--kill', 'gpg-agent'], { stdio: 'ignore' });
     rmSync(home, { recursive: true, force: true });

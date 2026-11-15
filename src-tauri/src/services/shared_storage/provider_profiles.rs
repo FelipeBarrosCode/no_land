@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::{
-    app_state::{SharedStorageOAuthSessionSecret, SharedStorageProfileSecret},
+    app_state::{PersistedAppState, SharedStorageOAuthSessionSecret, SharedStorageProfileSecret},
     application_bundle::{SharedStorageProfile, SharedStorageStatus, StorageProvider},
 };
 use crate::services::app_context::AppContext;
@@ -66,6 +66,7 @@ impl SharedStorageProfileManager {
                     .insert(profile_id.clone(), stored.clone());
             })
             .await?;
+        super::browse::invalidate_context(context);
 
         Ok(SharedStorageProfile {
             id: profile_id.clone(),
@@ -138,31 +139,8 @@ impl SharedStorageProfileManager {
         context: &AppContext,
         profile: &SharedStorageProfile,
     ) -> AppResult<[u8; 32]> {
-        let state = context.load_state().await;
-        let credentials = &state.shared_storage_credentials;
-
-        // Prefer the app-wide shared key. Fall back to the per-profile key
-        // for installations that persisted their key before the shared slot
-        // existed.
-        let key_hex = if !credentials.repository_key_hex.is_empty() {
-            credentials.repository_key_hex.clone()
-        } else {
-            credentials
-                .profiles
-                .get(&profile.id)
-                .map(|stored| stored.repository_key_hex.clone())
-                .filter(|key| !key.is_empty())
-                .ok_or_else(|| {
-                    AppError::NotFound("Repository key not found in state".to_string())
-                })?
-        };
-
-        let key_bytes: [u8; 32] = hex::decode(&key_hex)
-            .map_err(|e| AppError::State(format!("Invalid repository key: {e}")))?
-            .try_into()
-            .map_err(|_| AppError::State("Repository key has wrong length".to_string()))?;
-
-        Ok(key_bytes)
+        let state = context.state.read().await;
+        repository_key_from_state(&state, &profile.id)
     }
 
     pub async fn delete_profile_credentials(
@@ -185,6 +163,7 @@ impl SharedStorageProfileManager {
                     .remove(&profile.id);
             })
             .await?;
+        super::browse::invalidate_context(context);
         Ok(())
     }
 
@@ -235,6 +214,31 @@ impl SharedStorageProfileManager {
             .await?;
         Ok(())
     }
+}
+
+pub(crate) fn repository_key_from_state(
+    state: &PersistedAppState,
+    profile_id: &str,
+) -> AppResult<[u8; 32]> {
+    let credentials = &state.shared_storage_credentials;
+    let key_hex = if !credentials.repository_key_hex.is_empty() {
+        credentials.repository_key_hex.as_str()
+    } else {
+        credentials
+            .profiles
+            .get(profile_id)
+            .map(|stored| stored.repository_key_hex.as_str())
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| AppError::NotFound("Repository key not found in state".into()))?
+    };
+    let mut bytes = hex::decode(key_hex)
+        .map_err(|_| AppError::State("Invalid repository key encoding".into()))?;
+    let result = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AppError::State("Repository key has wrong length".into()));
+    bytes.fill(0);
+    result
 }
 
 fn generate_repository_key() -> [u8; 32] {

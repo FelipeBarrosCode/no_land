@@ -119,7 +119,7 @@ export function LaunchLibraryModal({
             {translate("generated.558aab1ea62591ac")}
           </h2>
           <p className="mt-2 text-sm text-[#91a9c4]">
-            {instanceLabel} {translate("generated.44dbfc9d6214e1f8")}
+            {instanceLabel} {translate("generated.92f7de766fa3c9cf")}
           </p>
         </div>
         <Button variant="ghost" onClick={onClose}>

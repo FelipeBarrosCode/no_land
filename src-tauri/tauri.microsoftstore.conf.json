@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "externalBin": ["binaries/noland-net-helper", "binaries/noland-mic-sender"],
     "targets": ["nsis"],
     "resources": [
       "binaries/wintun-*-pc-windows-msvc.dll",

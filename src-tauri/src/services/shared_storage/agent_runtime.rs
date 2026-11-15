@@ -2,16 +2,43 @@
 
 use sha2::{Digest, Sha256};
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use crate::errors::{AppError, AppResult};
 use crate::services::remote_exec::RemoteExec;
 
 const AGENT_SOCKET: &str = "/run/noland/state-agent.sock";
-const REQUIRED_AGENT_API_VERSION: u64 = 18;
+const REQUIRED_AGENT_API_VERSION: u64 = 22;
+
+type AgentEndpoint = (String, u16);
+type AgentAccessRegistry = Mutex<std::collections::HashMap<AgentEndpoint, Weak<RwLock<()>>>>;
+
+// All SSH identities for an endpoint use the same daemon/socket. RPCs may run
+// concurrently, but deployment must wait for their complete correlated replies.
+// Weak entries avoid retaining credentials or an unbounded history of instances.
+fn agent_access(remote: &RemoteExec) -> Arc<RwLock<()>> {
+    static ACCESS: OnceLock<AgentAccessRegistry> = OnceLock::new();
+    let mut entries = ACCESS
+        .get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    entries.retain(|_, entry| entry.strong_count() > 0);
+    let endpoint = (remote.ssh_host.to_ascii_lowercase(), remote.ssh_port);
+    if let Some(access) = entries.get(&endpoint).and_then(Weak::upgrade) {
+        return access;
+    }
+    let access = Arc::new(RwLock::new(()));
+    entries.insert(endpoint, Arc::downgrade(&access));
+    access
+}
+
+fn deployment_stamp() -> String {
+    uuid::Uuid::new_v4().as_u128().to_string()
+}
 
 // Keep this aligned with install-lifecycle-agent.sh. A healthy running agent
 // does not imply its shared installation workspace is safe to reuse as root.
@@ -32,25 +59,52 @@ test -z "$untrusted"
 "#;
 
 pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
-    if probe_agent(remote).await.ok().and_then(|health| {
+    let access = agent_access(remote);
+    let _deployment = access.write().await;
+    ensure_state_agent_exclusive(remote, target_user).await
+}
+
+async fn ensure_state_agent_exclusive(remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+    // Recheck only after gaining exclusivity. A concurrent caller may already
+    // have installed the exact sources while this caller was waiting.
+    let health = call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+        .await
+        .ok();
+    let active = deployment_has_active_work(remote, health.as_ref()).await?;
+    let compatible = health.as_ref().and_then(|health| {
         health
             .get("agent_api_version")
             .and_then(serde_json::Value::as_u64)
-    }) == Some(REQUIRED_AGENT_API_VERSION)
-        && prebuilt_deployment_matches(remote).await?
-    {
+    }) == Some(REQUIRED_AGENT_API_VERSION);
+    // Reattach to compatible work before refreshing builds. Never restart a
+    // daemon that still owns a capture, transfer, or restore transaction.
+    if compatible && (active || prebuilt_deployment_matches(remote).await?) {
         return Ok(());
+    }
+    if active {
+        return Err(AppError::Provisioning(
+            "Wait for active Shared Storage operations before updating the agent.".into(),
+        ));
     }
 
     let local_src = find_state_agent_source_dir()?;
+    let source_fingerprint = state_agent_source_fingerprint(&local_src)?;
 
-    let stamp = chrono::Utc::now().timestamp();
+    // Numeric UUIDs retain the trusted workspace naming contract, without the
+    // same-second collisions of wall-clock stamps across concurrent clients.
+    let stamp = deployment_stamp();
     let local_tar = std::env::temp_dir().join(format!("noland-state-agent-{stamp}.tar.gz"));
     let source = local_src.clone();
     let archive_path = local_tar.clone();
     tokio::task::spawn_blocking(move || pack_state_agent_sources(&source, &archive_path))
         .await
         .map_err(|error| AppError::Command(format!("agent archive join failure: {error}")))??;
+    if state_agent_source_fingerprint(&local_src)? != source_fingerprint {
+        let _ = fs::remove_file(&local_tar);
+        return Err(AppError::State(
+            "State-agent sources changed while preparing the update; try again.".into(),
+        ));
+    }
 
     let remote_tar = format!("/tmp/noland-state-agent-{stamp}.tar.gz");
     {
@@ -78,11 +132,12 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     );
     let sudo = remote.sudo_prefix();
     let worker = format!(
-        "flock -w 1200 /run/lock/noland-state-agent-bootstrap.lock bash {script} {src} /usr/local/bin/noland-state-agent {user}; code=$?; printf '%s\\n' \"$code\" > {status}",
+        "flock -w 1200 /run/lock/noland-state-agent-bootstrap.lock bash {script} {src} /usr/local/bin/noland-state-agent {user}; code=$?; if [ \"$code\" = 0 ]; then printf %s {fingerprint} > {src}/.noland-source-fingerprint || code=$?; fi; printf '%s\\n' \"$code\" > {status}",
         script = shell_escape(&remote_script),
         src = shell_escape(&remote_src),
         user = shell_escape(target_user),
         status = shell_escape(&remote_status),
+        fingerprint = shell_escape(&source_fingerprint),
     );
     let launcher = format!(
         "rm -f {status} {log}; nohup sh -c {worker} > {log} 2>&1 < /dev/null &",
@@ -91,7 +146,7 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
         worker = shell_escape(&worker),
     );
     let setup = format!(
-        "{sudo}rm -rf {src} && {sudo}mkdir -p {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && {sudo}find {src} -xdev \\( -type f -o -type d \\) -exec chmod go-w {{}} + && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
+        "{sudo}mkdir -p /opt/noland && {sudo}mkdir {src} && {sudo}tar -xzf {tar} -C {src} && {sudo}chown -R root:root {src} && {sudo}find {src} -xdev \\( -type f -o -type d \\) -exec chmod go-w {{}} + && printf %s {encoded} | base64 -d > {script} && chmod 700 {script} && {sudo}sh -c {launcher}",
         sudo = sudo,
         src = shell_escape(&remote_src),
         tar = shell_escape(&remote_tar),
@@ -110,12 +165,57 @@ pub async fn ensure_state_agent(remote: &RemoteExec, target_user: &str) -> AppRe
     wait_for_bootstrap(remote, &remote_status, &remote_log).await
 }
 
+async fn deployment_has_active_work(
+    remote: &RemoteExec,
+    health: Option<&serde_json::Value>,
+) -> AppResult<bool> {
+    let Some(health) = health else {
+        return Ok(false);
+    };
+    if let Some(count) = health
+        .get("active_operations")
+        .and_then(serde_json::Value::as_u64)
+    {
+        return Ok(count > 0);
+    }
+    if health
+        .get("unfinished_operations")
+        .and_then(serde_json::Value::as_u64)
+        == Some(0)
+    {
+        return Ok(false);
+    }
+    // Older agents count INTERRUPTED rows as unfinished. Inspect actual managed
+    // work rather than letting historical interruptions block every update.
+    // Called under ensure_state_agent's deployment write guard.
+    let recent = call_agent_raw_unlocked(
+        remote,
+        "ListRecentOperations",
+        serde_json::json!({"projection":"matching", "limit":1000}),
+    )
+    .await?;
+    Ok(legacy_list_has_active_work(&recent))
+}
+
+fn legacy_list_has_active_work(recent: &serde_json::Value) -> bool {
+    recent
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .is_none_or(|operations| {
+            operations.len() >= 1000
+                || operations
+                    .iter()
+                    .any(|op| op.get("running").and_then(serde_json::Value::as_bool) != Some(false))
+        })
+}
+
 /// API compatibility alone is insufficient: an updated application may ship
 /// new agents without changing the RPC schema. Refresh the managed workspace
 /// when its architecture-specific build manifest differs from the app bundle
 /// or its ownership/permissions fail the lifecycle installer's trust checks.
 async fn prebuilt_deployment_matches(remote: &RemoteExec) -> AppResult<bool> {
     let source = find_state_agent_source_dir()?;
+    let fingerprint = state_agent_source_fingerprint(&source)?;
     let mut cases = String::new();
     let mut has_prebuilt_manifests = true;
     for arch in ["x86_64", "aarch64"] {
@@ -139,12 +239,63 @@ async fn prebuilt_deployment_matches(remote: &RemoteExec) -> AppResult<bool> {
     let command = format!(
         "{}sh -c {}",
         remote.sudo_prefix(),
-        shell_escape(&format!("{TRUSTED_WORKSPACE_PROBE}\n{manifest_probe}"))
+        shell_escape(&format!("{TRUSTED_WORKSPACE_PROBE}\ntest \"$(cat /opt/noland/state-agent/.noland-source-fingerprint 2>/dev/null)\" = {}\n{manifest_probe}", shell_escape(&fingerprint)))
     );
     Ok(ssh_command(remote, command, Duration::from_secs(20))
         .await?
         .status_code
         == 0)
+}
+
+/// Content identity, not RPC compatibility or checkout timestamps. Only shipped
+/// source/config and prebuilt manifests participate; build artifacts do not.
+fn state_agent_source_fingerprint(root: &Path) -> AppResult<String> {
+    fn visit(root: &Path, directory: &Path, hash: &mut Sha256) -> AppResult<()> {
+        let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink()
+                || matches!(
+                    entry.file_name().to_str(),
+                    Some("target" | ".git" | ".DS_Store")
+                )
+            {
+                continue;
+            }
+            if kind.is_dir() {
+                visit(root, &path, hash)?;
+            } else if kind.is_file()
+                && (path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        matches!(
+                            ext,
+                            "rs" | "toml" | "lock" | "sql" | "c" | "h" | "sh" | "service"
+                        )
+                    })
+                    || entry.file_name() == "SHA256SUMS")
+            {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("source descendant")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                hash.update((relative.len() as u64).to_le_bytes());
+                hash.update(relative.as_bytes());
+                let bytes = fs::read(path)?;
+                hash.update((bytes.len() as u64).to_le_bytes());
+                hash.update(bytes);
+            }
+        }
+        Ok(())
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"noland-state-agent-source-v1\0");
+    visit(root, root, &mut hash)?;
+    Ok(format!("{:x}", hash.finalize()))
 }
 
 pub fn locate_state_agent_source_dir() -> AppResult<PathBuf> {
@@ -321,14 +472,6 @@ async fn wait_for_bootstrap(
     let mut last_connection_error = None;
 
     while tokio::time::Instant::now() < deadline {
-        if probe_agent(remote)
-            .await
-            .ok()
-            .is_some_and(|health| agent_api_is_compatible(&health))
-        {
-            return Ok(());
-        }
-
         match ssh_command(remote, status_command.clone(), Duration::from_secs(20)).await {
             Ok(output) if output.status_code == 0 => {
                 let status = output.stdout.trim();
@@ -338,6 +481,17 @@ async fn wait_for_bootstrap(
                         return Err(AppError::Provisioning(format!(
                             "Failed to install or start state-agent (exit {exit_code}): {log}"
                         )));
+                    }
+                    // A still-running *old* API-compatible daemon is not evidence
+                    // that this installation has finished. Its own status receipt
+                    // must be successful before checking the replacement's health.
+                    // The deployment write guard is already held here.
+                    let health =
+                        call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+                            .await
+                            .ok();
+                    if bootstrap_is_ready(Some(exit_code), health.as_ref()) {
+                        return Ok(());
                     }
                 }
             }
@@ -361,6 +515,10 @@ async fn wait_for_bootstrap(
         last_connection_error.unwrap_or_else(|| "none".to_string()),
         log
     )))
+}
+
+fn bootstrap_is_ready(exit_code: Option<i32>, health: Option<&serde_json::Value>) -> bool {
+    exit_code == Some(0) && health.is_some_and(agent_api_is_compatible)
 }
 
 async fn read_bootstrap_log(remote: &RemoteExec, remote_log: &str) -> String {
@@ -393,7 +551,156 @@ pub async fn probe_agent(remote: &RemoteExec) -> AppResult<serde_json::Value> {
     call_agent_raw(remote, "GetHealth", serde_json::json!({})).await
 }
 
+/// Option browsing may use an already-running protocol-compatible generation,
+/// but must NEVER install tools, inspect source workspaces, deploy or restart.
+/// Execution continues to use ensure_state_agent's exact source/trust checks.
+pub(crate) async fn call_agent_browse(
+    remote: &RemoteExec,
+    method: &str,
+    params: serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    if !matches!(method, "ListApps" | "ListCloudCatalog") {
+        return Err(AppError::InvalidInput(
+            "Only read-only option listing methods are permitted for browsing.".into(),
+        ));
+    }
+    let access = agent_access(remote);
+    let _request = access
+        .try_read()
+        .map_err(|_| super::browse::failure(super::browse::BrowseFailure::AgentUpdating))?;
+    let started = std::time::Instant::now();
+    let health = call_agent_raw_unlocked(remote, "GetHealth", serde_json::json!({}))
+        .await
+        .map_err(|_| super::browse::failure(super::browse::BrowseFailure::AgentUnavailable))?;
+    tracing::info!(
+        event = "shared_storage_browse_stage",
+        stage = "agent_health",
+        latency_ms = started.elapsed().as_millis() as u64,
+        rpc_requests = 1u64,
+        "Read-only storage agent probe completed"
+    );
+    require_browse_protocol(&health)?;
+    let started = std::time::Instant::now();
+    let result = call_agent_raw_unlocked(remote, method, params).await;
+    tracing::info!(
+        event = "shared_storage_browse_stage",
+        stage = "agent_read",
+        method,
+        latency_ms = started.elapsed().as_millis() as u64,
+        success = result.is_ok(),
+        rpc_requests = 1u64,
+        deployment_requests = 0u64,
+        "Read-only storage agent request completed"
+    );
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => {
+            // Probe only after a failed cloud read: healthy browsing adds no
+            // prerequisite round trip and never installs a missing executable.
+            if method == "ListCloudCatalog"
+                && matches!(browse_helper_available(remote).await, Ok(false))
+            {
+                return Err(super::browse::failure(
+                    super::browse::BrowseFailure::HelperMissing,
+                ));
+            }
+            Err(super::browse::failure(if method == "ListCloudCatalog" {
+                super::browse::BrowseFailure::ProviderUnavailable
+            } else {
+                super::browse::BrowseFailure::AgentUnavailable
+            }))
+        }
+    }
+}
+
+async fn browse_helper_available(remote: &RemoteExec) -> AppResult<bool> {
+    let script =
+        "import json,shutil; print(json.dumps({'available':shutil.which('rclone') is not None}))";
+    let output = run_rpc_transport(
+        rpc_ssh_command(remote, &format!("python3 -c {}", shell_escape(script)))?,
+        RpcInput(Vec::new()),
+        Duration::from_secs(15),
+    )
+    .await?;
+    parse_browse_helper_presence(&output)
+}
+
+fn parse_browse_helper_presence(output: &[u8]) -> AppResult<bool> {
+    let value: serde_json::Value = serde_json::from_slice(output)?;
+    value
+        .get("available")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::State("Invalid storage helper readiness response.".into()))
+}
+
+fn require_browse_protocol(health: &serde_json::Value) -> AppResult<()> {
+    if agent_api_is_compatible(health) {
+        Ok(())
+    } else {
+        Err(super::browse::failure(
+            super::browse::BrowseFailure::AgentIncompatible,
+        ))
+    }
+}
+
+// Probe the SAME kernel lock used by managed repository execution, including
+// previews which have no active operation row. Never create/unlink the file,
+// stop a process, install tooling or hold a detached lock owner.
+const REPOSITORY_IDLE_PROBE: &str = r#"import fcntl,json,os,stat,sys
+fd=None
+unlocked=False
+try:
+    fd=os.open(sys.argv[1],os.O_RDONLY|os.O_NOFOLLOW)
+    if stat.S_ISREG(os.fstat(fd).st_mode):
+        fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        unlocked=True
+except (OSError,ValueError):
+    pass
+finally:
+    if fd is not None:
+        os.close(fd)
+print(json.dumps({"unlocked":unlocked}))
+"#;
+
+pub(crate) async fn repository_admission_idle(remote: &RemoteExec) -> AppResult<bool> {
+    let access = agent_access(remote);
+    let _request = access.read().await;
+    let command = format!(
+        "python3 -c {} /var/lib/noland/state/repository-admission.lock",
+        shell_escape(REPOSITORY_IDLE_PROBE),
+    );
+    let output = run_rpc_transport(
+        rpc_ssh_command(remote, &command)?,
+        RpcInput(Vec::new()),
+        Duration::from_secs(15),
+    )
+    .await?;
+    if output.last() != Some(&b'\n') {
+        return Err(AppError::State(
+            "Repository admission probe returned an incomplete response.".into(),
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output)?;
+    value
+        .get("unlocked")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| AppError::State("Invalid repository admission probe response.".into()))
+}
+
 pub async fn call_agent_raw(
+    remote: &RemoteExec,
+    method: &str,
+    params: serde_json::Value,
+) -> AppResult<serde_json::Value> {
+    let access = agent_access(remote);
+    let _request = access.read().await;
+    call_agent_raw_unlocked(remote, method, params).await
+}
+
+// Transport implementation for callers that already hold an access guard.
+// Only deployment's own probes bypass the public read wrapper, under its write
+// guard. User operations must always go through call_agent_raw.
+async fn call_agent_raw_unlocked(
     remote: &RemoteExec,
     method: &str,
     params: serde_json::Value,
@@ -404,107 +711,493 @@ pub async fn call_agent_raw(
         "method": method,
         "params": params,
     });
-    let local_request = std::env::temp_dir().join(format!("noland-rpc-{request_id}.json"));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+    let mut request_bytes = RpcInput(serde_json::to_vec(&request)?);
+    request_bytes.0.push(b'\n');
+    if request_bytes.0.len() > MAX_RPC_BYTES {
+        return Err(AppError::InvalidInput(
+            "state-agent RPC request is too large".into(),
+        ));
     }
-    let mut request_file = options
-        .open(&local_request)
-        .map_err(|error| AppError::State(format!("create state-agent RPC request: {error}")))?;
-    let _local_request_guard = TempFileGuard(local_request.clone());
-    request_file
-        .write_all(format!("{request}\n").as_bytes())
-        .and_then(|_| request_file.sync_all())
-        .map_err(|error| AppError::State(format!("write state-agent RPC request: {error}")))?;
-    drop(request_file);
-    let remote_request = format!("/run/noland/noland-rpc-{request_id}.json");
-    let transfer_task = {
-        let remote = remote.clone();
-        let local_request = local_request.clone();
-        let remote_request = remote_request.clone();
-        tokio::task::spawn_blocking(move || {
-            remote.scp(&local_request, &remote_request, Duration::from_secs(60))
-        })
-    };
-    let transfer = match transfer_task.await {
-        Ok(Ok(transfer)) => transfer,
-        Ok(Err(error)) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(error);
-        }
-        Err(error) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(AppError::Command(format!("join failure: {error}")));
-        }
-    };
-    if transfer.status_code != 0 {
-        cleanup_remote_request(remote, &remote_request).await;
-        return Err(AppError::Provisioning(format!(
-            "failed to transfer state-agent RPC request: {}",
-            concise_remote_failure(&transfer.stdout, &transfer.stderr)
-        )));
-    }
-    let rpc_timeout_secs = match method {
-        "StartSeal" => 2 * 60 * 60,
-        "GetHealth" => 30,
-        _ => 5 * 60,
-    };
-    let ssh_timeout = Duration::from_secs(rpc_timeout_secs + 60);
+    let (socket_timeout, transport_timeout) = rpc_deadlines(method);
     let cmd = format!(
-        "python3 -c 'import glob,os,socket,sys,time; path=sys.argv[1]; now=time.time(); [(os.unlink(p) if p != path and now-os.path.getmtime(p) > 300 else None) for p in glob.glob(\"/run/noland/noland-rpc-*.json\")]; req=open(path,\"rb\").read(); os.unlink(path); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(s.makefile(\"rb\").readline(4194305))' {request}",
-        timeout = rpc_timeout_secs,
+        "python3 -c 'import socket,sys; req=sys.stdin.buffer.read(4194305); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(s.makefile(\"rb\").readline(4194305))'",
+        timeout = socket_timeout.as_secs(),
         sock = AGENT_SOCKET,
-        request = shell_escape(&remote_request),
     );
-    let output_task = {
-        let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh(&cmd, ssh_timeout))
-    };
-    let output = match output_task.await {
-        Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(error);
-        }
-        Err(error) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(AppError::Command(format!("join failure: {error}")));
-        }
-    };
-    if output.status_code != 0 {
-        cleanup_remote_request(remote, &remote_request).await;
-        return Err(AppError::Provisioning(format!(
-            "state-agent RPC {method} failed: {} {}",
-            output.stdout.trim(),
-            output.stderr.trim()
-        )));
-    }
-    let line = output
-        .stdout
-        .lines()
-        .find(|l| l.trim().starts_with('{'))
-        .ok_or_else(|| AppError::State("state-agent returned no JSON".into()))?;
-    let value: serde_json::Value = serde_json::from_str(line)
-        .map_err(|e| AppError::State(format!("agent RPC parse: {e}: {line}")))?;
-    if let Some(err) = value.get("error").and_then(|e| e.as_str()) {
-        return Err(AppError::Provisioning(format!(
-            "state-agent {method}: {err}"
-        )));
-    }
-    Ok(value.get("result").cloned().unwrap_or(value))
+    let output = run_rpc_transport(
+        rpc_ssh_command(remote, &cmd)?,
+        request_bytes,
+        transport_timeout,
+    )
+    .await?;
+    parse_rpc_response(&output, &request_id.to_string(), method)
 }
 
-struct TempFileGuard(PathBuf);
+const MAX_RPC_BYTES: usize = 4 * 1024 * 1024;
+
+fn rpc_deadlines(method: &str) -> (Duration, Duration) {
+    let seconds = match method {
+        "GetHealth"
+        | "GetOperationStatus"
+        | "GetBackupStatus"
+        | "GetRestoreStatus"
+        | "GetSealStatus"
+        | "ListRecentOperations"
+        | "CancelOperation" => (8, 15),
+        "StartBackup" | "StartRestore" | "StartSeal" | "RetryOperation" => (30, 45),
+        "ListApps" | "ListCloudCatalog" => (45, 60),
+        _ => (300, 315),
+    };
+    (
+        Duration::from_secs(seconds.0),
+        Duration::from_secs(seconds.1),
+    )
+}
+
+// Keep the child owned by this future, including while writing stdin. Dropping
+// a poll/admission future kills its SSH process rather than detaching a blocking
+// task. Request bodies and transport output are never logged or put in argv.
+fn rpc_ssh_command(remote: &RemoteExec, command: &str) -> AppResult<tokio::process::Command> {
+    use crate::services::os_detection::OsDetection;
+    use crate::utils::{
+        managed_binaries::configure_bundled_linux_runtime, process::configure_no_window,
+    };
+    let os = OsDetection::new();
+    let binary = os
+        .locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"))
+        .ok_or_else(|| {
+            AppError::Command("Bundled SSH is unavailable for state-agent RPC".into())
+        })?;
+    let mut process = std::process::Command::new(&binary);
+    configure_no_window(&mut process);
+    configure_bundled_linux_runtime(
+        &mut process,
+        &binary,
+        "ssh-runtime",
+        os.managed_binary_target_triple(),
+    );
+    process.args([
+        "-T",
+        "-p",
+        &remote.ssh_port.to_string(),
+        "-i",
+        &remote.private_key_path,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        &format!("UserKnownHostsFile={}", os.ssh_known_hosts_null_file()),
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ConnectionAttempts=1",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "PreferredAuthentications=publickey",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "ForwardAgent=no",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "PermitLocalCommand=no",
+        "-l",
+        &remote.ssh_user,
+        "--",
+        &remote.ssh_host,
+        command,
+    ]);
+    Ok(tokio::process::Command::from(process))
+}
+
+struct RpcInput(Vec<u8>);
+impl Drop for RpcInput {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+async fn read_rpc_output(
+    reader: impl tokio::io::AsyncRead + Unpin,
+    limit: usize,
+) -> AppResult<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let mut bytes = Vec::new();
+    reader
+        .take(limit as u64 + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > limit {
+        return Err(AppError::State(
+            "state-agent RPC output exceeds its limit".into(),
+        ));
+    }
+    Ok(bytes)
+}
+
+async fn run_rpc_transport(
+    mut command: tokio::process::Command,
+    input: RpcInput,
+    timeout: Duration,
+) -> AppResult<Vec<u8>> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+    let mut child = command
+        .kill_on_drop(true)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut stdin = child.stdin.take().expect("piped RPC stdin");
+    let stdout = child.stdout.take().expect("piped RPC stdout");
+    let stderr = child.stderr.take().expect("piped RPC stderr");
+    let result = tokio::time::timeout(timeout, async {
+        tokio::try_join!(
+            async {
+                stdin.write_all(&input.0).await?;
+                stdin.shutdown().await?;
+                drop(stdin);
+                drop(input);
+                Ok::<_, AppError>(())
+            },
+            read_rpc_output(stdout, MAX_RPC_BYTES),
+            read_rpc_output(stderr, 16 * 1024),
+            async { child.wait().await.map_err(AppError::from) },
+        )
+    })
+    .await;
+    match result {
+        Ok(Ok(((), stdout, _, status))) if status.success() => Ok(stdout),
+        Ok(Ok(_)) => Err(AppError::Command(
+            "state-agent RPC SSH transport failed".into(),
+        )),
+        Ok(Err(error)) => Err(error),
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+            Err(AppError::Timeout(
+                "state-agent RPC transport deadline exceeded".into(),
+            ))
+        }
+    }
+}
+
+fn parse_rpc_response(
+    output: &[u8],
+    request_id: &str,
+    method: &str,
+) -> AppResult<serde_json::Value> {
+    if output.is_empty() {
+        let recovery = if method == "PrepareDeletion" {
+            "Reopen the deletion preview to try again."
+        } else {
+            "Check the operation status before retrying a confirmed action."
+        };
+        return Err(AppError::State(format!(
+            "state-agent closed the RPC connection before replying; it may have restarted. {recovery}"
+        )));
+    }
+    if output.last() != Some(&b'\n') {
+        return Err(AppError::State(
+            "state-agent returned a truncated RPC response frame".into(),
+        ));
+    }
+    let line = output
+        .split(|byte| *byte == b'\n')
+        .find(|line| {
+            line.iter()
+                .copied()
+                .find(|byte| !byte.is_ascii_whitespace())
+                == Some(b'{')
+        })
+        .ok_or_else(|| AppError::State("state-agent returned no JSON".into()))?;
+    let value: serde_json::Value = serde_json::from_slice(line)
+        .map_err(|_| AppError::State("state-agent RPC response is invalid JSON".into()))?;
+    if value.get("id").and_then(serde_json::Value::as_str) != Some(request_id) {
+        return Err(AppError::State(
+            "state-agent RPC response ID did not match the request".into(),
+        ));
+    }
+    if let Some(error) = value.get("error").and_then(serde_json::Value::as_str) {
+        return Err(AppError::Provisioning(format!(
+            "state-agent {method}: {error}"
+        )));
+    }
+    value
+        .get("result")
+        .cloned()
+        .ok_or_else(|| AppError::State("state-agent RPC response has no result".into()))
+}
 
 #[cfg(test)]
 mod tests {
     use super::{is_state_agent_source_dir, pack_state_agent_sources};
     use flate2::read::GzDecoder;
     use std::{fs, path::PathBuf};
+
+    fn remote_fixture() -> crate::services::remote_exec::RemoteExec {
+        crate::services::remote_exec::RemoteExec {
+            ssh_host: format!("rpc-guard-{}.invalid", uuid::Uuid::new_v4()),
+            ssh_port: 22,
+            ssh_user: "fixture".into(),
+            private_key_path: "unused-test-key".into(),
+            ssh_password: String::new(),
+        }
+    }
+
+    #[test]
+    fn compatible_old_daemon_cannot_complete_an_unfinished_bootstrap() {
+        let old_health = serde_json::json!({
+            "agent_api_version": super::REQUIRED_AGENT_API_VERSION,
+            "active_operations": 0
+        });
+        assert!(!super::bootstrap_is_ready(None, Some(&old_health)));
+        assert!(!super::bootstrap_is_ready(Some(1), Some(&old_health)));
+        assert!(!super::bootstrap_is_ready(Some(0), None));
+        assert!(!super::bootstrap_is_ready(
+            Some(0),
+            Some(&serde_json::json!({"agent_api_version": 1}))
+        ));
+        assert!(super::bootstrap_is_ready(Some(0), Some(&old_health)));
+    }
+
+    #[test]
+    fn bootstrap_attempts_have_distinct_numeric_workspace_names() {
+        let first = super::deployment_stamp();
+        let second = super::deployment_stamp();
+        assert_ne!(first, second);
+        assert!(first.bytes().all(|byte| byte.is_ascii_digit()));
+        assert!(second.bytes().all(|byte| byte.is_ascii_digit()));
+    }
+
+    #[test]
+    fn daemon_access_is_shared_across_identities_but_not_instances() {
+        let remote = remote_fixture();
+        let access = super::agent_access(&remote);
+        let mut other_identity = remote.clone();
+        other_identity.ssh_user = "another-fixture".into();
+        other_identity.private_key_path = "another-unused-key".into();
+        assert!(std::sync::Arc::ptr_eq(
+            &access,
+            &super::agent_access(&other_identity)
+        ));
+        other_identity.ssh_port += 1;
+        assert!(!std::sync::Arc::ptr_eq(
+            &access,
+            &super::agent_access(&other_identity)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deployment_waits_for_rpc_reply_and_later_rpcs_wait_for_deployment() {
+        use std::task::Poll;
+        let access = super::agent_access(&remote_fixture());
+        let first_rpc = access.read().await;
+        let second_rpc = access.try_read().expect("RPC reads can overlap");
+        let mut deployment = Box::pin(access.write());
+        assert!(matches!(
+            futures_util::poll!(deployment.as_mut()),
+            Poll::Pending
+        ));
+        let mut later_rpc = Box::pin(access.read());
+        assert!(matches!(
+            futures_util::poll!(later_rpc.as_mut()),
+            Poll::Pending
+        ));
+        drop(first_rpc);
+        assert!(matches!(
+            futures_util::poll!(deployment.as_mut()),
+            Poll::Pending
+        ));
+        drop(second_rpc);
+        let installation = tokio::time::timeout(std::time::Duration::from_secs(2), deployment)
+            .await
+            .expect("deployment must acquire after complete RPC replies");
+        assert!(matches!(
+            futures_util::poll!(later_rpc.as_mut()),
+            Poll::Pending
+        ));
+        drop(installation);
+        let _reply = tokio::time::timeout(std::time::Duration::from_secs(2), later_rpc)
+            .await
+            .expect("RPC must resume after deployment finishes");
+    }
+
+    #[tokio::test]
+    async fn cancelled_update_waiter_does_not_stick_the_rpc_gate() {
+        let access = super::agent_access(&remote_fixture());
+        let request = access.read().await;
+        let mut deployment = Box::pin(access.write());
+        assert!(futures_util::poll!(deployment.as_mut()).is_pending());
+        drop(deployment);
+        let another_request = access
+            .try_read()
+            .expect("cancelled update must not block RPCs");
+        drop(another_request);
+        drop(request);
+        let update = access
+            .try_write()
+            .expect("cancelled RPCs release admission");
+        drop(update);
+        assert!(access.try_read().is_ok());
+    }
+
+    #[test]
+    fn lost_preview_reply_is_actionable_but_partial_frames_remain_rejected() {
+        let empty = super::parse_rpc_response(b"", "request", "PrepareDeletion")
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("before replying"));
+        assert!(empty.contains("Reopen the deletion preview"));
+        let partial = b"{\"id\":\"request\",\"result\":{\"planId\":\"fixture\"}}";
+        assert!(
+            super::parse_rpc_response(partial, "request", "PrepareDeletion")
+                .unwrap_err()
+                .to_string()
+                .contains("truncated")
+        );
+        assert!(super::parse_rpc_response(
+            b"{\"id\":\"request\",\"result\":{\"planId\":\"fixture\"}}\n",
+            "request",
+            "PrepareDeletion"
+        )
+        .is_ok());
+        let confirmed = super::parse_rpc_response(b"", "request", "StartDeletion")
+            .unwrap_err()
+            .to_string();
+        assert!(confirmed.contains("Check the operation status"));
+        assert!(!confirmed.contains("Reopen the deletion preview"));
+    }
+
+    #[test]
+    fn status_and_admission_deadlines_are_bounded_independently_of_remote_work() {
+        use std::time::Duration;
+        for method in ["GetOperationStatus", "ListRecentOperations", "GetHealth"] {
+            let (socket, transport) = super::rpc_deadlines(method);
+            assert!(socket < transport);
+            assert!(transport <= Duration::from_secs(15));
+        }
+        assert_eq!(
+            super::rpc_deadlines("StartSeal"),
+            super::rpc_deadlines("StartBackup")
+        );
+    }
+
+    #[test]
+    fn desktop_browse_accepts_protocol_compatible_old_sources_without_updating() {
+        // Source identity is deliberately irrelevant to a read-only browse.
+        // It is NOT irrelevant to ensure_state_agent / operation execution.
+        assert!(super::require_browse_protocol(&serde_json::json!({
+            "agent_api_version": super::REQUIRED_AGENT_API_VERSION,
+            "source_fingerprint": "older-generation",
+            "active_operations": 1,
+        }))
+        .is_ok());
+        for health in [
+            serde_json::json!({}),
+            serde_json::json!({"agent_api_version": 1}),
+        ] {
+            let error = super::require_browse_protocol(&health)
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Explicitly update"));
+            assert!(error.contains("will not deploy or restart"));
+        }
+        let (socket, transport) = super::rpc_deadlines("ListCloudCatalog");
+        assert!(socket < transport);
+        assert!(transport <= std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn desktop_browse_helper_probe_requires_a_boolean_without_interpreting_remote_text() {
+        assert!(!super::parse_browse_helper_presence(b"{\"available\":false}\n").unwrap());
+        assert!(super::parse_browse_helper_presence(b"{\"available\":true}\n").unwrap());
+        for invalid in [
+            b"{\"available\":\"install it now\"}".as_slice(),
+            b"{}".as_slice(),
+            b"{\"available\":".as_slice(),
+        ] {
+            assert!(super::parse_browse_helper_presence(invalid).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn desktop_browse_rejects_mutation_methods_and_busy_deployments_without_connecting() {
+        let remote = remote_fixture();
+        for method in [
+            "StartBackup",
+            "StartDeletion",
+            "RetryOperation",
+            "RefreshIndex",
+        ] {
+            let error = super::call_agent_browse(&remote, method, serde_json::json!({}))
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Only read-only"));
+        }
+        let access = super::agent_access(&remote);
+        let _updating = access.write().await;
+        let error = super::call_agent_browse(&remote, "ListApps", serde_json::json!({}))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("update is in progress"));
+    }
+
+    #[test]
+    fn only_a_correlated_rpc_error_is_a_definitive_rejection() {
+        let wrong = b"{\"id\":\"other\",\"error\":\"rejected\"}\n";
+        assert!(matches!(
+            super::parse_rpc_response(wrong, "request", "StartSeal"),
+            Err(crate::errors::AppError::State(_))
+        ));
+        let rejected = b"{\"id\":\"request\",\"error\":\"rejected\"}\n";
+        assert!(matches!(
+            super::parse_rpc_response(rejected, "request", "StartSeal"),
+            Err(crate::errors::AppError::Provisioning(_))
+        ));
+        let malformed = b"{request-secret-not-json}";
+        assert!(super::parse_rpc_response(malformed, "request", "StartSeal")
+            .unwrap_err()
+            .to_string()
+            .contains("truncated"));
+        assert!(
+            !super::parse_rpc_response(malformed, "request", "StartSeal")
+                .unwrap_err()
+                .to_string()
+                .contains("request-secret")
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_output_is_bounded_even_without_a_newline_or_eof() {
+        assert!(super::read_rpc_output(tokio::io::repeat(b'x'), 1024)
+            .await
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdin_transport_owns_and_times_out_its_child() {
+        use std::time::Duration;
+        let mut echo = tokio::process::Command::new("sh");
+        echo.args(["-c", "exec cat"]);
+        let bytes = b"request-body\n".to_vec();
+        assert_eq!(
+            super::run_rpc_transport(echo, super::RpcInput(bytes.clone()), Duration::from_secs(2))
+                .await
+                .unwrap(),
+            bytes
+        );
+        let mut hang = tokio::process::Command::new("sh");
+        hang.args(["-c", "exec sleep 60"]);
+        let result =
+            super::run_rpc_transport(hang, super::RpcInput(Vec::new()), Duration::from_millis(10))
+                .await;
+        assert!(matches!(result, Err(crate::errors::AppError::Timeout(_))));
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -514,6 +1207,44 @@ mod tests {
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_idle_probe_observes_real_os_locks_without_creating_or_removing_files() {
+        use std::os::unix::fs::symlink;
+        let root = temp_dir("repository-idle");
+        let path = root.join("admission.lock");
+        let probe = |path: &std::path::Path| {
+            let output = std::process::Command::new("python3")
+                .args(["-c", super::REPOSITORY_IDLE_PROBE])
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            value["unlocked"].as_bool().unwrap()
+        };
+        assert!(!probe(&path));
+        assert!(
+            !path.exists(),
+            "a diagnostic must not create an admission lock"
+        );
+        fs::write(&path, b"preserve lock identity").unwrap();
+        let file = fs::File::open(&path).unwrap();
+        file.try_lock().unwrap();
+        assert!(!probe(&path));
+        assert_eq!(fs::read(&path).unwrap(), b"preserve lock identity");
+        drop(file);
+        assert!(probe(&path));
+        let link = root.join("link");
+        symlink(&path, &link).unwrap();
+        assert!(
+            !probe(&link),
+            "a replacement symlink is not a lock-ownership proof"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"preserve lock identity");
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn create_minimal_source_tree(root: &PathBuf) {
@@ -537,6 +1268,42 @@ mod tests {
         )
         .unwrap();
         fs::write(root.join("target/debug/large-build-output"), "skip me\n").unwrap();
+    }
+
+    #[test]
+    fn legacy_interrupted_history_does_not_block_updates_but_active_or_unknown_work_does() {
+        assert!(!super::legacy_list_has_active_work(
+            &serde_json::json!({"operations":[{"state":"INTERRUPTED","running":false}]})
+        ));
+        assert!(super::legacy_list_has_active_work(
+            &serde_json::json!({"operations":[{"running":true}]})
+        ));
+        assert!(super::legacy_list_has_active_work(
+            &serde_json::json!({"operations":[{}]})
+        ));
+        assert!(super::legacy_list_has_active_work(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn source_fingerprint_changes_without_an_api_bump_but_ignores_build_artifacts() {
+        let root = temp_dir("fingerprint");
+        create_minimal_source_tree(&root);
+        let original = super::state_agent_source_fingerprint(&root).unwrap();
+        fs::write(root.join("target/debug/generated.rs"), "not shipped").unwrap();
+        assert_eq!(
+            super::state_agent_source_fingerprint(&root).unwrap(),
+            original
+        );
+        fs::write(
+            root.join("crates/noland-state-agent/src/main.rs"),
+            "fn main() { println!(\"new\"); }",
+        )
+        .unwrap();
+        assert_ne!(
+            super::state_agent_source_fingerprint(&root).unwrap(),
+            original
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -576,19 +1343,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(&archive_path);
     }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-async fn cleanup_remote_request(remote: &RemoteExec, remote_request: &str) {
-    let command = format!("rm -f -- {}", shell_escape(remote_request));
-    let remote = remote.clone();
-    let _ =
-        tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(15))).await;
 }
 
 fn concise_remote_failure(stdout: &str, stderr: &str) -> String {

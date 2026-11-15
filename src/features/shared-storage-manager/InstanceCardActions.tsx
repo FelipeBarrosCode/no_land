@@ -41,6 +41,7 @@ export function InstanceCardActions({
   const transferRunning =
     loadingKey === "instance.storage.export" ||
     loadingKey === "instance.storage.sync" ||
+    loadingKey === "instance.storage.delete" ||
     loadingKey === "instance.files.upload";
 
   const handleDestroy = () => setShowDestroyConfirm(true);
@@ -76,10 +77,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.export"}
-          loadingText={translate("generated.0a6e1f59cb714422")}
+          loadingText={`${t("storage.games.upload")}…`}
           onClick={() => onSaveStorage(instance.instanceId)}
         >
-          {translate("generated.1509f561f2416598")}
+          {translate("storage.games.upload")}
         </Button>
 
         <Button
@@ -87,10 +88,10 @@ export function InstanceCardActions({
           className="w-full text-[14px]"
           disabled={actionDisabled || transferRunning || !isRunning}
           loading={loadingKey === "instance.storage.sync"}
-          loadingText={translate("generated.61263112babd588c")}
+          loadingText={`${t("storage.games.download")}…`}
           onClick={() => onSyncStorage(instance.instanceId)}
         >
-          {translate("generated.8156b7d5123fb069")}
+          {translate("storage.games.download")}
         </Button>
       </div>
 

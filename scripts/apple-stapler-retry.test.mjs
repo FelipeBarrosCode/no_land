@@ -165,13 +165,14 @@ function runNotarizationFixture(context) {
   const sandboxScripts = join(root, 'scripts');
   mkdirSync(sandboxScripts);
   mkdirSync(join(root, 'src-tauri'));
-  for (const name of ['notarize-macos-bundle.mjs', 'apple-stapler-retry.mjs']) {
+  for (const name of ['notarize-macos-bundle.mjs', 'apple-stapler-retry.mjs', 'net-helper-trust.mjs']) {
     copyFileSync(join(scripts, name), join(sandboxScripts, name));
   }
   writeFileSync(join(root, 'src-tauri', 'tauri.conf.json'), JSON.stringify({ productName: 'Fixture', version: '1.0.0' }));
   const app = join(root, 'src-tauri', 'target', 'x86_64-apple-darwin', 'release', 'bundle', 'macos', 'Fixture.app');
   mkdirSync(join(app, 'Contents', 'MacOS'), { recursive: true });
   writeFileSync(join(app, 'Contents', 'MacOS', 'noland-connect'), 'fixture, not executable');
+  if (!context.missingHelper) writeFileSync(join(app, 'Contents', 'MacOS', 'noland-net-helper'), 'fixture helper, never executable');
   // Route EVERY child process to the offline fixture, including codesign/notarytool.
   // Force the macOS branch on all test hosts; no production platform bypass is added.
   const bootstrap = `
@@ -191,6 +192,15 @@ function runNotarizationFixture(context) {
   });
 }
 
+test('a missing network helper aborts before creating or submitting a notarization archive', () => {
+  withFixture({}, context => {
+    const result = runNotarizationFixture({ ...context, missingHelper: true });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /missing its bundled noland-net-helper/u);
+    assert.equal(context.history().length, 0);
+  });
+});
+
 test('notarization pipeline retries both app/DMG staple and validate before completing all trust checks', () => {
   const plan = {};
   for (const kind of ['app', 'dmg']) {
@@ -201,9 +211,9 @@ test('notarization pipeline retries both app/DMG staple and validate before comp
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.match(result.stdout, /Notarization complete/u);
     const history = context.history();
-    for (const key of Object.keys(plan)) assert.equal(history.filter((entry) => entry.key === key).length, 2, key);
-    assert.equal(history.filter((entry) => entry.command === 'spctl').length, 3);
-    assert.equal(history.filter((entry) => entry.command === 'codesign').length, 2);
+    for (const key of Object.keys(plan)) assert.equal(history.filter((entry) => entry.key === key).length, key === 'xcrun stapler validate app' ? 3 : 2, key);
+    assert.equal(history.filter((entry) => entry.command === 'spctl').length, 4);
+    assert.equal(history.filter((entry) => entry.command === 'codesign').length, 10);
     assert.equal(history.filter((entry) => entry.args[0] === 'notarytool' && entry.args[1] === 'submit').length, 2);
   });
 });

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS session_pids (
     FOREIGN KEY(session_id) REFERENCES app_sessions(session_id)
 );
 
+CREATE INDEX IF NOT EXISTS idx_session_pids_session_id ON session_pids(session_id, pid);
+
 CREATE TABLE IF NOT EXISTS paths (
     path_id INTEGER PRIMARY KEY AUTOINCREMENT,
     canonical_path TEXT NOT NULL UNIQUE,
@@ -203,6 +205,36 @@ CREATE TABLE IF NOT EXISTS capture_generations (
     app_id TEXT PRIMARY KEY,
     generation INTEGER NOT NULL
 );
+"#;
+
+pub const MIGRATION_V4: &str = include_str!("schema_v4.sql");
+
+pub const MIGRATION_V5: &str = r#"
+CREATE TABLE IF NOT EXISTS operation_projections (
+    operation_id TEXT PRIMARY KEY REFERENCES operations(operation_id) ON DELETE CASCADE,
+    detail_json TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS invalidate_operation_projection
+AFTER UPDATE OF detail_json ON operations
+WHEN NEW.detail_json IS NOT OLD.detail_json
+BEGIN
+    DELETE FROM operation_projections WHERE operation_id=NEW.operation_id;
+END;
+"#;
+
+/// Disposable authenticated ciphertext, separate from chunk-index receipts.
+/// No mutable pointers, tombstones, listings, credentials or negative entries.
+pub const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS immutable_metadata_cache (
+    storage_binding TEXT NOT NULL,
+    remote_path TEXT NOT NULL,
+    payload BLOB NOT NULL,
+    receipt TEXT NOT NULL,
+    observed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY(storage_binding, remote_path)
+);
+CREATE INDEX IF NOT EXISTS idx_metadata_cache_observed
+    ON immutable_metadata_cache(observed_at_ms);
 "#;
 
 pub const MIGRATION_V2: &str = r#"

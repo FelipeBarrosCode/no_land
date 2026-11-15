@@ -124,6 +124,10 @@ function fixture(target) {
 }
 
 function checkBundle(config, target) {
+  for (const stem of ['noland-net-helper', 'noland-mic-sender']) {
+    assert.equal(config.bundle.externalBin.filter(path => path === `binaries/${stem}`).length, 1,
+      `${target}: ${stem} must remain a Tauri external binary in the effective shipping config`);
+  }
   const bundled = expandResources(config.bundle.resources, fixture(target));
   const windows = target.includes('windows');
   for (const tool of tools) {
@@ -143,7 +147,10 @@ test('fixtures cover every Tauri config and all six release targets', () => {
   assert.deepEqual(readdirSync(configDir).filter((name) => /^tauri(?:\..+)?\.conf\.json$/u.test(name)).sort(),
     [...configNames].sort());
   const workflow = readFileSync(new URL('../.github/workflows/_build.yml', import.meta.url), 'utf8');
-  assert.deepEqual([...new Set([...workflow.matchAll(/^\s+target: (\S+)$/gmu)].map((match) => match[1]))].sort(),
+  const staticTargets = [...workflow.matchAll(/^\s+target: (\S+)$/gmu)].map(match => match[1]);
+  const dynamicTargets = [...workflow.matchAll(/fromJSON\('([\s\S]*?)'\)/gu)]
+    .flatMap(match => JSON.parse(match[1])).map(entry => entry.target);
+  assert.deepEqual([...new Set([...staticTargets, ...dynamicTargets])].sort(),
     [...targets].sort());
 });
 
@@ -152,6 +159,16 @@ test('merge patches replace arrays while preserving unrelated bundle settings', 
   assert.deepEqual(windows.bundle.resources, configs['tauri.windows.x64.conf.json'].bundle.resources);
   assert.deepEqual(windows.bundle.externalBin, configs['tauri.conf.json'].bundle.externalBin);
   assert.deepEqual(mergePatch(windows, { bundle: { resources: [] } }).bundle.resources, []);
+});
+
+test('removing the network helper from an effective shipping config is a hard failure', () => {
+  for (const target of targets.filter(target => target.includes('linux') || target.includes('windows'))) {
+    const overlays = target.includes('windows') ? ['tauri.windows.conf.json',
+      target.startsWith('aarch64') ? 'tauri.windows.arm64.conf.json' : 'tauri.windows.x64.conf.json'] : [];
+    const config = structuredClone(effectiveConfig(overlays));
+    config.bundle.externalBin = config.bundle.externalBin.filter(path => path !== 'binaries/noland-net-helper');
+    assert.throws(() => checkBundle(config, target), /noland-net-helper must remain a Tauri external binary/u);
+  }
 });
 
 test('glob model uses Rust character classes, component separators and recursive matching', () => {

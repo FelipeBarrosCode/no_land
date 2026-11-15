@@ -151,6 +151,15 @@ impl Backend for DesktopBackend {
             value["template"] = json!(state.server_preferences.template_hash);
             value["billingNote"]=json!("Provider storage/network/other fees may be additional. The accepted estimate is checked again immediately before creation.");
         }
+        if tool == "storage_lock_recover" {
+            value["frozenRecoveryPreview"] =
+                crate::services::shared_storage::lock_recovery::approval_preview(
+                    id(args)?,
+                    &text(args, "preview_id")?,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         Ok(value)
     }
     async fn sanitize(&self, value: Value) -> Value {
@@ -620,6 +629,60 @@ impl Backend for DesktopBackend {
                 .await
                 .map_err(|e| e.details.unwrap_or(e.message))?;
                 Ok(json!({"stream":updated.moonlight_preferences}))
+            }
+            "storage_operation_status" => pack(
+                commands::get_storage_operation_status(
+                    app.state(),
+                    id(&args)?,
+                    args.get("operation_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                )
+                .await,
+            ),
+            "storage_locks_inspect" | "storage_lock_recovery_preview" | "storage_lock_recover" => {
+                if !e.config.all_instances {
+                    return Err("Lock recovery inspection requires the all-instance grant so stopped/unregistered provider machines cannot be hidden.".into());
+                }
+                let instance_id = id(&args)?;
+                let remote = commands::build_remote_exec_for_instance(&self.context, instance_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let result = match tool {
+                    "storage_locks_inspect" => {
+                        crate::services::shared_storage::lock_recovery::inspect(
+                            &self.context,
+                            &remote,
+                            instance_id,
+                        )
+                        .await
+                    }
+                    "storage_lock_recovery_preview" => {
+                        crate::services::shared_storage::lock_recovery::prepare(
+                            app,
+                            &self.context,
+                            &remote,
+                            instance_id,
+                            &text(&args, "claim_id")?,
+                            args.get("failed_job_id").and_then(Value::as_str),
+                        )
+                        .await
+                    }
+                    _ => {
+                        crate::services::shared_storage::lock_recovery::recover(
+                            app,
+                            &self.context,
+                            &remote,
+                            instance_id,
+                            &text(&args, "preview_id")?,
+                            args.get("confirm_no_other_writers")
+                                .and_then(Value::as_bool)
+                                == Some(true),
+                        )
+                        .await
+                    }
+                };
+                result.map_err(|error| error.to_string())
             }
             "storage_status" => {
                 let backup=crate::services::shared_storage::shared_storage_manager::SharedStorageManager::get_instance_backup_status(&self.context,id(&args)?)

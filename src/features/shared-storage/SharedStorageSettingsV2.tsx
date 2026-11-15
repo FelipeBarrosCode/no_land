@@ -162,13 +162,13 @@ export function SharedStorageSettingsV2({
         <Card className="p-6">
           <div className="flex items-center gap-2 mb-4">
             <h3 className="text-lg font-display text-neon-cyan">
-              {translate("generated.0e9614b59ef4c78b")}
+              {translate("generated.2ec3eb563477a32a")}
             </h3>
             <AIPromptHelper
-              topic={translate("generated.db4dc7d44e7e2a36")}
-              promptText={`# Shared Storage
+              topic={translate("generated.fb3a504381de3b14")}
+              promptText={`# Cloud Storage
 
-Noland Shared Storage keeps your games, applications, saves, settings, and mods available across your Noland instances.
+Noland Cloud Storage keeps your games, applications, saves, settings, and mods available across your Noland instances.
 
 ## Choosing a provider
 
@@ -196,7 +196,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
       {connectedProfile && !selectedProvider && (
         <Card className="p-6">
           <h3 className="text-lg font-display text-neon-cyan mb-4">
-            {translate("generated.0e9614b59ef4c78b")}
+            {translate("generated.2ec3eb563477a32a")}
           </h3>
           <div className="space-y-3 mb-6">
             <div className="flex items-center justify-between">
@@ -277,7 +277,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
           )}
 
           <div className="mb-4 rounded border border-[#3f476c] bg-[#0b0f23]/60 p-3">
-            <p className="text-sm text-gray-200">{translate("generated.31cc6e316ec6b651")}</p>
+            <p className="text-sm text-gray-200">{translate("generated.9e83165e2700b8bc")}</p>
             <p className="mt-1 text-xs text-gray-500">
               {translate("generated.eba933bf191e8079")}
             </p>
@@ -393,6 +393,25 @@ All data is encrypted before upload and can only be decrypted with your reposito
             />
 
             {staticCredentialFields.map((field) => {
+              if (field.key === "private_key") {
+                return (
+                  <label key={field.key} className="flex flex-col gap-2 text-base">
+                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">{translateSource(field.label)}</span>
+                    <textarea
+                      className="border border-[#3f476c] bg-[#0b0f23] px-3 py-2 font-mono text-sm text-[#dff8ff] outline-none focus:border-neon-cyan"
+                      rows={6}
+                      value={formValues[field.key] || ""}
+                      onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                      placeholder={field.placeholder || ""}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      disabled={busy}
+                    />
+                    {field.helpText && <span className="text-xs text-gray-400">{translateSource(field.helpText)}</span>}
+                  </label>
+                );
+              }
               if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
                 return (
                   <label key={field.key} className="flex flex-col gap-2 text-base">

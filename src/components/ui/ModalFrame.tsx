@@ -29,6 +29,7 @@ interface ModalFrameProps extends PropsWithChildren {
   labelledBy?: string;
   zIndexClassName?: string;
   mcpInstanceId?: number;
+  nonBlocking?: boolean;
 }
 
 export function ModalFrame({
@@ -38,16 +39,20 @@ export function ModalFrame({
   labelledBy,
   zIndexClassName = "z-50",
   mcpInstanceId,
+  nonBlocking = false,
 }: ModalFrameProps) {
   useEffect(() => {
+    if (nonBlocking) return;
     lockDocumentScroll();
     return unlockDocumentScroll;
-  }, []);
+  }, [nonBlocking]);
 
   return (
     <div
       className={clsx(
-        "fixed inset-0 overflow-y-auto overscroll-contain bg-[#02040bdd] p-3 sm:p-4",
+        nonBlocking
+          ? "pointer-events-none fixed bottom-4 right-4 w-[min(42rem,calc(100vw-2rem))]"
+          : "fixed inset-0 overflow-y-auto overscroll-contain bg-[#02040bdd] p-3 sm:p-4",
         zIndexClassName,
         overlayClassName,
       )}
@@ -56,10 +61,11 @@ export function ModalFrame({
         <div
           role="dialog"
           data-mcp-instance-id={mcpInstanceId}
-          aria-modal="true"
+          aria-modal={!nonBlocking}
           aria-labelledby={labelledBy}
           className={clsx(
             "flex max-h-[calc(100dvh-1.5rem)] min-h-0 w-full flex-col overflow-hidden sm:max-h-[calc(100dvh-2rem)]",
+            nonBlocking && "pointer-events-auto max-h-[80dvh]",
             panelClassName,
           )}
         >

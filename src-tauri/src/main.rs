@@ -354,6 +354,7 @@ fn main() {
                 reqwest::Client::new(),
                 app_data_dir.join("software-artwork-cache.json"),
             );
+            let mcp_config = initial_state.mcp.clone();
             let context = AppContext::new(config, state_store, initial_state);
             let automatic_network_context = context.clone();
             tauri::async_runtime::spawn(async move {
@@ -428,7 +429,7 @@ fn main() {
             });
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
-            mcp::initialize(app.handle(), context.clone());
+            mcp::initialize(app.handle(), context.clone(), mcp_config);
             services::feedback::FeedbackProgramService::start(app.handle().clone(), context.clone());
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
 
@@ -659,8 +660,13 @@ fn main() {
             trigger_instance_backup_for,
             sync_instance_from_shared_storage,
             list_instance_shared_storage_objects,
+            get_instance_storage_browse_snapshot,
+            prepare_instance_storage_helper,
             sync_instance_from_shared_storage_selected,
             list_instance_exportable_storage_objects,
+            prepare_storage_deletion,
+            confirm_storage_deletion,
+            get_storage_operation_status,
             save_instance_to_shared_storage_selected,
             cancel_shared_storage_operation,
             get_instance_backup_status,

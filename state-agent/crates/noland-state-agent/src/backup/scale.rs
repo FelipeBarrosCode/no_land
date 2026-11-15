@@ -59,14 +59,21 @@ async fn synthetic_storage_workload() {
         .db
         .upsert_app(&AppIdentity::new(app.clone(), "Synthetic Storage"))
         .unwrap();
-    let install = agent.config.home.join("Games/SyntheticStorage");
+    let install = agent
+        .config
+        .home
+        .join(".local/share/noland-runtime/app-data/synthetic/Games/SyntheticStorage");
     agent
         .db
         .add_known_root(&app, "install", install.to_str().unwrap())
         .unwrap();
     let mut changed_path = PathBuf::new();
     for index in 0..count {
-        let path = install.join(format!("{:04}/asset-{index:06}.dat", index / 512));
+        let path = if index + 1 == count {
+            install.join("user/save/slot.sav")
+        } else {
+            install.join(format!("romfs/{:04}/asset-{index:06}.dat", index / 512))
+        };
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let bytes = if index < 4 {
             vec![index as u8; 8 * 1024 * 1024]
@@ -116,6 +123,15 @@ async fn synthetic_storage_workload() {
         .await
         .unwrap();
         assert_eq!(manifest.files.len(), count);
+        assert_eq!(
+            manifest
+                .files
+                .iter()
+                .filter(|file| file.semantic_role == SemanticRole::UserState)
+                .count(),
+            1,
+            "private runtime installation assets must not be treated as saves"
+        );
         let metrics = operation_metrics(&agent.db.get_operation(operation).unwrap().unwrap());
         println!(
             "STORAGE_SCALE {}",
@@ -177,6 +193,7 @@ async fn synthetic_storage_workload() {
                 "phase": (["restore", "unchanged_restore"][round]), "files": count,
                 "elapsed_ms": duration.as_millis(), "files_per_second": count as f64 / duration.as_secs_f64(),
                 "assembled_bytes": last.assembled_bytes, "readback_bytes": last.readback_bytes,
+                "verified_bytes": last.verified_bytes, "io": report.io,
                 "published_bytes": last.published_bytes, "reused_files": report.restore.reused_entries,
                 "packs_downloaded": report.packs_downloaded,
                 "filesystem_peak_delta_bytes": sampler.peak.load(Ordering::Relaxed),
@@ -187,6 +204,17 @@ async fn synthetic_storage_workload() {
         } else {
             assert_eq!(report.restore.reused_entries, count);
             assert_eq!(report.packs_downloaded, 0);
+        }
+        for file in &snapshots[2].files {
+            let logical = file.logical_root_parsed().unwrap();
+            let destination = LogicalRootMap::from_home(&home)
+                .resolve(&logical)
+                .unwrap()
+                .join(&file.relative_path);
+            assert_eq!(
+                noland_cas::blake3_file(&destination).unwrap(),
+                file.file_hash
+            );
         }
         assert!(!plan.staging.exists());
     }

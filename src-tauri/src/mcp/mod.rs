@@ -60,13 +60,10 @@ async fn token(account: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())?
 }
 
-pub fn initialize(app: &AppHandle, context: AppContext) {
-    let config = context
-        .state
-        .try_read()
-        .map(|s| s.mcp.clone())
-        .unwrap_or_default()
-        .for_local_agents();
+pub fn initialize(app: &AppHandle, context: AppContext, config: Config) {
+    // Use the validated startup snapshot. Background maintenance may already
+    // hold the state lock; contention must never replace a saved grant with
+    // defaults or broaden its scopes during an ordinary restart.
     let ui = Arc::new(ui::UiBridge::default());
     let directory = context
         .state_store

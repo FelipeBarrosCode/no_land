@@ -2,7 +2,12 @@
 import { cpSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-const [command, ...args] = process.argv.slice(2);
+let [command, ...args] = process.argv.slice(2);
+// Model the read-only nested-helper trust check's shared stapler CLI offline.
+if (command === process.execPath && args[0]?.endsWith('apple-stapler-retry.mjs')) {
+  command = 'xcrun';
+  args = ['stapler', ...args.slice(1)];
+}
 const plan = JSON.parse(readFileSync(process.env.APPLE_RETRY_FIXTURE_PLAN, 'utf8'));
 const statePath = process.env.APPLE_RETRY_FIXTURE_STATE;
 const history = JSON.parse(readFileSync(statePath, 'utf8'));
@@ -45,7 +50,15 @@ switch (command) {
     } else if (args[0] !== 'detach') throw new Error('Unexpected hdiutil fixture operation');
     break;
   case 'codesign':
+    if (args.includes('-dv')) console.error([
+      'CodeDirectory v=20500 size=512 flags=0x10000(runtime)',
+      `Authority=Developer ID Application: Fixture (${process.env.APPLE_TEAM_ID})`,
+      `TeamIdentifier=${process.env.APPLE_TEAM_ID}`,
+      'Timestamp=Nov 15, 2026 at 12:00:00 PM',
+    ].join('\n'));
+    break;
   case 'spctl':
+    console.error('accepted\nsource=Notarized Developer ID');
     break;
   default:
     throw new Error(`Unexpected fixture command: ${command}`);

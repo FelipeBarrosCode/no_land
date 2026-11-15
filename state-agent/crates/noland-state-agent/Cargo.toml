@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 blake3.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 noland-attribution.workspace = true
 noland-baseline.workspace = true
@@ -34,6 +35,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
-
-[dev-dependencies]
-bytes.workspace = true
+zstd.workspace = true

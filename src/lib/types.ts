@@ -1001,8 +1001,6 @@ export interface ProfileReference {
   active?: boolean;
 }
 
-export type BackupPerformanceMode = "fast" | "balanced" | "full";
-
 export interface BackupStatusResponse {
   lastBackupStartedAt: string | null;
   lastBackupFinishedAt: string | null;
@@ -1027,6 +1025,16 @@ export interface SharedStorageObjectEntry {
   isDir: boolean;
 }
 
+export type SharedStorageBrowseTarget = "cloud" | "remote_pc";
+
+export interface SharedStorageBrowseSnapshot {
+  entries: SharedStorageObjectEntry[];
+  /** Opaque native repository/account/instance binding, never credentials. */
+  scope: string;
+  observedAt: string | null;
+  freshness: "cached" | "fresh" | "unavailable";
+}
+
 export interface SharedStorageSyncSelectionRequest {
   selectedPaths: string[];
 }
@@ -1038,6 +1046,25 @@ export interface SharedStorageRestoreCompletedEvent {
   appId: string;
   displayName: string;
   bundleId: string;
+}
+
+export interface StorageDeletionProgress {
+  phase: string;
+  validated_packs: number;
+  completed_objects: number;
+  total_objects: number;
+  completed_packs: number;
+  total_packs: number;
+  verified_absent_bytes: number;
+  total_bytes: number;
+  last_success_at: string | null;
+  elapsed_ms: number;
+  concurrency: number;
+  storage_metrics: {
+    rclone_invocations: number;
+    remote_stat_calls: number;
+    remote_list_calls: number;
+  };
 }
 
 export interface SharedStorageProgressEvent {
@@ -1057,6 +1084,22 @@ export interface SharedStorageProgressEvent {
   completedBytes?: number | null;
   totalBytes?: number | null;
   transferredBytes?: number | null;
+  deletion?: StorageDeletionProgress | null;
+  backupPipeline?: {
+    selected_files: number;
+    source_total_bytes: number;
+    reused_files: number;
+    reused_bytes: number;
+    capture_total_bytes: number;
+    durable_bytes: number;
+    completed_files: number;
+    prepared_bytes: number;
+    active_readers: number;
+    active_codecs: number;
+    inflight_uploads: number;
+    upload_limit: number;
+    waiting_on: string;
+  } | null;
   readyToLaunch: boolean;
   cancelRequested: boolean;
   cancellable: boolean;
